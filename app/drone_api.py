@@ -1807,8 +1807,7 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
 
 
 def _start_rom_metadata_watcher(settings: Settings) -> None:
-    """Wake the metadata poller in near real time when ROM, saves, or movie
-    files change.
+    """Keep each filesystem watcher scoped to the cache it owns.
 
     Best-effort: if inotify is unavailable the periodic poll still covers
     changes, so a failure here is logged and otherwise ignored.
@@ -1822,24 +1821,42 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     )
     if watcher.start():
         _ROM_METADATA_WATCHER = watcher
-    # Watch the saves tree too so a created/updated/deleted save wakes the poller in
-    # near real time; the periodic poll still covers it if inotify is unavailable.
+    def sync_saves() -> None:
+        try:
+            _saves_store.sync_saves_cache(settings.saves_root)
+        except Exception as error:
+            print(
+                f"Local saves watcher sync failed: {_format_http_error(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    # Save files change frequently during gameplay.  Refresh only their small,
+    # dedicated cache; waking the shared asset poller here used to rescan every
+    # ROM and BIOS file on each autosave and caused a visible gameplay hitch.
     saves_watcher = RomFilesystemWatcher(
         settings.saves_root,
-        _ROM_METADATA_WAKE.set,
+        sync_saves,
         debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
         max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
     )
     if saves_watcher.start():
         _SAVES_METADATA_WATCHER = saves_watcher
-    # And the movies tree -- previously the only asset type with no watcher at
-    # all, so a new/moved movie sat invisible until the next periodic poll
-    # (up to rom_metadata_poll_seconds later, no way to force it sooner short
-    # of the ROM-oriented "Purge Cache & Resync" button). Same near-real-time
-    # wake as ROMs/saves now.
+    def sync_movies() -> None:
+        try:
+            _movies_store.sync_movies_cache(settings.movies_root)
+        except Exception as error:
+            print(
+                f"Local movies watcher sync failed: {_format_http_error(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    # Movie changes likewise refresh only the movies cache.  The periodic
+    # asset poll remains a fallback if this best-effort watcher cannot start.
     movies_watcher = RomFilesystemWatcher(
         settings.movies_root,
-        _ROM_METADATA_WAKE.set,
+        sync_movies,
         debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
         max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
     )

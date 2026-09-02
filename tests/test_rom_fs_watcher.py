@@ -78,7 +78,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
         drone_api._SAVES_METADATA_WATCHER = None
         drone_api._MOVIES_METADATA_WATCHER = None
 
-    def test_watches_roms_saves_and_movies_roots(self) -> None:
+    def test_watches_roms_saves_and_movies_roots_with_scoped_callbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict(
@@ -96,23 +96,32 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            watched_paths = []
+            watchers = []
 
             class FakeWatcher:
                 def __init__(self, path, on_change, **kwargs):
                     self.path = Path(path)
-                    watched_paths.append(self.path)
+                    self.on_change = on_change
+                    watchers.append(self)
 
                 def start(self) -> bool:
                     return True
 
-            with mock.patch.object(drone_api, "RomFilesystemWatcher", FakeWatcher):
+            with mock.patch.object(drone_api, "RomFilesystemWatcher", FakeWatcher), \
+                 mock.patch.object(drone_api._saves_store, "sync_saves_cache") as sync_saves, \
+                 mock.patch.object(drone_api._movies_store, "sync_movies_cache") as sync_movies, \
+                 mock.patch.object(drone_api._ROM_METADATA_WAKE, "set") as wake_roms:
                 drone_api._start_rom_metadata_watcher(settings)
-
-            self.assertEqual(
-                watched_paths,
-                [settings.roms_root, settings.saves_root, settings.movies_root],
-            )
+                self.assertEqual(
+                    [watcher.path for watcher in watchers],
+                    [settings.roms_root, settings.saves_root, settings.movies_root],
+                )
+                watchers[0].on_change()
+                watchers[1].on_change()
+                watchers[2].on_change()
+                wake_roms.assert_called_once_with()
+                sync_saves.assert_called_once_with(settings.saves_root)
+                sync_movies.assert_called_once_with(settings.movies_root)
             self.assertIsInstance(drone_api._ROM_METADATA_WATCHER, FakeWatcher)
             self.assertIsInstance(drone_api._SAVES_METADATA_WATCHER, FakeWatcher)
             self.assertIsInstance(drone_api._MOVIES_METADATA_WATCHER, FakeWatcher)
