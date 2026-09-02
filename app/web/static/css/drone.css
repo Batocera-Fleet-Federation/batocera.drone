@@ -668,9 +668,34 @@
         width: auto;
         overflow: visible;
       }
+      /* Reference ROMs intentionally mirrors the stable, compact Torrents
+         grid. Its bounded columns keep large peer libraries easy to scan and
+         prevent long game/genre names from resizing the action column. */
+      .reference-roms-table {
+        table-layout: fixed;
+      }
+      .reference-roms-table th,
+      .reference-roms-table td {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .reference-roms-table tbody tr {
+        height: 2.5rem;
+      }
+      .reference-roms-table td.download-actions {
+        width: auto;
+        overflow: visible;
+      }
     }
     .torrents-table td.download-actions .btn + .btn {
       margin-left: 0.2rem;
+    }
+    .reference-roms-table td.download-actions .btn + .btn {
+      margin-left: 0.2rem;
+    }
+    .reference-roms-table tbody tr.reference-roms-row-selected td {
+      background: rgba(0, 194, 255, 0.1);
     }
     /* Every row always renders all action buttons (see
        renderTorrentRowMarkup); ones that don't apply to the current status
