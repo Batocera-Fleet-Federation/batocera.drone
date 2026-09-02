@@ -36,7 +36,7 @@ app/web/
   handlers_downloads.py   # 116 lines — download queue pause/resume/cancel/retry
   handlers_network.py     # 667 lines — pairing, LAN discovery, tailnet, swarm overview
   handlers_network_share.py # reference a paired peer's whole ROM library +
-                          # BIOS folder over SMB/CIFS (see "Network-share peer
+                          # BIOS folder over NFSv4/SMB (see "Network-share peer
                           # ROM+BIOS referencing" below; backs onto
                           # device/network_share_manager.py)
   handlers_peer.py        # 503 lines — inbound P2P asset serving (mTLS)
@@ -291,9 +291,9 @@ reached via this tab bar instead of a separate navbar item now).
   (`handlers_network.py:_handle_admin_swarm_overview`): each peer is probed live, in
   parallel with a short per-peer timeout budget, so one offline Drone degrades to
   `online: false` instead of hanging the whole page — this is a live probe on every
-  page load, not a periodic-cache read. Each online, tailnet-connected peer's card
-  has a **Reference ROMs**/**Stop Referencing** toggle (see "Network-share peer
-  ROM referencing" below).
+  page load, not a periodic-cache read. Each online peer with a known LAN or
+  tailnet address has a **Reference ROMs**/**Stop Referencing** toggle (see
+  "Network-share peer ROM referencing" below).
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
@@ -315,63 +315,138 @@ reached via this tab bar instead of a separate navbar item now).
 
 ### Network-share peer ROM+BIOS referencing (the "Reference ROMs" button)
 
-Lets this Drone show and play a paired peer's whole ROM library, and use its
-BIOS files, without copying them — reading bytes live over the network via a
-real SMB/CIFS mount of Batocera's own stock Samba export (`//<peer tailnet
-ip>/share`; Drone does not set up anything on the peer side, only the
-client-side mount, and mounts the whole share once since `roms/` and `bios/`
-are both subfolders under it). Requires the peer to be on the same tailnet
-(gated on `drone.tailnet_ip` in the Swarm page). Backend:
-`handlers_network_share.py` (`HandlersNetworkShareMixin`), delegating to
-`device/network_share_manager.py`. Key properties:
+This is a **live, read-only filesystem reference**, not a copy, sync, cache, or
+multi-peer swarm. If machine A owns the library and machine B should consume it,
+the administrator opens B's Swarm page and clicks **Reference ROMs** beside A.
+Clicking the button on A would reverse the direction. There is no separate
+source-side sharing toggle: B's request causes A to authorize B automatically,
+but only because the two machines are already paired. The browser client and
+the Ports client both call the same admin API and present the same semantics.
 
-- **ROMs are reconciled directory-by-directory** (one system = one
-  directory), **BIOS file-by-file** — different granularity on purpose. Once
-  mounted, each of the peer's system folders either symlinks straight into
-  `roms_root/<system>` (nothing local for that system yet), or, if a local
-  folder with real content already exists there, gets renamed aside to
-  `<system>.old` first (never deleted) and symlinked over. Each of the peer's
-  BIOS files (including ones nested one level under a per-emulator subfolder
-  like `dc/`) gets the same treatment individually — `<name>.old` — with any
-  needed per-emulator subfolder created as a **real** local directory (not a
-  symlink): `RomAssetBiosMixin.list_bios_entries`'s `os.walk` doesn't follow
-  symlinked directories by default, so a whole-subfolder symlink would hide
-  everything inside it, unlike a per-file symlink which `os.walk` picks up
-  regardless.
-- **No new scanning/gamelist code needed for either.** `.old` reuses
-  `RomRepository.should_include_system`'s existing suffix convention
-  (`app/drone_api.py`) for ROM systems, and for BIOS files `.old` simply isn't
-  a recognized BIOS extension so `list_bios_entries`'s extension filter
-  already excludes it — both are also the standard upstream
-  Batocera/EmulationStation trick for "on disk, hidden." Because
-  `roms/rom_systems.py`'s `get_system_dir`/`list_system_names` already
-  transparently follow a symlink via `.resolve()`, and the ROM scanner's
-  `rglob` follows it too, the existing ROM scanner and gamelist-merge code
-  pick up a referenced peer's games completely unmodified. If `<system>.old`
-  or `<bios-file>.old` already exists, that entry is skipped (never
-  overwritten) and reported as such.
-- **Precise, state-driven reversal.** Every rename/symlink this feature
-  performs is recorded per peer, separately for `systems` and `bios`, in
-  Drone's own state (not just suffix-guessed), so disabling a reference
-  (`POST /admin/network-shares/{peer_id}/disable`) restores exactly what it
-  changed — remove the symlink, rename `.old` back, best-effort `rmdir` any
-  now-empty per-emulator BIOS subfolder it created — and nothing else.
-- **Persistence mirrors VPN's connect-on-boot + self-heal**, not
-  fstab/systemd: `maybe_reconnect_all_on_boot` replays every configured
-  reference when the Drone service starts, and `run_watchdog_poller` re-mounts
-  a dropped share on a background thread. No OS-level mount unit is ever
-  written (Batocera's read-only/overlay-style updates make that riskier than
-  just having the always-on Drone process reassert it).
-- **Guest/anonymous mount only** (`mount -t cifs //<ip>/share ... -o
-  guest,ro,soft`) — no credential UI. `ro` + `soft` matter: read-only because
-  this Drone must never write into the peer's ROM/BIOS folders, and `soft`
-  (not `hard`) so a dead peer fails mount I/O within a bounded time instead of
-  potentially stalling the ROM-scanning poller thread
-  (`roms/rom_scanner.py`), which walks the whole `roms_root` tree — including
-  anything symlinked in from a referenced peer — on every scan pass.
-- The peer's tailnet IP is always resolved server-side from
-  `transfer/local_network.get_paired_peer`, never trusted from client input —
-  a mount can only ever target an actual paired swarm peer.
+Backend entry points are `web/handlers_network_share.py`
+(`HandlersNetworkShareMixin`) and `device/network_share_manager.py`; source-side
+NFS authorization/export construction is in `device/nfs_export_manager.py`.
+The full lifecycle is:
+
+1. **Accept and persist intent before doing slow work.**
+   `POST /admin/network-shares/{peer_id}/enable` verifies that `peer_id` is an
+   actual paired peer, saves an `enabling` record in SQLite, and starts a daemon
+   worker. The operation continues if the browser/Ports client closes, and boot
+   replay can recover an interrupted enable. Address candidates come only from
+   the server-side paired-peer record, never client input.
+2. **Negotiate NFS over the paired mTLS API.** B calls A's
+   `POST /peer/network-share/nfs/authorize`. A verifies the pinned peer
+   identity, builds a Drone-owned NFSv4 pseudo-root containing only `roms/` and
+   `bios/`, and authorizes B's exact known private LAN/Tailscale IPv4 addresses.
+   The API authenticates and authorizes the mount; ROM bytes subsequently move
+   directly over the filesystem transport, not through the HTTP API.
+3. **Resolve source-side ROM symlinks.** A resolves every local ROM system to
+   its real directory and bind-mounts each one into the private export. This
+   makes absolute symlinks into external drives work correctly. A system that
+   is itself a Drone-owned network reference is excluded, preventing NFS
+   daisy-chain/re-export. A's BIOS root is bind-mounted alongside the systems.
+4. **Mount read-only, LAN first.** B tries the known same-LAN address before the
+   peer's Tailscale address and mounts NFSv4 over TCP port 2049 with bounded
+   `soft` failure options. If NFS negotiation/mounting is unavailable and
+   `DRONE_NETWORK_SHARE_PROTOCOL=auto` (the default), B falls back to a
+   read-only guest CIFS mount of Batocera's stock `//<address>/share` on port
+   445. `DRONE_NETWORK_SHARE_PROTOCOL=nfs|smb` exists for diagnostics. An
+   already-active SMB reference is not swapped underneath a running emulator;
+   it adopts NFS on its next controlled detach/reconnect.
+5. **Preflight before touching local paths.** B mounts the peer at its private
+   Drone network-share directory, reads the real `roms/` directory entries, and
+   compares them with A's advertised system inventory. A missing/unreadable
+   system aborts the enable before any new local ROM directory is renamed.
+6. **Expose systems to Batocera.** B reconciles each advertised system as
+   described below, then queues file-by-file BIOS reconciliation in a separate
+   background worker. Drone refreshes EmulationStation after a successful
+   attach/detach when the mount topology changed.
+
+#### ROM collision rules: whole systems replace, never merge
+
+ROMs are reconciled **one system directory at a time**, not one game at a time.
+For a source `roms/snes`:
+
+- If B has no `roms/snes`, Drone creates `roms/snes -> <A mount>/roms/snes`.
+- If B has a real local `roms/snes`, Drone renames the entire directory to
+  `roms/snes.old`, then creates the network symlink. B's local SNES library is
+  preserved but hidden while the reference is active; it is not merged with
+  A's SNES games.
+- If `roms/snes.old` already exists, Drone skips A's SNES system rather than
+  overwriting or guessing ownership.
+- If `roms/snes` already references another peer, Drone skips the system; the
+  first active peer reference wins for that system.
+
+The `.old` convention keeps the renamed local folder out of Drone's system list
+and EmulationStation's normal view. Every rename and symlink is recorded with
+its owning peer and exact original name; cleanup never infers ownership merely
+from a `.old` suffix. Drone's own metadata scanner deliberately excludes these
+network references so routine inventory/health scans do not traverse a
+latency-sensitive or dead network filesystem. EmulationStation itself follows
+the top-level system symlink to discover and launch the remote games.
+
+#### BIOS collision rules: local files always win
+
+BIOS reconciliation is **file-by-file**, including arbitrary safe nested
+relative paths:
+
+- An existing real local BIOS file or unrelated local symlink is left exactly
+  in place.
+- Only a BIOS path missing locally is created as a symlink into A's mounted
+  `bios/` tree.
+- Required nested directories are created as real local directories.
+- A BIOS already referenced from a different peer is treated as local/occupied
+  and is not replaced.
+
+BIOS files are therefore additive fallback dependencies; unlike ROM system
+directories, they are never renamed to `.old` and never hide a local copy.
+
+#### Data ownership, liveness, and refresh behavior
+
+- Only ROM and missing BIOS bytes are referenced. Saves, emulator settings,
+  configuration, and gameplay history remain on B, so two consumers have
+  independent saves/configuration even when playing the same source ROM.
+- A must remain reachable while B plays. ROMs are streamed live and are not
+  downloaded or cached locally. `ro` prevents B from modifying A's library;
+  bounded `soft` mount options prevent an offline A from hanging Drone or
+  EmulationStation indefinitely.
+- Changes to files inside an already-linked system are visible live, subject to
+  filesystem attribute caching. A brand-new top-level system directory is only
+  linked when reconciliation runs, so detach/re-reference or a Drone service
+  restart may be required to expose it on B; the Swarm page's ordinary Refresh
+  button only reloads status.
+- `maybe_reconnect_all_on_boot` replays durable references after restart.
+  `run_watchdog_poller` probes enabled mounts (60 seconds by default), restores
+  a safe local fallback when a remount fails, and retries later. No fstab or
+  systemd mount unit is written.
+- The status API is intentionally cheap: it reads stored rows and local
+  `/proc/self/mountinfo`; page loads do not synchronously probe a potentially
+  stalled network filesystem.
+
+#### Unreference, recovery, and authorization cleanup
+
+`POST /admin/network-shares/{peer_id}/disable` first persists `detaching`, then
+finishes in a daemon worker. It removes only Drone-owned ROM/BIOS symlinks,
+renames recorded `<system>.old` directories back to their original names,
+best-effort removes empty nested BIOS directories, lazily unmounts so an
+unhealthy peer or stale emulator file handle cannot block cleanup, refreshes
+EmulationStation, and revokes B's source-side NFS authorization. Nothing local
+is deleted. If the original name became occupied, Drone leaves the preserved
+`.old` directory in place and reports an error rather than overwriting it.
+
+Source NFS authorizations persist across A's restart and are replayed. They are
+read-only and restricted to the paired Drone's exact known addresses; detach,
+unpair/forget, and uninstall revoke/remove them. If detach occurs while A is
+offline, B's local restoration remains authoritative and succeeds without
+waiting for the remote revoke; A retains enough ownership state to revoke the
+authorization on a later refresh/unpair.
+
+Keep the two transports semantically identical above the mount point. Any
+change to this feature should preserve: paired-peer-only targeting, NFS-first
+with bounded SMB fallback, read-only bytes, preflight-before-rename, whole-system
+ROM replacement rather than merging, local-wins BIOS behavior, exact
+state-driven reversal, asynchronous browser-independent lifecycle work, and
+boot/watchdog recovery.
 
 ## ROMs/BIOS TreeGrid browser (new — absent from the old doc)
 
