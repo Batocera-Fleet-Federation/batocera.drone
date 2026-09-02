@@ -79,6 +79,7 @@ class RomAssetBiosMixin:
         *,
         systems=None,
         query: str = "",
+        genre: str = "",
         limit: int = 500,
         offset: int = 0,
         include_fingerprint: bool = True,
@@ -90,6 +91,7 @@ class RomAssetBiosMixin:
             self.settings,
             systems=systems,
             query=query,
+            genre=genre,
             limit=limit,
             offset=offset,
         )
