@@ -6097,6 +6097,7 @@ function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
     ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
+    ["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"],
   ]);
 }
 
@@ -10494,8 +10495,8 @@ function renderSwarmDroneCard(drone) {
       ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
       : "";
   const networkShareButton = share
-    ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${share.status === "detaching" ? "disabled" : ""}><i class="bi bi-x-circle me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Retry Detach" : "Stop Referencing"}</button>`
-    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference this peer's ROM library and missing BIOS files over read-only NFSv4, with SMB compatibility fallback" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
+    ? `<button class="btn btn-sm btn-outline-secondary" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Manage Reference" : "Manage Reference"}</button>`
+    : `<button class="btn btn-sm btn-outline-info" onclick="setHash('#admin/reference-roms/${droneToken}')" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Choose which systems to reference from this machine's ROM library" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
@@ -10520,66 +10521,6 @@ function renderSwarmDroneCard(drone) {
 function swarmBrowsePeerAssets(peerId) {
   localPeerAssetContext.peerId = String(peerId || "");
   setHash("#admin/transfers");
-}
-
-async function swarmReferencePeerRoms(peerId, peerName) {
-  const confirmed = window.confirm(
-    `Reference ${peerName}'s whole ROM library and BIOS folder over the network?\n\n` +
-    `Every system and BIOS file it has will be symlinked in here -- games and ` +
-    `emulators read bytes live from ${peerName}, not from a local copy.\n\n` +
-    `If a ROM system already exists locally, it is renamed aside with an ` +
-    `".old" suffix (never deleted) and restored when the reference is disabled. ` +
-    `Existing local BIOS files stay in place; the network only supplies missing BIOS.`
-  );
-  if (!confirmed) return;
-  try {
-    setLoading(true, `Referencing ${peerName}'s ROMs and BIOS...`);
-    const result = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/enable`, {});
-    if (result.status === "enabling" || result.status === "pending") {
-      showToast(
-        `Reference accepted for ${escapeHtml(peerName)}. Drone is mounting it in the background; the operation continues if this browser closes.`,
-        "info",
-        10000,
-      );
-    } else if (result.status !== "mounted") {
-      showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
-    } else {
-      const transport = String(result.protocol || "network").toUpperCase();
-      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS via ${escapeHtml(transport)}`, "success");
-    }
-  } catch (err) {
-    showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-    await renderSwarmPage();
-  }
-}
-
-async function swarmUnreferencePeerRoms(peerId, peerName) {
-  if (!window.confirm(`Stop referencing ${peerName}'s ROMs? Any local system folders that were renamed aside will be restored.`)) return;
-  try {
-    setLoading(true, `Removing reference to ${peerName}...`);
-    const accepted = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/disable`, {});
-    if (accepted.status !== "detaching" && accepted.status !== "disabled") {
-      throw new Error(accepted.status_detail || "detach was not accepted");
-    }
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const response = await api("/admin/network-shares");
-      const current = (response.shares || []).find((share) => String(share.peer_id || "") === String(peerId || ""));
-      if (!current) break;
-      if (current.status === "error") throw new Error(current.status_detail || "detach cleanup failed");
-      setLoading(true, `Restoring local ROMs and BIOS from ${peerName}...`);
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      if (attempt === 59) throw new Error("detach is still running in the background; check this page again shortly");
-    }
-    showToast(`Stopped referencing ${escapeHtml(peerName)}'s ROMs`, "success");
-    showToast("EmulationStation is refreshing its game list in the background.", "info", 8000);
-  } catch (err) {
-    showToast(`Failed to remove reference: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-    await renderSwarmPage();
-  }
 }
 
 // Tailnet's MagicDNS FQDN (e.g. "batocera.tailnet-name.ts.net") resolves its
@@ -10927,6 +10868,463 @@ async function renderSwarmPage() {
     content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
   } finally {
     setLoading(false);
+  }
+}
+
+// Issue #35: the Reference ROMs page. Referencing shares whole *systems* over
+// a read-only network mount (NFS/SMB) -- individual ROMs can't be symlinked
+// thousands at a time -- but the operator finds the systems they want by
+// searching the peer's games. Selecting any game selects its whole system.
+// The chosen peer + systems persist server-side across OFF/ON toggles.
+let referenceRomsState = {
+  peerId: "",
+  peerName: "",
+  online: false,
+  selectedSystems: new Set(),
+  savedSystems: new Set(),
+  active: false,
+  activePeerId: "",
+  activeStatus: "",
+  availableSystems: [],
+  systemCounts: {},
+  genres: [],
+  filterSystem: "",
+  filterGenre: "",
+  query: "",
+  limit: 50,
+  offset: 0,
+  total: 0,
+  items: [],
+};
+
+function referenceRomsSetsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
+}
+
+function referenceRomsShell(bodyHtml) {
+  return `${renderSwarmTabBar("reference-roms")}
+    <div class="card log-card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>Reference ROMs</span>
+      </div>
+      <div class="card-body" id="referenceRomsBody">${bodyHtml}</div>
+    </div>`;
+}
+
+async function renderReferenceRomsPage(peerId) {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "Reference ROMs";
+  subtitleNode.textContent = "Choose which systems to share from one paired machine's ROM library";
+  setLoading(true, "Loading Reference ROMs...");
+  try {
+    const [state, overview] = await Promise.all([
+      api("/admin/network-reference"),
+      loadSwarmOverview().catch(() => ({ drones: [] })),
+    ]);
+    const selection = state.selection || {};
+    const drones = Array.isArray(overview.drones) ? overview.drones : [];
+    const targetPeer = peerId || selection.active_peer_id || selection.peer_id || "";
+    const drone = drones.find((entry) => String(entry.drone_id || "") === targetPeer);
+    const savedForTarget = selection.peer_id === targetPeer ? (selection.selected_systems || []) : [];
+    referenceRomsState = {
+      ...referenceRomsState,
+      peerId: targetPeer,
+      peerName: (drone && (drone.name || drone.hostname)) || selection.peer_name || targetPeer,
+      online: !!(drone && drone.online),
+      selectedSystems: new Set(savedForTarget),
+      savedSystems: new Set(savedForTarget),
+      active: !!selection.active && selection.active_peer_id === targetPeer,
+      activePeerId: selection.active_peer_id || "",
+      activeStatus: (state.active_share && state.active_share.status) || "",
+      availableSystems: [],
+      systemCounts: {},
+      genres: [],
+      filterSystem: "",
+      filterGenre: "",
+      query: "",
+      offset: 0,
+      total: 0,
+      items: [],
+    };
+
+    if (!targetPeer) {
+      content.innerHTML = referenceRomsShell(
+        `<div class="themed-empty">Pick a machine to reference from the <a href="#admin/swarm">Swarm</a> page, then choose its systems here.</div>`,
+      );
+      return;
+    }
+    if (referenceRomsState.activePeerId && referenceRomsState.activePeerId !== targetPeer) {
+      const otherName = escapeHtml(selection.peer_name || referenceRomsState.activePeerId);
+      content.innerHTML = referenceRomsShell(
+        `<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>This Drone is already referencing <strong>${otherName}</strong>. Only one machine can be referenced at a time &mdash; stop that reference first from the <a href="#admin/reference-roms/${encodeURIComponent(referenceRomsState.activePeerId)}">Reference ROMs</a> page.</div>`,
+      );
+      return;
+    }
+
+    content.innerHTML = referenceRomsShell(referenceRomsBodyHtml());
+    wireReferenceRomsControls();
+    await loadReferencePeerSystems();
+    await loadReferenceRoms();
+  } catch (err) {
+    showToast(`Failed to load Reference ROMs: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = referenceRomsShell('<div class="themed-empty">Reference ROMs could not be loaded.</div>');
+  } finally {
+    setLoading(false);
+  }
+}
+
+function referenceRomsBodyHtml() {
+  const st = referenceRomsState;
+  const busy = ["enabling", "detaching", "pending"].includes(st.activeStatus);
+  return `
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+      <div>
+        <div class="h5 mb-1"><i class="bi bi-hdd-network me-2"></i>${escapeHtml(st.peerName || st.peerId)}</div>
+        <div class="small text-muted">${st.online ? "Online" : "Offline"} &middot; referencing shares whole systems over a read-only network mount</div>
+      </div>
+      <div class="form-check form-switch fs-5">
+        <input class="form-check-input" type="checkbox" role="switch" id="referenceRomsToggle" ${st.active ? "checked" : ""} ${busy ? "disabled" : ""}>
+        <label class="form-check-label fs-6" for="referenceRomsToggle" id="referenceRomsToggleLabel">${st.active ? "Referencing ON" : "Referencing OFF"}</label>
+      </div>
+    </div>
+    <div id="referenceRomsSummary" class="mb-3"></div>
+    <div class="row g-2 mb-3">
+      <div class="col-12 col-lg-3">
+        <label class="form-label small" for="referenceRomsSystem">System</label>
+        <select id="referenceRomsSystem" class="form-select form-select-sm"><option value="">All systems</option></select>
+      </div>
+      <div class="col-12 col-lg-3">
+        <label class="form-label small" for="referenceRomsGenre">Genre</label>
+        <select id="referenceRomsGenre" class="form-select form-select-sm"><option value="">All genres</option></select>
+      </div>
+      <div class="col-12 col-lg-4">
+        <label class="form-label small" for="referenceRomsQuery">Search games</label>
+        <input id="referenceRomsQuery" class="form-control form-control-sm" placeholder="Search by game name">
+      </div>
+      <div class="col-12 col-lg-2">
+        <label class="form-label small" for="referenceRomsPageSize">Per page</label>
+        <select id="referenceRomsPageSize" class="form-select form-select-sm"><option>50</option><option>100</option><option>200</option></select>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead><tr>
+          <th style="width:6rem">Reference</th>
+          <th>Game</th>
+          <th style="width:9rem">System</th>
+          <th>Genre</th>
+          <th style="width:5rem"></th>
+        </tr></thead>
+        <tbody id="referenceRomsRows"><tr><td colspan="5" class="text-muted">Loading games...</td></tr></tbody>
+      </table>
+    </div>
+    <div id="referenceRomsPagination"></div>`;
+}
+
+function wireReferenceRomsControls() {
+  const systemSel = document.getElementById("referenceRomsSystem");
+  const genreSel = document.getElementById("referenceRomsGenre");
+  const query = document.getElementById("referenceRomsQuery");
+  const pageSize = document.getElementById("referenceRomsPageSize");
+  const toggle = document.getElementById("referenceRomsToggle");
+  if (systemSel) systemSel.addEventListener("change", () => { referenceRomsState.filterSystem = systemSel.value; referenceRomsState.offset = 0; loadReferenceRoms(); });
+  if (genreSel) genreSel.addEventListener("change", () => { referenceRomsState.filterGenre = genreSel.value; referenceRomsState.offset = 0; loadReferenceRoms(); });
+  if (pageSize) pageSize.addEventListener("change", () => { referenceRomsState.limit = Math.max(1, Number(pageSize.value) || 50); referenceRomsState.offset = 0; loadReferenceRoms(); });
+  if (query) {
+    let timer = null;
+    query.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => { referenceRomsState.query = query.value.trim(); referenceRomsState.offset = 0; loadReferenceRoms(); }, 300);
+    });
+  }
+  if (toggle) toggle.addEventListener("change", () => toggleReferenceActive(toggle.checked));
+  renderReferenceRomsSummary();
+}
+
+async function loadReferencePeerSystems() {
+  try {
+    const summary = await api(`/admin/local-network/peers/${encodeURIComponent(referenceRomsState.peerId)}/assets?type=summary`);
+    referenceRomsState.availableSystems = Array.isArray(summary.systems) ? summary.systems : [];
+    referenceRomsState.systemCounts = summary.system_counts || {};
+    referenceRomsState.genres = Array.isArray(summary.genres) ? summary.genres : [];
+  } catch (err) {
+    showToast(`Could not load this machine's systems: ${escapeHtml(err.message || "unknown error")}`, "warning");
+  }
+  const systemSel = document.getElementById("referenceRomsSystem");
+  if (systemSel) {
+    systemSel.innerHTML = ['<option value="">All systems</option>']
+      .concat(referenceRomsState.availableSystems.map((name) => {
+        const count = Number(referenceRomsState.systemCounts[name] || 0);
+        return `<option value="${escapeHtml(name)}">${escapeHtml(name)}${count ? ` (${count})` : ""}</option>`;
+      }))
+      .join("");
+  }
+  const genreSel = document.getElementById("referenceRomsGenre");
+  if (genreSel) {
+    genreSel.innerHTML = ['<option value="">All genres</option>']
+      .concat(referenceRomsState.genres.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`))
+      .join("");
+  }
+  renderReferenceRomsSummary();
+}
+
+async function loadReferenceRoms() {
+  const rows = document.getElementById("referenceRomsRows");
+  if (rows) rows.innerHTML = '<tr><td colspan="5" class="text-muted">Loading games...</td></tr>';
+  const st = referenceRomsState;
+  const params = new URLSearchParams({ type: "roms", limit: String(st.limit), offset: String(st.offset) });
+  if (st.filterSystem) params.set("system", st.filterSystem);
+  if (st.filterGenre) params.set("genre", st.filterGenre);
+  if (st.query) params.set("q", st.query);
+  try {
+    const page = await api(`/admin/local-network/peers/${encodeURIComponent(st.peerId)}/assets?${params.toString()}`);
+    st.items = Array.isArray(page.items) ? page.items : [];
+    st.total = Number(page.total || 0);
+    st.offset = Number(page.offset || 0);
+  } catch (err) {
+    if (rows) rows.innerHTML = `<tr><td colspan="5" class="text-danger">Could not load games: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
+    return;
+  }
+  renderReferenceRomsTable();
+  renderReferenceRomsPagination();
+}
+
+function referenceRomItemGenre(item) {
+  const gl = item.gamelist || {};
+  let genre = item.genre || gl.genre || "";
+  if (Array.isArray(genre)) genre = genre[0];
+  if (genre && typeof genre === "object") genre = genre.text || "";
+  return String(genre || "").trim();
+}
+
+function renderReferenceRomsTable() {
+  const rows = document.getElementById("referenceRomsRows");
+  if (!rows) return;
+  const st = referenceRomsState;
+  if (!st.items.length) {
+    rows.innerHTML = '<tr><td colspan="5" class="text-muted">No games match these filters.</td></tr>';
+    return;
+  }
+  rows.innerHTML = st.items.map((item, index) => {
+    const system = String(item.system || item.system_name || "");
+    const name = String(item.title || item.name || item.rom_file || "Unknown");
+    const selected = st.selectedSystems.has(system);
+    const genre = referenceRomItemGenre(item);
+    return `<tr>
+      <td>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" ${selected ? "checked" : ""} ${st.active ? "disabled" : ""}
+            onchange="toggleReferenceRomSystem(${jsAttr(system)})" title="${selected ? "System is referenced" : "Reference this game's system"}">
+        </div>
+      </td>
+      <td class="text-truncate" style="max-width:22rem">${escapeHtml(name)}
+        ${selected ? '<span class="badge text-bg-info ms-2">Referenced</span>' : ""}</td>
+      <td>${escapeHtml(system)}</td>
+      <td class="text-truncate" style="max-width:14rem">${escapeHtml(genre || "&mdash;")}</td>
+      <td><button class="btn btn-sm btn-outline-secondary" type="button" onclick="showReferenceRomDetail(${index})"><i class="bi bi-info-circle"></i></button></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderReferenceRomsPagination() {
+  const node = document.getElementById("referenceRomsPagination");
+  if (!node) return;
+  const st = referenceRomsState;
+  const limit = Math.max(1, st.limit);
+  if (!st.total) { node.innerHTML = ""; return; }
+  const totalPages = Math.max(1, Math.ceil(st.total / limit));
+  const page = Math.min(totalPages, Math.floor(st.offset / limit) + 1);
+  const showingFrom = st.offset + 1;
+  const showingTo = Math.min(st.total, st.offset + limit);
+  node.innerHTML = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div class="text-muted small">Showing ${showingFrom}-${showingTo} of ${st.total}</div>
+      <div class="btn-group" role="group">
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} onclick="setReferenceRomsPage(${page - 1})">Previous</button>
+        <button class="btn btn-sm btn-outline-primary disabled" type="button">${page} / ${totalPages}</button>
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} onclick="setReferenceRomsPage(${page + 1})">Next</button>
+      </div>
+    </div>`;
+}
+
+function setReferenceRomsPage(page) {
+  referenceRomsState.offset = Math.max(0, (page - 1) * referenceRomsState.limit);
+  loadReferenceRoms();
+}
+
+function toggleReferenceRomSystem(system) {
+  if (!system || referenceRomsState.active) return;
+  const set = referenceRomsState.selectedSystems;
+  if (set.has(system)) set.delete(system); else set.add(system);
+  renderReferenceRomsTable();
+  renderReferenceRomsSummary();
+}
+
+function removeReferenceSystem(system) {
+  if (referenceRomsState.active) return;
+  referenceRomsState.selectedSystems.delete(system);
+  renderReferenceRomsTable();
+  renderReferenceRomsSummary();
+}
+
+function renderReferenceRomsSummary() {
+  const node = document.getElementById("referenceRomsSummary");
+  if (!node) return;
+  const st = referenceRomsState;
+  const dirty = !referenceRomsSetsEqual(st.selectedSystems, st.savedSystems);
+  const chips = [...st.selectedSystems].sort((a, b) => a.localeCompare(b)).map((name) => {
+    const count = Number(st.systemCounts[name] || 0);
+    return `<span class="badge text-bg-secondary me-1 mb-1">${escapeHtml(name)}${count ? ` &middot; ${count}` : ""}
+      ${st.active ? "" : `<i class="bi bi-x ms-1 pointer" onclick="removeReferenceSystem(${jsAttr(name)})"></i>`}</span>`;
+  }).join("");
+  const statusNote = st.active
+    ? `<span class="badge text-bg-success"><i class="bi bi-check-circle me-1"></i>Referencing ${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"}${st.activeStatus && st.activeStatus !== "mounted" ? ` (${escapeHtml(st.activeStatus)})` : ""}</span>`
+    : `<span class="text-muted small">${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"} selected${dirty ? " &middot; unsaved changes" : ""}</span>`;
+  node.innerHTML = `
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+      ${statusNote}
+      <button class="btn btn-sm btn-primary ms-auto" id="referenceRomsSaveBtn" ${st.active || !dirty ? "disabled" : ""} onclick="saveReferenceSelection()"><i class="bi bi-save me-1"></i>Save Selection</button>
+    </div>
+    <div>${chips || '<span class="text-muted small">No systems selected yet &mdash; find a game below and switch on its system.</span>'}</div>
+    ${st.active ? '<div class="small text-muted mt-1">Switch referencing OFF to change which systems are selected.</div>' : ""}`;
+}
+
+async function saveReferenceSelection() {
+  const st = referenceRomsState;
+  try {
+    setLoading(true, "Saving selection...");
+    const result = await apiPost("/admin/network-reference/selection", {
+      peer_id: st.peerId,
+      peer_name: st.peerName,
+      selected_systems: [...st.selectedSystems],
+    });
+    const selection = result.selection || {};
+    st.savedSystems = new Set(selection.selected_systems || [...st.selectedSystems]);
+    showToast("Reference selection saved", "success");
+    renderReferenceRomsSummary();
+  } catch (err) {
+    showToast(`Could not save selection: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function toggleReferenceActive(wantOn) {
+  const st = referenceRomsState;
+  if (wantOn && st.selectedSystems.size === 0) {
+    showToast("Select at least one system before turning referencing on.", "warning");
+    await renderReferenceRomsPage(st.peerId);
+    return;
+  }
+  const confirmed = wantOn
+    ? window.confirm(
+        `Reference ${st.selectedSystems.size} system(s) from ${st.peerName}?\n\n` +
+        `Those systems are symlinked in and read live over a read-only network mount. ` +
+        `A system that already exists locally is renamed aside with an ".old" suffix ` +
+        `(never deleted) and restored when you switch referencing OFF. Missing BIOS ` +
+        `files those systems need are supplied from ${st.peerName} too.`,
+      )
+    : window.confirm(`Stop referencing ${st.peerName}? Local system folders that were renamed aside are restored. Your selection is kept for next time.`);
+  if (!confirmed) {
+    await renderReferenceRomsPage(st.peerId);
+    return;
+  }
+  try {
+    if (wantOn) {
+      setLoading(true, "Saving selection...");
+      await apiPost("/admin/network-reference/selection", {
+        peer_id: st.peerId,
+        peer_name: st.peerName,
+        selected_systems: [...st.selectedSystems],
+      });
+      setLoading(true, `Referencing ${st.peerName}...`);
+      await apiPost(`/admin/network-shares/${encodeURIComponent(st.peerId)}/enable`, {});
+    } else {
+      setLoading(true, `Stopping reference to ${st.peerName}...`);
+      await apiPost(`/admin/network-shares/${encodeURIComponent(st.peerId)}/disable`, {});
+    }
+    await referenceRomsWaitForSettled(wantOn);
+    showToast(wantOn ? `Now referencing ${escapeHtml(st.peerName)}` : `Stopped referencing ${escapeHtml(st.peerName)}`, "success");
+    showToast("EmulationStation is refreshing its game list in the background.", "info", 8000);
+  } catch (err) {
+    showToast(`Reference toggle failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+    await renderReferenceRomsPage(st.peerId);
+  }
+}
+
+async function referenceRomsWaitForSettled(wantOn) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const state = await api("/admin/network-reference");
+    const selection = state.selection || {};
+    const share = state.active_share;
+    if (wantOn) {
+      if (selection.active && share && share.status === "mounted") return;
+      if (share && share.status === "error") throw new Error(share.status_detail || "reference failed");
+    } else {
+      if (!selection.active) return;
+      if (share && share.status === "error") throw new Error(share.status_detail || "detach failed");
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  throw new Error("still working in the background; check this page again shortly");
+}
+
+function showReferenceRomDetail(index) {
+  const item = referenceRomsState.items[index];
+  if (!item) return;
+  const gl = item.gamelist || {};
+  const gv = (value) => (value && typeof value === "object" ? String(value.text || "") : String(value || ""));
+  const fields = [
+    ["Name", item.title || item.name],
+    ["System", item.system || item.system_name],
+    ["Genre", referenceRomItemGenre(item)],
+    ["Players", gv(gl.players)],
+    ["Developer", gv(gl.developer)],
+    ["Publisher", gv(gl.publisher)],
+    ["Release date", gv(gl.releasedate)],
+    ["Rating", gv(gl.rating)],
+    ["File", item.relative_path || item.rom_file],
+  ];
+  const rowsHtml = fields
+    .filter(([, value]) => String(value || "").trim())
+    .map(([label, value]) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`)
+    .join("");
+  const description = gv(gl.desc || gl.description).trim();
+  const system = String(item.system || item.system_name || "");
+  const selected = referenceRomsState.selectedSystems.has(system);
+  const modalId = "referenceRomDetailModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-controller me-2"></i>${escapeHtml(String(item.title || item.name || "Game"))}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">${selected
+            ? '<span class="badge text-bg-info"><i class="bi bi-check-circle me-1"></i>System is referenced</span>'
+            : '<span class="badge text-bg-secondary">System is not referenced</span>'}</div>
+          ${rowsHtml}
+          ${description ? `<div class="mt-3 small">${escapeHtml(description)}</div>` : ""}
+          ${referenceRomsState.active ? "" : `<div class="mt-3"><button class="btn btn-sm btn-outline-info" type="button" onclick="toggleReferenceRomSystem(${jsAttr(system)});showReferenceRomDetail(${index})">${selected ? "Remove" : "Reference"} the ${escapeHtml(system)} system</button></div>`}
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
   }
 }
 
@@ -13156,6 +13554,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderSwarmPage();
+    } else if (hash === "#admin/reference-roms" || hash.startsWith("#admin/reference-roms/")) {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderReferenceRomsPage(decodeURIComponent(hash.split("/")[2] || ""));
     } else if (
       hash.startsWith("#admin/integration")
       || ["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"].includes(hash)

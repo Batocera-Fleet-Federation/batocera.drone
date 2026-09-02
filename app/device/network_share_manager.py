@@ -82,6 +82,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_connectivity import _peer_get_json_for_peer, _peer_post_json_for_peer  # type: ignore
 
 NETWORK_SHARE_STATE_NAMESPACE = "network_share_manager.json"
+# Issue #35: the user's ROM-reference *intent* -- which peer and which systems
+# to reference -- persisted independently of the mount record above so that
+# toggling a reference OFF (which deletes the mount record) still remembers the
+# chosen peer + systems for the next toggle ON. Only one peer at a time.
+NETWORK_REFERENCE_SELECTION_NAMESPACE = "network_reference_selection.json"
 NETWORK_SHARE_STATUSES = ("mounted", "peer_unreachable", "error", "pending", "enabling", "detaching")
 NETWORK_SHARE_OLD_SUFFIX = ".old"
 NETWORK_SHARE_LAYOUT_SCHEMA_VERSION = 2
@@ -232,6 +237,100 @@ def list_shares(settings: Settings) -> List[dict]:
 
 def get_share(settings: Settings, peer_id: str) -> Optional[dict]:
     return _get_peer_record(settings, peer_id)
+
+
+# ------------------------------------------------------ reference selection
+
+
+def _normalize_selection_systems(values) -> List[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted(
+        {str(name).strip() for name in values if str(name or "").strip()},
+        key=str.lower,
+    )
+
+
+def active_reference_peer_id(settings: Settings) -> str:
+    """The peer whose ROMs are currently referenced, if any.
+
+    A mounted or in-progress record counts; a fully detached one does not.
+    Used to enforce "only one machine referenced at a time" (issue #35)."""
+    for share in list_shares(settings):
+        peer_id = str(share.get("peer_id") or "").strip()
+        if peer_id and share.get("enabled", True) and share.get("status") != "detaching":
+            return peer_id
+    return ""
+
+
+def get_reference_selection(settings: Settings) -> dict:
+    """The durable ROM-reference selection (peer + chosen systems).
+
+    Survives ``disable()`` so an OFF/ON toggle keeps the user's choices.
+    ``updated_at`` is ``None`` when nothing has ever been chosen -- callers
+    treat that as "no explicit selection" (reference every exported system,
+    the pre-issue-35 behavior)."""
+    with _STATE_LOCK:
+        stored = _load_state_payload(
+            _state_database_path(settings.userdata_root),
+            NETWORK_REFERENCE_SELECTION_NAMESPACE,
+            {},
+        )
+    stored = stored if isinstance(stored, dict) else {}
+    peer_id = str(stored.get("peer_id") or "").strip()
+    active_peer = active_reference_peer_id(settings)
+    return {
+        "peer_id": peer_id,
+        "peer_name": str(stored.get("peer_name") or "").strip(),
+        "selected_systems": _normalize_selection_systems(stored.get("selected_systems")),
+        "updated_at": stored.get("updated_at") or None,
+        "active": bool(active_peer and active_peer == peer_id),
+        "active_peer_id": active_peer,
+    }
+
+
+def save_reference_selection(settings: Settings, peer_id: str, peer_name: str, selected_systems) -> dict:
+    """Persist which peer + systems to reference. Rejects a second peer while
+    another is still referenced (one machine at a time)."""
+    peer_id = str(peer_id or "").strip()
+    if not peer_id:
+        raise ValueError("peer_id is required")
+    active_peer = active_reference_peer_id(settings)
+    if active_peer and active_peer != peer_id:
+        raise ValueError("another machine's ROMs are currently referenced; stop that reference first")
+    if active_peer == peer_id:
+        raise ValueError("stop referencing this machine before changing which systems are selected")
+    payload = {
+        "peer_id": peer_id,
+        "peer_name": str(peer_name or "").strip(),
+        "selected_systems": _normalize_selection_systems(selected_systems),
+        "updated_at": _now_iso(),
+    }
+    with _STATE_LOCK:
+        _save_state_payload(
+            _state_database_path(settings.userdata_root),
+            NETWORK_REFERENCE_SELECTION_NAMESPACE,
+            payload,
+        )
+    return get_reference_selection(settings)
+
+
+def clear_reference_selection(settings: Settings) -> None:
+    with _STATE_LOCK:
+        _save_state_payload(
+            _state_database_path(settings.userdata_root),
+            NETWORK_REFERENCE_SELECTION_NAMESPACE,
+            {},
+        )
+
+
+def _reference_selection_filter(settings: Settings, peer_id: str) -> Optional[set]:
+    """Lowercased system names this peer's reference is limited to, or ``None``
+    for "no explicit selection -> reference everything the peer exports"."""
+    selection = get_reference_selection(settings)
+    if selection["peer_id"] != str(peer_id or "").strip() or selection["updated_at"] is None:
+        return None
+    return {name.strip().lower() for name in selection["selected_systems"]}
 
 
 # ---------------------------------------------------------------- resolve
@@ -1070,6 +1169,9 @@ def request_enable(settings: Settings, peer_id: str) -> dict:
     key = _operation_key(settings, peer_id)
     with _peer_operation_lock(settings, peer_id):
         target = resolve_peer_target(settings, peer_id)
+        active_peer = active_reference_peer_id(settings)
+        if active_peer and active_peer != peer_id:
+            raise ValueError("another machine's ROMs are already referenced; only one at a time")
         prior = _get_peer_record(settings, peer_id)
         if prior and prior.get("enabled", True) and prior.get("status") == "mounted":
             return public_record(prior)
@@ -1131,6 +1233,10 @@ def request_enable(settings: Settings, peer_id: str) -> dict:
 
 def _enable_locked(settings: Settings, peer_id: str) -> dict:
     target = resolve_peer_target(settings, peer_id)
+    active_peer = active_reference_peer_id(settings)
+    if active_peer and active_peer != peer_id:
+        raise ValueError("another machine's ROMs are already referenced; only one at a time")
+    selection_filter = _reference_selection_filter(settings, peer_id)
     migration = migrate_legacy_state(settings)
     if migration.get("errors"):
         return _upsert_peer_record(
@@ -1213,6 +1319,13 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
 
     summary = _fetch_peer_summary(settings, target)
     peer_system_names = summary.get("systems") if isinstance(summary, dict) and isinstance(summary.get("systems"), list) else None
+    if selection_filter is not None and peer_system_names is not None:
+        # Issue #35: reference only the systems the user selected. Filtering
+        # here keeps the completeness preflight below scoped to those systems.
+        peer_system_names = [
+            name for name in peer_system_names
+            if str(name).strip().lower() in selection_filter
+        ]
     preflight_detail = ""
     try:
         mounted_peer_system_names = _mounted_peer_system_names(mount_point)
@@ -1236,6 +1349,12 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
         peer_system_names = expected_system_names
     elif peer_system_names is None:
         peer_system_names = mounted_peer_system_names
+
+    if selection_filter is not None:
+        peer_system_names = [
+            name for name in (peer_system_names or [])
+            if str(name).strip().lower() in selection_filter
+        ]
 
     if preflight_detail:
         interrupted = {"systems": existing_systems, "bios": existing_bios}

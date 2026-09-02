@@ -229,6 +229,7 @@ class HandlersPeerMixin:
         except (TypeError, ValueError):
             raise ValueError("limit and offset must be integers")
         query = str((query_params.get("q") or [""])[0]).strip().lower()
+        genre = str((query_params.get("genre") or [""])[0]).strip()
         system = str((query_params.get("system") or [""])[0]).strip()
         systems = {
             value.strip().lower()
@@ -251,12 +252,22 @@ class HandlersPeerMixin:
             counts = dict(cache_status.get("counts") or {})
             counts["systems"] = len(system_names)
             counts["roms"] = sum(system_counts.values())
+            try:
+                genre_facets = self.repository.list_rom_genre_facets(systems=sorted(systems) if systems else None)
+            except Exception:
+                genre_facets = []
+            if not isinstance(genre_facets, list):
+                genre_facets = []
             response = {
                 "drone_id": self.settings.device_id,
                 "name": socket.gethostname(),
                 "systems": system_names,
                 "system_counts": system_counts,
                 "counts": counts,
+                "genres": [
+                    str(row.get("genre") or "") for row in genre_facets
+                    if isinstance(row, dict) and str(row.get("genre") or "").strip()
+                ],
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
             include_bios_paths = str((query_params.get("include_bios_paths") or [""])[0]).strip().lower() in {
@@ -338,6 +349,7 @@ class HandlersPeerMixin:
             page = self.repository.list_rom_assets_page(
                 systems=selected_systems,
                 query=query,
+                genre=genre,
                 limit=limit,
                 offset=offset,
             )

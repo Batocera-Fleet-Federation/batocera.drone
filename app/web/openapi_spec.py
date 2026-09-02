@@ -1609,6 +1609,34 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "NetworkShareListResponse": _object({"shares": _array(_ref("NetworkShareRecord"))}, ("shares",)),
         "NetworkShareDisableResponse": _object({"status": _enum(["detaching", "disabled", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
+        "NetworkReferenceSelection": _object(
+            {
+                "peer_id": _string(description="Paired peer whose ROMs the selection targets"),
+                "peer_name": _string(),
+                "selected_systems": _array(_string()),
+                "updated_at": _string(fmt="date-time", nullable=True, description="null until the operator has saved a selection"),
+                "active": _boolean(description="Whether this selection's peer is currently being referenced"),
+                "active_peer_id": _string(description="Peer currently referenced, if any (only one at a time)"),
+            },
+            ("peer_id", "selected_systems", "active"),
+        ),
+        "NetworkReferenceStateResponse": _object(
+            {
+                "selection": _ref("NetworkReferenceSelection"),
+                "active_share": _ref("NetworkShareRecord"),
+                "shares": _array(_ref("NetworkShareRecord")),
+            },
+            ("selection", "shares"),
+        ),
+        "NetworkReferenceSelectionUpdateRequest": _object(
+            {
+                "peer_id": _string(description="Paired peer to reference ROMs from"),
+                "peer_name": _string(),
+                "selected_systems": _array(_string()),
+            },
+            ("peer_id", "selected_systems"),
+        ),
+        "NetworkReferenceSelectionResponse": _object({"selection": _ref("NetworkReferenceSelection")}, ("selection",)),
         "NfsExportAuthorizationResponse": _object(
             {
                 "available": _boolean(),
@@ -1826,6 +1854,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
         _query_param("type", _enum(["summary", "roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay"], default="summary"), "Peer asset type"),
         *common_paging,
         *system_filter_params,
+        _query_param("genre", _string(), "Exact (case-insensitive) genre filter for type=roms"),
     ]
     peer_security = [{"mutualTLS": []}]
 
@@ -2527,6 +2556,16 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
                     error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/admin/network-reference": {"get": _operation("Reference ROMs page state: the saved peer/system selection plus every peer's live mount status", {"200": _json_response("NetworkReferenceStateResponse")}, tags=["admin", "local-network"])},
+            "/admin/network-reference/selection": {
+                "post": _operation(
+                    "Save which paired peer and which systems to reference ROMs from (persists across OFF/ON toggles; rejected while a machine is actively referenced)",
+                    {"200": _json_response("NetworkReferenceSelectionResponse")},
+                    request_body=_json_request("NetworkReferenceSelectionUpdateRequest"),
+                    tags=["admin", "local-network"],
+                    error_codes=("400", "401", "403", "429", "500"),
                 )
             },
             "/admin/tailnet/status": {"get": _operation("Tailscale mesh status for the Swarm page onboarding card", {"200": _json_response("TailnetStatusResponse")}, tags=["admin", "local-network"])},

@@ -17,6 +17,31 @@ class HandlersNetworkShareMixin:
     def _handle_admin_network_shares_list(self) -> None:
         self._send_json(200, {"shares": _network_share.status(self.settings)})
 
+    def _handle_admin_network_reference_get(self) -> None:
+        # Issue #35: the Reference ROMs page's state -- the saved peer/system
+        # selection plus every peer's live mount status in one round trip.
+        selection = _network_share.get_reference_selection(self.settings)
+        shares = _network_share.status(self.settings)
+        active_share = next(
+            (share for share in shares if str(share.get("peer_id") or "") == selection.get("active_peer_id")),
+            None,
+        )
+        self._send_json(200, {"selection": selection, "active_share": active_share, "shares": shares})
+
+    def _handle_admin_network_reference_selection(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            selection = _network_share.save_reference_selection(
+                self.settings,
+                str(payload.get("peer_id") or ""),
+                str(payload.get("peer_name") or ""),
+                payload.get("selected_systems"),
+            )
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(200, {"selection": selection})
+
     def _handle_admin_network_share_enable(self, peer_id: str) -> None:
         # peer_id arrives as a raw URL path segment -- unlike query-string
         # values, Python's stdlib server does not auto-decode these, and peer

@@ -629,6 +629,10 @@ class ApiRoutesMixin:
                 self._handle_admin_network_shares_list()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-reference":
+                self._handle_admin_network_reference_get()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "status":
                 self._handle_admin_tailnet_status()
                 return
@@ -802,6 +806,11 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "pull-from-peer":
                 payload = self._read_json_body()
                 self._handle_admin_tailnet_pull_from_peer(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "network-reference" and parts[2] == "selection":
+                payload = self._read_json_body()
+                self._handle_admin_network_reference_selection(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "enable":
