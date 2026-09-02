@@ -7898,6 +7898,7 @@ class NetworkSharePageTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
 
     def test_manage_button_and_impersonation_machinery_are_gone(self) -> None:
         self.assertNotIn("swarmManagePeer", self.js)
@@ -7947,6 +7948,16 @@ class NetworkSharePageTests(unittest.TestCase):
         fn_body = self.js[fn_start:self.js.index("\nfunction removeReferenceSystem(", fn_start)]
         self.assertIn("selectedSystems", fn_body)
         self.assertIn("renderReferenceRomsSummary()", fn_body)
+
+    def test_reference_roms_uses_the_compact_torrent_style_grid(self) -> None:
+        fn_start = self.js.index("function referenceRomsBodyHtml(")
+        fn_body = self.js[fn_start:self.js.index("\nfunction wireReferenceRomsControls(", fn_start)]
+        self.assertIn("themed-table download-table local-assets-table bff-stack reference-roms-table", fn_body)
+        self.assertIn("<colgroup>", fn_body)
+        self.assertIn("download-summary-grid", self.js)
+        self.assertIn('class="download-actions">Actions', fn_body)
+        self.assertIn(".reference-roms-table {", self.css)
+        self.assertIn(".reference-roms-row-selected", self.css)
 
     def test_referencing_pill_shown_next_to_email_pill(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
