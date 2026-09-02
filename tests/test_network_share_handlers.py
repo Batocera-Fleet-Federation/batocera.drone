@@ -139,5 +139,51 @@ class NetworkShareDisableHandlerTests(unittest.TestCase):
             self.assertEqual(payload["status"], "detaching")
 
 
+class NetworkReferenceHandlerTests(unittest.TestCase):
+    def test_get_returns_selection_and_shares(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(
+                network_share_manager,
+                "get_reference_selection",
+                return_value={"peer_id": "p1", "peer_name": "n", "selected_systems": ["snes"], "updated_at": "now", "active": False, "active_peer_id": ""},
+            ), mock.patch.object(network_share_manager, "status", return_value=[{"peer_id": "p1", "status": "pending"}]):
+                handler._handle_admin_network_reference_get()
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["selection"]["selected_systems"], ["snes"])
+            self.assertEqual(len(payload["shares"]), 1)
+
+    def test_selection_save_delegates_and_returns_200(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(
+                network_share_manager,
+                "save_reference_selection",
+                return_value={"peer_id": "p1", "selected_systems": ["snes"], "active": False},
+            ) as save:
+                handler._handle_admin_network_reference_selection({"peer_id": "p1", "peer_name": "n", "selected_systems": ["snes"]})
+            save.assert_called_once_with(settings, "p1", "n", ["snes"])
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["selection"]["selected_systems"], ["snes"])
+
+    def test_selection_save_maps_value_error_to_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(
+                network_share_manager,
+                "save_reference_selection",
+                side_effect=ValueError("another machine's ROMs are currently referenced"),
+            ):
+                handler._handle_admin_network_reference_selection({"peer_id": "p2", "selected_systems": []})
+            status, payload = handler.response
+            self.assertEqual(status, 400)
+            self.assertIn("another machine", payload["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

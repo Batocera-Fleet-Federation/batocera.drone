@@ -674,7 +674,7 @@ class HandlersNetworkMixin:
             result = self._collect_peer_inventory(asset_type, query_params)
         else:
             params = []
-            for key in ("system", "systems", "q", "limit", "offset"):
+            for key in ("system", "systems", "q", "genre", "limit", "offset"):
                 value = str((query_params.get(key) or [""])[0]).strip()
                 if value:
                     params.append(f"{quote(key, safe='')}={quote(value, safe='')}")

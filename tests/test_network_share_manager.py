@@ -1024,5 +1024,103 @@ class MigrationAndOfflineRecoveryTests(unittest.TestCase):
             self.assertFalse(record["enabled"])
 
 
+class ReferenceSelectionTests(unittest.TestCase):
+    """Issue #35: choose specific systems to reference, persisted across
+    OFF/ON toggles, one machine at a time."""
+
+    def _settings_with_peer(self, tmp: str) -> Settings:
+        settings = _build_settings(self, Path(tmp))
+        patcher = mock.patch.object(network_share_manager._local_network, "get_paired_peer", return_value=_PEER)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        return settings
+
+    def test_selection_defaults_to_empty_and_no_updated_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            selection = network_share_manager.get_reference_selection(settings)
+            self.assertEqual(selection["selected_systems"], [])
+            self.assertIsNone(selection["updated_at"])
+            self.assertFalse(selection["active"])
+
+    def test_save_and_reload_selection_normalizes_and_sorts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes", " gba ", "snes", ""])
+            selection = network_share_manager.get_reference_selection(settings)
+            self.assertEqual(selection["peer_id"], "peer-1")
+            self.assertEqual(selection["selected_systems"], ["gba", "snes"])
+            self.assertIsNotNone(selection["updated_at"])
+
+    def test_enable_references_only_selected_systems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes"])
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"], "gba": ["zelda.gba"]}),
+            ):
+                record = network_share_manager.enable(settings, "peer-1")
+            self.assertEqual(record["status"], "mounted")
+            self.assertTrue((settings.roms_root / "snes").is_symlink())
+            self.assertFalse((settings.roms_root / "gba").exists())
+            self.assertEqual([row["system"] for row in record["systems"]], ["snes"])
+
+    def test_selection_survives_disable_and_reapplies_on_reenable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes"])
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"], "gba": ["zelda.gba"]}),
+            ):
+                network_share_manager.enable(settings, "peer-1")
+                network_share_manager.disable(settings, "peer-1")
+            selection = network_share_manager.get_reference_selection(settings)
+            self.assertEqual(selection["selected_systems"], ["snes"])
+            self.assertFalse(selection["active"])
+            self.assertIsNone(network_share_manager.get_share(settings, "peer-1"))
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"], "gba": ["zelda.gba"]}),
+            ):
+                record = network_share_manager.enable(settings, "peer-1")
+            self.assertEqual([row["system"] for row in record["systems"]], ["snes"])
+
+    def test_only_one_machine_referenced_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"]}),
+            ):
+                network_share_manager.enable(settings, "peer-1")
+            with self.assertRaises(ValueError):
+                network_share_manager.enable(settings, "peer-2")
+            with self.assertRaises(ValueError):
+                network_share_manager.save_reference_selection(settings, "peer-2", "other", ["snes"])
+
+    def test_selection_cannot_be_changed_while_actively_referencing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes"])
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"]}),
+            ):
+                network_share_manager.enable(settings, "peer-1")
+            with self.assertRaises(ValueError):
+                network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes", "gba"])
+
+
 if __name__ == "__main__":
     unittest.main()

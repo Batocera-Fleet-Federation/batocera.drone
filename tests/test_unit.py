@@ -7319,7 +7319,7 @@ class SwarmPageTests(unittest.TestCase):
 
     def test_request_assets_deep_links_into_the_transfers_picker(self) -> None:
         browse_start = self.js.index("function swarmBrowsePeerAssets(")
-        browse_body = self.js[browse_start:self.js.index("async function swarmReferencePeerRoms(", browse_start)]
+        browse_body = self.js[browse_start:self.js.index("// Tailnet's MagicDNS", browse_start)]
         self.assertIn("localPeerAssetContext.peerId", browse_body)
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
@@ -7916,38 +7916,37 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertTrue(promise_all_index < shares_index < promise_all_close)
         self.assertIn("swarmNetworkSharesByPeer = Object.fromEntries", body)
 
-    def test_card_shows_reference_button_gated_on_known_network_address_and_online(self) -> None:
+    def test_card_reference_button_opens_reference_roms_page_gated_on_address_and_online(self) -> None:
+        # Issue #35: the inline confirm-then-enable-all button became a link to
+        # the dedicated Reference ROMs page, where systems are chosen first.
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
-        self.assertIn("swarmReferencePeerRoms(decodeURIComponent(", card_body)
-        self.assertIn("swarmUnreferencePeerRoms(decodeURIComponent(", card_body)
+        self.assertIn("setHash('#admin/reference-roms/${droneToken}')", card_body)
         self.assertIn("drone.online && (drone.tailnet_ip || lanUrl)", card_body)
+        self.assertNotIn("swarmReferencePeerRoms", self.js)
+        self.assertNotIn("swarmUnreferencePeerRoms", self.js)
 
-    def test_reference_flow_confirms_then_posts_enable(self) -> None:
-        fn_start = self.js.index("async function swarmReferencePeerRoms(")
-        fn_body = self.js[fn_start:self.js.index("\nasync function swarmUnreferencePeerRoms(", fn_start)]
-        self.assertIn("window.confirm(", fn_body)
-        self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/enable", fn_body)
-        self.assertIn("await renderSwarmPage();", fn_body)
-        self.assertNotIn("offerNetworkShareUiRefresh", fn_body)
-        self.assertIn("operation continues if this browser closes", fn_body)
-        # The confirm dialog and toasts must mention BIOS, not just ROMs --
-        # this button references both in one call.
-        self.assertIn("BIOS", fn_body)
+    def test_reference_roms_page_is_routed_and_loads_selection_state(self) -> None:
+        self.assertIn('hash.startsWith("#admin/reference-roms/")', self.js)
+        fn_start = self.js.index("async function renderReferenceRomsPage(")
+        fn_body = self.js[fn_start:self.js.index("\nfunction referenceRomsBodyHtml(", fn_start)]
+        self.assertIn('api("/admin/network-reference")', fn_body)
+        # Only one machine may be referenced at a time.
+        self.assertIn("already referencing", fn_body)
 
-    def test_unreference_flow_confirms_then_posts_disable(self) -> None:
-        fn_start = self.js.index("async function swarmUnreferencePeerRoms(")
-        fn_body = self.js[fn_start:self.js.index("\n// Tailnet's MagicDNS", fn_start)]
-        self.assertIn("window.confirm(", fn_body)
-        self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/disable", fn_body)
-        self.assertIn('api("/admin/network-shares")', fn_body)
-        self.assertIn("detach is still running in the background", fn_body)
+    def test_reference_roms_toggle_saves_selection_then_enables_or_disables(self) -> None:
+        fn_start = self.js.index("async function toggleReferenceActive(")
+        fn_body = self.js[fn_start:self.js.index("\nasync function referenceRomsWaitForSettled(", fn_start)]
+        self.assertIn("/admin/network-reference/selection", fn_body)
+        self.assertIn("/admin/network-shares/${encodeURIComponent(st.peerId)}/enable", fn_body)
+        self.assertIn("/admin/network-shares/${encodeURIComponent(st.peerId)}/disable", fn_body)
+        self.assertIn("Select at least one system", fn_body)
 
-    def test_reference_refresh_is_owned_by_backend_worker(self) -> None:
-        self.assertNotIn("offerNetworkShareUiRefresh", self.js)
-        fn_start = self.js.index("async function swarmReferencePeerRoms(")
-        fn_body = self.js[fn_start:self.js.index("\nasync function swarmUnreferencePeerRoms(", fn_start)]
-        self.assertNotIn('apiPost("/admin/system/restart-emulationstation", {})', fn_body)
+    def test_reference_roms_selecting_a_game_selects_its_system(self) -> None:
+        fn_start = self.js.index("function toggleReferenceRomSystem(")
+        fn_body = self.js[fn_start:self.js.index("\nfunction removeReferenceSystem(", fn_start)]
+        self.assertIn("selectedSystems", fn_body)
+        self.assertIn("renderReferenceRomsSummary()", fn_body)
 
     def test_referencing_pill_shown_next_to_email_pill(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
