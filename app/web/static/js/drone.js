@@ -10991,7 +10991,9 @@ function referenceRomsBodyHtml() {
       </div>
     </div>
     <div id="referenceRomsSummary" class="mb-3"></div>
-    <div class="row g-2 mb-3">
+    <div class="download-section mb-3">
+      <div class="download-section-title"><span><i class="bi bi-funnel me-2"></i>Find games</span></div>
+      <div class="row g-2">
       <div class="col-12 col-lg-3">
         <label class="form-label small" for="referenceRomsSystem">System</label>
         <select id="referenceRomsSystem" class="form-select form-select-sm"><option value="">All systems</option></select>
@@ -11008,15 +11010,19 @@ function referenceRomsBodyHtml() {
         <label class="form-label small" for="referenceRomsPageSize">Per page</label>
         <select id="referenceRomsPageSize" class="form-select form-select-sm"><option>50</option><option>100</option><option>200</option></select>
       </div>
+      </div>
     </div>
     <div class="table-responsive">
-      <table class="table table-sm align-middle">
+      <table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack reference-roms-table">
+        <colgroup>
+          <col style="width:34%"><col style="width:15%"><col style="width:14%"><col style="width:23%"><col style="width:14%">
+        </colgroup>
         <thead><tr>
-          <th style="width:6rem">Reference</th>
           <th>Game</th>
-          <th style="width:9rem">System</th>
+          <th>Status</th>
+          <th>System</th>
           <th>Genre</th>
-          <th style="width:5rem"></th>
+          <th class="download-actions">Actions</th>
         </tr></thead>
         <tbody id="referenceRomsRows"><tr><td colspan="5" class="text-muted">Loading games...</td></tr></tbody>
       </table>
@@ -11090,6 +11096,7 @@ async function loadReferenceRoms() {
   }
   renderReferenceRomsTable();
   renderReferenceRomsPagination();
+  renderReferenceRomsSummary();
 }
 
 function referenceRomItemGenre(item) {
@@ -11113,18 +11120,24 @@ function renderReferenceRomsTable() {
     const name = String(item.title || item.name || item.rom_file || "Unknown");
     const selected = st.selectedSystems.has(system);
     const genre = referenceRomItemGenre(item);
-    return `<tr>
-      <td>
-        <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" ${selected ? "checked" : ""} ${st.active ? "disabled" : ""}
-            onchange="toggleReferenceRomSystem(${jsAttr(system)})" title="${selected ? "System is referenced" : "Reference this game's system"}">
-        </div>
+    const status = selected
+      ? (st.active
+        ? '<span class="badge text-bg-success"><i class="bi bi-link-45deg me-1"></i>Referenced</span>'
+        : '<span class="badge text-bg-info"><i class="bi bi-check2 me-1"></i>Selected</span>')
+      : '<span class="badge text-bg-secondary">Not selected</span>';
+    const selectTitle = selected ? `Stop referencing the ${system} system` : `Reference the ${system} system`;
+    return `<tr class="${selected ? "reference-roms-row-selected" : ""}">
+      <td class="download-file" title="${escapeHtml(name)}">${escapeHtml(name)}</td>
+      <td>${status}</td>
+      <td class="text-truncate" title="${escapeHtml(system)}">${escapeHtml(system)}</td>
+      <td class="text-truncate" title="${escapeHtml(genre)}">${escapeHtml(genre || "\u2014")}</td>
+      <td class="download-actions">
+        <button class="btn btn-sm ${selected ? "btn-outline-warning" : "btn-outline-success"}" type="button"
+          title="${escapeHtml(selectTitle)}" aria-label="${escapeHtml(selectTitle)}" ${st.active ? "disabled" : ""}
+          onclick="toggleReferenceRomSystem(${jsAttr(system)})"><i class="bi ${selected ? "bi-dash-circle" : "bi-plus-circle"}"></i></button>
+        <button class="btn btn-sm btn-outline-info" type="button" title="Game details" aria-label="Game details"
+          onclick="showReferenceRomDetail(${index})"><i class="bi bi-info-circle"></i></button>
       </td>
-      <td class="text-truncate" style="max-width:22rem">${escapeHtml(name)}
-        ${selected ? '<span class="badge text-bg-info ms-2">Referenced</span>' : ""}</td>
-      <td>${escapeHtml(system)}</td>
-      <td class="text-truncate" style="max-width:14rem">${escapeHtml(genre || "&mdash;")}</td>
-      <td><button class="btn btn-sm btn-outline-secondary" type="button" onclick="showReferenceRomDetail(${index})"><i class="bi bi-info-circle"></i></button></td>
     </tr>`;
   }).join("");
 }
@@ -11183,6 +11196,12 @@ function renderReferenceRomsSummary() {
     ? `<span class="badge text-bg-success"><i class="bi bi-check-circle me-1"></i>Referencing ${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"}${st.activeStatus && st.activeStatus !== "mounted" ? ` (${escapeHtml(st.activeStatus)})` : ""}</span>`
     : `<span class="text-muted small">${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"} selected${dirty ? " &middot; unsaved changes" : ""}</span>`;
   node.innerHTML = `
+    <div class="download-summary-grid mb-3">
+      <div class="download-summary-card"><i class="bi bi-collection"></i><div><strong>${st.availableSystems.length.toLocaleString()}</strong><span>Peer systems</span></div></div>
+      <div class="download-summary-card tone-info"><i class="bi bi-check2-square"></i><div><strong>${st.selectedSystems.size.toLocaleString()}</strong><span>Selected</span></div></div>
+      <div class="download-summary-card"><i class="bi bi-controller"></i><div><strong>${st.total.toLocaleString()}</strong><span>Matching games</span></div></div>
+      <div class="download-summary-card ${st.active ? "tone-success" : ""}"><i class="bi ${st.active ? "bi-hdd-network" : "bi-pause-circle"}"></i><div><strong>${st.active ? "On" : "Off"}</strong><span>Referencing</span></div></div>
+    </div>
     <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
       ${statusNote}
       <button class="btn btn-sm btn-primary ms-auto" id="referenceRomsSaveBtn" ${st.active || !dirty ? "disabled" : ""} onclick="saveReferenceSelection()"><i class="bi bi-save me-1"></i>Save Selection</button>
@@ -11315,7 +11334,9 @@ function showReferenceRomDetail(index) {
         </div>
         <div class="modal-body">
           <div class="mb-2">${selected
-            ? '<span class="badge text-bg-info"><i class="bi bi-check-circle me-1"></i>System is referenced</span>'
+            ? (referenceRomsState.active
+              ? '<span class="badge text-bg-success"><i class="bi bi-link-45deg me-1"></i>System is referenced</span>'
+              : '<span class="badge text-bg-info"><i class="bi bi-check-circle me-1"></i>System is selected</span>')
             : '<span class="badge text-bg-secondary">System is not referenced</span>'}</div>
           ${rowsHtml}
           ${description ? `<div class="mt-3 small">${escapeHtml(description)}</div>` : ""}
