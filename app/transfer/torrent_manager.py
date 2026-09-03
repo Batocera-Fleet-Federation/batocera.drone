@@ -2351,12 +2351,16 @@ class TorrentManager:
 
         if finalize_result is not None:
             if finalize_result["removed_from_list"]:
-                self._remove_from_aria2(finalize_result["removed_gid"])
-                if finalize_result["removed_torrent_file"]:
-                    try:
-                        Path(finalize_result["removed_torrent_file"]).unlink(missing_ok=True)
-                    except OSError as error:
-                        print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
+                # Mirror delete()/clear(): a removal aria2 couldn't confirm
+                # right now must be retried on a later tick, not silently
+                # dropped -- otherwise the still-registered gid gets picked
+                # back up by _adopt_orphaned_gids and the just-cleaned torrent
+                # reappears in the list (issue #40). The watched .torrent file
+                # is already unlinked under the lock in
+                # _finalize_move_job_locked, atomically with dropping the entry.
+                removed_gid = finalize_result["removed_gid"]
+                if not self._remove_from_aria2(removed_gid):
+                    self._queue_pending_removal(removed_gid)
                 self.wake()
             _notifications.record_event(
                 self.settings,
@@ -2387,10 +2391,21 @@ class TorrentManager:
 
         removed_from_list = False
         removed_gid = None
-        removed_torrent_file = None
         if cleanup_performed:
             removed_gid = entry.get("gid")
-            removed_torrent_file = entry.get("torrent_file")
+            # Delete the watched .torrent file here, under the lock and
+            # atomically with dropping the entry. If it were left for the
+            # caller to unlink after the lock is released, the poll thread's
+            # watch-folder rescan (_scan_watch_directory_locked) can slip in
+            # during that gap and re-register the still-present .torrent as a
+            # brand-new "queued" entry -- the torrent stays stuck in the list
+            # even though its payload is already gone (issue #40).
+            torrent_file = entry.get("torrent_file")
+            if torrent_file:
+                try:
+                    Path(torrent_file).unlink(missing_ok=True)
+                except OSError as error:
+                    print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
             self._torrents.pop(str(entry.get("id") or ""), None)
             removed_from_list = True
         elif moved_sources:
@@ -2419,7 +2434,6 @@ class TorrentManager:
         return {
             "removed_from_list": removed_from_list,
             "removed_gid": removed_gid,
-            "removed_torrent_file": removed_torrent_file,
             "notification_type": notification_type,
             "notification_title": notification_title,
             "notification_details": {
@@ -2503,10 +2517,16 @@ class TorrentManager:
             known_info_hashes = {
                 entry.get("info_hash") for entry in self._torrents.values() if entry.get("info_hash")
             }
+            # A gid we've already dropped an entry for and are still trying to
+            # remove from aria2 (delete/cancel/clear, or a move+cleanup whose
+            # forceRemove hasn't landed yet) must not be resurrected here as an
+            # "Adopted download" -- _retry_pending_removals runs just before
+            # this on the same tick and will clear it (issue #40).
+            pending_removal_gids = set(self._pending_removal_gids)
             dirty = False
             for result in [*active, *waiting]:
                 gid = str(result.get("gid") or "")
-                if not gid or gid in known_gids:
+                if not gid or gid in known_gids or gid in pending_removal_gids:
                     continue
                 following = str(result.get("following") or "")
                 if following and following in known_gids:
