@@ -1,14 +1,15 @@
-"""Drone TLS certificate lifecycle: self-signed generation, rotation, metadata.
+"""Drone TLS identity lifecycle: self-signed generation, rotation, metadata.
 
 Extracted from ``drone_api.py``. ``DroneCertificateManager`` owns the drone's mTLS
-identity -- it ensures a self-signed cert exists (via ``openssl``), builds SANs from
-the local IPs + hostname overrides, can force a fresh self-signed cert on demand
-(rotation), and decodes the current cert's metadata.
+identity -- it ensures a self-signed CA/client certificate exists (via ``openssl``),
+can force a fresh identity on demand (rotation), and decodes its metadata. HTTPS
+listeners use a replaceable leaf signed by this identity; see ``web.server_tls``.
 """
 
 import hashlib
 import os
 import re
+import socket
 import ssl
 import subprocess
 from datetime import datetime, timezone
@@ -67,21 +68,8 @@ class DroneCertificateManager:
 
     def _generate_local_certificate(self, cert_file: Path, key_file: Path) -> None:
         cert_file.parent.mkdir(parents=True, exist_ok=True)
-        identity = re.sub(r"[^A-Za-z0-9_.:-]+", "-", self.settings.device_id).strip("-") or "drone"
-        common_name = f"batocera-drone-{identity}"
-        alt_names = [
-            f"DNS:{common_name}",
-            "DNS:localhost",
-            "IP:127.0.0.1",
-        ]
-        for override in _hostname_override_values(self.settings):
-            if _is_ip_literal(override):
-                alt_names.append(f"IP:{override.strip('[]')}")
-            else:
-                alt_names.append(f"DNS:{override}")
-        for ip in _get_local_certificate_ips():
-            alt_names.append(f"IP:{ip}")
-        san = ",".join(dict.fromkeys(alt_names))
+        common_name = certificate_common_name(self.settings)
+        san = ",".join(certificate_alt_names(self.settings))
         command = [
             "openssl",
             "req",
@@ -99,6 +87,10 @@ class DroneCertificateManager:
             f"/CN={common_name}",
             "-addext",
             f"subjectAltName={san}",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyCertSign",
             "-addext",
             "extendedKeyUsage=serverAuth,clientAuth",
         ]
@@ -156,3 +148,44 @@ class DroneCertificateManager:
             "mtls_enabled": self.settings.drone_mtls_enabled,
             "mtls_mode": self.settings.drone_mtls_mode,
         }
+
+
+def certificate_common_name(settings: Settings) -> str:
+    # A MAC-like device id contains colons, which are legal in an X.509 CN but
+    # invalid in a DNS SAN and make strict OpenSSL verification reject a leaf.
+    identity = re.sub(r"[^A-Za-z0-9.-]+", "-", settings.device_id).strip("-.") or "drone"
+    return f"batocera-drone-{identity}"
+
+
+def certificate_alt_names(settings: Settings) -> list[str]:
+    """Return stable hostnames plus current LAN/tailnet addresses for TLS.
+
+    The self-signed Drone identity is long-lived and pinned by peers. The web
+    server leaf certificate may be reissued as this set grows without changing
+    that identity. Unqualified hostnames gain their mDNS ``.local`` form so the
+    standard ``https://batocera.local`` URL validates after the Drone CA is
+    trusted by a client.
+    """
+    common_name = certificate_common_name(settings)
+    alt_names = [f"DNS:{common_name}", "DNS:localhost", "IP:127.0.0.1"]
+
+    hostnames = []
+    for loader in (socket.gethostname, socket.getfqdn):
+        try:
+            value = str(loader() or "").strip().rstrip(".")
+        except OSError:
+            value = ""
+        if value:
+            hostnames.append(value)
+    hostnames.extend(_hostname_override_values(settings))
+
+    for hostname in hostnames:
+        if _is_ip_literal(hostname):
+            alt_names.append(f"IP:{hostname.strip('[]')}")
+            continue
+        alt_names.append(f"DNS:{hostname}")
+        if "." not in hostname:
+            alt_names.append(f"DNS:{hostname}.local")
+    for ip in _get_local_certificate_ips():
+        alt_names.append(f"IP:{ip}")
+    return list(dict.fromkeys(alt_names))

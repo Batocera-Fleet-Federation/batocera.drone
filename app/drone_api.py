@@ -1956,7 +1956,9 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
         return
     if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
         raise RuntimeError("managed Drone mTLS mode requires DRONE_CERT_FILE and DRONE_KEY_FILE")
-    if settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+    if settings.drone_mtls_mode == "managed":
+        # A managed certificate is provisioned out of band and may not be a CA;
+        # preserve its existing direct-use behavior on every listener.
         cert_file, key_file = settings.drone_cert_file, settings.drone_key_file
     else:
         cert_file, key_file = _resolve_tls_material(settings)

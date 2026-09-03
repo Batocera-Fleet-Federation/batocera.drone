@@ -8,7 +8,7 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 
 - Drone runs on each Batocera device and gives you a local web UI. There is no central hub — every Drone is a standalone agent that pairs directly with a handful of others (peer-to-peer only).
 - Drones pair directly over the local network (short-lived 8-digit pairing code) or code-free over a shared Tailscale tailnet. Pairing exchanges and pins each Drone's self-signed certificate; there is no third party granting trust.
-- Drone-to-Drone API calls require mTLS with that pinned certificate. Drone creates its own local certificate on startup, so you do not need a public domain or a CA.
+- Drone-to-Drone API calls require mTLS with that pinned identity certificate. Drone also creates a hostname-aware HTTPS certificate on startup, so you do not need a public domain or an external CA.
 - Local-network/tailnet P2P is always on — it is a fixed property of the architecture, not a toggle, since there is no hub to fall back to if it were disabled.
 - Containers are supported for local swarm testing. The Drone container creates a Batocera-like `/userdata` tree and copies a varied set of ROMs from `.github/data/roms/<system>/<files>`.
 - The Drone admin header uses the shared project mascot at `content/batocera-swarm-mascot.jpg`.
@@ -57,7 +57,7 @@ https://batocera.local
 
 Drone also listens on `https://<your-batocera-name>.local:8443` for backwards compatibility with older installs and bookmarks.
 
-Your browser may warn you about the certificate. That is expected because Drone creates a self-signed local certificate by default.
+Your browser may warn you about the certificate until you trust the Drone's downloaded public identity certificate on that client. Drone uses that local identity as its own certificate authority by default.
 
 ## Login
 
@@ -121,7 +121,11 @@ Local fake mode is opt-in with `USE_FAKE_DATA=true`. One visible nearby Drone is
 
 Drone can protect peer API routes with mTLS. In plain language, one Drone must show its local certificate before another Drone answers peer API calls.
 
-Drone creates or reuses a local self-signed certificate on startup. It does not need Let's Encrypt and does not need a public domain name. Its certificate metadata is shown on the Local Network page and exchanged with a peer during pairing so the paired Drone can pin it. The private key stays on the Drone.
+Drone creates or reuses one long-lived, self-signed identity certificate on startup. It does not need Let's Encrypt and does not need a public domain name. Its certificate metadata is shown on the Local Network page and exchanged with a peer during pairing so the paired Drone can pin it. The private key stays on the Drone.
+
+At every service start, Drone also checks a separate HTTPS server certificate in `TLS_SELF_SIGNED_DIR`. It creates or replaces that server certificate when it is missing, damaged, near expiry, or lacks a current hostname, LAN address, or Tailscale address. Unqualified hostnames automatically include their `.local` mDNS form (for example, `batocera.local`). This replacement does **not** change the long-lived identity certificate or its fingerprint, so existing swarm pairings continue to work and Tailscale enrollment/state is untouched. If names and addresses have not changed, the existing server certificate and key are reused.
+
+Browsers, Claude, and other normal HTTPS clients still need to trust the public identity certificate once because it is a private per-device CA. Download it from **Admin > API Access**, install it in the client's trusted root store, and reconnect. Do not install or copy the private key. Clients that intentionally disable certificate verification do not need this step, but lose server-authentication protection.
 
 Useful settings:
 
@@ -142,7 +146,7 @@ For API clients that need mTLS, use your client certificate and key from a trust
 curl --cert client.crt --key client.key -k "https://<drone-host>/health"
 ```
 
-Keep private keys private. If a key is exposed, recreate or rotate the certificate.
+Keep private keys private. If the identity key is exposed, rotate it and re-pair the Drone with its peers. Routine startup replacement of only the HTTPS server certificate does not require re-pairing.
 
 ## Releases
 

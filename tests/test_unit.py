@@ -4859,6 +4859,7 @@ class CreateServerHttpRedirectTests(unittest.TestCase):
             "DRONE_APP_USERNAME": "admin",
             "DRONE_APP_PASSWORD": "changeme",
             "HTTPS_PORT": "0",
+            "TLS_SELF_SIGNED_DIR": str(self._root / "system" / "certs"),
             "LOG_DIR": str(Path(self._tmp.name) / "logs"),
             "ROM_METADATA_POLL_SECONDS": "0",
         })
@@ -5171,6 +5172,7 @@ class CreateServerCastListenerTests(unittest.TestCase):
             "DRONE_APP_USERNAME": "admin",
             "DRONE_APP_PASSWORD": "changeme",
             "HTTPS_PORT": "0",
+            "TLS_SELF_SIGNED_DIR": str(self._root / "system" / "certs"),
             "LOG_DIR": str(Path(self._tmp.name) / "logs"),
             "ROM_METADATA_POLL_SECONDS": "0",
             "DRONE_HTTP_REDIRECT_PORT": "0",

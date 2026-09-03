@@ -8,6 +8,11 @@
   emulator configs, missing artwork, email and automation; write tools for screen
   mode, volume, music volume, screensaver, automation toggles, and artwork scraping.
   Generate/revoke the token and copy Claude/Codex setup snippets on the API Access page.
+- MCP setup guide: the API Access "MCP Server" card title now opens a "Connect an AI
+  assistant" modal explaining what MCP is, what this server exposes (read/write tool
+  groups), and per-client setup steps -- including trusting the Drone's self-signed
+  HTTPS certificate (`NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE`), without which clients
+  refuse the endpoint. Adds a "Download Drone certificate" button to the card.
 
 ## [v0.1.92] - 2026-07-28
 

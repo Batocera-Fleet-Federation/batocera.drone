@@ -136,7 +136,10 @@ sync to; a completed local pass just marks the cache clean, see
 `transfer/transfer_files.py`) and fetch with `_download_*_from_peer` (now in
 `transfer/peer_download.py`; cert pinning + peer client in
 `transfer/peer_connectivity.py` via `_peer_trust_cafile`, SSL-retry; the mTLS
-identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). See
+identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). The
+peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
+hostname/IP-aware HTTPS leaf signed by that identity during startup, including
+current LAN and Tailscale addresses. See
 `drone-p2p-transfer-security` skill.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
