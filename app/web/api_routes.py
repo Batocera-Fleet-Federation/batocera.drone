@@ -86,6 +86,10 @@ class ApiRoutesMixin:
                 self._handle_public_video(parts[2], "/".join(parts[4:]))
                 return
 
+            if api_path == "/mcp":
+                self._send_json(405, {"error": "MCP uses POST JSON-RPC over Streamable HTTP"}, extra_headers={"Allow": "POST"})
+                return
+
             if len(parts) == 2 and parts[0] == "peer" and parts[1] == "info":
                 self._handle_peer_info()
                 return
@@ -479,6 +483,10 @@ class ApiRoutesMixin:
                 self._handle_admin_api_status()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "mcp":
+                self._handle_admin_mcp_status()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "automation":
                 self._handle_admin_automation_status()
                 return
@@ -732,6 +740,13 @@ class ApiRoutesMixin:
                 self._handle_peer_smtp_mail(payload)
                 return
 
+            # Public to the session gate, but gated by its own bearer token:
+            # remote MCP clients (Claude/Codex) authenticate with
+            # ``Authorization: Bearer`` and never carry a browser cookie.
+            if api_path == "/mcp":
+                self._handle_mcp_rpc()
+                return
+
             # Public: must be reachable with no (or an already-invalid) session
             # cookie -- that's the whole point of a login endpoint.
             if api_path == "/auth/login":
@@ -850,6 +865,15 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate" and parts[3] == "rotate":
                 self._handle_admin_api_certificate_rotate()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mcp" and parts[2] == "token":
+                payload = self._read_json_body()
+                self._handle_admin_mcp_token(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mcp" and parts[2] == "revoke":
+                self._handle_admin_mcp_revoke()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-volume":
