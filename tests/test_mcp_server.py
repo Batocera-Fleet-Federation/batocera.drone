@@ -12,6 +12,19 @@ from app.mock_data import seed_mock_userdata
 from app.drone_api import Settings, create_server
 
 
+class McpUiTests(unittest.TestCase):
+    def test_token_reveal_uses_dark_theme_panel(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="alert mcp-token-reveal mt-3 d-none"', js)
+        self.assertIn('class="mono small p-2 rounded mb-0 mcp-token-value"', js)
+        self.assertIn(".mcp-token-reveal {", css)
+        self.assertIn("color: var(--admin-text);", css)
+        self.assertNotIn('class="alert alert-success mt-3 d-none"', js)
+
+
 class McpServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
