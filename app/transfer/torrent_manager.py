@@ -1628,9 +1628,12 @@ class TorrentManager:
             entry["last_error"] = ""
             entry["retry_count"] = 0
             entry["retry_at"] = 0.0
+            # Keep the old gid registered for removal for the whole RPC
+            # window, so a concurrent tick can't adopt it as an "Adopted
+            # download" twin of the entry we're merely requeueing (issue #42).
+            self._begin_gid_removal_locked(gid)
             self._persist_locked()
-        if not self._remove_from_aria2(gid):
-            self._queue_pending_removal(gid)
+        self._finish_gid_removal(gid)
         self.wake()
         return {"status": result_status}
 
@@ -1739,18 +1742,27 @@ class TorrentManager:
                 return {"status": "not_found"}
             if self._migration_active(entry):
                 return {"status": "migration_in_progress", "message": "wait for the current file move to finish"}
+            gid = entry.get("gid")
             self._torrents.pop(entry_id, None)
+            # Register the gid for removal and unlink the watched .torrent
+            # file *under the lock*, atomically with dropping the entry.
+            # Otherwise a concurrent poll tick can rescan the still-present
+            # .torrent (re-registering it as a fresh "queued" row) or adopt
+            # the still-registered gid as an "Adopted download" before the
+            # forceRemove below lands -- the torrent "deletes and adds itself
+            # right back" (issue #42). Same fix as the move+cleanup path.
+            self._begin_gid_removal_locked(gid)
+            torrent_file_removed = True
+            torrent_file = entry.get("torrent_file")
+            if torrent_file:
+                torrent_file_removed = False
+                try:
+                    Path(torrent_file).unlink(missing_ok=True)
+                    torrent_file_removed = True
+                except OSError as error:
+                    print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
             self._persist_locked()
-        if not self._remove_from_aria2(entry.get("gid")):
-            self._queue_pending_removal(entry.get("gid"))
-        torrent_file_removed = True
-        if entry.get("torrent_file"):
-            torrent_file_removed = False
-            try:
-                Path(entry["torrent_file"]).unlink(missing_ok=True)
-                torrent_file_removed = True
-            except OSError as error:
-                print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
+        self._finish_gid_removal(gid)
         downloaded_files_removed = _remove_downloaded_payload(entry)
         self.wake()
         return {
@@ -1821,20 +1833,25 @@ class TorrentManager:
                 targets = [dict(entry) for entry in self._torrents.values() if entry.get("status") == "complete"]
             else:
                 targets = [dict(entry) for entry in self._torrents.values()]
-            if delete_from_ui:
+            if delete_from_ui or delete_torrent_file:
                 for entry in targets:
-                    self._torrents.pop(entry["id"], None)
-                self._persist_locked()
+                    if delete_from_ui:
+                        self._torrents.pop(entry["id"], None)
+                        self._begin_gid_removal_locked(entry.get("gid"))
+                    if delete_torrent_file and entry.get("torrent_file"):
+                        # Unlink under the lock so a concurrent watch-folder
+                        # rescan can't re-register a torrent this bulk-clear
+                        # just removed (issue #42, same fix as delete()).
+                        try:
+                            Path(entry["torrent_file"]).unlink(missing_ok=True)
+                        except OSError as error:
+                            print(f"Torrent clear: file delete failed: {error}", file=sys.stderr, flush=True)
+                if delete_from_ui:
+                    self._persist_locked()
 
         for entry in targets:
-            if delete_torrent_file and entry.get("torrent_file"):
-                try:
-                    Path(entry["torrent_file"]).unlink(missing_ok=True)
-                except OSError as error:
-                    print(f"Torrent clear: file delete failed: {error}", file=sys.stderr, flush=True)
             if delete_downloaded_files or delete_from_ui:
-                if not self._remove_from_aria2(entry.get("gid")):
-                    self._queue_pending_removal(entry.get("gid"))
+                self._finish_gid_removal(entry.get("gid"))
             if delete_downloaded_files:
                 _remove_downloaded_payload(entry)
 
@@ -2351,12 +2368,14 @@ class TorrentManager:
 
         if finalize_result is not None:
             if finalize_result["removed_from_list"]:
-                self._remove_from_aria2(finalize_result["removed_gid"])
-                if finalize_result["removed_torrent_file"]:
-                    try:
-                        Path(finalize_result["removed_torrent_file"]).unlink(missing_ok=True)
-                    except OSError as error:
-                        print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
+                # Mirror delete()/clear(): a removal aria2 couldn't confirm
+                # right now must be retried on a later tick, not silently
+                # dropped -- otherwise the still-registered gid gets picked
+                # back up by _adopt_orphaned_gids and the just-cleaned torrent
+                # reappears in the list (issue #40). The watched .torrent file
+                # is already unlinked under the lock in
+                # _finalize_move_job_locked, atomically with dropping the entry.
+                self._finish_gid_removal(finalize_result["removed_gid"])
                 self.wake()
             _notifications.record_event(
                 self.settings,
@@ -2387,11 +2406,26 @@ class TorrentManager:
 
         removed_from_list = False
         removed_gid = None
-        removed_torrent_file = None
         if cleanup_performed:
             removed_gid = entry.get("gid")
-            removed_torrent_file = entry.get("torrent_file")
+            # Delete the watched .torrent file here, under the lock and
+            # atomically with dropping the entry. If it were left for the
+            # caller to unlink after the lock is released, the poll thread's
+            # watch-folder rescan (_scan_watch_directory_locked) can slip in
+            # during that gap and re-register the still-present .torrent as a
+            # brand-new "queued" entry -- the torrent stays stuck in the list
+            # even though its payload is already gone (issue #40).
+            torrent_file = entry.get("torrent_file")
+            if torrent_file:
+                try:
+                    Path(torrent_file).unlink(missing_ok=True)
+                except OSError as error:
+                    print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
             self._torrents.pop(str(entry.get("id") or ""), None)
+            # Same rationale as delete(): hold the gid in the pending-removal
+            # list from here (still under the lock) so a poll tick can't
+            # re-adopt it before the caller's forceRemove lands (issue #42).
+            self._begin_gid_removal_locked(removed_gid)
             removed_from_list = True
         elif moved_sources:
             moved_set = set(moved_sources)
@@ -2419,7 +2453,6 @@ class TorrentManager:
         return {
             "removed_from_list": removed_from_list,
             "removed_gid": removed_gid,
-            "removed_torrent_file": removed_torrent_file,
             "notification_type": notification_type,
             "notification_title": notification_title,
             "notification_details": {
@@ -2469,6 +2502,35 @@ class TorrentManager:
                 self._pending_removal_gids.append(gid)
                 self._persist_locked()
 
+    def _begin_gid_removal_locked(self, gid: Optional[str]) -> None:
+        """Register ``gid`` as pending-removal while ``self._lock`` is still
+        held, so a concurrent ``_tick``'s ``_adopt_orphaned_gids`` can never
+        observe it as an orphan in the window between the entry being dropped
+        here and the ``aria2.forceRemove`` actually landing -- which is
+        exactly how a deleted in-progress torrent came back as a source-less
+        "Adopted download" row (issue #42). Paired with ``_finish_gid_removal``.
+        """
+        if gid and gid not in self._pending_removal_gids:
+            self._pending_removal_gids.append(gid)
+
+    def _finish_gid_removal(self, gid: Optional[str]) -> None:
+        """Do the real aria2 stop for a ``gid`` handed to
+        ``_begin_gid_removal_locked``: drop it from the pending list once
+        aria2 confirms it is gone, or leave it for ``_retry_pending_removals``
+        if the RPC could not complete. Safe for a ``gid`` that was never
+        pre-registered -- it falls back to ``_queue_pending_removal`` on
+        failure, matching the older inline pattern it replaces.
+        """
+        if not gid:
+            return
+        if not self._remove_from_aria2(gid):
+            self._queue_pending_removal(gid)
+            return
+        with self._lock:
+            if gid in self._pending_removal_gids:
+                self._pending_removal_gids.remove(gid)
+                self._persist_locked()
+
     def _retry_pending_removals(self, rpc) -> None:
         with self._lock:
             pending = list(self._pending_removal_gids)
@@ -2503,10 +2565,16 @@ class TorrentManager:
             known_info_hashes = {
                 entry.get("info_hash") for entry in self._torrents.values() if entry.get("info_hash")
             }
+            # A gid we've already dropped an entry for and are still trying to
+            # remove from aria2 (delete/cancel/clear, or a move+cleanup whose
+            # forceRemove hasn't landed yet) must not be resurrected here as an
+            # "Adopted download" -- _retry_pending_removals runs just before
+            # this on the same tick and will clear it (issue #40).
+            pending_removal_gids = set(self._pending_removal_gids)
             dirty = False
             for result in [*active, *waiting]:
                 gid = str(result.get("gid") or "")
-                if not gid or gid in known_gids:
+                if not gid or gid in known_gids or gid in pending_removal_gids:
                     continue
                 following = str(result.get("following") or "")
                 if following and following in known_gids:
