@@ -1389,6 +1389,71 @@ class TorrentAria2ReconciliationTests(unittest.TestCase):
                 self.assertNotIn(gid, manager._pending_removal_gids)
             self.assertIn(("aria2.forceRemove", [gid]), rpc.calls)
 
+    def test_delete_in_progress_torrent_is_not_re_added_by_a_concurrent_rescan(self) -> None:
+        # Issue #42: deleting an in-progress torrent "deletes it and adds it
+        # right back". The watched .torrent file was unlinked only after the
+        # lock was released, so the 3s poll thread's watch-folder rescan
+        # slipped into that gap and re-registered it as a fresh "queued" row.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "shape-of-water")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+
+            original_remove = manager._remove_from_aria2
+
+            def racing_remove(gid, *args, **kwargs):
+                # Stand in for the poll thread grabbing the lock during the
+                # window between the entry being dropped and aria2 confirming
+                # the removal.
+                with manager._lock:
+                    manager._scan_watch_directory_locked(dict(manager._config))
+                return original_remove(gid, *args, **kwargs)
+
+            manager._remove_from_aria2 = racing_remove
+
+            result = manager.delete(entry["id"])
+            self.assertEqual(result["status"], "deleted")
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertFalse((watch / "shape-of-water.torrent").exists())
+
+    def test_delete_does_not_leave_an_adopted_download_when_removal_races_a_tick(self) -> None:
+        # Issue #42: the "weird Adopted download" torrent. While delete()'s
+        # forceRemove RPC was in flight, a concurrent tick's
+        # _adopt_orphaned_gids saw the still-registered gid with no entry and
+        # resurrected it as a source-less "Adopted download" row.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "shape-of-water")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+            rpc.statuses[gid].update({"status": "active", "totalLength": "1000", "completedLength": "500"})
+            rpc.active = [rpc.statuses[gid]]
+
+            original_remove = manager._remove_from_aria2
+
+            def racing_remove(target_gid, *args, **kwargs):
+                manager._adopt_orphaned_gids(rpc)
+                return original_remove(target_gid, *args, **kwargs)
+
+            manager._remove_from_aria2 = racing_remove
+
+            manager.delete(entry["id"])
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            rpc.active = []
+            manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
     def test_gid_not_found_on_removal_counts_as_already_gone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
