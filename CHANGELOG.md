@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- MCP server: expose the Drone over the Model Context Protocol at `POST /v1/api/mcp`
+  (stateless Streamable HTTP, bearer-token auth). Read tools for assets, gamelists,
+  BIOS, controls, swarm, tailnet, VPN, transfers, torrents, system info, logs,
+  emulator configs, missing artwork, email and automation; write tools for screen
+  mode, volume, music volume, screensaver, automation toggles, and artwork scraping.
+  Generate/revoke the token and copy Claude/Codex setup snippets on the API Access page.
+
 ## [v0.1.92] - 2026-07-28
 
 - revert: restore v0.1.89 after VPN DNS outage

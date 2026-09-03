@@ -11946,12 +11946,101 @@ async function renderAutomationPage() {
     }
   });
 }
+function mcpEndpointUrl() {
+  return `${window.location.origin}${API_BASE}/mcp`;
+}
+function renderMcpSection(mcp) {
+  const info = mcp || {};
+  const url = mcpEndpointUrl();
+  const configured = Boolean(info.configured);
+  const statusBadge = configured
+    ? `<span class="badge text-bg-success">Token active</span>`
+    : `<span class="badge text-bg-secondary">No token</span>`;
+  const meta = configured
+    ? `<div class="text-muted small mt-1">Token <span class="mono">${escapeHtml(info.hint || "")}</span>${info.label ? ` &middot; ${escapeHtml(info.label)}` : ""}${info.created_at ? ` &middot; created ${escapeHtml(info.created_at)}` : ""}</div>`
+    : `<div class="text-muted small mt-1">Generate a token to enable the MCP endpoint for your AI assistant.</div>`;
+  const claudeCmd = `claude mcp add --transport http batocera-drone ${url} --header "Authorization: Bearer <TOKEN>"`;
+  const jsonSnippet = JSON.stringify({
+    mcpServers: {
+      "batocera-drone": { type: "http", url, headers: { Authorization: "Bearer <TOKEN>" } },
+    },
+  }, null, 2);
+  const codexSnippet = [
+    "[mcp_servers.batocera_drone]",
+    `url = "${url}"`,
+    'http_headers = { Authorization = "Bearer <TOKEN>" }',
+  ].join("\n");
+  return `
+    <div class="card log-card mt-3" id="mcpSection">
+      <div class="card-header d-flex align-items-center gap-2">MCP Server ${statusBadge}</div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">Expose this Drone to an AI assistant (Claude, Codex) over the Model Context Protocol.
+          Read tools cover assets, gamelists, BIOS, controls, swarm, tailnet, VPN, transfers, torrents, system info, logs,
+          emulator configs, missing artwork, email and automation. Write tools: screen mode, volume, music volume,
+          screensaver, automation toggles, and artwork scraping.</p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <button class="btn btn-primary btn-sm" type="button" id="mcpGenerateBtn"><i class="bi bi-key me-1"></i>${configured ? "Regenerate Token" : "Generate Token"}</button>
+          <button class="btn btn-outline-danger btn-sm ${configured ? "" : "d-none"}" type="button" id="mcpRevokeBtn"><i class="bi bi-x-circle me-1"></i>Revoke</button>
+          <span class="text-muted small">Endpoint: <span class="mono">${escapeHtml(url)}</span></span>
+        </div>
+        ${meta}
+        <div class="alert alert-success mt-3 d-none" id="mcpTokenReveal">
+          <div class="fw-semibold mb-1">Copy this token now &mdash; it is not shown again.</div>
+          <pre class="mono small p-2 rounded mb-0" style="background:rgba(0,0,0,.25);white-space:pre-wrap" id="mcpTokenValue"></pre>
+        </div>
+        <hr>
+        <div class="fw-semibold small mb-1">Claude Code</div>
+        <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(claudeCmd)}</pre>
+        <div class="fw-semibold small mb-1">Codex (<span class="mono">~/.codex/config.toml</span>)</div>
+        <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(codexSnippet)}</pre>
+        <div class="fw-semibold small mb-1">Generic MCP client (<span class="mono">mcp.json</span>)</div>
+        <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(jsonSnippet)}</pre>
+        <div class="text-muted small">Replace <span class="mono">&lt;TOKEN&gt;</span> with the generated token. Keep it secret; regenerating invalidates the previous token.</div>
+      </div>
+    </div>
+  `;
+}
+function wireMcpSection() {
+  document.getElementById("mcpGenerateBtn")?.addEventListener("click", async () => {
+    if (!window.confirm("Generate a new MCP token? Any existing token stops working immediately.")) return;
+    setLoading(true, "Generating MCP token...");
+    try {
+      const result = await apiPost("/admin/mcp/token", {});
+      const reveal = document.getElementById("mcpTokenReveal");
+      const value = document.getElementById("mcpTokenValue");
+      if (reveal && value) {
+        value.textContent = result.token || "";
+        reveal.classList.remove("d-none");
+      }
+      showToast("MCP token generated.", "success");
+      document.getElementById("mcpRevokeBtn")?.classList.remove("d-none");
+    } catch (err) {
+      showToast(`Failed to generate MCP token: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+  document.getElementById("mcpRevokeBtn")?.addEventListener("click", async () => {
+    if (!window.confirm("Revoke the MCP token and disable the MCP endpoint?")) return;
+    setLoading(true, "Revoking MCP token...");
+    try {
+      await apiPost("/admin/mcp/revoke", {});
+      showToast("MCP token revoked.", "success");
+      await renderApiAdminPage();
+    } catch (err) {
+      showToast(`Failed to revoke MCP token: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+}
 async function renderApiAdminPage() {
   titleNode.textContent = "API Access";
   subtitleNode.textContent = "Swagger documentation and mTLS certificate guidance";
   setLoading(true, "Loading API status...");
   try {
     const payload = await api("/admin/api/status");
+    const mcp = await api("/admin/mcp").catch(() => null);
     const cert = payload.certificate || {};
     const rows = [
       ["Fingerprint", cert.fingerprint],
@@ -11998,7 +12087,9 @@ async function renderApiAdminPage() {
           <div class="text-muted small">${escapeHtml((payload.guidance || {}).lifecycle || "")}</div>
         </div>
       </div>
+      ${renderMcpSection(mcp)}
     `;
+    wireMcpSection();
     document.getElementById("rotateDroneCertBtn")?.addEventListener("click", async () => {
       if (!window.confirm("Generate a fresh self-signed Drone certificate now? Paired peers will need to re-pair afterward.")) return;
       setLoading(true, "Rotating Drone certificate...");

@@ -1301,7 +1301,15 @@ except ImportError:
     from web.handlers_music import HandlersMusicMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+try:
+    from .web.mcp_server import McpServerMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.mcp_server import McpServerMixin  # type: ignore
+
+
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
