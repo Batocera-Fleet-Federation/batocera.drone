@@ -12128,9 +12128,9 @@ function renderMcpSection(mcp) {
           <span class="text-muted small">Endpoint: <span class="mono">${escapeHtml(url)}</span></span>
         </div>
         ${meta}
-        <div class="alert alert-success mt-3 d-none" id="mcpTokenReveal">
-          <div class="fw-semibold mb-1">Copy this token now &mdash; it is not shown again.</div>
-          <pre class="mono small p-2 rounded mb-0" style="background:rgba(0,0,0,.25);white-space:pre-wrap" id="mcpTokenValue"></pre>
+        <div class="alert mcp-token-reveal mt-3 d-none" id="mcpTokenReveal">
+          <div class="fw-semibold mb-1"><i class="bi bi-shield-lock me-1"></i>Copy this token now &mdash; it is not shown again.</div>
+          <pre class="mono small p-2 rounded mb-0 mcp-token-value" id="mcpTokenValue"></pre>
         </div>
         <hr>
         <div class="fw-semibold small mb-1">Claude Code</div>
