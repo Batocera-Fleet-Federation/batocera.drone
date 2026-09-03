@@ -11949,6 +11949,143 @@ async function renderAutomationPage() {
 function mcpEndpointUrl() {
   return `${window.location.origin}${API_BASE}/mcp`;
 }
+// Same file the "Download Public Certificate" button on this page serves: the
+// stable Drone identity cert. It also signs the hostname-aware HTTPS leaf this
+// Drone binds, so an MCP client that trusts it as a CA stops rejecting the
+// self-signed endpoint. See showMcpGuideModal() for the per-client wiring.
+const MCP_CERT_DOWNLOAD_URL = `${API_BASE}/admin/api/certificate`;
+// Human-readable groupings of what web/mcp_tools.py exposes -- kept in sync by
+// hand (short, stable list; the guide only needs categories, not tool names).
+const MCP_READ_GROUPS = [
+  "Assets & systems", "Gamelists", "BIOS files", "Controllers",
+  "Swarm & tailnet", "VPN", "Transfers & torrents", "System info & logs",
+  "Emulator configs", "Missing artwork", "Email settings", "Automation",
+  "Notifications", "Gameplay history",
+];
+const MCP_WRITE_GROUPS = [
+  "Screen mode", "System volume", "Music volume", "Screensaver delay",
+  "Automation toggles (idle volume, idle game-exit, wi-fi recovery)",
+  "Per-game artwork scraping",
+];
+// UTF-8-safe clipboard copy with a brief in-button confirmation. navigator.clipboard
+// needs a secure context -- the Drone is always HTTPS, but guard anyway.
+function copyToClipboard(btn, text) {
+  const flash = (icon) => {
+    if (!btn) return;
+    const original = btn.innerHTML;
+    btn.innerHTML = `<i class="bi ${icon}"></i>`;
+    setTimeout(() => { btn.innerHTML = original; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => flash("bi-check2"), () => flash("bi-x-lg"));
+  } else {
+    flash("bi-x-lg");
+  }
+}
+// A code block with a copy button. Base64 keeps the source text intact through
+// the inline onclick regardless of quotes/newlines it contains.
+function mcpCodeBlock(text) {
+  const b64 = btoa(unescape(encodeURIComponent(text)));
+  return `
+    <div class="position-relative mb-3">
+      <button type="button" class="btn btn-sm btn-outline-secondary position-absolute top-0 end-0 m-1" title="Copy"
+        onclick="copyToClipboard(this, decodeURIComponent(escape(atob('${b64}'))))"><i class="bi bi-clipboard"></i></button>
+      <pre class="mono small p-3 pe-5 rounded mb-0" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(text)}</pre>
+    </div>`;
+}
+// The "click MCP Server" guide: what MCP is, what this server exposes, and the
+// per-client steps -- crucially the certificate step, without which every client
+// rejects this Drone's self-signed HTTPS endpoint.
+function showMcpGuideModal(endpointUrl) {
+  const url = endpointUrl || mcpEndpointUrl();
+  const modalId = "mcpGuideModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  const claudeAdd = `claude mcp add --transport http batocera-drone \\\n  ${url} \\\n  --header "Authorization: Bearer YOUR_TOKEN"`;
+  const claudeTrust = `{\n  "env": {\n    "NODE_EXTRA_CA_CERTS": "/absolute/path/to/drone.crt"\n  }\n}`;
+  const codexCfg = `[mcp_servers.batocera_drone]\nurl = "${url}"\nhttp_headers = { Authorization = "Bearer YOUR_TOKEN" }`;
+  const genericCfg = JSON.stringify(
+    { mcpServers: { "batocera-drone": { type: "http", url, headers: { Authorization: "Bearer YOUR_TOKEN" } } } },
+    null,
+    2,
+  );
+  const pill = (label) => `<span class="badge rounded-pill text-bg-secondary fw-normal">${escapeHtml(label)}</span>`;
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-robot me-2"></i>Connect an AI assistant (MCP)</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="text-uppercase small text-muted fw-bold mb-2">What is an MCP server?</h6>
+          <p class="small">MCP (Model Context Protocol) is a shared standard that lets an AI assistant &mdash; Claude, Codex,
+            and others &mdash; call into an outside tool. Turning it on here lets your assistant check on this Drone and make a
+            few safe changes for you, in plain language, instead of clicking through these admin pages. The assistant talks to a
+            single endpoint on this Drone (<span class="mono">${escapeHtml(url)}</span>) and proves itself with a token you
+            generate on this page. Nothing is opened to the internet &mdash; the assistant reaches the Drone the same way your
+            browser does right now.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">What this MCP server provides</h6>
+          <p class="small mb-1"><span class="fw-semibold">Read</span> &mdash; look only:</p>
+          <div class="d-flex flex-wrap gap-1 mb-2">${MCP_READ_GROUPS.map(pill).join("")}</div>
+          <p class="small mb-1"><span class="fw-semibold">Write</span> &mdash; makes changes:</p>
+          <div class="d-flex flex-wrap gap-1 mb-2">${MCP_WRITE_GROUPS.map(pill).join("")}</div>
+          <p class="small text-muted">Every tool is a thin wrapper over an admin API this Drone already exposes &mdash; the
+            assistant can do nothing here that you couldn't do yourself on these pages.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Set it up</h6>
+          <ol class="small">
+            <li class="mb-2"><span class="fw-semibold">Generate a token.</span> On the MCP Server card, click
+              <em>Generate Token</em>. Copy it right away &mdash; it is shown only once. Regenerating replaces the old one.</li>
+            <li class="mb-2"><span class="fw-semibold">Download this Drone's certificate.</span> This Drone serves HTTPS with
+              its own certificate, not one from a public authority, so clients reject it until told to trust it.
+              <a href="${escapeHtml(MCP_CERT_DOWNLOAD_URL)}"><i class="bi bi-download me-1"></i>Download <span class="mono">drone.crt</span></a>
+              and save it somewhere stable, e.g. <span class="mono">~/.batocera/drone.crt</span>.</li>
+            <li class="mb-2"><span class="fw-semibold">Point your assistant at the Drone.</span>
+              <div class="fw-semibold mt-2 mb-1">Claude Code</div>
+              ${mcpCodeBlock(claudeAdd)}
+              <div class="mb-1">Then have Node trust the certificate &mdash; add this to <span class="mono">~/.claude/settings.json</span> (the path must be absolute) and restart Claude Code:</div>
+              ${mcpCodeBlock(claudeTrust)}
+              <div class="fw-semibold mt-2 mb-1">Codex (<span class="mono">~/.codex/config.toml</span>)</div>
+              ${mcpCodeBlock(codexCfg)}
+              <div class="mb-1">Codex checks your operating system's trust store &mdash; add <span class="mono">drone.crt</span>
+                there (macOS Keychain, or Linux <span class="mono">update-ca-certificates</span>). Most clients also honor the
+                <span class="mono">SSL_CERT_FILE</span> environment variable pointing at the file.</div>
+              <div class="fw-semibold mt-2 mb-1">Generic MCP client (<span class="mono">mcp.json</span>)</div>
+              ${mcpCodeBlock(genericCfg)}
+              <div class="mb-1">Trust <span class="mono">drone.crt</span> however your client's runtime expects &mdash; often
+                <span class="mono">NODE_EXTRA_CA_CERTS</span> or <span class="mono">SSL_CERT_FILE</span>.</div>
+            </li>
+            <li class="mb-2"><span class="fw-semibold">Check it works.</span> Replace <span class="mono">YOUR_TOKEN</span> with
+              the token from step 1, then ask the assistant something like &ldquo;what does the Batocera drone report for system
+              info?&rdquo;</li>
+          </ol>
+
+          <div class="alert alert-info small mb-0"><i class="bi bi-lightbulb me-1"></i><span class="fw-semibold">On a Tailscale
+            tailnet?</span> If you reach this Drone at its <span class="mono">.ts.net</span> name, that address has a
+            publicly-trusted certificate &mdash; you can skip step 2 entirely.</div>
+        </div>
+        <div class="modal-footer">
+          <a href="${escapeHtml(MCP_CERT_DOWNLOAD_URL)}" class="btn btn-outline-primary btn-sm me-auto"><i class="bi bi-download me-1"></i>Download certificate</a>
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap && window.bootstrap.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
 function renderMcpSection(mcp) {
   const info = mcp || {};
   const url = mcpEndpointUrl();
@@ -11972,7 +12109,12 @@ function renderMcpSection(mcp) {
   ].join("\n");
   return `
     <div class="card log-card mt-3" id="mcpSection">
-      <div class="card-header d-flex align-items-center gap-2">MCP Server ${statusBadge}</div>
+      <div class="card-header d-flex align-items-center gap-2">
+        <button type="button" class="btn btn-link p-0 text-reset text-decoration-none fw-semibold d-flex align-items-center gap-2" onclick="showMcpGuideModal()">
+          MCP Server <i class="bi bi-question-circle"></i>
+        </button>
+        ${statusBadge}
+      </div>
       <div class="card-body">
         <p class="text-muted small mb-2">Expose this Drone to an AI assistant (Claude, Codex) over the Model Context Protocol.
           Read tools cover assets, gamelists, BIOS, controls, swarm, tailnet, VPN, transfers, torrents, system info, logs,
@@ -11981,6 +12123,8 @@ function renderMcpSection(mcp) {
         <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
           <button class="btn btn-primary btn-sm" type="button" id="mcpGenerateBtn"><i class="bi bi-key me-1"></i>${configured ? "Regenerate Token" : "Generate Token"}</button>
           <button class="btn btn-outline-danger btn-sm ${configured ? "" : "d-none"}" type="button" id="mcpRevokeBtn"><i class="bi bi-x-circle me-1"></i>Revoke</button>
+          <button class="btn btn-outline-primary btn-sm" type="button" onclick="showMcpGuideModal()"><i class="bi bi-question-circle me-1"></i>How to connect</button>
+          <a class="btn btn-outline-primary btn-sm" href="${escapeHtml(MCP_CERT_DOWNLOAD_URL)}"><i class="bi bi-download me-1"></i>Download Drone certificate</a>
           <span class="text-muted small">Endpoint: <span class="mono">${escapeHtml(url)}</span></span>
         </div>
         ${meta}
@@ -11995,7 +12139,9 @@ function renderMcpSection(mcp) {
         <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(codexSnippet)}</pre>
         <div class="fw-semibold small mb-1">Generic MCP client (<span class="mono">mcp.json</span>)</div>
         <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml(jsonSnippet)}</pre>
-        <div class="text-muted small">Replace <span class="mono">&lt;TOKEN&gt;</span> with the generated token. Keep it secret; regenerating invalidates the previous token.</div>
+        <div class="text-muted small">Replace <span class="mono">&lt;TOKEN&gt;</span> with the generated token. Keep it secret; regenerating invalidates the previous token.
+          This Drone's HTTPS certificate is self-signed &mdash; your client must trust <span class="mono">drone.crt</span> (above) or the connection is refused.
+          <button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="showMcpGuideModal()">See per-client steps</button>.</div>
       </div>
     </div>
   `;
