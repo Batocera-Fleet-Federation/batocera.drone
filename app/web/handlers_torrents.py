@@ -120,6 +120,36 @@ class HandlersTorrentsMixin:
         status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "migration_in_progress" else 200
         self._send_json(status_code, result)
 
+    def _handle_admin_torrent_remove(self, torrent_id: str) -> None:
+        """Remove the queue record but keep every downloaded file on disk --
+        the safe counterpart to the destructive delete route (issue #51)."""
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        result = manager.remove_from_list(torrent_id)
+        status_code = (
+            404 if result.get("status") == "not_found"
+            else 409 if result.get("status") == "migration_in_progress"
+            else 200
+        )
+        self._send_json(status_code, result)
+
+    def _handle_admin_torrent_adopt(self, torrent_id: str) -> None:
+        """Re-add a destination-conflicted torrent with an integrity check so
+        aria2 adopts the existing on-disk payload instead of erroring (#51)."""
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        result = manager.adopt_existing_payload(torrent_id)
+        status_code = (
+            404 if result.get("status") == "not_found"
+            else 409 if result.get("status") == "not_applicable"
+            else 200
+        )
+        self._send_json(status_code, result)
+
     def _handle_admin_torrent_migrate(self, torrent_id: str, payload: dict) -> None:
         manager = _get_torrent_manager()
         if manager is None:

@@ -3461,5 +3461,277 @@ class TorrentSettingsHandlerTests(unittest.TestCase):
         self.assertEqual(handler.response[1]["settings"]["directory"], "/fixed/torrents")
 
 
+# aria2's own errorCode=13 wording: payload on disk, no top-level .aria2 file.
+_CONTROL_FILE_MISSING_ERROR = (
+    "File /userdata/roms/ps2/Big Collection exists, but a control file(*.aria2) does not "
+    "exist. Download was canceled in order to prevent your file from being truncated by mistake."
+)
+
+
+class TorrentDestinationConflictTests(unittest.TestCase):
+    """Issue #51: aria2 errorCode=13 (existing payload, missing control file)
+    must be a stable, non-retrying conflict with only safe recovery actions."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def _conflicted(self, root: Path, rpc: FakeRpc):
+        manager = self._manager(root, rpc)
+        watch = root / "watch"
+        manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 2})
+        _write_torrent(watch, "Big Collection")
+        manager._tick()
+        with manager._lock:
+            entry = next(iter(manager._torrents.values()))
+            entry_id, gid = entry["id"], entry["gid"]
+        rpc.statuses[gid] = {
+            "gid": gid, "status": "error", "totalLength": "0", "completedLength": "0",
+            "downloadSpeed": "0", "errorMessage": _CONTROL_FILE_MISSING_ERROR,
+        }
+        manager._tick()
+        return manager, entry_id
+
+    def test_classify_aria2_error(self) -> None:
+        self.assertEqual(
+            torrent_manager._classify_aria2_error(_CONTROL_FILE_MISSING_ERROR), "destination_conflict"
+        )
+        self.assertEqual(torrent_manager._classify_aria2_error("Timeout was reached"), "retryable")
+        self.assertEqual(torrent_manager._classify_aria2_error(""), "retryable")
+
+    def test_error_code_13_is_a_stable_non_retrying_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager, entry_id = self._conflicted(root, rpc)
+            row = manager.snapshot()["torrents"][0]
+            self.assertEqual(row["status"], "error")
+            self.assertEqual(row["conflict_path"], "/userdata/roms/ps2/Big Collection")
+            self.assertIn("control file", row["message"].lower())
+            with manager._lock:
+                entry = manager._torrents[entry_id]
+                self.assertEqual(entry["retry_at"], 0.0)
+                self.assertIsNone(entry["gid"])
+            adds_before = len(rpc.method_calls("aria2.addTorrent"))
+            for _ in range(6):
+                manager._tick()
+            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), adds_before)
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "error")
+
+    def test_generic_error_still_uses_automatic_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            rpc.statuses[gid] = {
+                "gid": gid, "status": "error", "totalLength": "0", "completedLength": "0",
+                "downloadSpeed": "0", "errorMessage": "tracker exploded",
+            }
+            manager._tick()
+            row = manager.snapshot()["torrents"][0]
+            self.assertEqual(row["status"], "error")
+            self.assertEqual(row["conflict_path"], "")
+            self.assertIn("automatic retry", row["message"])
+
+    def test_conflict_state_is_not_rearmed_for_retry_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._conflicted(root, FakeRpc())
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            with restarted._lock:
+                entry = next(iter(restarted._torrents.values()))
+                self.assertEqual(entry["status"], "error")
+                self.assertEqual(entry["conflict_path"], "/userdata/roms/ps2/Big Collection")
+                self.assertEqual(entry["retry_at"], 0.0)
+
+    def test_force_start_refuses_a_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, entry_id = self._conflicted(root, FakeRpc())
+            result = manager.force_start(entry_id)
+            self.assertEqual(result["status"], "not_applicable")
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "error")
+
+    def test_adopt_existing_payload_readds_with_integrity_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager, entry_id = self._conflicted(root, rpc)
+            self.assertEqual(manager.adopt_existing_payload(entry_id)["status"], "queued")
+            manager._tick()
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(adds[-1][2]["check-integrity"], "true")
+            self.assertEqual(adds[-1][2]["allow-overwrite"], "true")
+            with manager._lock:
+                entry = manager._torrents[entry_id]
+                self.assertFalse(entry["adopt_existing"])
+                self.assertEqual(entry["conflict_path"], "")
+            # The next re-add (e.g. after a daemon restart) is a plain add.
+            with manager._lock:
+                manager._torrents[entry_id]["gid"] = None
+                manager._torrents[entry_id]["status"] = "queued"
+            manager._tick()
+            self.assertNotIn("check-integrity", rpc.method_calls("aria2.addTorrent")[-1][2])
+
+    def test_remove_from_list_keeps_downloaded_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            downloads = root / "downloads"
+            downloads.mkdir()
+            manager.update_settings({"directory": str(watch), "download_directory": str(downloads)})
+            payload_dir = downloads / "Big Collection"
+            payload_dir.mkdir()
+            (payload_dir / "disc1.iso").write_bytes(b"x" * 128)
+            (payload_dir / "disc2.iso").write_bytes(b"y" * 128)
+            torrent_file = _write_torrent(watch, "Big Collection")
+            manager._tick()
+            entry_id = manager.snapshot()["torrents"][0]["id"]
+
+            result = manager.remove_from_list(entry_id)
+
+            self.assertEqual(result["status"], "removed")
+            self.assertTrue(result["downloaded_files_kept"])
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertTrue((payload_dir / "disc1.iso").exists())
+            self.assertTrue((payload_dir / "disc2.iso").exists())
+            self.assertFalse(torrent_file.exists())
+            manager._tick()  # a rescan must not resurrect it
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
+    def test_remove_and_adopt_route_through_the_handlers(self) -> None:
+        from app.web import handlers_torrents
+
+        class _FakeManager:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def remove_from_list(self, torrent_id):
+                self.calls.append(("remove", torrent_id))
+                return {"status": "removed", "downloaded_files_kept": True}
+
+            def adopt_existing_payload(self, torrent_id):
+                self.calls.append(("adopt", torrent_id))
+                return {"status": "not_applicable"}
+
+        class _FakeHandler(handlers_torrents.HandlersTorrentsMixin):
+            def __init__(self) -> None:
+                self.response = None
+
+            def _send_json(self, status_code, payload):
+                self.response = (status_code, payload)
+
+        manager = _FakeManager()
+        with mock.patch.object(handlers_torrents, "_get_torrent_manager", return_value=manager):
+            handler = _FakeHandler()
+            handler._handle_admin_torrent_remove("t1")
+            self.assertEqual(handler.response[0], 200)
+            handler._handle_admin_torrent_adopt("t2")
+            self.assertEqual(handler.response[0], 409)
+        self.assertEqual(manager.calls, [("remove", "t1"), ("adopt", "t2")])
+
+
+class TorrentMagnetMetadataSafetyTests(unittest.TestCase):
+    """Issue #51: a magnet's metadata-only GID must never surface or persist as
+    a completed content download."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_metadata_complete_without_followedby_stays_resolving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            rpc.statuses[gid] = {
+                "gid": gid, "status": "complete", "totalLength": "966130",
+                "completedLength": "966130", "downloadSpeed": "0",
+                "files": [{"path": "/downloads/[METADATA]c12fe1c06bba254a9dc9f519b335aa7c1367a88a"}],
+            }
+            manager._tick()
+            manager._tick()
+            row = manager.snapshot()["torrents"][0]
+            self.assertNotEqual(row["status"], "complete")
+            self.assertIsNone(row["completed_at"])
+            self.assertEqual(row["total_bytes"], 0)
+
+            rpc.statuses[gid]["followedBy"] = ["content-gid"]
+            rpc.statuses["content-gid"] = {
+                "gid": "content-gid", "status": "active", "totalLength": "500000000000",
+                "completedLength": "4096", "downloadSpeed": "1000",
+            }
+            manager._tick()
+            with manager._lock:
+                entry = next(iter(manager._torrents.values()))
+                self.assertEqual(entry["gid"], "content-gid")
+                self.assertTrue(entry["content_gid_adopted"])
+            manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"][0]["total_bytes"], 500000000000)
+
+    def test_restart_during_handoff_does_not_persist_metadata_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = self._manager(root, FakeRpc())
+            added = manager.add_magnet(_MAGNET_URI)
+            with manager._lock:
+                entry = manager._torrents[added["id"]]
+                entry["status"] = "complete"
+                entry["completed_at"] = "2026-01-01T00:00:00+00:00"
+                entry["total_bytes"] = 966130
+                entry["completed_bytes"] = 966130
+                entry["files"] = ["/downloads/[METADATA]c12fe1c06bba254a9dc9f519b335aa7c1367a88a"]
+                entry["content_gid_adopted"] = False
+                manager._persist_locked()
+
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            row = restarted.snapshot()["torrents"][0]
+            self.assertEqual(row["status"], "queued")
+            self.assertIsNone(row["completed_at"])
+            self.assertEqual(row["total_bytes"], 0)
+            self.assertEqual(row["completed_bytes"], 0)
+
+    def test_genuinely_completed_content_magnet_still_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            # Real content GID handoff, then completion at a real size.
+            rpc.statuses[gid] = {
+                "gid": gid, "status": "complete", "totalLength": "1000",
+                "completedLength": "1000", "downloadSpeed": "0", "followedBy": ["content-gid"],
+            }
+            rpc.statuses["content-gid"] = {
+                "gid": "content-gid", "status": "active", "totalLength": "9000000000",
+                "completedLength": "9000000000", "downloadSpeed": "0",
+                "files": [{"path": "/downloads/Big Movie/movie.mkv"}],
+                "bittorrent": {"info": {"name": "Big Movie"}},
+            }
+            manager._tick()
+            manager._tick()
+            manager._tick()
+            row = manager.snapshot()["torrents"][0]
+            self.assertEqual(row["status"], "complete")
+            self.assertEqual(row["total_bytes"], 9000000000)
+
+
 if __name__ == "__main__":
     unittest.main()
