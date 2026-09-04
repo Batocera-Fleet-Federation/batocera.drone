@@ -104,6 +104,77 @@ _CANNOT_BE_UNPAUSED_RE = re.compile(r"cannot be unpaused now", re.IGNORECASE)
 # _remove_from_aria2 rather than something worth retrying forever.
 _GID_NOT_FOUND_RE = re.compile(r"is not found", re.IGNORECASE)
 
+# aria2 errorCode=13 -- the destination payload already exists on disk but its
+# top-level ``.aria2`` control file does not, so aria2 refuses to touch it
+# rather than risk truncating a file it has no resume map for. Its own wording
+# is e.g. "File /path/to/name exists, but a control file(*.aria2) does not
+# exist. Download was canceled in order to prevent your file from being
+# truncated by mistake." This is a standing conflict, NOT a transient failure:
+# retrying it just reproduces the same error forever (seen live: 683 times over
+# ~2 days) while consuming a scheduler slot, so it must land in a stable error
+# state with an explicit, non-destructive recovery path (see issue #51).
+_DESTINATION_CONFLICT_RE = re.compile(
+    r"control file\(\*\.aria2\) does not exist"
+    r"|a control file.*does not exist"
+    r"|prevent your file from being truncated",
+    re.IGNORECASE,
+)
+_CONFLICT_PATH_RE = re.compile(r"File\s+(.+?)\s+exists,\s+but\s+a\s+control\s+file", re.IGNORECASE)
+
+
+def _classify_aria2_error(message: str) -> str:
+    """``"destination_conflict"`` for aria2 errorCode=13 (payload exists with no
+    control file), else ``"retryable"`` for everything the backoff retry loop
+    should keep trying."""
+    return "destination_conflict" if _DESTINATION_CONFLICT_RE.search(str(message or "")) else "retryable"
+
+
+def _conflict_path_from_message(message: str) -> str:
+    match = _CONFLICT_PATH_RE.search(str(message or ""))
+    return match.group(1).strip() if match else ""
+
+
+# A reconstructed BitTorrent info dict is at most a few MB even for a huge
+# multi-file torrent; anything above this is unambiguously real content.
+_MAGNET_METADATA_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _result_file_paths(result: dict) -> List[str]:
+    files = result.get("files") if isinstance(result, dict) else None
+    if not isinstance(files, list):
+        return []
+    return [str(item.get("path") or "") for item in files if isinstance(item, dict) and item.get("path")]
+
+
+def _looks_like_metadata_only_result(result: dict) -> bool:
+    """True when aria2's status response is explicitly for a magnet's metadata
+    transfer -- it names that single file ``[METADATA]<infohash>``."""
+    return any(os.path.basename(path).startswith("[METADATA]") for path in _result_file_paths(result))
+
+
+def _is_magnet_metadata_blip(result: dict) -> bool:
+    """True when a magnet GID that has *not* handed off to a content GID yet is
+    already reporting itself finished, and everything about the response says
+    it is the tiny metadata fetch rather than real content: aria2's own
+    ``[METADATA]`` file name, or a finished-but-tiny transfer carrying no real
+    file list and no reconstructed torrent ``info`` (issue #51)."""
+    if not isinstance(result, dict):
+        return False
+    if _looks_like_metadata_only_result(result):
+        return True
+    status = str(result.get("status") or "")
+    total = int(result.get("totalLength") or 0)
+    completed = int(result.get("completedLength") or 0)
+    finished = status == "complete" or (total > 0 and completed >= total)
+    if not finished or total > _MAGNET_METADATA_MAX_BYTES:
+        return False
+    has_real_files = any(
+        not os.path.basename(path).startswith("[METADATA]") for path in _result_file_paths(result)
+    )
+    bittorrent = result.get("bittorrent") if isinstance(result.get("bittorrent"), dict) else {}
+    info = bittorrent.get("info") if isinstance(bittorrent.get("info"), dict) else {}
+    return not has_real_files and not info.get("name")
+
 _TELL_STATUS_KEYS = [
     "gid",
     "status",
@@ -212,6 +283,18 @@ _ENTRY_PERSISTED_FIELDS = (
     "retry_at",
     "last_error",
     "info_hash",
+    # Set once aria2's magnet metadata GID has handed off to the real content
+    # GID (followedBy). Until it's true, a magnet entry's "complete" status is
+    # only the tiny metadata fetch finishing and must never be shown or
+    # persisted as a finished content download (issue #51).
+    "content_gid_adopted",
+    # Filesystem path aria2 refused to touch (errorCode=13: payload exists, no
+    # ``.aria2`` control file). Presence marks a non-retryable conflict state.
+    "conflict_path",
+    # One-shot flag: re-add this torrent with --check-integrity/--allow-overwrite
+    # so aria2 hash-checks and adopts an existing on-disk payload instead of
+    # erroring on it. Cleared the moment that re-add lands a GID.
+    "adopt_existing",
     # The in-progress/last "Move Downloaded Files" job for this entry, or
     # None if one was never requested. Deliberately NOT in
     # _ENTRY_LIVE_DEFAULTS below -- unlike gid/force_started/etc, this must
@@ -618,6 +701,9 @@ class TorrentManager:
             # e.g. `gid`) -- the blanket update above would otherwise wipe it
             # back to "" on every restart, right after pulling it from disk.
             entry["info_hash"] = persisted_info_hash
+            entry["content_gid_adopted"] = bool(raw.get("content_gid_adopted"))
+            entry["conflict_path"] = str(raw.get("conflict_path") or "")
+            entry["adopt_existing"] = bool(raw.get("adopt_existing"))
             status = str(entry.get("status") or "queued")
             # aria2 GIDs do not survive a daemon restart: anything that was
             # mid-flight resumes from its .aria2 control file after a fresh
@@ -629,6 +715,29 @@ class TorrentManager:
             entry["completed_bytes"] = int(entry.get("completed_bytes") or 0)
             entry["progress_percent"] = float(entry.get("progress_percent") or 0.0)
             entry["message"] = str(entry.get("message") or "")
+            files_before_metadata_check = entry.get("files")
+            metadata_files = (
+                isinstance(files_before_metadata_check, list)
+                and any("[METADATA]" in str(p) for p in files_before_metadata_check)
+            )
+            if (
+                magnet_uri
+                and entry["status"] == "complete"
+                and not entry["content_gid_adopted"]
+                and (metadata_files or not files_before_metadata_check or entry["total_bytes"] == 0)
+            ):
+                # A daemon restart caught mid magnet-metadata handoff must not
+                # freeze the entry as a "complete" content download at the
+                # metadata fetch's tiny size (issue #51 live incident: a
+                # 966,130-byte "[METADATA]..." entry persisted as terminal).
+                # Re-resolve it from scratch on the next tick instead.
+                entry["status"] = "queued"
+                entry["completed_at"] = None
+                entry["total_bytes"] = 0
+                entry["completed_bytes"] = 0
+                entry["progress_percent"] = 0.0
+                entry["files"] = []
+                entry["message"] = "Re-resolving magnet metadata after restart"
             entry["name"] = str(entry.get("name") or (Path(torrent_file).stem if torrent_file else "Magnet link"))
             entry["download_dir"] = str(entry.get("download_dir") or effective_download_directory(self._config))
             files_list = entry.get("files")
@@ -650,8 +759,14 @@ class TorrentManager:
             entry["last_error"] = str(entry.get("last_error") or entry.get("message") or "")
             # Older persisted errors predate automatic retry metadata. Queue
             # them for the first worker tick unless they were intentionally
-            # canceled by the user.
-            if entry["status"] == "error" and entry["message"] != "Canceled" and entry["retry_at"] <= 0:
+            # canceled by the user or are a standing destination conflict
+            # (errorCode=13) that must never auto-retry (issue #51).
+            if (
+                entry["status"] == "error"
+                and entry["message"] != "Canceled"
+                and not entry["conflict_path"]
+                and entry["retry_at"] <= 0
+            ):
                 entry["retry_at"] = time.time()
             move_job = entry.get("move_job")
             if isinstance(move_job, dict):
@@ -1087,11 +1202,18 @@ class TorrentManager:
                     entry["gid"] = result["gid"]
                     entry["message"] = ""
                     entry["retry_at"] = 0.0
+                    # The check-integrity/allow-overwrite adoption add has now
+                    # landed; it must not repeat on every future re-add.
+                    entry["adopt_existing"] = False
                     if result.get("started"):
                         entry["status"] = "downloading"
                         entry["force_started"] = False
                 else:
-                    self._schedule_retry_locked(entry, result.get("error") or "failed to add torrent")
+                    add_error = result.get("error") or "failed to add torrent"
+                    if _classify_aria2_error(add_error) == "destination_conflict":
+                        self._mark_destination_conflict_locked(entry, add_error)
+                    else:
+                        self._schedule_retry_locked(entry, add_error)
             for entry_id, result in status_results.items():
                 entry = self._torrents.get(entry_id)
                 if entry is None:
@@ -1188,6 +1310,15 @@ class TorrentManager:
             dirty = True
         return dirty
 
+    @staticmethod
+    def _adopt_existing_options(entry: dict) -> dict:
+        """Extra aria2 add-options for the "verify & adopt existing payload"
+        recovery: hash-check whatever is already on disk and keep the good
+        pieces instead of erroring on a missing control file (issue #51)."""
+        if not entry.get("adopt_existing"):
+            return {}
+        return {"check-integrity": "true", "allow-overwrite": "true"}
+
     def _add_torrent_via_rpc(self, rpc, entry: dict, config: dict) -> dict:
         try:
             torrent_bytes = Path(entry["torrent_file"]).read_bytes()
@@ -1201,6 +1332,7 @@ class TorrentManager:
             "seed-ratio": str(config["seed_ratio"]),
             "bt-stop-timeout": str(config["bt_stop_timeout"]),
             "file-allocation": config["file_allocation"],
+            **self._adopt_existing_options(entry),
         }
         try:
             gid = rpc.call(
@@ -1228,6 +1360,7 @@ class TorrentManager:
             "seed-ratio": str(config["seed_ratio"]),
             "bt-stop-timeout": str(config["bt_stop_timeout"]),
             "file-allocation": config["file_allocation"],
+            **self._adopt_existing_options(entry),
         }
         try:
             gid = rpc.call("aria2.addUri", [[entry["magnet_uri"]], options], timeout=ARIA2_ADD_TIMEOUT_SECONDS)
@@ -1349,6 +1482,29 @@ class TorrentManager:
             # total/completed/status onto the entry -- the very next tick's
             # query (now against the new GID) reports the real numbers.
             entry["gid"] = str(followed_by[0])
+            entry["content_gid_adopted"] = True
+            return None
+        if bool(entry.get("magnet_uri")) and not entry.get("content_gid_adopted") and _is_magnet_metadata_blip(result):
+            # A magnet GID that has not handed off to a content GID yet (no
+            # followedBy above) but is already reporting "finished" -- either
+            # aria2's named "[METADATA]" transfer, or a tiny fileless/infoless
+            # completion in the narrow window before followedBy is populated.
+            # Its total/completed/"complete" describe the metadata fetch, never
+            # real content; writing them onto the entry is exactly what
+            # persisted a 966 KB "complete" torrent in issue #51. Hold the
+            # entry resolving until the handoff lands.
+            aria2_status = str(result.get("status") or "")
+            if aria2_status == "error":
+                message = str(result.get("errorMessage") or "aria2 reported an error")
+                if _classify_aria2_error(message) == "destination_conflict":
+                    return self._mark_destination_conflict_locked(entry, message)
+                return self._schedule_retry_locked(entry, message)
+            entry["status"] = "downloading"
+            entry["message"] = "Fetching torrent metadata…"
+            entry["completed_at"] = None
+            entry["_pending_complete_gid"] = None
+            entry["download_speed_bps"] = int(result.get("downloadSpeed") or 0)
+            entry["seeding"] = False
             return None
         total = int(result.get("totalLength") or 0)
         completed = int(result.get("completedLength") or 0)
@@ -1405,11 +1561,41 @@ class TorrentManager:
                 entry["status"] = "error"
                 entry["message"] = entry.get("message") or "Canceled"
         elif aria2_status == "error":
-            return self._schedule_retry_locked(
-                entry,
-                str(result.get("errorMessage") or "aria2 reported an error"),
-            )
+            message = str(result.get("errorMessage") or "aria2 reported an error")
+            if _classify_aria2_error(message) == "destination_conflict":
+                return self._mark_destination_conflict_locked(entry, message)
+            return self._schedule_retry_locked(entry, message)
         return None
+
+    def _mark_destination_conflict_locked(self, entry: dict, message: str) -> Optional[str]:
+        """aria2 errorCode=13: the payload already exists on disk with no
+        ``.aria2`` control file, so aria2 will not touch it. This is a standing
+        conflict, not a transient failure -- park the entry in a stable error
+        state with the offending path and NO ``retry_at`` so the scheduler
+        never re-queues it (issue #51). Recovery is explicit: "Verify & adopt
+        existing files", "Remove from list (keep files)", or destructive Delete.
+        Returns the now-defunct GID for the caller's normal orphan cleanup.
+        """
+        gid = entry.get("gid")
+        conflict_path = _conflict_path_from_message(message) or str(entry.get("download_dir") or "")
+        entry["status"] = "error"
+        entry["conflict_path"] = conflict_path
+        entry["message"] = (
+            f"Files already exist at {conflict_path} without an aria2 control file. "
+            "Automatic retry is disabled so they are not overwritten -- verify & adopt "
+            "them, remove this torrent (keeping the files), or delete it."
+        )
+        entry["last_error"] = message
+        entry["retry_at"] = 0.0
+        entry["retry_count"] = 0
+        entry["gid"] = None
+        entry["force_started"] = False
+        entry["seeding"] = False
+        entry["download_speed_bps"] = 0
+        entry["upload_speed_bps"] = 0
+        entry["eta_seconds"] = None
+        entry["_pending_complete_gid"] = None
+        return gid
 
     def _confirm_finished_and_notify_locked(self, entry: dict) -> None:
         """Only fire ``torrent_completed`` (and set ``completed_at``) once the
@@ -1542,6 +1728,16 @@ class TorrentManager:
                 return {"status": "not_applicable", "message": "torrent already completed"}
             if status == "downloading":
                 return {"status": "already_active"}
+            if entry.get("conflict_path"):
+                # A plain re-add just reproduces errorCode=13. Route the user to
+                # the explicit, non-destructive recovery actions (issue #51).
+                return {
+                    "status": "not_applicable",
+                    "message": (
+                        "existing files block this torrent -- use \"Verify & adopt existing files\", "
+                        "\"Remove from list\", or Delete"
+                    ),
+                }
             gid = entry.get("gid")
             stale_gid = None
             if status == "queued" and gid and int(entry.get("completed_bytes") or 0) == 0:
@@ -1770,6 +1966,71 @@ class TorrentManager:
             "torrent_file_removed": torrent_file_removed,
             "downloaded_files_removed": downloaded_files_removed,
         }
+
+    def remove_from_list(self, entry_id: str) -> dict:
+        """Drop a queue record without touching a single downloaded byte -- the
+        safe counterpart to the destructive ``delete()`` (issue #51). The
+        watched ``.torrent`` definition IS removed (otherwise the next scan
+        just re-registers it); the aria2 download is stopped but its partial
+        payload and ``.aria2`` resume file are left exactly where they are.
+        """
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            if entry is None:
+                return {"status": "not_found"}
+            if self._migration_active(entry):
+                return {"status": "migration_in_progress", "message": "wait for the current file move to finish"}
+            gid = entry.get("gid")
+            self._torrents.pop(entry_id, None)
+            # Same under-the-lock atomicity as delete(): register the gid for
+            # removal and unlink the .torrent before releasing the lock so a
+            # concurrent tick can neither rescan nor re-adopt it (issue #42).
+            self._begin_gid_removal_locked(gid)
+            torrent_file_removed = True
+            torrent_file = entry.get("torrent_file")
+            if torrent_file:
+                torrent_file_removed = False
+                try:
+                    Path(torrent_file).unlink(missing_ok=True)
+                    torrent_file_removed = True
+                except OSError as error:
+                    print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
+            self._persist_locked()
+        self._finish_gid_removal(gid)
+        self.wake()
+        return {
+            "status": "removed",
+            "torrent_file_removed": torrent_file_removed,
+            "downloaded_files_kept": True,
+        }
+
+    def adopt_existing_payload(self, entry_id: str) -> dict:
+        """Resolve an errorCode=13 destination conflict by re-adding the
+        torrent with aria2's integrity check + allow-overwrite, so it hashes
+        whatever is already on disk, keeps the good pieces, writes a fresh
+        ``.aria2`` control file, and only re-downloads what is missing or
+        corrupt (issue #51). No-op unless the entry is actually in the
+        conflict state.
+        """
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            if entry is None:
+                return {"status": "not_found"}
+            if not entry.get("conflict_path"):
+                return {"status": "not_applicable", "message": "no destination conflict to resolve"}
+            entry["status"] = "queued"
+            entry["message"] = "Verifying existing files against the torrent…"
+            entry["gid"] = None
+            entry["conflict_path"] = ""
+            entry["adopt_existing"] = True
+            entry["last_error"] = ""
+            entry["retry_count"] = 0
+            entry["retry_at"] = 0.0
+            entry["force_started"] = False
+            entry["queue_position"] = self._take_queue_position_locked()
+            self._persist_locked()
+        self.wake()
+        return {"status": "queued"}
 
     def pause(self) -> dict:
         with self._lock:
@@ -2867,6 +3128,7 @@ class TorrentManager:
                     "magnet_uri": entry.get("magnet_uri"),
                     "is_magnet": bool(entry.get("magnet_uri")),
                     "download_dir": entry.get("download_dir"),
+                    "conflict_path": entry.get("conflict_path") or "",
                     "added_at": entry.get("added_at"),
                     "completed_at": entry.get("completed_at"),
                     "move_job": _move_job_summary(move_job) if isinstance(move_job, dict) else None,

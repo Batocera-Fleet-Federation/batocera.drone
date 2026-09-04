@@ -2383,6 +2383,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/torrents/{torrent_id}/delete": {
                 "post": _operation("Delete a torrent: remove it from the list, delete its .torrent file, and delete its downloaded files", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
+            "/admin/torrents/{torrent_id}/remove": {
+                "post": _operation("Remove a torrent from the list but keep every downloaded file on disk (the safe alternative to delete)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "A file move is in progress")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/adopt": {
+                "post": _operation("Resolve a destination conflict by re-adding the torrent with an integrity check that adopts the existing on-disk payload", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "No destination conflict to resolve")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
             "/admin/torrents/{torrent_id}/migrate": {
                 "post": _operation("Move an incomplete torrent and its aria2 resume data to the current Download location", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent cannot be migrated")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },

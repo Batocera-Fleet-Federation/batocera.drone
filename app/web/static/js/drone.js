@@ -6692,7 +6692,11 @@ function renderTorrentRowMarkup(row) {
   const id = escapeHtml(row.id || "");
   const status = String(row.status || "queued");
   const pct = Number(row.progress_percent || 0);
-  let canForceStart = ["queued", "error"].includes(status);
+  // A destination conflict (aria2 errorCode=13: payload on disk, no .aria2
+  // control file) is a standing "error" that must NOT auto-retry or be
+  // force-started -- only the explicit safe recovery actions apply (issue #51).
+  const conflictPath = String(row.conflict_path || "");
+  let canForceStart = ["queued", "error"].includes(status) && !conflictPath;
   // "Cancel" now covers two distinct outcomes depending on status: a
   // downloading or errored torrent gets stopped/retried and sent to the back
   // of the queue (see torrent_manager.py's cancel(), which requeues rather
@@ -6731,17 +6735,27 @@ function renderTorrentRowMarkup(row) {
   // visible at a glance instead of guessed from an empty slot, while still
   // being un-clickable (this is what originally fixed the misclick-during-
   // refresh bug; disabled preserves that, invisible was just one way to do it).
+  // "Verify & adopt existing files" only shows on a destination conflict;
+  // "Remove from list" (keep downloaded files) is always available -- the
+  // safe, non-destructive counterpart to Delete.
+  const canAdopt = !!conflictPath && !migrationActive;
+  const canRemoveKeep = !migrationActive;
   const actionSlot = (enabled, cls, title, onclick, icon) =>
     `<button class="btn btn-sm ${cls}" title="${title}" aria-label="${title}" ${enabled ? "" : "disabled"} onclick="${enabled ? onclick : ""}"><i class="bi ${icon}"></i></button>`;
   const actions = [
     actionSlot(canForceStart, "btn-outline-success", "Force start", `forceStartTorrent('${id}')`, "bi-lightning-charge"),
     actionSlot(canCancel, "btn-outline-warning", cancelTitle, `cancelTorrent('${id}')`, cancelIcon),
+    actionSlot(canAdopt, "btn-outline-success", "Verify & adopt existing files", `adoptExistingTorrentPayload('${id}')`, "bi-shield-check"),
     actionSlot(canMigrate, "btn-outline-primary", migrateTitle, `migratePartialTorrent('${id}', ${migrationFailed ? "true" : "false"})`, "bi-device-ssd"),
     actionSlot(canMoveFiles, "btn-outline-info", moveFilesTitle, `openMoveFilesModal('${id}')`, "bi-folder-symlink"),
-    actionSlot(!migrationActive, "btn-outline-danger", migrationActive ? "Migration in progress" : "Delete torrent", `deleteTorrent('${id}')`, "bi-trash"),
+    actionSlot(canRemoveKeep, "btn-outline-secondary", "Remove from list (keep downloaded files)", `removeTorrentFromList('${id}')`, "bi-eye-slash"),
+    actionSlot(!migrationActive, "btn-outline-danger", migrationActive ? "Migration in progress" : "Delete torrent (also deletes downloaded files)", `deleteTorrent('${id}')`, "bi-trash"),
   ].join(" ");
+  const conflictNote = conflictPath
+    ? `<div class="small text-danger mt-1"><i class="bi bi-exclamation-octagon me-1"></i>Files already exist at <code>${escapeHtml(conflictPath)}</code> without an aria2 control file. Automatic retry is off. Verify &amp; adopt them, remove this torrent (keeping the files), or delete it.</div>`
+    : "";
   return `<tr>
-    <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
+    <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}${conflictNote}</td>
     <td>${torrentStatusBadge(row)}${torrentMoveJobBadge(row)}${torrentMigrationBadge(row)}</td>
     <td class="torrent-progress-cell" title="${escapeHtml(progressText)}">
       <div class="torrent-progress-wrap">
@@ -7075,6 +7089,32 @@ async function deleteTorrent(torrentId) {
     await refreshTorrentsLive();
   } catch (err) {
     showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+// The safe, non-destructive counterpart to deleteTorrent: drops the queue
+// record and the .torrent definition but never touches a downloaded byte.
+async function removeTorrentFromList(torrentId) {
+  if (!torrentId || !window.confirm("Remove this torrent from the list? Downloaded files stay on disk untouched; only the queue record and its .torrent definition are removed.")) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/remove`, {});
+    showToast("Removed from the list. Downloaded files were kept.", "success");
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+// Resolve a destination conflict (files already on disk, no .aria2 control
+// file) by asking aria2 to hash-check and adopt what is already there.
+async function adoptExistingTorrentPayload(torrentId) {
+  if (!torrentId || !window.confirm("Verify the existing files against this torrent and continue the download from them? aria2 hash-checks every piece already on disk, keeps the good ones, and only re-downloads what is missing or corrupt. Nothing is deleted.")) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/adopt`, {});
+    showToast("Verifying existing files -- the torrent will resume from whatever checks out.", "success");
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Verify & adopt failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
 
