@@ -20,6 +20,7 @@ def _build_settings(root: Path) -> Settings:
         "BIOS_ROOT": str(root / "bios"),
         "SAVES_ROOT": str(root / "saves"),
         "MOVIES_ROOT": str(root / "movies"),
+        "SHOWS_ROOT": str(root / "shows"),
         "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
         "DRONE_DEVICE_ID": "metadata-manager-test",
     }
@@ -212,16 +213,25 @@ class ApplyTests(unittest.TestCase):
             backdrop_path = root / "movies" / result["backdrop_relative_path"]
             self.assertTrue(poster_path.is_file())
             self.assertTrue(backdrop_path.is_file())
-            # Artwork lands in an images/ folder sibling to the movie file.
-            self.assertEqual(poster_path.parent.name, "images")
-            self.assertEqual(poster_path.parent.parent.resolve(), (root / "movies").resolve())
-            # Named after the movie, ROM-artwork-style: <safe-stem>-tmdb-<field>.jpg
-            # (non-alphanumeric characters sanitized to "-", same as ROM scraped art).
-            self.assertEqual(poster_path.name, "The-Matrix-1999--tmdb-image.jpg")
-            self.assertEqual(backdrop_path.name, "The-Matrix-1999--tmdb-fanart.jpg")
+            # Plex flat-library artwork is named after the adjacent movie.
+            self.assertEqual(poster_path.name, "The Matrix (1999).jpg")
+            self.assertEqual(backdrop_path.name, "The Matrix (1999)-fanart.jpg")
 
             stored = movies_store.get_movie_metadata(settings.movies_root, entry_key)
             self.assertEqual(stored["title"], "The Matrix")
+
+    def test_folder_movie_artwork_uses_plex_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999)/The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root, settings.shows_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            result = metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=_MATRIX_DETAILS))
+
+            self.assertEqual(result["poster_relative_path"], "The Matrix (1999)/poster.jpg")
+            self.assertEqual(result["backdrop_relative_path"], "The Matrix (1999)/fanart.jpg")
 
     def test_no_poster_or_backdrop_url_skips_download(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -464,6 +474,31 @@ class DeleteMovieTests(unittest.TestCase):
 
 
 class ApplyTvEpisodeTests(unittest.TestCase):
+    def test_dedicated_show_root_writes_plex_season_and_episode_artwork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            episode = root / "shows" / "Dexter (2006)" / "Season 01" / "Dexter - S01E01 - Dexter.mkv"
+            episode.parent.mkdir(parents=True)
+            episode.write_bytes(b"episode")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root, settings.shows_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            fake = FakeTmdbClient(
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter"),
+                season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": "season"},
+                tv_episode_details={"title": "Dexter", "overview": "", "air_date": None, "rating": None, "still_url": "still"},
+            )
+
+            result = metadata_manager.apply_tv_episode(settings, entry_key, 1405, 1, 1, client=fake)
+
+            self.assertEqual(result["poster_relative_path"], "Shows/Dexter (2006)/Season 01/Season01.jpg")
+            self.assertEqual(
+                result["backdrop_relative_path"],
+                "Shows/Dexter (2006)/Season 01/Dexter - S01E01 - Dexter.jpg",
+            )
+            self.assertTrue((episode.parent / "Season01.jpg").is_file())
+            self.assertTrue(episode.with_suffix(".jpg").is_file())
+
     def test_unknown_movie_raises_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))

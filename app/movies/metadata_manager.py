@@ -7,18 +7,12 @@ for the API key, and ``roms/rom_artwork_apply.py``'s apply-flow shape
 (fetch details, download the chosen images, write them to disk next to the
 content they decorate, save metadata) for the actual scrape.
 
-Unlike ROM artwork, movies have no gamelist.xml to write into -- scraped
-metadata lives entirely in ``storage/movies_store.py``'s
-``movies_metadata_entries`` table, and artwork files land in an ``images/``
-folder that is a *sibling of the movie file itself* (not one shared root-level
-folder), because movies can be nested arbitrarily deep (season/show
-subfolders) and a single shared folder would risk basename collisions between
-e.g. two different shows' "S01E01" files. Filenames follow the same
-``<stem>-<source>-<field><ext>`` convention ROM scraped art uses (see
-``rom_artwork_apply.py``), with ``field`` using the same vocabulary ROMs use
-(``image`` for the primary poster, ``fanart`` for the backdrop) rather than
-TMDb's own "poster"/"backdrop" terms, so it reads as "just like a ROM" per
-the original feature ask.
+Unlike ROM artwork, movies have no gamelist.xml to write into. Scraped
+metadata lives in ``storage/movies_store.py`` and artwork is written using
+Plex's local-media convention so the same files are immediately usable by
+the SWARM media server: movie ``poster.jpg``/``fanart.jpg`` files, show-level
+``poster.jpg``/``fanart.jpg``, ``SeasonXX.jpg`` season posters, and an episode
+still whose basename matches the episode video.
 """
 
 from __future__ import annotations
@@ -97,20 +91,68 @@ def search(settings: Settings, query: str, *, client: Optional[TmdbClient] = Non
     return (client or _client(settings)).search(query)
 
 
-def _safe_movie_stem(movie_path: Path) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]+", "-", movie_path.stem) or "movie"
+def _movie_artwork_path(movie_absolute_path: Path, movies_root: Path, field: str) -> Path:
+    """Return Plex's canonical local artwork path for one movie."""
+    movie_absolute_path = movie_absolute_path.resolve()
+    movies_root = movies_root.resolve()
+    if movie_absolute_path.parent == movies_root:
+        suffix = "" if field == "poster" else "-fanart"
+        return movie_absolute_path.with_name(f"{movie_absolute_path.stem}{suffix}{TMDB_IMAGE_EXTENSION}")
+    return movie_absolute_path.parent / ("poster.jpg" if field == "poster" else "fanart.jpg")
 
 
-def _artwork_path(movie_absolute_path: Path, field: str) -> Path:
-    """``<movie's own folder>/images/<safe-stem>-tmdb-<field>.jpg`` -- a
-    sibling of the movie file at whatever depth it lives, mirroring the ROM
-    convention of an images/ folder next to the content it decorates."""
-    stem = _safe_movie_stem(movie_absolute_path)
-    return movie_absolute_path.parent / "images" / f"{stem}-tmdb-{field}{TMDB_IMAGE_EXTENSION}"
+def _show_artwork_path(
+    shows_root: Path,
+    episode_absolute_path: Path,
+    field: str,
+    *,
+    season_number: Optional[int] = None,
+) -> Path:
+    """Return Plex's series, season, or episode artwork path."""
+    shows_root = shows_root.resolve()
+    episode_absolute_path = episode_absolute_path.resolve()
+    relative = episode_absolute_path.relative_to(shows_root)
+    # Flat episode files were accepted by older Drone releases. They are not
+    # a valid Plex library layout, but retaining a root-level fallback keeps
+    # manual re-scrapes usable while users reorganize them.
+    show_dir = shows_root / relative.parts[0] if len(relative.parts) >= 2 else shows_root
+    if field == "show_poster":
+        return show_dir / "poster.jpg"
+    if field == "show_fanart":
+        return show_dir / "fanart.jpg"
+    if field == "episode":
+        return episode_absolute_path.with_suffix(TMDB_IMAGE_EXTENSION)
+    season = int(season_number or 0)
+    season_dir = next(
+        (
+            parent
+            for parent in episode_absolute_path.parents
+            if parent != show_dir and show_dir in parent.parents
+            and (parent.name.lower() == "specials" or re.match(r"^season\s+\d+$", parent.name, re.IGNORECASE))
+        ),
+        episode_absolute_path.parent,
+    )
+    name = "season-specials-poster.jpg" if season == 0 else f"Season{season:02d}.jpg"
+    return season_dir / name
 
 
-def _relative_to_movies_root(movies_root: Path, path: Path) -> str:
-    return path.resolve().relative_to(movies_root.resolve()).as_posix()
+def _relative_to_media_root(settings: Settings, path: Path) -> str:
+    return _movies_store.media_relative_path(settings.movies_root, path, settings.shows_root)
+
+
+def _show_root_for_path(settings: Settings, path: Path) -> Path:
+    """Use the dedicated show root, retaining read compatibility with the old tree."""
+    target = path.resolve()
+    shows_root = Path(settings.shows_root).resolve()
+    if target != shows_root and shows_root in target.parents:
+        return shows_root
+    legacy_root = (Path(settings.movies_root) / _movies_store.SHOWS_PATH_PREFIX).resolve()
+    if target != legacy_root and legacy_root in target.parents:
+        return legacy_root
+    movies_root = Path(settings.movies_root).resolve()
+    if target != movies_root and movies_root in target.parents:
+        return movies_root
+    raise ValueError("show media is outside the configured shows root")
 
 
 def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbClient] = None) -> dict:
@@ -131,19 +173,19 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
 
     poster_relative_path: Optional[str] = None
     if details.get("poster_url"):
-        target = _artwork_path(movie_path, "image")
+        target = _movie_artwork_path(movie_path, movies_root, "poster")
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(details["poster_url"])
         target.write_bytes(data)
-        poster_relative_path = _relative_to_movies_root(movies_root, target)
+        poster_relative_path = _relative_to_media_root(settings, target)
 
     backdrop_relative_path: Optional[str] = None
     if details.get("backdrop_url"):
-        target = _artwork_path(movie_path, "fanart")
+        target = _movie_artwork_path(movie_path, movies_root, "backdrop")
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(details["backdrop_url"])
         target.write_bytes(data)
-        backdrop_relative_path = _relative_to_movies_root(movies_root, target)
+        backdrop_relative_path = _relative_to_media_root(settings, target)
 
     extra = {
         "overview": details.get("overview") or "",
@@ -195,11 +237,20 @@ def delete_metadata(settings: Settings, entry_key: str) -> dict:
     deleted = _movies_store.delete_movie_metadata(settings.movies_root, entry_key)
     if not deleted:
         return {"deleted": False}
-    movies_root = Path(settings.movies_root).resolve()
     for column in ("poster_relative_path", "backdrop_relative_path"):
         relative_path = deleted.get(column)
-        if relative_path:
-            (movies_root / relative_path).unlink(missing_ok=True)
+        if (
+            deleted.get("provider") != "local"
+            and relative_path
+            and _movies_store.artwork_reference_count(settings.movies_root, relative_path) == 0
+        ):
+            try:
+                target = _movies_store.resolve_media_relative_path(
+                    settings.movies_root, relative_path, settings.shows_root
+                )
+            except FileNotFoundError:
+                continue
+            target.unlink(missing_ok=True)
     return {"deleted": True}
 
 
@@ -209,7 +260,7 @@ def delete_movie(settings: Settings, entry_key: str) -> dict:
     Unlike ``delete_metadata`` (which only clears a scrape gone wrong, leaving
     the file itself alone), this removes the file too."""
     delete_metadata(settings, entry_key)
-    return _movies_store.delete_movie_file(settings.movies_root, entry_key)
+    return _movies_store.delete_movie_file(settings.movies_root, entry_key, settings.shows_root)
 
 
 # Substituted for season/episode TMDb lookups that 404 (TmdbNotFoundError) --
@@ -274,11 +325,13 @@ def apply_tv_episode(
     poster_relative_path: Optional[str] = None
     poster_source = season.get("poster_url") or show.get("poster_url")
     if poster_source:
-        target = _artwork_path(movie_path, "image")
+        target = _show_artwork_path(
+            _show_root_for_path(settings, movie_path), movie_path, "season", season_number=season_number
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(poster_source)
         target.write_bytes(data)
-        poster_relative_path = _relative_to_movies_root(movies_root, target)
+        poster_relative_path = _relative_to_media_root(settings, target)
 
     # The episode's own "still" (a screenshot from that episode) is more
     # useful as this file's backdrop than the show-wide backdrop would be --
@@ -287,11 +340,11 @@ def apply_tv_episode(
     backdrop_relative_path: Optional[str] = None
     backdrop_source = episode.get("still_url") or show.get("backdrop_url")
     if backdrop_source:
-        target = _artwork_path(movie_path, "fanart")
+        target = _show_artwork_path(_show_root_for_path(settings, movie_path), movie_path, "episode")
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(backdrop_source)
         target.write_bytes(data)
-        backdrop_relative_path = _relative_to_movies_root(movies_root, target)
+        backdrop_relative_path = _relative_to_media_root(settings, target)
 
     season_number, episode_number = int(season_number), int(episode_number)
     title = f"{show.get('title') or ''} - S{season_number:02d}E{episode_number:02d}"
@@ -358,20 +411,20 @@ def apply_tv_extra(
     poster_relative_path: Optional[str] = None
     poster_source = show.get("poster_url")
     if poster_source:
-        target = _artwork_path(movie_path, "image")
+        target = _show_artwork_path(_show_root_for_path(settings, movie_path), movie_path, "show_poster")
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(poster_source)
         target.write_bytes(data)
-        poster_relative_path = _relative_to_movies_root(movies_root, target)
+        poster_relative_path = _relative_to_media_root(settings, target)
 
     backdrop_relative_path: Optional[str] = None
     backdrop_source = show.get("backdrop_url")
     if backdrop_source:
-        target = _artwork_path(movie_path, "fanart")
+        target = _show_artwork_path(_show_root_for_path(settings, movie_path), movie_path, "show_fanart")
         target.parent.mkdir(parents=True, exist_ok=True)
         data, _content_type = client.download_image(backdrop_source)
         target.write_bytes(data)
-        backdrop_relative_path = _relative_to_movies_root(movies_root, target)
+        backdrop_relative_path = _relative_to_media_root(settings, target)
 
     extra = {
         "media_type": "tv_extra",

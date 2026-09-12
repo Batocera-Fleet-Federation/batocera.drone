@@ -190,7 +190,9 @@ class HandlersMoviesMixin:
         ``drone_api.py``'s ``_CastHttpHandler``) via
         ``movies_store.resolve_movie_stream_path``, so this path-traversal
         check has exactly one implementation."""
-        return _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+        return _movies_store.resolve_movie_stream_path(
+            self.settings.movies_root, entry_key, self.settings.shows_root
+        )
 
     def _handle_movie_download(self, entry_key: str) -> None:
         if not self.settings.downloads_enabled:
@@ -351,9 +353,13 @@ class HandlersMoviesMixin:
         relative_path = (metadata or {}).get(column)
         if not relative_path:
             raise FileNotFoundError()
-        movies_root = Path(self.settings.movies_root).resolve()
-        target = (movies_root / relative_path).resolve()
-        if target == movies_root or movies_root not in target.parents or not target.is_file():
+        try:
+            target = _movies_store.resolve_media_relative_path(
+                self.settings.movies_root, relative_path, self.settings.shows_root
+            )
+        except FileNotFoundError:
+            raise FileNotFoundError()
+        if not target.is_file():
             raise FileNotFoundError()
         # Same helper ROM artwork uses (handlers_peer.py): server-side
         # in-memory cache (keyed by mtime, so a re-scrape overwriting this

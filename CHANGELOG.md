@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Scan TV shows from `/userdata/shows` alongside movies, route show streams and peer
+  transfers to that root, and read/write Plex-compatible local artwork for movies,
+  series, seasons, and episodes.
 - MCP server: expose the Drone over the Model Context Protocol at `POST /v1/api/mcp`
   (stateless Streamable HTTP, bearer-token auth). Read tools for assets, gamelists,
   BIOS, controls, swarm, tailnet, VPN, transfers, torrents, system info, logs,

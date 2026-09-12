@@ -69,7 +69,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
     """``_start_rom_metadata_watcher`` (drone_api.py) is the wiring that
     decides which trees get near-real-time inotify coverage. Real inotify
     behavior is already covered generically above; this just verifies the
-    wiring itself covers ROMs, saves, *and* movies -- movies previously had
+    wiring itself covers ROMs, saves, movies, and shows -- movies previously had
     no watcher at all, so a new/moved movie file sat invisible until the next
     periodic poll (see rom-scanner's _poll_rom_metadata_once)."""
 
@@ -77,6 +77,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
         drone_api._ROM_METADATA_WATCHER = None
         drone_api._SAVES_METADATA_WATCHER = None
         drone_api._MOVIES_METADATA_WATCHER = None
+        drone_api._SHOWS_METADATA_WATCHER = None
 
     def test_watches_roms_saves_and_movies_roots_with_scoped_callbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +90,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
                     "BIOS_ROOT": str(root / "bios"),
                     "SAVES_ROOT": str(root / "saves"),
                     "MOVIES_ROOT": str(root / "movies"),
+                    "SHOWS_ROOT": str(root / "shows"),
                     "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
                     "DRONE_DEVICE_ID": "watcher-wiring-test",
                 },
@@ -114,18 +116,21 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
                 drone_api._start_rom_metadata_watcher(settings)
                 self.assertEqual(
                     [watcher.path for watcher in watchers],
-                    [settings.roms_root, settings.saves_root, settings.movies_root],
+                    [settings.roms_root, settings.saves_root, settings.movies_root, settings.shows_root],
                 )
                 watchers[0].on_change()
                 watchers[1].on_change()
                 watchers[2].on_change()
+                watchers[3].on_change()
                 wake_roms.assert_called_once_with()
                 sync_saves.assert_called_once_with(settings.saves_root)
-                sync_movies.assert_called_once_with(settings.movies_root)
+                self.assertEqual(sync_movies.call_count, 2)
+                sync_movies.assert_called_with(settings.movies_root, settings.shows_root)
             self.assertIsInstance(drone_api._ROM_METADATA_WATCHER, FakeWatcher)
             self.assertIsInstance(drone_api._SAVES_METADATA_WATCHER, FakeWatcher)
             self.assertIsInstance(drone_api._MOVIES_METADATA_WATCHER, FakeWatcher)
             self.assertEqual(drone_api._MOVIES_METADATA_WATCHER.path, settings.movies_root)
+            self.assertEqual(drone_api._SHOWS_METADATA_WATCHER.path, settings.shows_root)
 
     def test_movies_watcher_not_set_when_start_fails(self) -> None:
         # Best-effort: if inotify can't watch movies_root (missing dir, watch
@@ -141,6 +146,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
                     "BIOS_ROOT": str(root / "bios"),
                     "SAVES_ROOT": str(root / "saves"),
                     "MOVIES_ROOT": str(root / "movies"),
+                    "SHOWS_ROOT": str(root / "shows"),
                     "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
                     "DRONE_DEVICE_ID": "watcher-wiring-test-2",
                 },
@@ -161,6 +167,7 @@ class StartRomMetadataWatcherTests(unittest.TestCase):
             self.assertIsNone(drone_api._ROM_METADATA_WATCHER)
             self.assertIsNone(drone_api._SAVES_METADATA_WATCHER)
             self.assertIsNone(drone_api._MOVIES_METADATA_WATCHER)
+            self.assertIsNone(drone_api._SHOWS_METADATA_WATCHER)
 
 
 if __name__ == "__main__":

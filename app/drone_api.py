@@ -876,6 +876,7 @@ _ROM_METADATA_WATCHER_STARTED = False
 _ROM_METADATA_WATCHER = None
 _SAVES_METADATA_WATCHER = None
 _MOVIES_METADATA_WATCHER = None
+_SHOWS_METADATA_WATCHER = None
 # File-only rotating stream for the Drone's own narration log; configured in
 # _configure_rotating_logs. _DRONE_ACTIVITY_LOG_STREAM now lives in logging_setup.py
 _LOCAL_NETWORK_WORKERS_STARTED = False
@@ -1820,7 +1821,7 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     Best-effort: if inotify is unavailable the periodic poll still covers
     changes, so a failure here is logged and otherwise ignored.
     """
-    global _ROM_METADATA_WATCHER, _SAVES_METADATA_WATCHER, _MOVIES_METADATA_WATCHER
+    global _ROM_METADATA_WATCHER, _SAVES_METADATA_WATCHER, _MOVIES_METADATA_WATCHER, _SHOWS_METADATA_WATCHER
     watcher = RomFilesystemWatcher(
         settings.roms_root,
         _ROM_METADATA_WAKE.set,
@@ -1852,7 +1853,7 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
         _SAVES_METADATA_WATCHER = saves_watcher
     def sync_movies() -> None:
         try:
-            _movies_store.sync_movies_cache(settings.movies_root)
+            _movies_store.sync_movies_cache(settings.movies_root, settings.shows_root)
         except Exception as error:
             print(
                 f"Local movies watcher sync failed: {_format_http_error(error)}",
@@ -1870,6 +1871,14 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     )
     if movies_watcher.start():
         _MOVIES_METADATA_WATCHER = movies_watcher
+    shows_watcher = RomFilesystemWatcher(
+        settings.shows_root,
+        sync_movies,
+        debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
+        max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
+    )
+    if shows_watcher.start():
+        _SHOWS_METADATA_WATCHER = shows_watcher
 
 
 def _ensure_game_event_spool(settings: Settings) -> None:
@@ -2205,7 +2214,9 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
                 )
             else:
                 try:
-                    target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+                    target = _movies_store.resolve_movie_stream_path(
+                        self.settings.movies_root, entry_key, self.settings.shows_root
+                    )
                 except FileNotFoundError:
                     self._log_cast(f"404 unknown movie {entry_key}")
                     self._send_404()
@@ -2253,7 +2264,9 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
             media_type = "application/x-mpegURL"
         elif delivery == "direct":
             try:
-                target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+                target = _movies_store.resolve_movie_stream_path(
+                    self.settings.movies_root, entry_key, self.settings.shows_root
+                )
             except FileNotFoundError:
                 self._send_404()
                 return
