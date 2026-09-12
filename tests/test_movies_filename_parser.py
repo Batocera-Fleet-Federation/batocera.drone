@@ -276,6 +276,25 @@ class ClassifyExtraTests(unittest.TestCase):
         self.assertEqual(result.show_title, "Forensic Files")
         self.assertEqual(result.season, 0)
 
+    def test_plex_marker_only_episode_uses_show_and_year_from_folders(self) -> None:
+        result = filename_parser.classify(
+            "Shows/Severance (2022)/Season 01/s01e03.mkv",
+            "s01e03.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "Severance")
+        self.assertEqual(result.year, "2022")
+        self.assertEqual((result.season, result.episode), (1, 3))
+
+    def test_plex_guid_is_removed_from_episode_show_title(self) -> None:
+        result = filename_parser.classify(
+            "Shows/The Wire (2002) {tvdb-79126}/Season 01/The Wire (2002) {tvdb-79126} - S01E01 - The Target.mkv",
+            "The Wire (2002) {tvdb-79126} - S01E01 - The Target.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "The Wire")
+        self.assertEqual(result.year, "2002")
+
     def test_no_resolvable_show_or_season_leaves_extra_ungrouped(self) -> None:
         # No "<Show> SXX" or "Season NN" folder anywhere in the path -- must
         # not guess; an ungrouped extra falls back to today's behavior

@@ -642,7 +642,7 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         except Exception as error:
             print(f"Local saves cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
         try:
-            _movies_store.sync_movies_cache(settings.movies_root)
+            _movies_store.sync_movies_cache(settings.movies_root, settings.shows_root)
         except Exception as error:
             print(f"Local movies cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
         try:

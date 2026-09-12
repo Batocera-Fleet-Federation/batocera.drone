@@ -29,6 +29,7 @@ def _settings(root: Path) -> Settings:
             "BIOS_ROOT": str(root / "bios"),
             "SAVES_ROOT": str(root / "saves"),
             "MOVIES_ROOT": str(root / "movies"),
+            "SHOWS_ROOT": str(root / "shows"),
             "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
             "DRONE_DEVICE_ID": "movies-test-device",
         },
@@ -217,6 +218,19 @@ class HandlePeerMovieDownloadTests(unittest.TestCase):
             self.assertIsNone(handler.response)
             self.assertEqual(handler.streamed["path"], movie_path.resolve())
             self.assertTrue(handler.streamed["as_attachment"])
+
+    def test_streams_virtual_show_path_from_dedicated_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _settings(Path(tmp) / "userdata")
+            episode = settings.shows_root / "Firefly (2002)" / "Season 01" / "Firefly - S01E01.mkv"
+            episode.parent.mkdir(parents=True)
+            episode.write_bytes(b"episode")
+            handler = _peer_handler(settings)
+
+            handler._handle_peer_movie_download("Shows/Firefly (2002)/Season 01/Firefly - S01E01.mkv")
+
+            self.assertIsNone(handler.response)
+            self.assertEqual(handler.streamed["path"], episode.resolve())
 
 
 class CollectPeerInventoryMoviesTests(unittest.TestCase):

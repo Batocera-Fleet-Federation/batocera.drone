@@ -110,6 +110,7 @@ _SCENE_TOKENS_RE = re.compile(
 # a space, before the string ends).
 _TRAILING_GROUP_RE = re.compile(r"-[A-Za-z0-9.]{2,20}$")
 _BRACKETED_RE = re.compile(r"[\[\(][^\[\]()]*[\])]")
+_PLEX_TOKEN_RE = re.compile(r"\{[^{}]*\}")
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 _PUNCTUATION_RE = re.compile(r"[.\-_,;:\[\]()<>/]+")
 # A "(Year)" anywhere in a *folder* name -- deliberately not anchored to the
@@ -139,6 +140,14 @@ _BARE_SEASON_FOLDER_RE = re.compile(r"^season\s+(?P<season>\d{1,3})$", re.IGNORE
 # mid-word. Tried only after the two stricter patterns above fail.
 _SEASON_TOKEN_RE = re.compile(r"\bseason\s+(?P<season_word>\d{1,3})\b|\bs(?P<season_abbr>\d{1,3})\b(?!e\d)", re.IGNORECASE)
 
+# Plex permits an episode filename to start with the marker when the show and
+# season are already expressed by the containing folders (``s01e03.mkv``).
+_PATH_EPISODE_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:s(?P<season>\d{1,2})[.\s_-]?e(?P<episode>\d{1,3})|"
+    r"(?P<alt_season>\d{1,2})x(?P<alt_episode>\d{2,3}))(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class ParsedEntry:
@@ -157,8 +166,24 @@ def _normalize_unicode(text: str) -> str:
 
 
 def _collapse(text: str) -> str:
+    text = _PLEX_TOKEN_RE.sub(" ", text)
     text = _PUNCTUATION_RE.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _show_from_episode_path(file_path: str) -> Tuple[str, Optional[str]]:
+    segments = list(Path(file_path).parts[:-1])
+    for index, segment in enumerate(segments[:-1]):
+        if segment.lower() == "shows" and index + 1 < len(segments):
+            candidate = segments[index + 1]
+            folder = folder_title_candidate(candidate)
+            return folder if folder else (_collapse(candidate), None)
+    for index, segment in enumerate(segments):
+        if (_BARE_SEASON_FOLDER_RE.match(segment) or segment.lower() == "specials") and index > 0:
+            candidate = segments[index - 1]
+            folder = folder_title_candidate(candidate)
+            return folder if folder else (_collapse(candidate), None)
+    return "", None
 
 
 def folder_title_candidate(folder_name: str) -> Optional[Tuple[str, str]]:
@@ -295,9 +320,25 @@ def classify(file_path: str, file_name: str) -> ParsedEntry:
     ``episode_title`` stay empty, since a Featurette isn't a numbered
     episode."""
     stem = _normalize_unicode(Path(file_name).stem)
-    strict_match = _EPISODE_RE.match(stem) or _ALT_EPISODE_RE.match(stem)
+    match_stem = _PLEX_TOKEN_RE.sub(" ", stem)
+    strict_match = _EPISODE_RE.match(match_stem) or _ALT_EPISODE_RE.match(match_stem)
     if strict_match:
         return _episode_entry_from_match(strict_match, season_defaulted=False)
+
+    path_match = _PATH_EPISODE_RE.search(match_stem)
+    if path_match:
+        show_title, year = _show_from_episode_path(file_path)
+        if show_title:
+            fields = path_match.groupdict()
+            tail = _SCENE_TOKENS_RE.sub("", _BRACKETED_RE.sub("", fields.get("tail") or ""))
+            return ParsedEntry(
+                kind=KIND_EPISODE,
+                show_title=show_title,
+                year=year,
+                season=int(fields.get("season") or fields.get("alt_season")),
+                episode=int(fields.get("episode") or fields.get("alt_episode")),
+                episode_title=tail.strip(" -_.:"),
+            )
 
     path_segments = [segment.lower() for segment in Path(file_path).parts[:-1]]
     if any(segment in EXTRAS_FOLDER_NAMES for segment in path_segments):

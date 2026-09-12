@@ -390,7 +390,7 @@ class HandlersPeerMixin:
             # No system dimension at all -- selected_systems/system are
             # accepted for a uniform request shape but ignored.
             if self.settings.use_fake_data:
-                _movies_store.sync_movies_cache(self.settings.movies_root)
+                _movies_store.sync_movies_cache(self.settings.movies_root, self.settings.shows_root)
             return paged_response(
                 _movies_store.list_movies_page(
                     self.settings.movies_root,
@@ -735,13 +735,18 @@ class HandlersPeerMixin:
         """
         if not self._peer_request_authorized():
             return
-        movies_root = Path(self.settings.movies_root).resolve()
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
             self._send_json(400, {"error": "invalid movie path"})
             return
-        target = (movies_root / rel).resolve()
-        if not target.exists() or not target.is_file() or (target != movies_root and movies_root not in target.parents):
+        try:
+            target = _movies_store.resolve_media_relative_path(
+                self.settings.movies_root, rel, self.settings.shows_root
+            )
+        except FileNotFoundError:
+            self._send_json(400, {"error": "invalid movie path"})
+            return
+        if not target.exists() or not target.is_file():
             self.log_error("peer movie download failed movie=%s resolved=%s reason=not_found", rel, str(target))
             self._send_json(404, {"error": "not found"})
             return
