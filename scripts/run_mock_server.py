@@ -19,6 +19,7 @@ def main() -> None:
     os.environ.setdefault("BIOS_ROOT", str(mock_root / "bios"))
     os.environ.setdefault("SAVES_ROOT", str(mock_root / "saves"))
     os.environ.setdefault("MOVIES_ROOT", str(mock_root / "movies"))
+    os.environ.setdefault("SHOWS_ROOT", str(mock_root / "shows"))
     os.environ.setdefault("MUSIC_ROOT", str(mock_root / "music"))
     os.environ.setdefault("THEMES_ROOT", str(mock_root / "themes"))
     os.environ.setdefault("BATOCERA_CONF_FILE", str(mock_root / "system" / "batocera.conf"))

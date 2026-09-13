@@ -1,6 +1,7 @@
-"""Movie file scanning, fingerprinting, and change tracking for the Drone.
+"""Movie/show file scanning, fingerprinting, and change tracking for Drone.
 
-Mirrors ``saves_store.py`` for movie files under ``/userdata/movies``, with one
+Mirrors ``saves_store.py`` for video files under ``/userdata/movies`` and
+``/userdata/shows``, with one
 deliberate simplification: unlike ROMs, BIOS, or saves, movies have **no**
 system or artwork association at all -- this is a flat inventory (no
 per-system grouping column), and callers (the Transfers UI, peer inventory)
@@ -60,6 +61,9 @@ _VIDEO_SUFFIXES = {
 
 def default_movies_root() -> Path:
     return Path(os.environ.get("MOVIES_ROOT", "/userdata/movies"))
+
+
+SHOWS_PATH_PREFIX = "Shows"
 
 
 @dataclass(frozen=True)
@@ -169,8 +173,8 @@ def _iter_movie_files(movies_root: Path):
             yield file_path, root
 
 
-def scan_movies(movies_root: Path) -> list[MovieEntry]:
-    """Scan ``movies_root`` and return one MovieEntry per movie file."""
+def scan_movies(movies_root: Path, *, virtual_prefix: str = "") -> list[MovieEntry]:
+    """Scan one media root and return one ``MovieEntry`` per video file."""
     entries: list[MovieEntry] = []
     for file_path, root in _iter_movie_files(movies_root):
         try:
@@ -178,6 +182,8 @@ def scan_movies(movies_root: Path) -> list[MovieEntry]:
         except OSError:
             continue
         relative = file_path.resolve().relative_to(root).as_posix()
+        if virtual_prefix:
+            relative = f"{virtual_prefix.strip('/')}/{relative}"
         try:
             fingerprint = build_movie_fingerprint(file_path)
         except OSError:
@@ -203,13 +209,18 @@ def _read_existing(connection: sqlite3.Connection) -> dict[str, tuple[int, int, 
     return {row[0]: (int(row[1] or 0), int(row[2] or 0), row[3] or "") for row in rows}
 
 
-def sync_movies_cache(movies_root: Path) -> dict:
+def sync_movies_cache(movies_root: Path, shows_root: Optional[Path] = None) -> dict:
     """Scan disk, reconcile against the cache, and queue created/updated/deleted changes.
 
     Returns a summary ``{"created", "updated", "deleted", "total", "thumbprint"}``.
     """
     scanned = scan_movies(movies_root)
+    if shows_root is not None and Path(shows_root).resolve() != Path(movies_root).resolve():
+        # Preserve the combined Movies UI/protocol namespace while reading
+        # shows from their dedicated Plex-style filesystem root.
+        scanned.extend(scan_movies(shows_root, virtual_prefix=SHOWS_PATH_PREFIX))
     scanned_by_key = {entry.entry_key: entry for entry in scanned}
+    scanned = list(scanned_by_key.values())
     created = updated = deleted = 0
     with _open(movies_root) as connection:
         existing = _read_existing(connection)
@@ -228,6 +239,7 @@ def sync_movies_cache(movies_root: Path) -> dict:
             connection.execute("DELETE FROM movies_cache_entries WHERE entry_key = ?", (key,))
             _queue_change(connection, key, "delete")
             deleted += 1
+        _recover_plex_artwork(connection, movies_root, shows_root, scanned)
         connection.commit()
     return {
         "created": created,
@@ -236,6 +248,116 @@ def sync_movies_cache(movies_root: Path) -> dict:
         "total": len(scanned),
         "thumbprint": movies_inventory_thumbprint(scanned),
     }
+
+
+def _first_local_asset(
+    directory: Path,
+    names: tuple[str, ...],
+    cache: dict[Path, dict[str, Path]],
+) -> Optional[Path]:
+    """Find a Plex local asset case-insensitively without walking a library."""
+    key = directory.resolve()
+    by_name = cache.get(key)
+    if by_name is None:
+        try:
+            by_name = {item.name.lower(): item for item in directory.iterdir() if item.is_file()}
+        except OSError:
+            by_name = {}
+        cache[key] = by_name
+    for name in names:
+        found = by_name.get(name.lower())
+        if found is not None:
+            return found
+    return None
+
+
+def _plex_image_names(*stems: str) -> tuple[str, ...]:
+    return tuple(f"{stem}{extension}" for stem in stems for extension in (".jpg", ".jpeg", ".png", ".tbn"))
+
+
+def _plex_artwork_for_entry(
+    entry: MovieEntry,
+    movies_root: Path,
+    shows_root: Optional[Path],
+    asset_cache: dict[Path, dict[str, Path]],
+) -> tuple[Optional[str], Optional[str]]:
+    video = Path(entry.absolute_path).resolve()
+    is_show = entry.file_path.lower().startswith(f"{SHOWS_PATH_PREFIX.lower()}/")
+    if is_show and shows_root is not None:
+        physical_show_root = Path(shows_root).resolve()
+        try:
+            relative = video.relative_to(physical_show_root)
+        except ValueError:
+            # The same virtual prefix also represents the legacy
+            # /userdata/movies/Shows tree during a rolling migration.
+            physical_show_root = (Path(movies_root) / SHOWS_PATH_PREFIX).resolve()
+            try:
+                relative = video.relative_to(physical_show_root)
+            except ValueError:
+                return None, None
+        if len(relative.parts) < 2:
+            return None, None
+        show_dir = physical_show_root / relative.parts[0]
+        season_dir = next(
+            (
+                parent for parent in video.parents
+                if parent != show_dir and show_dir in parent.parents
+                and (parent.name.lower() == "specials" or re.match(r"^season\s+\d+$", parent.name, re.IGNORECASE))
+            ),
+            None,
+        )
+        season_poster = None
+        if season_dir is not None:
+            match = re.match(r"^season\s+(\d+)$", season_dir.name, re.IGNORECASE)
+            season_stem = "season-specials-poster" if season_dir.name.lower() == "specials" else f"Season{int(match.group(1)):02d}"
+            season_poster = _first_local_asset(season_dir, _plex_image_names(season_stem), asset_cache)
+        poster = season_poster or _first_local_asset(show_dir, _plex_image_names("poster", "folder", "show"), asset_cache)
+        backdrop = _first_local_asset(video.parent, _plex_image_names(video.stem), asset_cache)
+        backdrop = backdrop or _first_local_asset(show_dir, _plex_image_names("fanart", "background", "backdrop", "art"), asset_cache)
+    else:
+        root = Path(movies_root).resolve()
+        if video.parent == root:
+            poster = _first_local_asset(video.parent, _plex_image_names(video.stem), asset_cache)
+            backdrop = _first_local_asset(video.parent, _plex_image_names(f"{video.stem}-fanart"), asset_cache)
+        else:
+            poster = _first_local_asset(video.parent, _plex_image_names("poster", "folder", "cover", "movie", "default"), asset_cache)
+            backdrop = _first_local_asset(video.parent, _plex_image_names("fanart", "background", "backdrop", "art"), asset_cache)
+    return (
+        media_relative_path(movies_root, poster, shows_root) if poster else None,
+        media_relative_path(movies_root, backdrop, shows_root) if backdrop else None,
+    )
+
+
+def _recover_plex_artwork(
+    connection: sqlite3.Connection,
+    movies_root: Path,
+    shows_root: Optional[Path],
+    entries: list[MovieEntry],
+) -> None:
+    """Attach Plex-local artwork written by SWARM/Plex to catalog entries."""
+    scraped_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    asset_cache: dict[Path, dict[str, Path]] = {}
+    for entry in entries:
+        poster, backdrop = _plex_artwork_for_entry(entry, movies_root, shows_root, asset_cache)
+        if not poster and not backdrop:
+            continue
+        row = connection.execute(
+            "SELECT provider, poster_relative_path, backdrop_relative_path FROM movies_metadata_entries WHERE entry_key = ?",
+            (entry.entry_key,),
+        ).fetchone()
+        if row:
+            connection.execute(
+                "UPDATE movies_metadata_entries SET poster_relative_path = COALESCE(?, poster_relative_path), "
+                "backdrop_relative_path = COALESCE(?, backdrop_relative_path) WHERE entry_key = ?",
+                (poster, backdrop, entry.entry_key),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO movies_metadata_entries "
+                "(entry_key, provider, provider_id, title, poster_relative_path, backdrop_relative_path, scraped_at, extra_json) "
+                "VALUES (?, 'local', '', '', ?, ?, ?, '{}')",
+                (entry.entry_key, poster, backdrop, scraped_at),
+            )
 
 
 def _upsert(connection: sqlite3.Connection, entry: MovieEntry) -> None:
@@ -333,7 +455,67 @@ def get_movie_by_key(movies_root: Path, entry_key: str) -> Optional[dict]:
 _ENTRY_KEY_RE = re.compile(r"^[0-9a-f]{1,64}$")
 
 
-def resolve_movie_stream_path(movies_root: Path, entry_key: str) -> Path:
+def _allowed_media_roots(movies_root: Path, shows_root: Optional[Path] = None) -> tuple[Path, ...]:
+    roots = [Path(movies_root).resolve()]
+    if shows_root is not None:
+        resolved_shows = Path(shows_root).resolve()
+        if resolved_shows not in roots:
+            roots.append(resolved_shows)
+    return tuple(roots)
+
+
+def resolve_media_relative_path(
+    movies_root: Path,
+    relative_path: str,
+    shows_root: Optional[Path] = None,
+) -> Path:
+    """Resolve a catalog-relative path into the configured physical root."""
+    rel = _normalize_path(relative_path)
+    if not rel or ".." in Path(rel).parts:
+        raise FileNotFoundError()
+    prefix = f"{SHOWS_PATH_PREFIX}/"
+    if shows_root is not None and rel.lower().startswith(prefix.lower()):
+        root = Path(shows_root).resolve()
+        rel = rel[len(prefix):]
+        target = (root / rel).resolve()
+        # A rolling upgrade can still have the former
+        # /userdata/movies/Shows tree. Prefer the new location whenever it
+        # exists, but keep old files/artwork reachable until they are moved.
+        if not target.exists():
+            legacy_root = (Path(movies_root) / SHOWS_PATH_PREFIX).resolve()
+            legacy_target = (legacy_root / rel).resolve()
+            if (
+                legacy_target.exists()
+                and legacy_target != legacy_root
+                and legacy_root in legacy_target.parents
+            ):
+                return legacy_target
+    else:
+        root = Path(movies_root).resolve()
+        target = (root / rel).resolve()
+    if target == root or root not in target.parents:
+        raise FileNotFoundError()
+    return target
+
+
+def media_relative_path(movies_root: Path, path: Path, shows_root: Optional[Path] = None) -> str:
+    """Return the stable virtual path for a file under either media root."""
+    target = Path(path).resolve()
+    if shows_root is not None:
+        root = Path(shows_root).resolve()
+        if target != root and root in target.parents:
+            return f"{SHOWS_PATH_PREFIX}/{target.relative_to(root).as_posix()}"
+    root = Path(movies_root).resolve()
+    if target != root and root in target.parents:
+        return target.relative_to(root).as_posix()
+    raise ValueError("media path is outside configured roots")
+
+
+def resolve_movie_stream_path(
+    movies_root: Path,
+    entry_key: str,
+    shows_root: Optional[Path] = None,
+) -> Path:
     """Look up a movie by its stable id and validate the resolved path stays
     inside ``movies_root`` -- the one path-traversal-safe lookup every
     movie-file-serving handler shares (previously duplicated between the
@@ -344,9 +526,9 @@ def resolve_movie_stream_path(movies_root: Path, entry_key: str) -> Path:
     row = get_movie_by_key(movies_root, entry_key)
     if not row:
         raise FileNotFoundError()
-    resolved_root = Path(movies_root).resolve()
-    target = (resolved_root / row["file_path"]).resolve()
-    if target == resolved_root or resolved_root not in target.parents or not target.is_file():
+    target = Path(row.get("absolute_path") or "").resolve()
+    roots = _allowed_media_roots(movies_root, shows_root)
+    if not any(target != root and root in target.parents for root in roots) or not target.is_file():
         raise FileNotFoundError()
     return target
 
@@ -377,6 +559,17 @@ def get_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:
         "scraped_at": row[5],
         **extra,
     }
+
+
+def artwork_reference_count(movies_root: Path, relative_path: str) -> int:
+    """Count remaining metadata rows that share a Plex artwork file."""
+    with _open(movies_root) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM movies_metadata_entries "
+            "WHERE poster_relative_path = ? OR backdrop_relative_path = ?",
+            (relative_path, relative_path),
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
 
 
 def save_movie_metadata(
@@ -429,7 +622,7 @@ def delete_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:
     return existing
 
 
-def delete_movie_file(movies_root: Path, entry_key: str) -> dict:
+def delete_movie_file(movies_root: Path, entry_key: str, shows_root: Optional[Path] = None) -> dict:
     """Permanently delete one movie/episode's file from disk plus its cache
     entry -- the Movies UI detail page's delete action. An unknown entry_key
     is a no-op (``{"deleted": False}``), not an error, same convention as
@@ -441,9 +634,9 @@ def delete_movie_file(movies_root: Path, entry_key: str) -> dict:
     row = get_movie_by_key(movies_root, entry_key)
     if not row:
         return {"deleted": False}
-    resolved_root = Path(movies_root).resolve()
-    target = (resolved_root / row["file_path"]).resolve()
-    if target == resolved_root or resolved_root not in target.parents:
+    target = Path(row.get("absolute_path") or "").resolve()
+    roots = _allowed_media_roots(movies_root, shows_root)
+    if not any(target != root and root in target.parents for root in roots):
         return {"deleted": False}
     target.unlink(missing_ok=True)
     with _open(movies_root) as connection:

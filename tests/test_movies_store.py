@@ -12,6 +12,8 @@ class MoviesStoreTest(unittest.TestCase):
         self.userdata = Path(self._tmp.name)
         self.movies_root = self.userdata / "movies"
         self.movies_root.mkdir(parents=True)
+        self.shows_root = self.userdata / "shows"
+        self.shows_root.mkdir(parents=True)
         # Keep the SQLite cache inside the temp dir.
         self._db_env = os.environ.get("DRONE_STATE_DATABASE_FILE")
         os.environ["DRONE_STATE_DATABASE_FILE"] = str(self.userdata / "system" / "drone-app" / "cache.sqlite3")
@@ -68,6 +70,42 @@ class MoviesStoreTest(unittest.TestCase):
         movies_store.sync_movies_cache(self.movies_root)
         listed_paths = sorted(item["file_path"] for item in movies_store.list_movies(self.movies_root))
         self.assertEqual(listed_paths, sorted(entry.file_path for entry in entries))
+
+    def test_sync_includes_dedicated_shows_root_in_virtual_namespace(self):
+        episode = self.shows_root / "Firefly (2002)" / "Season 01" / "Firefly - S01E01 - Serenity.mkv"
+        episode.parent.mkdir(parents=True)
+        episode.write_bytes(b"episode")
+
+        result = movies_store.sync_movies_cache(self.movies_root, self.shows_root)
+
+        self.assertEqual(result["total"], 1)
+        row = movies_store.list_movies(self.movies_root)[0]
+        self.assertEqual(row["file_path"], "Shows/Firefly (2002)/Season 01/Firefly - S01E01 - Serenity.mkv")
+        self.assertEqual(
+            movies_store.resolve_movie_stream_path(self.movies_root, row["entry_key"], self.shows_root),
+            episode.resolve(),
+        )
+
+    def test_sync_recovers_plex_show_artwork(self):
+        show = self.shows_root / "Firefly (2002)"
+        season = show / "Season 01"
+        season.mkdir(parents=True)
+        episode = season / "Firefly - S01E01 - Serenity.mkv"
+        episode.write_bytes(b"episode")
+        (show / "poster.jpg").write_bytes(b"show poster")
+        (show / "fanart.jpg").write_bytes(b"fanart")
+        (season / "Season01.jpg").write_bytes(b"season poster")
+        (season / "Firefly - S01E01 - Serenity.jpg").write_bytes(b"still")
+
+        movies_store.sync_movies_cache(self.movies_root, self.shows_root)
+
+        row = movies_store.list_movies(self.movies_root)[0]
+        metadata = movies_store.get_movie_metadata(self.movies_root, row["entry_key"])
+        self.assertEqual(metadata["poster_relative_path"], "Shows/Firefly (2002)/Season 01/Season01.jpg")
+        self.assertEqual(
+            metadata["backdrop_relative_path"],
+            "Shows/Firefly (2002)/Season 01/Firefly - S01E01 - Serenity.jpg",
+        )
 
     def test_scan_ignores_partial_and_lock_files(self):
         self._write("Real Movie.mp4")

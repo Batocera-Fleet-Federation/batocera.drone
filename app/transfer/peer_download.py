@@ -695,18 +695,18 @@ def _download_movie_from_peer(
     movie files can be large media files where a full hash is wasteful, unlike
     small BIOS files where exact-identity MD5 matters to emulators."""
     try:
-        from ..storage.movies_store import build_movie_fingerprint
+        from ..storage.movies_store import build_movie_fingerprint, resolve_media_relative_path
     except ImportError:  # pragma: no cover - flat execution
-        from storage.movies_store import build_movie_fingerprint  # type: ignore
+        from storage.movies_store import build_movie_fingerprint, resolve_media_relative_path  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
     address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
     url = f"{address}/v1/api/peer/movies/{quote(rel, safe='/')}"
-    movies_root = settings.movies_root.resolve()
-    target = (movies_root / rel).resolve()
-    if target == movies_root or movies_root not in target.parents:
+    try:
+        target = resolve_media_relative_path(settings.movies_root, rel, settings.shows_root)
+    except FileNotFoundError:
         raise ValueError("invalid target path")
     partial_target = target.with_name(f"{target.name}.part")
     started_dt = datetime.now(timezone.utc).replace(microsecond=0)
@@ -721,7 +721,7 @@ def _download_movie_from_peer(
             "asset_type": "movies", "file_type": "Movie", "source_drone_id": peer_id,
             "target_drone_id": settings.device_id, "system": "movies",
             "movie_name": rel, "rom_name": rel,
-            "relative_path": existing.relative_to(movies_root).as_posix(),
+            "relative_path": rel,
             "action": "download", "status": "skipped", "skip_reason": reason,
             "failure_reason": reason, "bytes_transferred": 0,
             "file_size": existing.stat().st_size, "fingerprint": expected_fingerprint_clean,
@@ -832,7 +832,7 @@ def _download_movie_from_peer(
         "system": "movies",
         "movie_name": rel,
         "rom_name": rel,
-        "relative_path": target.relative_to(movies_root).as_posix(),
+        "relative_path": rel,
         "action": "download",
         "status": "completed",
         "bytes_transferred": bytes_written,
@@ -1278,4 +1278,3 @@ def _download_artwork_from_peer(
         "gamelist_update_status": gamelist_update_status,
         "gamelist_update": gamelist_update,
     }
-

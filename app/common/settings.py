@@ -68,6 +68,7 @@ class Settings:
     bios_root: Path
     saves_root: Path
     movies_root: Path
+    shows_root: Path
     music_root: Path
     username: Optional[str]
     password: Optional[str]
@@ -160,6 +161,7 @@ class Settings:
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             saves_root=Path(os.environ.get("SAVES_ROOT", "/userdata/saves")),
             movies_root=Path(os.environ.get("MOVIES_ROOT", "/userdata/movies")),
+            shows_root=Path(os.environ.get("SHOWS_ROOT", "/userdata/shows")),
             music_root=Path(os.environ.get("MUSIC_ROOT", "/userdata/music")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
