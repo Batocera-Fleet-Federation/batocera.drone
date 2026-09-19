@@ -1,4 +1,4 @@
-"""Reference a paired peer's whole ROM library and BIOS folder over the network.
+"""Reference selected systems from a paired peer over a read-only network mount.
 
 New mounts negotiate a private, read-only NFSv4 export through the paired mTLS
 API and prefer it over both LAN and Tailscale. Older peers and NFS failures
@@ -6,27 +6,19 @@ fall back to Batocera's stock ``//<peer>/share`` SMB export. Both transports
 present the same ``roms/`` + ``bios/`` layout at the same local mount point,
 so reconciliation and recovery remain transport-independent.
 
-**ROMs** are reconciled directory-by-directory (one system = one directory):
-either symlink a system straight in (no local games for it yet), or, if a
-local folder with real content already exists, rename it out of the way to
-``<system>.old`` first and symlink over it -- never deleting anything.
+**ROMs** remain entirely outside the mutation path.  The mount lives below
+Drone's private state directory and one Drone-owned ``es_systems`` overlay
+points only the selected systems at it.  Local ``/userdata/roms`` folders are
+never renamed, replaced, mounted over, or linked into.  EmulationStation's
+gamelist-only discovery is enabled for the lifetime of the reference so it
+does not recursively traverse large directory-based games over NFS.
 **BIOS** files are reconciled file-by-file instead (BIOS is a flat pile of
 individual dependency files, some nested under a per-emulator subfolder, not
 a browsable catalog the way ROM systems are). Existing local BIOS always win;
 only missing files are supplied by read-only network symlinks.
 
-``.old`` is not a new convention: ``RomRepository.should_include_system``
-excludes renamed-aside folders from Drone's own system list (reused here for
-ROMs). It is also the standard upstream
-Batocera/EmulationStation trick for "keep on disk, don't show" -- reusing them
-lets Batocera's native EmulationStation discover the remote system links. The
-Drone metadata scanner deliberately excludes those links so routine scans and
-peer-health summaries never walk a latency-sensitive network filesystem.
-
-Every rename this module performs is recorded (which peer, which system/file,
-the exact original name) so disabling a reference can precisely reverse only
-what this module itself did -- never guessing from a bare ``.old`` suffix,
-which could belong to something else entirely.
+Legacy symlink/``.old`` recovery remains only to reverse references created by
+older Drone releases during the schema-v4 migration.
 
 Structurally mirrors ``vpn_manager.py`` on purpose: Drone already runs as root
 (see ``service_bootstrap.sh``), so mounting is a direct ``subprocess`` call,
@@ -64,6 +56,7 @@ try:
     from ..common.network_references import lexical_symlink_target as _lexical_symlink_target
     from ..common.network_references import symlink_points_to as _symlink_points_to
     from ..common.settings import Settings
+    from . import network_es_overlay as _network_es_overlay
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
@@ -75,6 +68,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.network_references import lexical_symlink_target as _lexical_symlink_target  # type: ignore
     from common.network_references import symlink_points_to as _symlink_points_to  # type: ignore
     from common.settings import Settings  # type: ignore
+    from device import network_es_overlay as _network_es_overlay  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
@@ -89,8 +83,8 @@ NETWORK_SHARE_STATE_NAMESPACE = "network_share_manager.json"
 NETWORK_REFERENCE_SELECTION_NAMESPACE = "network_reference_selection.json"
 NETWORK_SHARE_STATUSES = ("mounted", "peer_unreachable", "error", "pending", "enabling", "detaching")
 NETWORK_SHARE_OLD_SUFFIX = ".old"
-NETWORK_SHARE_LAYOUT_SCHEMA_VERSION = 2
-NETWORK_SHARE_STATE_SCHEMA_VERSION = 3
+NETWORK_SHARE_LAYOUT_SCHEMA_VERSION = 4
+NETWORK_SHARE_STATE_SCHEMA_VERSION = 4
 
 NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS", "20"))
 NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS", "10"))
@@ -948,15 +942,10 @@ def _recover_owned_orphaned_references(settings: Settings, owned_root: Optional[
 def migrate_legacy_state(settings: Settings) -> dict:
     """Offline-safe migrations for mount layout and transport metadata.
 
-    v0.1.129 mounted ``.../share/roms`` at the peer root; v0.1.131 mounted the
-    whole share and expects a ``roms/`` child.  Reusing the old mount/links
-    made every reference dangle.  Restore local content first, unmount the old
-    layout, retain enabled peer records, and let boot replay build fresh links.
-
-    Schema v3 only adds the transport identity. Existing v2 mounts are known
-    SMB mounts and are deliberately left active; switching a live filesystem
-    underneath a running emulator would be less safe than migrating on its
-    next controlled remount.
+    Schema v4 replaces ROM-folder rename/symlink reconciliation with a
+    Drone-owned EmulationStation overlay. Restore every legacy local path and
+    unmount before boot replay installs the non-mutating layout. Failure leaves
+    the record present and refuses to advance the schema.
     """
     with _STATE_MIGRATION_LOCK:
         state = _load_state(settings)
@@ -1050,7 +1039,10 @@ def public_record(record: dict) -> dict:
     }
     public.update(
         {
-            "system_count": len([row for row in systems if isinstance(row, dict) and row.get("symlink_created")]),
+            "system_count": len([
+                row for row in systems
+                if isinstance(row, dict) and (row.get("overlay_created") or row.get("symlink_created"))
+            ]),
             "bios_link_count": len([row for row in bios if isinstance(row, dict) and row.get("symlink_created")]),
             "skipped_count": skipped_systems + int(record.get("bios_local_count") or 0),
         }
@@ -1060,7 +1052,10 @@ def public_record(record: dict) -> dict:
 
 def _restore_local_fallback(settings: Settings, mount_point: Path, record: dict) -> List[str]:
     """Restore every locally-owned path without touching the remote target."""
-    errors = _revert_system_references(settings, mount_point, record.get("systems") or [])
+    errors = _network_es_overlay.remove(settings, record.get("parse_gamelist_only_previous"))
+    # Compatibility-only recovery for schema-v3 and older references. New
+    # references never put ROM links or renamed folders under roms_root.
+    errors.extend(_revert_system_references(settings, mount_point, record.get("systems") or []))
     errors.extend(_revert_bios_references(settings, mount_point, record.get("bios") or []))
     # Also recover mutations made immediately before an interrupted manifest
     # commit. Ownership is restricted to this peer's mount root.
@@ -1298,7 +1293,11 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
     else:
         mount_result = _mount_preferred_transport(settings, target, mount_point)
     if mount_result["status"] != "mounted":
-        interrupted = {"systems": existing_systems, "bios": existing_bios}
+        interrupted = {
+            "systems": existing_systems,
+            "bios": existing_bios,
+            "parse_gamelist_only_previous": (prior or {}).get("parse_gamelist_only_previous"),
+        }
         recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
         _unmount(mount_point, detach_immediately=True)
         cleanup_safe = not recovery_errors
@@ -1357,7 +1356,11 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
         ]
 
     if preflight_detail:
-        interrupted = {"systems": existing_systems, "bios": existing_bios}
+        interrupted = {
+            "systems": existing_systems,
+            "bios": existing_bios,
+            "parse_gamelist_only_previous": (prior or {}).get("parse_gamelist_only_previous"),
+        }
         recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
         _unmount(mount_point, detach_immediately=True)
         if str(mount_result.get("protocol") or (prior or {}).get("protocol") or "") == "nfs":
@@ -1386,10 +1389,49 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
         result["_refresh_required"] = bool(prior or existing_systems or existing_bios)
         return result
 
-    systems = _apply_system_references(settings, mount_point, existing_systems, peer_system_names)
+    try:
+        systems, previous_parse_gamelist_setting = _network_es_overlay.install(
+            settings,
+            mount_point,
+            peer_system_names,
+            (prior or {}).get("parse_gamelist_only_previous"),
+        )
+    except (OSError, ValueError) as error:
+        interrupted = {
+            "systems": existing_systems,
+            "bios": existing_bios,
+            "parse_gamelist_only_previous": (prior or {}).get("parse_gamelist_only_previous"),
+        }
+        recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
+        _unmount(mount_point, detach_immediately=True)
+        if str(mount_result.get("protocol") or (prior or {}).get("protocol") or "") == "nfs":
+            _revoke_nfs_export(settings, target)
+        cleanup_safe = not recovery_errors
+        detail = f"EmulationStation network reference preflight failed: {error}"
+        record = _upsert_peer_record(
+            settings,
+            peer_id,
+            peer_name=target["peer_name"],
+            tailnet_ip=target["tailnet_ip"],
+            mount_point=str(mount_point),
+            enabled=True,
+            status="error",
+            status_detail=(detail if cleanup_safe else f"Could not restore local fallback: {recovery_errors[0]}"),
+            systems=[] if cleanup_safe else existing_systems,
+            bios=[] if cleanup_safe else existing_bios,
+            bios_status="pending" if cleanup_safe else "error",
+            protocol=str(mount_result.get("protocol") or (prior or {}).get("protocol") or ""),
+            last_checked_at=_now_iso(),
+        )
+        result = dict(record)
+        result["_refresh_required"] = bool(prior or existing_systems or existing_bios)
+        return result
     raw_remote_system_counts = summary.get("system_counts") if isinstance(summary, dict) and isinstance(summary.get("system_counts"), dict) else {}
     remote_system_counts = {}
+    selected_names = {str(name).strip().lower() for name in (peer_system_names or [])}
     for name, value in raw_remote_system_counts.items():
+        if str(name).strip().lower() not in selected_names:
+            continue
         try:
             remote_system_counts[str(name)] = max(0, int(value or 0))
         except (TypeError, ValueError):
@@ -1402,6 +1444,7 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
         export_path=str(mount_result.get("export_path") or ""),
         transport_fallback_detail=str(mount_result.get("transport_fallback_detail") or ""),
         enabled=True, status="mounted", status_detail="", systems=systems, bios=existing_bios,
+        parse_gamelist_only_previous=previous_parse_gamelist_setting,
         bios_status="pending", bios_status_detail="BIOS reconciliation queued",
         remote_system_counts=remote_system_counts,
         remote_rom_count=sum(int(value or 0) for value in remote_system_counts.values()),
@@ -1560,11 +1603,14 @@ def _refresh_emulationstation_after_share_change() -> bool:
     if str(os.environ.get("DRONE_NETWORK_SHARE_AUTO_REFRESH_ES", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return False
     try:
+        from ..common.runtime_state import _ES_LIFECYCLE_LOCK
         from .device_control import _restart_emulationstation
     except ImportError:  # pragma: no cover - direct script execution fallback
+        from common.runtime_state import _ES_LIFECYCLE_LOCK  # type: ignore
         from device.device_control import _restart_emulationstation  # type: ignore
     try:
-        return bool(_restart_emulationstation())
+        with _ES_LIFECYCLE_LOCK:
+            return bool(_restart_emulationstation())
     except Exception:
         return False
 

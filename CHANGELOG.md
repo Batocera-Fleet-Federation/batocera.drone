@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Make referenced ROM systems non-mutating and latency-safe: keep read-only network
+  mounts under Drone's private state directory, validate selected gamelists, and use
+  one atomic Drone-owned EmulationStation overlay instead of renaming local ROM
+  folders or replacing them with symlinks. Gamelist-only discovery is enabled only
+  while a reference is active and its exact previous value is restored on detach,
+  avoiding recursive NFS scans of large folder-based systems such as Lindbergh.
 - Scan TV shows from `/userdata/shows` alongside movies, route show streams and peer
   transfers to that root, and read/write Plex-compatible local artwork for movies,
   series, seasons, and episodes.

@@ -1,13 +1,13 @@
-"""Network Share admin feature: mount a paired peer's ROM/BIOS library over
-NFSv4 (or SMB fallback) and reconcile each into roms_root/
-bios_root as symlinks -- renaming locally colliding ROM system folders aside
-while always preserving existing local BIOS files.
+"""Network Share admin feature: mount a paired peer's ROM/BIOS library read
+only, expose ROMs through a Drone-owned EmulationStation overlay without
+touching roms_root, and preserve existing local BIOS files.
 """
 
 import subprocess
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +23,8 @@ def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
         "SAVES_ROOT": str(root / "saves"),
         "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
         "DRONE_DEVICE_ID": "network-share-test",
+        "ES_SETTINGS_FILE": str(root / "system" / "configs" / "emulationstation" / "es_settings.cfg"),
+        "ES_SYSTEMS_FILE": str(root / "es_systems.cfg"),
     }
     patcher = mock.patch.object(network_share_manager, "_drone_install_root", return_value=root / "install-root")
     bios_patcher = mock.patch.object(network_share_manager, "_bios_reconciliation_background_enabled", return_value=False)
@@ -34,6 +36,17 @@ def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
         settings = Settings.from_env()
     settings.roms_root.mkdir(parents=True, exist_ok=True)
     settings.bios_root.mkdir(parents=True, exist_ok=True)
+    settings.es_settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.es_settings_file.write_text('<?xml version="1.0"?><map/>')
+    definitions = ("snes", "gba", "genesis", "psx", "dreamcast", "n64", "neogeo", "switch", "lindbergh")
+    settings.es_systems_file.write_text(
+        "<systemList>" + "".join(
+            f"<system><name>{name}</name><fullname>{name}</fullname><path>/userdata/roms/{name}</path>"
+            f"<extension>.zip .game .rom</extension><command>emulatorlauncher -system {name} -rom %ROM%</command>"
+            f"<platform>{name}</platform><theme>{name}</theme></system>"
+            for name in definitions
+        ) + "</systemList>"
+    )
     return settings
 
 
@@ -67,8 +80,15 @@ def _mount_that_populates(mount_point: Path, roms: dict = None, bios: dict = Non
             for system, files in (roms or {}).items():
                 system_dir = mount_point / "roms" / system
                 system_dir.mkdir(parents=True, exist_ok=True)
+                game_paths = []
                 for name in files:
                     (system_dir / name).write_text("data")
+                    game_paths.append(name)
+                (system_dir / "gamelist.xml").write_text(
+                    "<gameList>" + "".join(
+                        f"<game><path>./{name}</path><name>{name}</name></game>" for name in game_paths
+                    ) + "</gameList>"
+                )
             for relative_path, content in (bios or {}).items():
                 file_path = mount_point / "bios" / relative_path
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +109,88 @@ class ShouldIncludeEntryTests(unittest.TestCase):
     def test_includes_ordinary_names(self) -> None:
         self.assertTrue(network_share_manager._should_include_entry("snes"))
         self.assertTrue(network_share_manager._should_include_entry("scph5501.bin"))
+
+
+class NetworkEsOverlayTests(unittest.TestCase):
+    def test_install_and_remove_never_touch_local_roms_and_restore_absent_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            local = settings.roms_root / "snes"
+            local.mkdir()
+            (local / "local.zip").write_text("local")
+            mount_point = Path(tmp) / "mount"
+            remote = mount_point / "roms" / "snes"
+            remote.mkdir(parents=True)
+            (remote / "remote.zip").write_text("remote")
+            (remote / "gamelist.xml").write_text(
+                "<gameList><game><path>./remote.zip</path><name>Remote</name></game></gameList>"
+            )
+
+            rows, previous = network_share_manager._network_es_overlay.install(
+                settings, mount_point, ["snes"]
+            )
+
+            self.assertEqual((local / "local.zip").read_text(), "local")
+            self.assertFalse((settings.roms_root / "snes.old").exists())
+            self.assertTrue(rows[0]["overlay_created"])
+            overlay = network_share_manager._network_es_overlay.overlay_path(settings)
+            self.assertEqual(
+                ET.parse(overlay).findtext(".//system/path"),
+                str(remote),
+            )
+            setting = ET.parse(settings.es_settings_file).find(".//bool[@name='ParseGamelistOnly']")
+            self.assertEqual(setting.get("value"), "true")
+
+            self.assertEqual(network_share_manager._network_es_overlay.remove(settings, previous), [])
+            self.assertFalse(overlay.exists())
+            self.assertIsNone(ET.parse(settings.es_settings_file).find(".//*[@name='ParseGamelistOnly']"))
+            self.assertEqual((local / "local.zip").read_text(), "local")
+
+    def test_remove_restores_an_existing_false_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            settings.es_settings_file.write_text(
+                '<map><bool name="ParseGamelistOnly" value="false"/></map>'
+            )
+            mount_point = Path(tmp) / "mount"
+            remote = mount_point / "roms" / "snes"
+            remote.mkdir(parents=True)
+            (remote / "remote.zip").write_text("remote")
+            (remote / "gamelist.xml").write_text(
+                "<gameList><game><path>./remote.zip</path></game></gameList>"
+            )
+            _rows, previous = network_share_manager._network_es_overlay.install(
+                settings, mount_point, ["snes"]
+            )
+            network_share_manager._network_es_overlay.remove(settings, previous)
+            setting = ET.parse(settings.es_settings_file).find(".//bool[@name='ParseGamelistOnly']")
+            self.assertEqual(setting.get("value"), "false")
+
+    def test_invalid_gamelist_fails_before_writing_any_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            remote = Path(tmp) / "mount" / "roms" / "snes"
+            remote.mkdir(parents=True)
+            (remote / "gamelist.xml").write_text(
+                "<gameList><game><path>../escape.zip</path></game></gameList>"
+            )
+            with self.assertRaisesRegex(ValueError, "unsafe game paths"):
+                network_share_manager._network_es_overlay.install(
+                    settings, Path(tmp) / "mount", ["snes"]
+                )
+            self.assertFalse(network_share_manager._network_es_overlay.overlay_path(settings).exists())
+            self.assertIsNone(ET.parse(settings.es_settings_file).find(".//*[@name='ParseGamelistOnly']"))
+
+    def test_refuses_to_replace_a_foreign_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            overlay = network_share_manager._network_es_overlay.overlay_path(settings)
+            overlay.write_text("<systemList/>")
+            with self.assertRaisesRegex(ValueError, "non-Drone"):
+                network_share_manager._network_es_overlay.install(
+                    settings, Path(tmp) / "mount", ["snes"]
+                )
+            self.assertEqual(overlay.read_text(), "<systemList/>")
 
 
 class ResolvePeerTargetTests(unittest.TestCase):
@@ -352,7 +454,7 @@ class EnableTests(unittest.TestCase):
             self.assertFalse(local_snes.is_symlink())
             self.assertEqual((local_snes / "local.zip").read_text(), "local")
             self.assertFalse(old_snes.exists())
-            unmount.assert_called_once_with(mount_point, detach_immediately=True)
+            unmount.assert_any_call(mount_point, detach_immediately=True)
             revoke.assert_called_once()
 
     def test_existing_active_smb_mount_is_not_hot_switched_to_nfs(self) -> None:
@@ -422,7 +524,8 @@ class EnableTests(unittest.TestCase):
 
             self.assertEqual(record["status"], "mounted")
             self.assertEqual(record["bios_status"], "pending")
-            self.assertTrue((settings.roms_root / "snes").is_symlink())
+            self.assertFalse((settings.roms_root / "snes").exists())
+            self.assertTrue(network_share_manager._network_es_overlay.overlay_path(settings).is_file())
             self.assertFalse((settings.bios_root / "scph5501.bin").exists())
             schedule.assert_called_once()
             scheduled_settings, scheduled_peer, scheduled_mount, scheduled_target = schedule.call_args.args
@@ -431,7 +534,7 @@ class EnableTests(unittest.TestCase):
             self.assertEqual(scheduled_mount, mount_point)
             self.assertEqual(scheduled_target["peer_id"], "peer-1")
 
-    def test_no_local_collision_creates_plain_symlink(self) -> None:
+    def test_no_local_collision_creates_only_an_es_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._settings_with_peer(tmp)
             mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
@@ -439,14 +542,16 @@ class EnableTests(unittest.TestCase):
                 record = network_share_manager.enable(settings, "peer-1")
             self.assertEqual(record["status"], "mounted")
             local_snes = settings.roms_root / "snes"
-            self.assertTrue(local_snes.is_symlink())
-            self.assertTrue((local_snes / "mario.zip").is_file())
+            self.assertFalse(local_snes.exists())
+            overlay = network_share_manager._network_es_overlay.overlay_path(settings)
+            self.assertIn(str(mount_point / "roms" / "snes"), overlay.read_text())
             [system_row] = record["systems"]
             self.assertEqual(system_row["system"], "snes")
+            self.assertTrue(system_row["overlay_created"])
             self.assertFalse(system_row["had_local_collision"])
             self.assertEqual(system_row["renamed_to"], "")
 
-    def test_local_collision_renames_to_old_suffix_and_symlinks_over_it(self) -> None:
+    def test_local_collision_leaves_the_local_folder_completely_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._settings_with_peer(tmp)
             local_snes = settings.roms_root / "snes"
@@ -456,16 +561,14 @@ class EnableTests(unittest.TestCase):
             with mock.patch.object(network_share_manager.subprocess, "run", side_effect=_mount_that_populates(mount_point, roms={"snes": ["peer_game.zip"]})):
                 record = network_share_manager.enable(settings, "peer-1")
             self.assertEqual(record["status"], "mounted")
-            # Nothing was deleted -- the original local folder survives, just renamed.
             old_dir = settings.roms_root / "snes.old"
-            self.assertTrue(old_dir.is_dir())
-            self.assertTrue((old_dir / "local_game.zip").is_file())
-            # The "snes" slot now points at the network mount.
-            self.assertTrue(local_snes.is_symlink())
-            self.assertTrue((local_snes / "peer_game.zip").is_file())
+            self.assertFalse(old_dir.exists())
+            self.assertFalse(local_snes.is_symlink())
+            self.assertEqual((local_snes / "local_game.zip").read_text(), "real local rom")
             [system_row] = record["systems"]
             self.assertTrue(system_row["had_local_collision"])
-            self.assertEqual(system_row["renamed_to"], "snes.old")
+            self.assertEqual(system_row["renamed_to"], "")
+            self.assertTrue(system_row["overlay_created"])
 
     def test_never_overwrites_a_pre_existing_old_folder_skips_instead(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,7 +589,8 @@ class EnableTests(unittest.TestCase):
             self.assertTrue((old_dir / "someone_elses_file.zip").is_file())
             [system_row] = record["systems"]
             self.assertFalse(system_row["symlink_created"])
-            self.assertIn("skipped", system_row["skipped_reason"])
+            self.assertTrue(system_row["overlay_created"])
+            self.assertEqual(system_row["skipped_reason"], "")
 
     def test_peer_system_folders_ending_in_old_are_not_referenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -499,7 +603,7 @@ class EnableTests(unittest.TestCase):
             self.assertFalse((settings.roms_root / "genesis.old").exists())
             self.assertFalse((settings.roms_root / "genesis").exists())
 
-    def test_reenabling_is_idempotent_and_leaves_correct_symlink_alone(self) -> None:
+    def test_reenabling_is_idempotent_and_keeps_the_owned_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._settings_with_peer(tmp)
             mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
@@ -509,7 +613,8 @@ class EnableTests(unittest.TestCase):
                 second = network_share_manager.enable(settings, "peer-1")
             self.assertEqual(second["status"], "mounted")
             [system_row] = second["systems"]
-            self.assertTrue(system_row["symlink_created"])
+            self.assertTrue(system_row["overlay_created"])
+            self.assertFalse((settings.roms_root / "snes").exists())
 
     def test_second_peer_never_replaces_first_peers_system_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -649,7 +754,8 @@ class BiosEnableTests(unittest.TestCase):
                 record = network_share_manager.enable(settings, "peer-1")
             self.assertEqual(len(record["systems"]), 1)
             self.assertEqual(len(record["bios"]), 1)
-            self.assertTrue((settings.roms_root / "snes").is_symlink())
+            self.assertFalse((settings.roms_root / "snes").exists())
+            self.assertTrue(network_share_manager._network_es_overlay.overlay_path(settings).is_file())
             self.assertTrue((settings.bios_root / "scph5501.bin").is_symlink())
 
     def test_api_bios_inventory_avoids_walking_the_smb_tree(self) -> None:
@@ -966,9 +1072,9 @@ class MigrationAndOfflineRecoveryTests(unittest.TestCase):
             self.assertFalse(link.is_symlink())
             self.assertEqual((link / "local.zip").read_text(), "local")
             self.assertFalse(original.exists())
-            self.assertEqual(network_share_manager._load_state(settings)["schema_version"], 3)
+            self.assertEqual(network_share_manager._load_state(settings)["schema_version"], 4)
 
-    def test_v2_transport_migration_does_not_unmount_or_rewrite_links(self) -> None:
+    def test_v2_transport_migration_detaches_the_legacy_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
@@ -990,16 +1096,17 @@ class MigrationAndOfflineRecoveryTests(unittest.TestCase):
             )
 
             with mock.patch.object(network_share_manager, "_unmount") as unmount, \
-                    mock.patch.object(network_share_manager, "_recover_owned_orphaned_references") as recover:
+                    mock.patch.object(network_share_manager, "_recover_owned_orphaned_references", return_value=[]) as recover:
                 result = network_share_manager.migrate_legacy_state(settings)
 
             self.assertTrue(result["migrated"])
-            unmount.assert_not_called()
-            recover.assert_not_called()
+            unmount.assert_called_once_with(mount_point)
+            recover.assert_called_once_with(settings)
             self.assertTrue(local_link.is_symlink())
             state = network_share_manager._load_state(settings)
-            self.assertEqual(state["schema_version"], 3)
+            self.assertEqual(state["schema_version"], 4)
             self.assertEqual(state["peers"]["peer-1"]["protocol"], "smb")
+            self.assertEqual(state["peers"]["peer-1"]["systems"], [])
 
     def test_disable_keeps_state_when_cleanup_is_not_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1064,9 +1171,12 @@ class ReferenceSelectionTests(unittest.TestCase):
             ):
                 record = network_share_manager.enable(settings, "peer-1")
             self.assertEqual(record["status"], "mounted")
-            self.assertTrue((settings.roms_root / "snes").is_symlink())
+            self.assertFalse((settings.roms_root / "snes").exists())
             self.assertFalse((settings.roms_root / "gba").exists())
             self.assertEqual([row["system"] for row in record["systems"]], ["snes"])
+            overlay = network_share_manager._network_es_overlay.overlay_path(settings).read_text()
+            self.assertIn("<name>snes</name>", overlay)
+            self.assertNotIn("<name>gba</name>", overlay)
 
     def test_selection_survives_disable_and_reapplies_on_reenable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1079,11 +1189,17 @@ class ReferenceSelectionTests(unittest.TestCase):
                 side_effect=_mount_that_populates(mount_point, roms={"snes": ["mario.zip"], "gba": ["zelda.gba"]}),
             ):
                 network_share_manager.enable(settings, "peer-1")
+                active_setting = ET.parse(settings.es_settings_file).find(
+                    ".//bool[@name='ParseGamelistOnly']"
+                )
+                self.assertEqual(active_setting.get("value"), "true")
                 network_share_manager.disable(settings, "peer-1")
             selection = network_share_manager.get_reference_selection(settings)
             self.assertEqual(selection["selected_systems"], ["snes"])
             self.assertFalse(selection["active"])
             self.assertIsNone(network_share_manager.get_share(settings, "peer-1"))
+            self.assertFalse(network_share_manager._network_es_overlay.overlay_path(settings).exists())
+            self.assertIsNone(ET.parse(settings.es_settings_file).find(".//*[@name='ParseGamelistOnly']"))
             with mock.patch.object(
                 network_share_manager.subprocess,
                 "run",
@@ -1091,6 +1207,28 @@ class ReferenceSelectionTests(unittest.TestCase):
             ):
                 record = network_share_manager.enable(settings, "peer-1")
             self.assertEqual([row["system"] for row in record["systems"]], ["snes"])
+
+    def test_remote_counts_include_only_selected_systems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            network_share_manager.save_reference_selection(settings, "peer-1", "batocera", ["snes"])
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(
+                    mount_point,
+                    roms={"snes": ["mario.zip"], "gba": ["zelda.gba"]},
+                ),
+            ), mock.patch.object(
+                network_share_manager,
+                "_fetch_peer_summary",
+                return_value={"systems": ["snes", "gba"], "system_counts": {"snes": 1, "gba": 99}},
+            ):
+                record = network_share_manager.enable(settings, "peer-1")
+
+            self.assertEqual(record["remote_system_counts"], {"snes": 1})
+            self.assertEqual(record["remote_rom_count"], 1)
 
     def test_only_one_machine_referenced_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
