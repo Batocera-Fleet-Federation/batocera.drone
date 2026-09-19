@@ -93,6 +93,19 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
 # unreachable one fails fast, so the old headroom just made dead peers slow.
 SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "2.5"))
 
+# The health fallback's own guaranteed budget, never taken from the summary's.
+# Liveness and inventory are different questions: /peer/health is ~150 bytes
+# and answers in well under a second even over slow wifi, while
+# /peer/inventory/summary is built from the whole local cache and was measured
+# at 18-22s on a real drone. Funding health out of "whatever the summary left
+# over" means a peer whose inventory is merely slow gets no liveness check at
+# all and is reported Offline -- the exact false negative the fallback exists
+# to prevent. Worst case per peer is therefore summary + health, still bounded
+# and still far below the old two-full-timeouts behaviour.
+SWARM_PEER_HEALTH_TIMEOUT_SECONDS = float(
+    os.environ.get("DRONE_SWARM_PEER_HEALTH_TIMEOUT_SECONDS", "1.5")
+)
+
 
 def _get_download_manager():
     """Delegate to the drone_api singleton accessor (lazy to avoid a cycle)."""
@@ -577,17 +590,13 @@ class HandlersNetworkMixin:
             if self.settings.use_fake_data and peer.get("fake_data"):
                 entry["error"] = str(summary_error) or summary_error.__class__.__name__
                 return entry
-            # Share the peer's single budget rather than starting a fresh
-            # one: two full timeouts back to back is how one dead peer used
-            # to cost 2x SWARM_PEER_TIMEOUT_SECONDS on its own. Health is a
-            # tiny endpoint, so whatever is left of the budget is plenty for
-            # a peer that is actually up -- and if nothing is left, the peer
-            # has already proven it is not answering quickly.
-            health_deadline = started + SWARM_PEER_TIMEOUT_SECONDS
-            health_budget = health_deadline - time.monotonic()
-            if health_budget <= 0:
-                entry["error"] = str(summary_error) or summary_error.__class__.__name__
-                return entry
+            # Health gets its own small, guaranteed budget. It must not be
+            # funded from what the summary left over: a slow inventory
+            # consumes the entire peer budget, and the liveness check that
+            # would have proven the peer is up then never runs at all.
+            health_started = time.monotonic()
+            health_deadline = health_started + SWARM_PEER_HEALTH_TIMEOUT_SECONDS
+            health_budget = SWARM_PEER_HEALTH_TIMEOUT_SECONDS
             try:
                 _health, address = _peer_get_json_for_peer(
                     peer,

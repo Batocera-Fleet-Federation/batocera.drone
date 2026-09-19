@@ -9093,14 +9093,45 @@ class SwarmAsyncProbeTests(unittest.TestCase):
         self.assertIn("404", body)
         self.assertIn("self._swarm_probe_peer(peer)", body)
 
-    def test_health_fallback_shares_the_peers_budget(self) -> None:
-        # Regression: a fresh budget for the health fallback is how one dead
-        # peer used to cost 2x SWARM_PEER_TIMEOUT_SECONDS by itself.
+    def test_health_fallback_has_its_own_guaranteed_budget(self) -> None:
+        # Regression, both directions. The health fallback must not start a
+        # *full* second SWARM_PEER_TIMEOUT_SECONDS (that is how one dead peer
+        # used to cost 2x on its own) -- but it must not be funded from the
+        # summary's leftovers either.
+        #
+        # Measured on a real drone: /peer/health answers in 0.15-0.68s while
+        # /peer/inventory/summary takes 18-22s. With a shared budget the
+        # summary consumed all of it, the liveness check never ran, and a
+        # perfectly healthy Drone was reported Offline with "read operation
+        # timed out" -- exactly the false negative the fallback exists to
+        # prevent.
         start = self.handlers.index("def _swarm_probe_peer(")
         body = self.handlers[start:self.handlers.index("def _handle_admin_tailnet_status(", start)]
-        self.assertIn("health_deadline = started + SWARM_PEER_TIMEOUT_SECONDS", body)
-        self.assertIn("health_budget = health_deadline - time.monotonic()", body)
-        self.assertNotIn("health_started + SWARM_PEER_TIMEOUT_SECONDS", body)
+        self.assertIn("health_deadline = health_started + SWARM_PEER_HEALTH_TIMEOUT_SECONDS", body)
+        self.assertIn("health_budget = SWARM_PEER_HEALTH_TIMEOUT_SECONDS", body)
+        # Never derived from what the summary left behind.
+        self.assertNotIn("health_deadline - time.monotonic()", body)
+        self.assertNotIn("health_deadline = started + SWARM_PEER_TIMEOUT_SECONDS", body)
+
+    def test_health_budget_is_smaller_than_the_peer_budget(self) -> None:
+        # It is a floor for a tiny endpoint, not a second full timeout.
+        from app.web import handlers_network
+
+        self.assertLess(
+            handlers_network.SWARM_PEER_HEALTH_TIMEOUT_SECONDS,
+            handlers_network.SWARM_PEER_TIMEOUT_SECONDS * 2,
+        )
+        self.assertGreater(handlers_network.SWARM_PEER_HEALTH_TIMEOUT_SECONDS, 0)
+
+    def test_slow_inventory_still_reports_the_peer_online(self) -> None:
+        # The whole point: a peer whose summary is too slow is Online with
+        # summary_error set, not Offline.
+        start = self.handlers.index("def _swarm_probe_peer(")
+        body = self.handlers[start:self.handlers.index("def _handle_admin_tailnet_status(", start)]
+        health_at = body.index("/v1/api/peer/health")
+        online_at = body.index('entry["online"] = True', health_at)
+        summary_err_at = body.index('entry["summary_error"]', health_at)
+        self.assertLess(online_at, summary_err_at)
 
 
 class TailscaleInstallUiTests(unittest.TestCase):
@@ -9282,3 +9313,79 @@ class DiagnosticPeerErrorTests(unittest.TestCase):
         self.assertTrue(pc._is_tls_identity_error(URLError(ssl.SSLError("unknown ca"))))
         self.assertFalse(pc._is_tls_identity_error(URLError("timed out")))
         self.assertFalse(pc._is_tls_identity_error(None))
+
+
+class SwarmProbeHealthFallbackBehaviourTests(unittest.TestCase):
+    """Behavioural cover for the probe's liveness fallback.
+
+    Regression caught on hardware: /peer/inventory/summary was measured at
+    18-22s on a real drone while /peer/health answered in 0.15s. When health
+    was funded from whatever the summary left of the peer budget, the summary
+    consumed all of it, health never ran, and a healthy Drone was reported
+    Offline with "read operation timed out" -- the exact false negative the
+    fallback exists to prevent."""
+
+    def _probe(self, summary_side_effect, health_side_effect, summary_seconds=0.0):
+        from app.web import handlers_network
+
+        probe = handlers_network.HandlersNetworkMixin._swarm_probe_peer
+        handler = mock.Mock()
+        handler.settings.use_fake_data = False
+        calls = []
+
+        def fake_get(peer, endpoint, settings, **kwargs):
+            calls.append((endpoint, kwargs.get("timeout")))
+            if endpoint.endswith("/inventory/summary"):
+                # A slow summary must burn real wall clock, or the bug this
+                # class covers cannot reproduce: the failure needed the
+                # summary to *consume* the peer budget, not merely fail.
+                if summary_seconds:
+                    time.sleep(summary_seconds)
+                if isinstance(summary_side_effect, Exception):
+                    raise summary_side_effect
+                return summary_side_effect, "https://100.64.0.5:8543"
+            if isinstance(health_side_effect, Exception):
+                raise health_side_effect
+            return health_side_effect, "https://100.64.0.5:8543"
+
+        peer = {"drone_id": "aa:bb", "name": "Peer", "tailnet_ip": "100.64.0.5"}
+        with mock.patch.object(handlers_network, "_peer_get_json_for_peer", side_effect=fake_get):
+            entry = probe(handler, peer)
+        return entry, calls
+
+    def test_slow_inventory_still_reports_online_via_health(self) -> None:
+        from app.web import handlers_network
+
+        # Shrink the peer budget so a short sleep exhausts it, reproducing the
+        # field case (summary 18-22s against a 2.5s budget) in milliseconds.
+        with mock.patch.object(handlers_network, "SWARM_PEER_TIMEOUT_SECONDS", 0.05):
+            entry, calls = self._probe(
+                URLError("read operation timed out"),
+                {"status": "ok"},
+                summary_seconds=0.12,
+            )
+        self.assertTrue(entry["online"])
+        self.assertIsNone(entry["error"])
+        self.assertIn("timed out", entry["summary_error"])
+        # Health really was attempted, with its own non-zero budget.
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1][0].endswith("/peer/health"))
+        self.assertGreater(calls[1][1], 0)
+
+    def test_health_budget_is_independent_of_the_summary_budget(self) -> None:
+        from app.web import handlers_network
+
+        _entry, calls = self._probe(URLError("timed out"), {"status": "ok"})
+        self.assertEqual(calls[1][1], handlers_network.SWARM_PEER_HEALTH_TIMEOUT_SECONDS)
+
+    def test_peer_that_fails_both_is_offline(self) -> None:
+        entry, calls = self._probe(URLError("timed out"), URLError("no route to host"))
+        self.assertFalse(entry["online"])
+        self.assertIn("no route to host", entry["error"])
+        self.assertEqual(len(calls), 2)
+
+    def test_fast_inventory_never_calls_health(self) -> None:
+        entry, calls = self._probe({"counts": {"roms": 5}, "systems": []}, {"status": "ok"})
+        self.assertTrue(entry["online"])
+        self.assertIsNone(entry["summary_error"])
+        self.assertEqual(len(calls), 1)
