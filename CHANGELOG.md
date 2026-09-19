@@ -8,6 +8,9 @@
   folders or replacing them with symlinks. Gamelist-only discovery is enabled only
   while a reference is active and its exact previous value is restored on detach,
   avoiding recursive NFS scans of large folder-based systems such as Lindbergh.
+- Allow a network reference when only some source gamelist entries are stale, report
+  their count and a short preview, and continue rejecting unsafe paths, invalid XML,
+  or a selected system whose gamelist has no reachable games.
 - Scan TV shows from `/userdata/shows` alongside movies, route show streams and peer
   transfers to that root, and read/write Plex-compatible local artwork for movies,
   series, seasons, and episodes.

@@ -181,6 +181,46 @@ class NetworkEsOverlayTests(unittest.TestCase):
             self.assertFalse(network_share_manager._network_es_overlay.overlay_path(settings).exists())
             self.assertIsNone(ET.parse(settings.es_settings_file).find(".//*[@name='ParseGamelistOnly']"))
 
+    def test_partially_stale_gamelist_is_allowed_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            mount_point = Path(tmp) / "mount"
+            remote = mount_point / "roms" / "snes"
+            remote.mkdir(parents=True)
+            (remote / "present.zip").write_text("present")
+            (remote / "gamelist.xml").write_text(
+                "<gameList>"
+                "<game><path>./present.zip</path></game>"
+                "<game><path>./stale.zip</path></game>"
+                "</gameList>"
+            )
+
+            rows, _previous = network_share_manager._network_es_overlay.install(
+                settings, mount_point, ["snes"]
+            )
+
+            self.assertEqual(rows[0]["missing_gamelist_path_count"], 1)
+            self.assertEqual(rows[0]["missing_gamelist_path_preview"], ["stale.zip"])
+            self.assertTrue(network_share_manager._network_es_overlay.overlay_path(settings).exists())
+
+    def test_gamelist_with_no_reachable_games_fails_before_writing_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            mount_point = Path(tmp) / "mount"
+            remote = mount_point / "roms" / "snes"
+            remote.mkdir(parents=True)
+            (remote / "gamelist.xml").write_text(
+                "<gameList><game><path>./stale.zip</path></game></gameList>"
+            )
+
+            with self.assertRaisesRegex(ValueError, "no reachable game paths"):
+                network_share_manager._network_es_overlay.install(
+                    settings, mount_point, ["snes"]
+                )
+
+            self.assertFalse(network_share_manager._network_es_overlay.overlay_path(settings).exists())
+            self.assertIsNone(ET.parse(settings.es_settings_file).find(".//*[@name='ParseGamelistOnly']"))
+
     def test_refuses_to_replace_a_foreign_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))

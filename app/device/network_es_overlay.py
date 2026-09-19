@@ -87,7 +87,7 @@ def _effective_system_nodes(settings: Settings) -> dict[str, ET.Element]:
     return by_name
 
 
-def _validated_game_paths(system_dir: Path) -> list[Path]:
+def _validated_game_paths(system_dir: Path) -> tuple[list[Path], list[Path]]:
     gamelist = system_dir / "gamelist.xml"
     try:
         root = ET.parse(gamelist).getroot()
@@ -121,10 +121,13 @@ def _validated_game_paths(system_dir: Path) -> list[Path]:
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="network-rom-preflight") as pool:
         present = list(pool.map(lambda candidate: candidate.exists(), paths))
     missing = [path for path, exists in zip(paths, present) if not exists]
-    if missing:
+    if len(missing) == len(paths):
         preview = ", ".join(str(path.relative_to(system_dir)) for path in missing[:3])
-        raise ValueError(f"{system_dir.name}: gamelist references {len(missing)} missing game path(s) ({preview})")
-    return paths
+        raise ValueError(
+            f"{system_dir.name}: gamelist contains no reachable game paths "
+            f"({len(missing)} missing; {preview})"
+        )
+    return paths, missing
 
 
 def _build_overlay(settings: Settings, mount_point: Path, system_names: Iterable[str]) -> tuple[ET.ElementTree, list[dict]]:
@@ -137,7 +140,7 @@ def _build_overlay(settings: Settings, mount_point: Path, system_names: Iterable
         if source_node is None:
             raise ValueError(f"{name}: no EmulationStation system definition is installed locally")
         remote_dir = mount_point / "roms" / name
-        _validated_game_paths(remote_dir)
+        _game_paths, missing_paths = _validated_game_paths(remote_dir)
         node = copy.deepcopy(source_node)
         path_node = node.find("path")
         if path_node is None:
@@ -151,6 +154,10 @@ def _build_overlay(settings: Settings, mount_point: Path, system_names: Iterable
             "had_local_collision": (settings.roms_root / name).exists(),
             "renamed_to": "",
             "skipped_reason": "",
+            "missing_gamelist_path_count": len(missing_paths),
+            "missing_gamelist_path_preview": [
+                str(path.relative_to(remote_dir)) for path in missing_paths[:3]
+            ],
         })
     return ET.ElementTree(root), rows
 
