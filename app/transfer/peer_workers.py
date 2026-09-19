@@ -12,13 +12,13 @@ from threading import Thread
 
 try:
     from ..common.settings import Settings
-    from ..device.tailnet_service import ensure_tailnet_networking, tailnet_status
+    from ..device.tailnet_service import ensure_tailnet_networking, tailnet_status, _repair_tailnet_data_path
     from . import local_network as _local_network
     from .drone_tls import DroneCertificateManager
     from .peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
-    from device.tailnet_service import ensure_tailnet_networking, tailnet_status  # type: ignore
+    from device.tailnet_service import ensure_tailnet_networking, tailnet_status, _repair_tailnet_data_path  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address  # type: ignore
@@ -33,6 +33,8 @@ def _start_local_network_workers(settings: Settings) -> None:
             time.sleep(interval)
             if not tailnet_status().get("running"):
                 ensure_tailnet_networking(settings)
+            else:
+                _repair_tailnet_data_path()
 
     Thread(target=tailnet_watchdog, name="drone-tailnet-watchdog", daemon=True).start()
 

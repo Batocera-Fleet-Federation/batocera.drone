@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Iterable, Optional
 
 try:
@@ -79,6 +80,79 @@ TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock" if _TAILSCALE_SOCKET_ENV
 # OAuth client is configured (opt-in).
 TAILSCALE_API_BASE = "https://api.tailscale.com/api/v2"
 TAILSCALE_API_TIMEOUT_SECONDS = 15.0
+
+_NETWORK_REPAIR_LOCK = Lock()
+_NETWORK_REPAIR_LAST = float("-inf")
+
+
+def _kernel_tailnet_failure(payload: dict) -> Optional[str]:
+    """Inspect the kernel data path; daemon pings bypass this path entirely."""
+    if payload.get("BackendState") != "Running":
+        return None
+    # Only supervise our kernel-mode daemon, never userspace networking or an
+    # intentionally logged-out node. Missing/unreadable process state is unknown.
+    try:
+        pid = int(Path("/tmp/drone-tailscaled.pid").read_text().strip())
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except (OSError, ValueError):
+        return None
+    if b"--tun=tailscale0" not in args:
+        return None
+    addresses = payload.get("TailscaleIPs") or []
+    if not addresses:
+        return None
+    result = subprocess.run(["ip", "-j", "address", "show", "dev", "tailscale0"],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        return "tailscale0 is missing"
+    links = json.loads(result.stdout)
+    if not links or "UP" not in links[0].get("flags", []):
+        return "tailscale0 is down"
+    assigned = {row.get("local") for row in links[0].get("addr_info", [])}
+    if not set(addresses).issubset(assigned):
+        return "tailscale0 has lost its assigned address"
+    for peer in (payload.get("Peer") or {}).values():
+        for address in peer.get("TailscaleIPs") or []:
+            if ":" in address:
+                continue
+            result = subprocess.run(["ip", "-j", "route", "get", address],
+                                    capture_output=True, text=True, timeout=5)
+            routes = json.loads(result.stdout) if result.returncode == 0 else []
+            if not routes or routes[0].get("dev") != "tailscale0":
+                return "a peer route no longer uses tailscale0"
+    return None
+
+
+def _repair_tailnet_data_path() -> None:
+    global _NETWORK_REPAIR_LAST
+    if not sys.platform.startswith("linux") or not TAILNET_SERVICE.is_file():
+        return
+    if not _NETWORK_REPAIR_LOCK.acquire(blocking=False):
+        return
+    try:
+        if time.monotonic() - _NETWORK_REPAIR_LAST < 300:
+            return
+        proc = _run_cli(["status", "--json"], timeout=5)
+        if proc.returncode:
+            return
+        reason = _kernel_tailnet_failure(json.loads(proc.stdout))
+        if not reason:
+            return
+        _NETWORK_REPAIR_LAST = time.monotonic()
+        print(f"Tailnet recovery: {reason}; restarting DRONE_TAILNET", flush=True)
+        result = subprocess.run(["sh", str(TAILNET_SERVICE), "restart"],
+                                capture_output=True, text=True, timeout=45)
+        if result.returncode:
+            print(f"Tailnet recovery restart failed: exit {result.returncode}", flush=True)
+            return
+        _run_cli(["set", "--netfilter-mode=off"], timeout=10)
+        proc = _run_cli(["status", "--json"], timeout=5)
+        remaining = _kernel_tailnet_failure(json.loads(proc.stdout)) if proc.returncode == 0 else "daemon unavailable"
+        print(f"Tailnet recovery: {remaining or 'completed'}", flush=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Tailnet recovery check failed: {type(error).__name__}: {error}", flush=True)
+    finally:
+        _NETWORK_REPAIR_LOCK.release()
 
 
 def _run_cli(args: list, timeout: float) -> "subprocess.CompletedProcess[str]":
@@ -349,6 +423,7 @@ def ensure_tailnet_networking(settings: Optional[Any] = None) -> None:
     except (OSError, subprocess.SubprocessError):
         return
     _maybe_disable_key_expiry(settings)
+    _repair_tailnet_data_path()
 
 
 def _start_daemon_if_needed() -> Optional[str]:

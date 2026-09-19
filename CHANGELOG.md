@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Recover Tailscale after network resets leave its kernel interface down, remove
+  its address, or lose peer routes even while the daemon reports Running. The
+  startup/60-second watchdog restarts the managed service, verifies recovery,
+  and limits restarts to once per five minutes; logged-out and userspace nodes
+  are left alone.
+
 - Make referenced ROM systems non-mutating and latency-safe: keep read-only network
   mounts under Drone's private state directory, validate selected gamelists, and use
   one atomic Drone-owned EmulationStation overlay instead of renaming local ROM
