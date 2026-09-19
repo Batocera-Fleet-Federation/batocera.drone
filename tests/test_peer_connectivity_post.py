@@ -117,6 +117,8 @@ class PeerFileDownloadConnectivityTests(unittest.TestCase):
                 peer_connectivity.time,
                 "monotonic",
                 side_effect=[1.0, 8.0, 11.0],
+            ), mock.patch.object(
+                peer_connectivity, "_resolve_host_within", return_value=True
             ):
                 with self.assertRaises(URLError):
                     peer_connectivity._peer_post_json_for_peer(

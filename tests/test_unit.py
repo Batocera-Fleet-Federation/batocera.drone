@@ -832,6 +832,8 @@ class SettingsTests(unittest.TestCase):
                 peer_connectivity, "_peer_get_json", side_effect=URLError("timed out")
             ) as get_json, mock.patch.object(
                 peer_connectivity.time, "monotonic", side_effect=[1.0, 8.0, 11.0]
+            ), mock.patch.object(
+                peer_connectivity, "_resolve_host_within", return_value=True
             ):
                 with self.assertRaises(URLError):
                     peer_connectivity._peer_get_json_for_peer(
@@ -2633,7 +2635,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_bios_route_redirects_into_systems_browse_bios_entry(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
-        router_start = source.index("async function router()")
+        router_start = source.index("async function router(")
         bios_branch_start = source.index('if (hash === "#bios")', router_start)
         bios_branch_end = source.index("\n", source.index("return;", bios_branch_start))
         self.assertIn("redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY))", source[bios_branch_start:bios_branch_end])
@@ -7260,7 +7262,7 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn("swarmMenuBtn", self.js[visibility_start:visibility_end])
 
     def test_router_dispatches_swarm_hash(self) -> None:
-        router_start = self.js.index("async function router()")
+        router_start = self.js.index("async function router(")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         self.assertIn('hash === "#admin/swarm"', router_body)
         self.assertIn("await renderSwarmPage();", router_body)
@@ -7289,7 +7291,7 @@ class SwarmPageTests(unittest.TestCase):
         body = self.js[page_start:page_end]
         promise_all_index = body.index("Promise.all([")
         discover_index = body.index("loadTailnetDiscovery()")
-        overview_index = body.index("loadSwarmOverview()")
+        overview_index = body.index("loadSwarmOverview(false, { probe: false })")
         # Both calls must be arguments to the same Promise.all(...), i.e. both
         # indices fall between it and its closing "]);".
         promise_all_close = body.index("]);", promise_all_index)
@@ -7367,7 +7369,7 @@ class SwarmPageTests(unittest.TestCase):
 
     def test_system_info_bar_uses_cheap_paired_count(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
-        bar_end = self.js.index("async function router()", bar_start)
+        bar_end = self.js.index("async function router(", bar_start)
         body = self.js[bar_start:bar_end]
         self.assertIn('api("/admin/local-network/status")', body)
         self.assertIn("Paired: ${pairedCount}", body)
@@ -7377,7 +7379,7 @@ class SwarmPageTests(unittest.TestCase):
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        overview_index = body.index("loadSwarmOverview()")
+        overview_index = body.index("loadSwarmOverview(false, { probe: false })")
         cache_index = body.index("swarmDronesById = Object.fromEntries(")
         card_map_index = body.index("drones.map(renderSwarmDroneCard)")
         # Populated from the overview drones list, before the cards are rendered
@@ -7472,7 +7474,7 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertNotIn("bi-grid-3x3-gap", self.js)
 
     def test_router_dispatches_plain_and_explore_systems_hashes_to_the_same_page(self) -> None:
-        router_start = self.js.index("async function router()")
+        router_start = self.js.index("async function router(")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         self.assertIn('hash.startsWith("#systems")', router_body)
         self.assertIn("await renderSystemsExplorePage();", router_body)
@@ -7481,7 +7483,7 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertNotIn('hash.startsWith("#systems/explore")', router_body)
 
     def test_router_dispatches_plain_and_explore_movies_hashes_to_the_same_page(self) -> None:
-        router_start = self.js.index("async function router()")
+        router_start = self.js.index("async function router(")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         movies_branch_start = router_body.index('} else if (hash.startsWith("#movies")) {')
         movies_branch_end = router_body.index("} else if (hash ===", movies_branch_start)
@@ -7491,7 +7493,7 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn("await renderMovieExplorerPage();", movies_branch)
 
     def test_movies_and_systems_explore_share_the_full_bleed_chrome_takeover(self) -> None:
-        router_start = self.js.index("async function router()")
+        router_start = self.js.index("async function router(")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         self.assertIn("isMoviesExplorerRoute || hash.startsWith(\"#systems\")", router_body)
 
@@ -7514,12 +7516,12 @@ class SystemsExplorePageTests(unittest.TestCase):
         # `await router()` call doesn't return until the whole redirect
         # chain has actually finished.
         helper_start = self.js.index("async function redirectRouterHash(")
-        helper_end = self.js.index("async function router() {", helper_start)
+        helper_end = self.js.index("async function router(", helper_start)
         helper_body = self.js[helper_start:helper_end]
         self.assertIn("history.replaceState(null, \"\", hash)", helper_body)
         self.assertIn("await router();", helper_body)
 
-        router_start = self.js.index("async function router() {")
+        router_start = self.js.index("async function router(")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         self.assertIn('await redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY));', router_body)
         self.assertIn('await redirectRouterHash("#movies");', router_body)
@@ -7963,7 +7965,7 @@ class NetworkSharePageTests(unittest.TestCase):
 
     def test_referencing_pill_shown_next_to_email_pill(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
-        bar_end = self.js.index("async function router()", bar_start)
+        bar_end = self.js.index("async function router(", bar_start)
         body = self.js[bar_start:bar_end]
         email_index = body.index("Email: ${emailOn")
         share_index = body.index("Referencing: ${shares.length}")
@@ -8052,7 +8054,7 @@ class TailnetServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tailnet_service.tailnet_enroll("   ")
         with mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path("/nonexistent/tailscale")):
-            with self.assertRaisesRegex(RuntimeError, "Re-run the Drone installer"):
+            with self.assertRaisesRegex(RuntimeError, "Install Tailscale on the"):
                 tailnet_service.tailnet_enroll("tskey-auth-test")
 
     def test_enroll_runs_tailscale_up_and_never_echoes_the_key_on_failure(self) -> None:
@@ -8337,28 +8339,54 @@ class TailnetKeyExpiryTests(unittest.TestCase):
 
 
 class InstallerTailscaleTests(unittest.TestCase):
-    """batocera_install.sh sets up the Tailscale mesh (binaries under /userdata,
-    DRONE_TAILNET service, optional auth-key enrollment) so the tailnet needs no
-    manual install; batocera_uninstall.sh removes it symmetrically."""
+    """The Tailscale mesh (binaries under /userdata, DRONE_TAILNET service,
+    optional auth-key enrollment) needs no manual install. The download/service
+    logic lives in the *versioned app bundle* at app/install_tailscale.sh so it
+    auto-updates with every Drone release and so the installer, the self-update
+    hook and the Controls page button all run the identical code path;
+    batocera_install.sh delegates to it, and batocera_uninstall.sh removes the
+    mesh symmetrically."""
 
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         cls.install = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
         cls.uninstall = root.joinpath("scripts/batocera_uninstall.sh").read_text(encoding="utf-8")
+        cls.ts_install = root.joinpath("app/install_tailscale.sh").read_text(encoding="utf-8")
         cls.install_path = str(root / "scripts/batocera_install.sh")
         cls.uninstall_path = str(root / "scripts/batocera_uninstall.sh")
+        cls.ts_install_path = str(root / "app/install_tailscale.sh")
 
     def test_scripts_parse_cleanly(self) -> None:
-        for path in (self.install_path, self.uninstall_path):
+        for path in (self.install_path, self.uninstall_path, self.ts_install_path):
             result = subprocess.run(["sh", "-n", path], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_installer_places_everything_under_userdata(self) -> None:
         # Binaries + state must survive Batocera OS updates (read-only rootfs).
-        self.assertIn('TS_DIR="/userdata/system/tailscale"', self.install)
-        self.assertIn('TS_SERVICE="/userdata/system/services/DRONE_TAILNET"', self.install)
-        self.assertIn('--statedir="$STATE_DIR"', self.install)
+        self.assertIn('TS_DIR="${DRONE_TAILSCALE_DIR:-/userdata/system/tailscale}"', self.ts_install)
+        self.assertIn('TS_SERVICE="${DRONE_TAILNET_SERVICE:-/userdata/system/services/DRONE_TAILNET}"', self.ts_install)
+        self.assertIn('--statedir="$STATE_DIR"', self.ts_install)
+
+    def test_installer_delegates_to_the_bundled_script(self) -> None:
+        # One source of truth: batocera_install.sh must not carry its own copy
+        # of the download/service logic, or a Drone release could never fix it.
+        self.assertIn('TS_INSTALLER="$WORK_DIR/app/install_tailscale.sh"', self.install)
+        self.assertNotIn("pkgs.tailscale.com", self.install)
+        self.assertIn("pkgs.tailscale.com", self.ts_install)
+
+    def test_bundled_installer_exposes_the_expected_commands(self) -> None:
+        for command in ("ensure", "install", "update", "service", "status"):
+            self.assertIn(f"  {command})", self.ts_install)
+
+    def test_upgrade_backs_up_and_rolls_back(self) -> None:
+        # An unattended drone in another house must never be stranded by a
+        # Tailscale upgrade that fails to start.
+        self.assertIn("TS_BACKUP=", self.ts_install)
+        self.assertIn("rolling back", self.ts_install)
+        self.assertIn("wait_for_daemon", self.ts_install)
+        # Only restart when the version actually changed.
+        self.assertIn("is already current; not restarting the daemon.", self.ts_install)
 
     def test_installer_supports_hands_free_and_skip_paths(self) -> None:
         self.assertIn("DRONE_SKIP_TAILSCALE", self.install)
@@ -8371,8 +8399,8 @@ class InstallerTailscaleTests(unittest.TestCase):
         self.assertIn("if ! install_tailscale_mesh; then", self.install)
 
     def test_service_falls_back_to_userspace_networking_without_tun(self) -> None:
-        self.assertIn("modprobe tun", self.install)
-        self.assertIn("--tun=userspace-networking", self.install)
+        self.assertIn("modprobe tun", self.ts_install)
+        self.assertIn("--tun=userspace-networking", self.ts_install)
 
     def test_uninstaller_removes_the_mesh_and_releases_the_node(self) -> None:
         self.assertIn("remove_tailscale_mesh", self.uninstall)
@@ -8823,3 +8851,289 @@ class NotificationsDropdownHeaderTests(unittest.TestCase):
     def test_dismiss_all_button_is_styled_white_not_red(self) -> None:
         self.assertIn(".notifications-dismiss-all-btn {", self.css)
         self.assertIn("color: var(--admin-text);", self.css)
+
+
+class PeerDnsBoundTests(unittest.TestCase):
+    """Name resolution is the one part of a peer dial no socket timeout can
+    bound: urlopen's timeout only applies once a socket exists, and
+    getaddrinfo() runs before that. A failing `.local` lookup costs ~15s on a
+    Batocera box with avahi, which is what made the Swarm overview take 36s
+    with three unreachable peers. These guard the bounded resolver and the
+    candidate gate built on it."""
+
+    def setUp(self) -> None:
+        from app.transfer import peer_connectivity
+
+        peer_connectivity.reset_peer_dns_cache()
+
+    def tearDown(self) -> None:
+        from app.transfer import peer_connectivity
+
+        peer_connectivity.reset_peer_dns_cache()
+
+    def test_literal_ip_never_blocks_on_resolution(self) -> None:
+        from app.transfer import peer_connectivity
+
+        # An IP must short-circuit entirely -- no thread, no getaddrinfo, and
+        # true even with a zero budget.
+        with mock.patch.object(peer_connectivity.socket, "getaddrinfo") as getaddrinfo:
+            self.assertTrue(peer_connectivity._resolve_host_within("192.168.1.50", 443, 0))
+            self.assertTrue(peer_connectivity._resolve_host_within("100.64.0.5", 443, 0))
+        getaddrinfo.assert_not_called()
+
+    def test_slow_resolution_is_abandoned_at_the_deadline(self) -> None:
+        from app.transfer import peer_connectivity
+
+        started = time.monotonic()
+
+        def never_returns(*_args, **_kwargs):
+            time.sleep(30)
+
+        with mock.patch.object(peer_connectivity.socket, "getaddrinfo", side_effect=never_returns):
+            resolved = peer_connectivity._resolve_host_within("drone-b.local", 443, 0.2)
+        elapsed = time.monotonic() - started
+        self.assertFalse(resolved)
+        # The point of the fix: we stop waiting, rather than paying the full
+        # (uninterruptible) lookup.
+        self.assertLess(elapsed, 5)
+
+    def test_failures_are_negatively_cached(self) -> None:
+        from app.transfer import peer_connectivity
+
+        with mock.patch.object(
+            peer_connectivity.socket, "getaddrinfo", side_effect=OSError("no such host")
+        ) as getaddrinfo:
+            self.assertFalse(peer_connectivity._resolve_host_within("drone-b.local", 443, 1))
+            self.assertFalse(peer_connectivity._resolve_host_within("drone-b.local", 443, 1))
+        # Second call served from the negative cache, so a dead peer costs the
+        # resolver once per TTL rather than once per probe.
+        self.assertEqual(getaddrinfo.call_count, 1)
+
+    def test_unresolvable_candidate_is_skipped_and_ip_still_tried(self) -> None:
+        from app.transfer import peer_connectivity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            peer = {
+                "advertised_reachable_url": "https://drone-b.local",
+                "reachable_url": "https://192.168.1.50",
+                "scheme": "https",
+                "api_port": 443,
+            }
+            with mock.patch.object(
+                peer_connectivity, "_resolve_host_within", return_value=False
+            ) as resolve, mock.patch.object(
+                peer_connectivity, "_peer_get_json", return_value={"ok": True}
+            ) as get_json:
+                payload, address = peer_connectivity._peer_get_json_for_peer(
+                    peer,
+                    "/v1/api/peer/health",
+                    settings,
+                    peer_id="peer-id",
+                    timeout=2,
+                )
+        self.assertEqual(payload, {"ok": True})
+        # The hostname candidate never reached the network; the literal-IP
+        # candidate did, and won.
+        self.assertEqual(address, "https://192.168.1.50")
+        self.assertEqual(get_json.call_count, 1)
+        self.assertEqual(get_json.call_args_list[0].args[0], "https://192.168.1.50/v1/api/peer/health")
+        resolve.assert_called()
+
+    def test_all_candidates_unresolvable_raises_rather_than_hanging(self) -> None:
+        from app.transfer import peer_connectivity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            peer = {"advertised_reachable_url": "https://drone-b.local", "scheme": "https", "api_port": 443}
+            with mock.patch.object(
+                peer_connectivity, "_resolve_host_within", return_value=False
+            ), mock.patch.object(peer_connectivity, "_peer_get_json") as get_json:
+                with self.assertRaises(URLError):
+                    peer_connectivity._peer_get_json_for_peer(
+                        peer, "/v1/api/peer/health", settings, peer_id="peer-id", timeout=2
+                    )
+        get_json.assert_not_called()
+
+
+class TailscaleInstallServiceTests(unittest.TestCase):
+    """Install/upgrade is driven from the UI and from the self-update hook,
+    both through the single bundled app/install_tailscale.sh."""
+
+    def test_install_status_parses_the_script_output(self) -> None:
+        from app.device import tailnet_service
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="installed=1 version=1.80.0 running=1\n", stderr=""
+        )
+        with mock.patch.object(tailnet_service.Path, "exists", return_value=True), mock.patch.object(
+            tailnet_service.Path, "is_file", return_value=True
+        ), mock.patch.object(tailnet_service.subprocess, "run", return_value=completed):
+            status = tailnet_service.tailscale_install_status()
+        self.assertTrue(status["installed"])
+        self.assertEqual(status["version"], "1.80.0")
+        self.assertTrue(status["running"])
+
+    def test_install_rejects_an_unknown_mode(self) -> None:
+        from app.device import tailnet_service
+
+        with self.assertRaises(ValueError):
+            tailnet_service.install_tailscale("wipe")
+
+    def test_install_surfaces_the_scripts_last_line_on_failure(self) -> None:
+        from app.device import tailnet_service
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="[drone-tailscale] Could not download tailscale_1.80.0_amd64.tgz."
+        )
+        with mock.patch.object(tailnet_service.Path, "is_file", return_value=True), mock.patch.object(
+            tailnet_service.subprocess, "run", return_value=completed
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Could not download"):
+                tailnet_service.install_tailscale("ensure")
+
+    def test_ensure_never_raises_so_it_cannot_fail_an_app_update(self) -> None:
+        from app.device import tailnet_service
+
+        # A mesh problem must not be able to fail or roll back a Drone update.
+        with mock.patch.object(
+            tailnet_service, "install_tailscale", side_effect=RuntimeError("no network")
+        ):
+            result = tailnet_service.ensure_tailscale_installed()
+        self.assertFalse(result["ok"])
+        self.assertIn("no network", result["error"])
+
+    def test_self_update_runs_the_tailscale_hook(self) -> None:
+        from app.common import self_update
+
+        with mock.patch.object(
+            self_update, "_ensure_tailscale_after_update", return_value={"ok": True, "version": "1.80.0"}
+        ) as hook:
+            self.assertEqual(hook(), {"ok": True, "version": "1.80.0"})
+        # The hook is wired into the update path itself, not just importable.
+        source = Path(self_update.__file__).read_text(encoding="utf-8")
+        self.assertIn('result["tailscale"] = _ensure_tailscale_after_update()', source)
+
+
+class SwarmAsyncProbeTests(unittest.TestCase):
+    """The Swarm page paints from stored state and probes each peer
+    separately, so one Drone that moved networks or powered off can't hold up
+    the page (the 36s-load bug). Server side: probe=0 returns pending peers;
+    /admin/swarm/peers/<id>/probe resolves one card."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.handlers = root.joinpath("app/web/handlers_network.py").read_text(encoding="utf-8")
+        cls.routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
+
+    def test_page_requests_the_unprobed_overview_then_fans_out(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_body = self.js[page_start:page_start + 6000]
+        self.assertIn("loadSwarmOverview(false, { probe: false })", page_body)
+        # Not awaited: the cards must fill in after the page is usable.
+        self.assertIn("probeSwarmPeersAsync(drones);", page_body)
+        self.assertNotIn("await probeSwarmPeersAsync(drones);", page_body)
+
+    def test_probe_fan_out_is_parallel_and_replaces_cards_in_place(self) -> None:
+        start = self.js.index("async function probeSwarmPeersAsync(")
+        body = self.js[start:self.js.index("function swarmSetProbeProgress(", start)]
+        self.assertIn("await Promise.all(", body)
+        self.assertIn("/admin/swarm/peers/${encodeURIComponent(droneId)}/probe", body)
+        self.assertIn("node.outerHTML = renderSwarmDroneCard(resolved)", body)
+        # A failed probe must still resolve the card, never leave it spinning.
+        self.assertIn("pending: false, online: false", body)
+
+    def test_pending_cards_render_a_checking_state(self) -> None:
+        start = self.js.index("function renderSwarmDroneCard(")
+        body = self.js[start:self.js.index("\n}", self.js.index("return `\n    <div class=\"col\" id=", start))]
+        self.assertIn("drone.pending === true || drone.online == null", body)
+        self.assertIn("Checking...", body)
+        self.assertIn("progress-bar-animated", body)
+
+    def test_unprobed_overview_marks_peers_pending_without_dialing(self) -> None:
+        self.assertIn('probe_raw = str(((query_params or {}).get("probe") or ["1"])[0])', self.handlers)
+        self.assertIn('probe = probe_raw not in {"0", "false", "no"}', self.handlers)
+        # online is tri-state: None means "not probed yet".
+        self.assertIn('"online": None,', self.handlers)
+        self.assertIn('"pending": True,', self.handlers)
+        # Probing stays the default so API/MCP/ports-client callers are unaffected.
+        pending_branch = self.handlers.index("if peers and not probe:")
+        probe_branch = self.handlers.index("pool.map(self._swarm_probe_peer, peers)")
+        self.assertLess(pending_branch, probe_branch)
+
+    def test_per_peer_probe_endpoint_is_routed_and_guarded(self) -> None:
+        self.assertIn(
+            'parts[1] == "swarm" and parts[2] == "peers" and parts[4] == "probe"',
+            self.routes,
+        )
+        start = self.handlers.index("def _handle_admin_swarm_peer_probe(")
+        body = self.handlers[start:self.handlers.index("def _handle_admin_swarm_overview(", start)]
+        self.assertIn("_local_network.is_local_mode(self.settings)", body)
+        self.assertIn("404", body)
+        self.assertIn("self._swarm_probe_peer(peer)", body)
+
+    def test_health_fallback_shares_the_peers_budget(self) -> None:
+        # Regression: a fresh budget for the health fallback is how one dead
+        # peer used to cost 2x SWARM_PEER_TIMEOUT_SECONDS by itself.
+        start = self.handlers.index("def _swarm_probe_peer(")
+        body = self.handlers[start:self.handlers.index("def _handle_admin_tailnet_status(", start)]
+        self.assertIn("health_deadline = started + SWARM_PEER_TIMEOUT_SECONDS", body)
+        self.assertIn("health_budget = health_deadline - time.monotonic()", body)
+        self.assertNotIn("health_started + SWARM_PEER_TIMEOUT_SECONDS", body)
+
+
+class TailscaleInstallUiTests(unittest.TestCase):
+    """Install/update Tailscale is reachable from the Controls tile and the
+    Swarm page's Tailnet card, both through one shared action."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.handlers = root.joinpath("app/web/handlers_network.py").read_text(encoding="utf-8")
+        cls.routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
+
+    def test_controls_page_has_a_tailnet_tile_with_an_install_button(self) -> None:
+        start = self.js.index("async function renderAdminControlsPage()")
+        body = self.js[start:start + 12000]
+        self.assertIn('api("/admin/tailnet/status")', body)
+        self.assertIn("renderTailnetControlBadge(tailnet)", body)
+        self.assertIn("installTailscale(this,", body)
+        # The tile must never take the Controls page down with it.
+        self.assertIn(".catch(() => ({ installed: false, unavailable: true }))", body)
+
+    def test_swarm_tailnet_card_offers_install_instead_of_a_shell_command(self) -> None:
+        start = self.js.index("function renderSwarmTailnetCard(")
+        body = self.js[start:self.js.index("\nfunction ", start + 10)]
+        self.assertIn('id="swarmTailnetInstallBtn"', body)
+        self.assertIn("installTailscale(this, 'ensure')", body)
+        self.assertIn("installTailscale(this, 'update')", body)
+
+    def test_install_action_posts_and_repaints(self) -> None:
+        start = self.js.index("async function installTailscale(")
+        body = self.js[start:self.js.index("async function swarmEnrollTailnet()", start)]
+        self.assertIn('apiPost("/admin/tailnet/install", { mode })', body)
+        # Freshly installed is not the same as enrolled; don't imply it joined.
+        self.assertIn("status.enrolled", body)
+        self.assertIn("Connect it with an auth key", body)
+        # Re-enable the button on failure, or the tile is stuck.
+        self.assertIn("button.disabled = false;", body)
+
+    def test_install_endpoint_is_routed_and_maps_errors(self) -> None:
+        self.assertIn('parts[1] == "tailnet" and parts[2] == "install"', self.routes)
+        start = self.handlers.index("def _handle_admin_tailnet_install(")
+        body = self.handlers[start:start + 2000]
+        self.assertIn("_install_tailscale(mode)", body)
+        self.assertIn("self._send_json(400", body)
+        self.assertIn("self._send_json(502", body)
+
+    def test_tailnet_status_carries_install_details(self) -> None:
+        start = self.handlers.index("def _handle_admin_tailnet_status(")
+        body = self.handlers[start:self.handlers.index("def _handle_admin_tailnet_install(", start)]
+        self.assertIn('payload["install"] = _tailscale_install_status()', body)

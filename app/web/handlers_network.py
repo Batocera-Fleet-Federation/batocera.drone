@@ -19,6 +19,8 @@ try:
     from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
     from ..device.tailnet_service import (
+        install_tailscale as _install_tailscale,
+        tailscale_install_status as _tailscale_install_status,
         set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
@@ -37,6 +39,7 @@ try:
         _peer_get_json,
         _peer_get_json_for_peer,
         _public_local_peer,
+        reset_peer_dns_cache as _reset_peer_dns_cache,
     )
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -44,6 +47,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
     from device.tailnet_service import (  # type: ignore
+        install_tailscale as _install_tailscale,
+        tailscale_install_status as _tailscale_install_status,
         set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
@@ -62,6 +67,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _peer_get_json,
         _peer_get_json_for_peer,
         _public_local_peer,
+        reset_peer_dns_cache as _reset_peer_dns_cache,
     )
     from web.server_tls import load_peer_cert_everywhere  # type: ignore
 
@@ -78,7 +84,12 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
 # Per-peer budget for the Swarm-overview fan-out. Deliberately short: an
 # offline drone should read as "Offline" quickly, not stall the whole page for
 # the full inventory timeout.
-SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "4"))
+# Total wall-clock budget for probing one peer, inventory + health fallback
+# combined. Lowered from 4s now that a hostname candidate can no longer burn
+# ~15s in getaddrinfo (see PEER_DNS_TIMEOUT_SECONDS in peer_connectivity):
+# with DNS bounded, a reachable peer answers well inside this and an
+# unreachable one fails fast, so the old headroom just made dead peers slow.
+SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "2.5"))
 
 
 def _get_download_manager():
@@ -333,6 +344,10 @@ class HandlersNetworkMixin:
         if not _local_network.is_local_mode(self.settings):
             self._send_json(409, {"error": "Enable Local Network mode before discovering peers"})
             return
+        # Discover is the operator saying "look again". Drop the negative DNS
+        # cache so a peer that just came back onto this network is retried now
+        # rather than after PEER_DNS_FAILURE_TTL_SECONDS.
+        _reset_peer_dns_cache()
         sent = _local_network.announce(
             self.settings,
             str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""),
@@ -485,7 +500,17 @@ class HandlersNetworkMixin:
             if self.settings.use_fake_data and peer.get("fake_data"):
                 entry["error"] = str(summary_error) or summary_error.__class__.__name__
                 return entry
-            health_started = time.monotonic()
+            # Share the peer's single budget rather than starting a fresh
+            # one: two full timeouts back to back is how one dead peer used
+            # to cost 2x SWARM_PEER_TIMEOUT_SECONDS on its own. Health is a
+            # tiny endpoint, so whatever is left of the budget is plenty for
+            # a peer that is actually up -- and if nothing is left, the peer
+            # has already proven it is not answering quickly.
+            health_deadline = started + SWARM_PEER_TIMEOUT_SECONDS
+            health_budget = health_deadline - time.monotonic()
+            if health_budget <= 0:
+                entry["error"] = str(summary_error) or summary_error.__class__.__name__
+                return entry
             try:
                 _health, address = _peer_get_json_for_peer(
                     peer,
@@ -493,8 +518,8 @@ class HandlersNetworkMixin:
                     self.settings,
                     peer_id=entry["drone_id"],
                     config={"network_mode": "local_network"},
-                    timeout=SWARM_PEER_TIMEOUT_SECONDS,
-                    overall_deadline=health_started + SWARM_PEER_TIMEOUT_SECONDS,
+                    timeout=health_budget,
+                    overall_deadline=health_deadline,
                 )
                 entry["reachable_url"] = address
                 entry["latency_ms"] = int((time.monotonic() - started) * 1000)
@@ -507,9 +532,40 @@ class HandlersNetworkMixin:
     def _handle_admin_tailnet_status(self) -> None:
         payload = tailnet_status()
         payload.update(_tailnet_sharing_status(self.settings))
+        # Lets the Controls tile and the Swarm Tailnet card show installed /
+        # version / running without a second round trip, and decide between
+        # an "Install" and an "Update" label.
+        payload["install"] = _tailscale_install_status()
         self._send_json(200, payload)
 
+    def _handle_admin_tailnet_install(self, payload: dict) -> None:
+        """Install or upgrade the Tailscale binaries + DRONE_TAILNET service.
+
+        Backs the Controls page tile and the Swarm page's Tailnet card. The
+        work itself is the same bundled app/install_tailscale.sh that the
+        installer and the self-update hook run, so there is exactly one
+        install path on the device.
+        """
+        mode = str((payload or {}).get("mode") or "ensure").strip().lower()
+        try:
+            result = _install_tailscale(mode)
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except RuntimeError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        # Report enrollment state alongside it: a freshly installed mesh is
+        # running but not enrolled, and the UI should say so rather than
+        # implying the drone just joined a tailnet.
+        status = tailnet_status()
+        status.update(_tailnet_sharing_status(self.settings))
+        status["install"] = {key: value for key, value in result.items() if key != "log"}
+        status["install_log"] = result.get("log") or ""
+        self._send_json(200, status)
+
     def _handle_admin_tailnet_discover(self) -> None:
+        _reset_peer_dns_cache()
         status = tailnet_status()
         status.update(_tailnet_sharing_status(self.settings))
         tailnet_devices = self._sync_tailnet_peers(status)
@@ -609,38 +665,102 @@ class HandlersNetworkMixin:
             return
         self._send_json(200, {"status": "enrolled" if result.get("enrolled") else "pending", **result})
 
-    def _handle_admin_swarm_overview(self) -> None:
-        """One entry per Drone in the federation: this machine plus every paired
-        peer, probed in parallel with a short per-peer budget so an offline
-        drone degrades to ``online: false`` instead of hanging the page."""
-        active = _local_network.is_local_mode(self.settings)
+    def _swarm_self_entry(self) -> dict:
         own = _local_network.discovery_payload(self.settings, "")
         self_summary = self._collect_peer_inventory("summary", {})
-        drones = [
+        return {
+            "drone_id": str(self.settings.device_id),
+            "name": str(self_summary.get("name") or own.get("name") or ""),
+            "hostname": str(own.get("hostname") or ""),
+            "is_self": True,
+            "online": True,
+            "paired": True,
+            "reachable_url": str(own.get("reachable_url") or ""),
+            "advertised_reachable_url": str(own.get("reachable_url") or ""),
+            "tailnet_ip": str(own.get("tailnet_ip") or ""),
+            "ui_url": "",
+            "error": None,
+            "latency_ms": 0,
+            "summary": {key: self_summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")},
+        }
+
+    @staticmethod
+    def _swarm_pending_peer(peer: dict) -> dict:
+        """A peer card's stored state, with no network probe performed.
+
+        ``online: None`` is the tri-state the UI renders as "Checking..." --
+        distinct from ``False`` (probed, unreachable). The browser then probes
+        each peer in parallel via _handle_admin_swarm_peer_probe, so one dead
+        drone never delays the page or the other peers' cards.
+        """
+        return {
+            "drone_id": str(peer.get("drone_id") or ""),
+            "name": str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "Drone"),
+            "hostname": str(peer.get("hostname") or ""),
+            "is_self": False,
+            "online": None,
+            "pending": True,
+            "paired": True,
+            "reachable_url": str(peer.get("reachable_url") or ""),
+            "advertised_reachable_url": str(peer.get("advertised_reachable_url") or ""),
+            "tailnet_ip": str(peer.get("tailnet_ip") or ""),
+            "dns_name": str(peer.get("dns_name") or ""),
+            "ui_url": HandlersNetworkMixin._swarm_peer_ui_url(peer),
+            "error": None,
+            "summary_error": None,
+            "latency_ms": None,
+            "summary": None,
+        }
+
+    def _handle_admin_swarm_peer_probe(self, peer_id: str) -> None:
+        """Probe exactly one paired peer -- the async half of the Swarm page.
+
+        Same per-peer budget and health fallback as the batch path; the only
+        difference is that the browser fans these out itself, one request per
+        card, so each card resolves on its own timeline.
+        """
+        peer_id = unquote(peer_id)
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before probing peers"})
+            return
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if not peer:
+            self._send_json(404, {"error": "paired peer not found"})
+            return
+        self._send_json(
+            200,
             {
-                "drone_id": str(self.settings.device_id),
-                "name": str(self_summary.get("name") or own.get("name") or ""),
-                "hostname": str(own.get("hostname") or ""),
-                "is_self": True,
-                "online": True,
-                "paired": True,
-                "reachable_url": str(own.get("reachable_url") or ""),
-                "advertised_reachable_url": str(own.get("reachable_url") or ""),
-                "tailnet_ip": str(own.get("tailnet_ip") or ""),
-                "ui_url": "",
-                "error": None,
-                "latency_ms": 0,
-                "summary": {key: self_summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")},
-            }
-        ]
+                "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "drone": self._swarm_probe_peer(peer),
+            },
+        )
+
+    def _handle_admin_swarm_overview(self, query_params: Optional[dict] = None) -> None:
+        """One entry per Drone in the federation: this machine plus every paired
+        peer, probed in parallel with a short per-peer budget so an offline
+        drone degrades to ``online: false`` instead of hanging the page.
+
+        ``?probe=0`` skips the peer probes entirely and returns stored state
+        immediately, each peer marked ``pending``. That is what the web UI
+        asks for, so the page paints at once; it then probes each peer through
+        _handle_admin_swarm_peer_probe. Probing stays the default so existing
+        API/MCP/ports-client callers are unaffected.
+        """
+        probe_raw = str(((query_params or {}).get("probe") or ["1"])[0]).strip().lower()
+        probe = probe_raw not in {"0", "false", "no"}
+        active = _local_network.is_local_mode(self.settings)
+        drones = [self._swarm_self_entry()]
         peers = _local_network.paired_peers(self.settings) if active else []
-        if peers:
+        if peers and not probe:
+            drones.extend(self._swarm_pending_peer(peer) for peer in peers)
+        elif peers:
             with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
                 drones.extend(pool.map(self._swarm_probe_peer, peers))
         self._send_json(
             200,
             {
                 "active": active,
+                "probed": bool(probe),
                 "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                 "drones": drones,
             },

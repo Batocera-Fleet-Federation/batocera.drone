@@ -531,6 +531,23 @@ def _download_latest_ports_client(settings: Settings, *, release_version: Option
         return {"status": "error", "error": message}
 
 
+def _ensure_tailscale_after_update() -> dict:
+    """Install-or-upgrade Tailscale as part of a Drone update, best effort.
+
+    Imported lazily: tailnet_service shells out to the device and pulls in the
+    device layer, which the update path should not require just to apply an
+    app bundle (and which tests of the update path should not have to stub).
+    """
+    try:
+        from ..device.tailnet_service import ensure_tailscale_installed
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        try:
+            from device.tailnet_service import ensure_tailscale_installed  # type: ignore
+        except ImportError as error:
+            return {"ok": False, "error": f"tailnet_service unavailable: {error}"}
+    return ensure_tailscale_installed(upgrade=True)
+
+
 def _download_latest_drone_app(settings: Settings, *, release_version: Optional[str] = None) -> dict:
     previous_version = _installed_drone_version(settings)
     # Install the architecture-matched Ports runtime first. On supported
@@ -543,6 +560,13 @@ def _download_latest_drone_app(settings: Settings, *, release_version: Optional[
     with _DRONE_UPDATE_LOCK:
         result = _download_latest_drone_app_unlocked(settings, release_version=release_version)
     result["ports_client"] = ports_client
+    # Every update guarantees the Tailscale mesh is present and current. A
+    # drone installed before the mesh existed -- or one whose binaries were
+    # skipped -- repairs itself here with no manual step, which is the only
+    # way an unattended drone in another house ever gets a tailnet. This is
+    # best effort by contract (ensure_tailscale_installed never raises): a
+    # mesh problem must not fail or roll back an app update.
+    result["tailscale"] = _ensure_tailscale_after_update()
     new_version = _installed_drone_version(settings)
     release_url = _release_url_for_version(new_version) if new_version else ""
     release_notes = _fetch_commit_notes(previous_version, new_version)

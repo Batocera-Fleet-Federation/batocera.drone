@@ -12,6 +12,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,98 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 # Local copy of the peer-request timeout (drone_api keeps its own for peer_download,
 # still resident there); both read the same env var, so the value is identical.
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
+
+# Name resolution is the one part of an outbound peer dial that no socket
+# timeout can bound: urlopen's ``timeout`` only starts applying once there is
+# a socket, and getaddrinfo() runs before that. On a Batocera box with avahi,
+# a *failing* ``.local`` lookup costs ~15s (three chained 5s mDNS timeouts),
+# so a peer that has moved networks or powered off blows any per-peer budget
+# wide open -- this is what made the Swarm overview take 36s with three
+# unreachable peers instead of its intended ~8s.
+#
+# getaddrinfo() is an uncancellable C call, so it cannot be interrupted; it
+# can only be *abandoned*. _resolve_host_within() runs it on a daemon thread
+# and stops waiting at the deadline, and a short negative cache means the
+# next probe for the same dead name does not even pay that much.
+PEER_DNS_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_DNS_TIMEOUT_SECONDS", "2"))
+PEER_DNS_FAILURE_TTL_SECONDS = float(os.environ.get("DRONE_PEER_DNS_FAILURE_TTL_SECONDS", "120"))
+_DNS_FAILURES: dict[str, float] = {}
+_DNS_FAILURES_LOCK = threading.Lock()
+# Bound at import on purpose. The negative-cache TTL is its own concern, not
+# part of a dial's budget accounting, and tests that drive the dial loop by
+# patching ``peer_connectivity.time.monotonic`` with a fixed sequence must not
+# have their clock consumed by cache bookkeeping.
+_dns_clock = time.monotonic
+
+
+def _dns_failure_fresh(key: str) -> bool:
+    with _DNS_FAILURES_LOCK:
+        failed_at = _DNS_FAILURES.get(key)
+        if failed_at is None:
+            return False
+        if _dns_clock() - failed_at >= PEER_DNS_FAILURE_TTL_SECONDS:
+            _DNS_FAILURES.pop(key, None)
+            return False
+        return True
+
+
+def _record_dns_result(key: str, resolved: bool) -> None:
+    with _DNS_FAILURES_LOCK:
+        if resolved:
+            _DNS_FAILURES.pop(key, None)
+        else:
+            _DNS_FAILURES[key] = _dns_clock()
+
+
+def reset_peer_dns_cache() -> None:
+    """Clear the negative DNS cache (an explicit rescan/Discover should retry)."""
+    with _DNS_FAILURES_LOCK:
+        _DNS_FAILURES.clear()
+
+
+def _resolve_host_within(host: str, port: int, timeout: float) -> bool:
+    """True if ``host`` resolves within ``timeout`` seconds.
+
+    Literal IPs short-circuit (getaddrinfo on them never blocks). A name that
+    times out is cached as failing for PEER_DNS_FAILURE_TTL_SECONDS so the
+    next dial skips it immediately rather than paying the wall clock again.
+
+    The abandoned worker thread is a daemon and holds nothing but its own
+    stack, so it exits harmlessly whenever the resolver finally gives up.
+    """
+    name = str(host or "").strip().strip("[]")
+    if not name:
+        return False
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    key = f"{name}:{int(port)}"
+    if _dns_failure_fresh(key):
+        return False
+    if timeout <= 0:
+        return False
+    done = threading.Event()
+    outcome: dict[str, bool] = {}
+
+    def resolve() -> None:
+        try:
+            socket.getaddrinfo(name, int(port), proto=socket.IPPROTO_TCP)
+            outcome["ok"] = True
+        except Exception:  # noqa: BLE001 - any failure is "did not resolve"
+            outcome["ok"] = False
+        finally:
+            done.set()
+
+    threading.Thread(target=resolve, name=f"peer-dns-{name}", daemon=True).start()
+    if not done.wait(timeout):
+        # Still blocked in getaddrinfo; treat as unresolvable for now.
+        _record_dns_result(key, False)
+        return False
+    resolved = bool(outcome.get("ok"))
+    _record_dns_result(key, resolved)
+    return resolved
 
 
 def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False, cafile: Optional[Path] = None) -> Optional[ssl.SSLContext]:
@@ -529,6 +622,27 @@ def _remember_successful_peer_route(settings: Settings, peer_id: str, address: s
         return
 
 
+def _candidate_dialable(address: str, *, budget: float) -> bool:
+    """Skip a named candidate whose DNS lookup cannot finish inside ``budget``.
+
+    Only hostname routes are gated; literal IP and tailnet routes always pass.
+    The resolve budget is capped at PEER_DNS_TIMEOUT_SECONDS so one slow name
+    can never consume a whole peer's dial budget by itself.
+    """
+    if _peer_route_kind(address) != "host":
+        return True
+    parsed = urlparse(str(address or ""))
+    host = str(parsed.hostname or "").strip()
+    if not host:
+        return True
+    try:
+        port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+    except (TypeError, ValueError):
+        port = 443
+    allowance = min(PEER_DNS_TIMEOUT_SECONDS, budget) if budget > 0 else PEER_DNS_TIMEOUT_SECONDS
+    return _resolve_host_within(host, port, allowance)
+
+
 def _peer_get_json_for_peer(
     peer: dict,
     endpoint: str,
@@ -582,6 +696,9 @@ def _peer_get_json_for_peer(
             attempt_timeout = timeout
             if index < len(addresses) - 1:
                 attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        if not _candidate_dialable(address, budget=attempt_timeout):
+            last_error = URLError(f"could not resolve {address} in time")
+            continue
         try:
             payload = _peer_get_json(
                 f"{address}{path}",
@@ -641,6 +758,9 @@ def _peer_post_json_for_peer(
             attempt_timeout = timeout
             if index < len(addresses) - 1:
                 attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        if not _candidate_dialable(address, budget=attempt_timeout):
+            last_error = URLError(f"could not resolve {address} in time")
+            continue
         try:
             response = _peer_post_json(
                 f"{address}{path}",

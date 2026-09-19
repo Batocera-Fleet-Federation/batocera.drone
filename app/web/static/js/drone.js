@@ -464,8 +464,18 @@ async function apiPost(url, payload) {
   return await res.json();
 }
 
-async function loadSwarmOverview(force = false) {
+// probe=false asks the server to skip peer probing and answer immediately
+// from stored state. Only the Swarm page uses it (it probes each peer itself
+// afterwards); every other caller keeps the probing default, and the two
+// shapes are cached separately so an unprobed payload can never be served to
+// a caller that needs live online/offline state.
+async function loadSwarmOverview(force = false, { probe = true } = {}) {
   const now = Date.now();
+  if (!probe) {
+    // Never cached: its whole purpose is to paint instantly, and it is
+    // immediately superseded by the per-peer probes.
+    return await api("/admin/swarm/overview?probe=0");
+  }
   if (!force && swarmOverviewCache && now - swarmOverviewCachedAt < SWARM_DATA_CACHE_TTL_MS) {
     return swarmOverviewCache;
   }
@@ -480,6 +490,58 @@ async function loadSwarmOverview(force = false) {
   } finally {
     if (swarmOverviewPromise === request) swarmOverviewPromise = null;
   }
+}
+
+// Probe every pending peer in parallel, replacing each card in place as its
+// own request returns. Each probe is independently bounded server-side, so a
+// dead peer resolves to an Offline card instead of holding the page.
+async function probeSwarmPeersAsync(drones) {
+  const pending = (Array.isArray(drones) ? drones : []).filter(
+    (drone) => drone && !drone.is_self && String(drone.drone_id || ""),
+  );
+  if (!pending.length) {
+    swarmSetProbeProgress(0, 0);
+    return;
+  }
+  let done = 0;
+  swarmSetProbeProgress(0, pending.length);
+  await Promise.all(
+    pending.map(async (drone) => {
+      const droneId = String(drone.drone_id || "");
+      let resolved;
+      try {
+        const payload = await api(`/admin/swarm/peers/${encodeURIComponent(droneId)}/probe`);
+        resolved = payload && payload.drone ? payload.drone : { ...drone, pending: false, online: false };
+      } catch (err) {
+        resolved = { ...drone, pending: false, online: false, error: err.message || "probe failed" };
+      }
+      done += 1;
+      swarmDronesById[droneId] = resolved;
+      swarmSetProbeProgress(done, pending.length);
+      // The page may have navigated away mid-probe; only touch the card if
+      // its container is still on screen.
+      const node = document.getElementById(swarmDroneCardId(droneId));
+      if (node) node.outerHTML = renderSwarmDroneCard(resolved);
+    }),
+  );
+}
+
+function swarmSetProbeProgress(done, total) {
+  const wrap = document.getElementById("swarmProbeProgress");
+  if (!wrap) return;
+  if (!total || done >= total) {
+    wrap.classList.add("d-none");
+    return;
+  }
+  wrap.classList.remove("d-none");
+  const bar = document.getElementById("swarmProbeProgressBar");
+  const label = document.getElementById("swarmProbeProgressLabel");
+  const pct = Math.round((done / total) * 100);
+  if (bar) {
+    bar.style.width = `${pct}%`;
+    bar.setAttribute("aria-valuenow", String(pct));
+  }
+  if (label) label.textContent = `Checking ${total - done} of ${total} Drone${total === 1 ? "" : "s"}...`;
 }
 
 async function loadTailnetDiscovery(force = false) {
@@ -10490,17 +10552,28 @@ function _networkShareStatusBadge(share) {
   return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || `This Drone is referencing this peer's ROM library${transportSuffix}.${fallback}`)}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
 }
 
+// A peer card has three states, not two: online, offline, and *not probed
+// yet*. The Swarm page paints immediately from stored state with every peer
+// pending, then swaps each card in as its own probe returns -- so one drone
+// that has moved networks never delays the page or the other cards.
+function swarmDroneCardId(droneId) {
+  return `swarmDroneCard-${cssSafeId(String(droneId || ""))}`;
+}
+
 function renderSwarmDroneCard(drone) {
   const summary = drone.summary || {};
   const droneToken = encodeURIComponent(String(drone.drone_id || "")).replace(/'/g, "%27");
   const counts = summary.counts || {};
   const systems = Array.isArray(summary.systems) ? summary.systems : [];
   const share = swarmNetworkSharesByPeer[String(drone.drone_id || "")];
+  const pending = !drone.is_self && (drone.pending === true || drone.online == null);
   const badge = drone.is_self
     ? '<span class="badge text-bg-info">This Drone</span>'
-    : drone.online
-      ? '<span class="badge text-bg-success">Online</span>'
-      : '<span class="badge text-bg-secondary">Offline</span>';
+    : pending
+      ? '<span class="badge text-bg-secondary"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Checking...</span>'
+      : drone.online
+        ? '<span class="badge text-bg-success">Online</span>'
+        : '<span class="badge text-bg-secondary">Offline</span>';
   const latency = !drone.is_self && drone.online && drone.latency_ms != null
     ? `<span class="small text-muted">${Number(drone.latency_ms)} ms</span>`
     : "";
@@ -10522,7 +10595,13 @@ function renderSwarmDroneCard(drone) {
     const skippedNote = skippedCount ? `; ${skippedCount} local item${skippedCount === 1 ? "" : "s"} kept` : "";
     addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(countNote + skippedNote)}</span></div>`);
   }
-  const stats = drone.online && drone.summary
+  const stats = pending
+    ? `<div class="mt-2" aria-label="Checking this Drone">
+        <div class="progress" style="height: 4px;" role="progressbar" aria-valuetext="Checking">
+          <div class="progress-bar progress-bar-striped progress-bar-animated w-100"></div>
+        </div>
+      </div>`
+    : drone.online && drone.summary
     ? `<div class="d-flex flex-wrap gap-3 small mt-2">
         <span><strong>${Number(counts.roms || 0)}</strong> ROMs</span>
         <span><strong>${Number(counts.bios || 0)}</strong> BIOS</span>
@@ -10545,7 +10624,7 @@ function renderSwarmDroneCard(drone) {
         <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;
   return `
-    <div class="col"><div class="card log-card h-100">
+    <div class="col" id="${swarmDroneCardId(drone.drone_id)}"><div class="card log-card h-100">
       <div class="card-header d-flex justify-content-between align-items-center gap-2">
         <span class="text-truncate"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</span>
         <span class="d-flex align-items-center gap-2">${latency}${badge}</span>
@@ -10621,6 +10700,43 @@ function openTailnetPeerModal(peerId) {
   } else {
     modal.classList.add("show");
     modal.style.display = "block";
+  }
+}
+
+// Shared by the Controls page tile and the Swarm page's Tailnet card. Both
+// hit the same endpoint, which runs the same bundled app/install_tailscale.sh
+// the installer and the self-update hook run -- one install path on the
+// device, so there is never a "which one did I use?" question.
+async function installTailscale(button, mode = "ensure") {
+  const label = button ? button.innerHTML : "";
+  const verb = mode === "update" ? "Updating" : "Installing";
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>${verb}...`;
+  }
+  try {
+    // The download can take a while on a slow link; the server caps it.
+    const status = await apiPost("/admin/tailnet/install", { mode });
+    const version = (status.install && status.install.version) || "";
+    showToast(
+      status.enrolled
+        ? `Tailscale ${escapeHtml(version)} is installed and connected.`
+        : `Tailscale ${escapeHtml(version)} is installed. Connect it with an auth key to join your tailnet.`,
+      "success",
+    );
+    tailnetDiscoveryCache = null;
+    tailnetDiscoveryCachedAt = 0;
+    // Repaint whichever page asked, so the new state is visible immediately.
+    if (window.location.hash === "#admin/swarm") await renderSwarmPage();
+    else if (window.location.hash === "#admin/controls") await renderAdminControlsPage();
+    return status;
+  } catch (err) {
+    showToast(`Tailscale install failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = label;
+    }
+    return null;
   }
 }
 
@@ -10747,8 +10863,11 @@ function renderSwarmTailnetCard(tailnet) {
   } else if (!state.installed) {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-secondary">Not installed</span></div>
-      <div class="small text-muted">Tailscale isn't installed on this Drone yet. Re-run the Drone installer once (it now sets the mesh up automatically), then come back here to connect:</div>
-      <pre class="small mt-2 mb-0"><code>curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code></pre>`;
+      <div class="small text-muted mb-3">Tailscale isn't installed on this Drone yet. Install it here -- it downloads the mesh daemon and starts it, then you can connect with an auth key below. Every Drone update keeps it current from then on.</div>
+      <button class="btn btn-primary" type="button" id="swarmTailnetInstallBtn" onclick="installTailscale(this, 'ensure')"><i class="bi bi-download me-1"></i>Install Tailscale</button>
+      <div class="small text-muted mt-2">No internet on this Drone? Re-run the Drone installer instead:
+        <code class="user-select-all">curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code>
+      </div>`;
   } else {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-warning text-dark">Not connected</span></div>
@@ -10775,6 +10894,7 @@ function renderSwarmTailnetCard(tailnet) {
         <span><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</span>
         <div class="d-flex flex-wrap align-items-center gap-2">
           <button class="help-term" type="button" onclick="showTailnetGuideModal()"><i class="bi bi-question-circle-fill"></i>How does this work?</button>
+          ${state.installed ? `<button class="btn btn-sm btn-outline-secondary text-nowrap" type="button" onclick="installTailscale(this, 'update')" title="${escapeHtml(`Installed ${(state.install && state.install.version) || "version unknown"}; check for a newer Tailscale`)}"><i class="bi bi-arrow-up-circle me-1"></i>Update Tailscale</button>` : ""}
           ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
         </div>
       </div>
@@ -10855,9 +10975,12 @@ async function renderSwarmPage() {
     // Independent calls run concurrently. Default Tailnet/local-network state
     // is read-only here; active discovery is reserved for the page's explicit
     // Discover and Refresh controls.
+    // probe: false -- the overview returns stored peer state immediately and
+    // each peer is probed separately below, so a Drone that has moved
+    // networks or powered off can no longer hold up the whole page.
     const [discovery, overview, networkShares] = await Promise.all([
       loadTailnetDiscovery(),
-      loadSwarmOverview(),
+      loadSwarmOverview(false, { probe: false }),
       api("/admin/network-shares").catch(() => ({ shares: [] })),
     ]);
     const tailnet = discovery.tailnet || { installed: false };
@@ -10866,6 +10989,14 @@ async function renderSwarmPage() {
     swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
     content.innerHTML = `
       ${renderSwarmTabBar("swarm")}
+      <div class="d-none mb-2" id="swarmProbeProgress">
+        <div class="d-flex align-items-center gap-2">
+          <div class="progress flex-grow-1" style="height: 4px;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" id="swarmProbeProgressBar" role="progressbar" style="width: 0%" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+          </div>
+          <span class="small text-muted text-nowrap" id="swarmProbeProgressLabel">Checking Drones...</span>
+        </div>
+      </div>
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
@@ -10903,6 +11034,10 @@ async function renderSwarmPage() {
     document.getElementById("localRefreshBtn").addEventListener("click", () => refreshPairing(null, true));
     document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(null, true); });
     await refreshPairing(discovery.network || null);
+    // Deliberately not awaited before the page is usable: the cards fill in
+    // as each probe lands. setLoading(false) has to run first, which the
+    // finally block below guarantees.
+    probeSwarmPeersAsync(drones);
   } catch (err) {
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
@@ -13295,14 +13430,42 @@ async function renderAdminSystemInfoPage() {
   }
 }
 
+// The Controls page's Tailnet tile. Install/update lives here, beside the
+// page's other maintenance actions; enrolling with an auth key stays on the
+// Swarm page, where the full explanation and the key field already are.
+function renderTailnetControlBadge(tailnet) {
+  const state = tailnet || {};
+  if (state.unavailable) return '<span class="badge text-bg-secondary">Unknown</span>';
+  if (!state.installed) return '<span class="badge text-bg-secondary">Not installed</span>';
+  if (state.enrolled) return '<span class="badge text-bg-success">Connected</span>';
+  return '<span class="badge text-bg-warning text-dark">Not connected</span>';
+}
+
+function renderTailnetControlSummary(tailnet) {
+  const state = tailnet || {};
+  if (state.unavailable) return "Could not read the tailnet status on this Drone.";
+  const version = (state.install && state.install.version) || state.version || "";
+  if (!state.installed) {
+    return "Reach this Drone -- and let it reach Drones in other homes -- from anywhere, with no port forwarding.";
+  }
+  const versionNote = version ? `Tailscale <code>${escapeHtml(version)}</code>` : "Tailscale";
+  if (state.enrolled) {
+    return `${versionNote} is connected${state.tailnet_ip ? ` at <code>${escapeHtml(state.tailnet_ip)}</code>` : ""}.`;
+  }
+  return `${versionNote} is installed but this Drone hasn't joined a tailnet yet. Use Connect to paste an auth key.`;
+}
+
 async function renderAdminControlsPage() {
   titleNode.textContent = "Controls";
   subtitleNode.textContent = "Screen mode, volume, screensaver, and EmulationStation configuration";
   setLoading(true, "Loading controls...");
   try {
-    const [payload, autoUpdate] = await Promise.all([
+    const [payload, autoUpdate, tailnet] = await Promise.all([
       api("/admin/system-info"),
       api("/admin/system/auto-update"),
+      // Never fatal: the Tailnet tile degrades to "unknown" rather than
+      // taking the whole Controls page down with it.
+      api("/admin/tailnet/status").catch(() => ({ installed: false, unavailable: true })),
     ]);
     const fields = payload.fields || {};
     const pixnInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
@@ -13383,6 +13546,23 @@ async function renderAdminControlsPage() {
                 <span class="small text-muted text-nowrap">min</span>
               </div>
               <div class="small text-muted mt-2">Restarts EmulationStation.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card control-tile h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <span><i class="bi bi-globe2 me-2"></i>Tailnet</span>
+              ${renderTailnetControlBadge(tailnet)}
+            </div>
+            <div class="card-body d-flex flex-column">
+              <div class="small text-muted mb-2">${renderTailnetControlSummary(tailnet)}</div>
+              <div class="mt-auto d-flex flex-wrap gap-2">
+                <button class="btn btn-sm ${tailnet.installed ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="installTailscale(this, '${tailnet.installed ? "update" : "ensure"}')">
+                  <i class="bi bi-${tailnet.installed ? "arrow-up-circle" : "download"} me-1"></i>${tailnet.installed ? "Update" : "Install"} Tailscale
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" onclick="setHash('#admin/swarm')" title="Connect this Drone to your tailnet with an auth key"><i class="bi bi-link-45deg me-1"></i>Connect</button>
+              </div>
             </div>
           </div>
         </div>

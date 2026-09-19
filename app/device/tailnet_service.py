@@ -206,6 +206,125 @@ def tailnet_peer_ips() -> set[str]:
     }
 
 
+def _installer_script() -> Path:
+    """Path to the bundled app/install_tailscale.sh.
+
+    Resolved from this module rather than a fixed /userdata path so the
+    versioned bundle's own copy always wins -- the point of shipping the
+    installer inside the app bundle is that it updates with every release.
+    """
+    override = os.environ.get("DRONE_TAILSCALE_INSTALLER")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "install_tailscale.sh"
+
+
+def tailscale_install_status() -> dict:
+    """Installed / running / version for the Controls + Swarm install UI.
+
+    Deliberately cheap and offline: it never reaches out to
+    pkgs.tailscale.com, because this runs on every Controls page render.
+    Discovering the latest release is the install/update action's job.
+    """
+    installer = _installer_script()
+    payload = {
+        "installed": TAILSCALE_CLI.exists(),
+        "version": "",
+        "running": False,
+        "service_installed": TAILNET_SERVICE.exists(),
+        "installer_available": installer.is_file(),
+        "install_dir": str(TAILSCALE_DIR),
+    }
+    if not payload["installed"] or not payload["installer_available"]:
+        return payload
+    try:
+        proc = subprocess.run(
+            ["sh", str(installer), "status"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_installer_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return payload
+    for token in (proc.stdout or "").strip().split():
+        key, _, value = token.partition("=")
+        if key == "version" and value:
+            payload["version"] = value
+        elif key == "running":
+            payload["running"] = value == "1"
+    return payload
+
+
+def _installer_env() -> dict:
+    """Pass the module's dev/test path overrides through to the shell script."""
+    env = dict(os.environ)
+    env["DRONE_TAILSCALE_DIR"] = str(TAILSCALE_DIR)
+    env["DRONE_TAILNET_SERVICE"] = str(TAILNET_SERVICE)
+    if TAILSCALE_SOCKET:
+        env["DRONE_TAILSCALE_SOCKET"] = TAILSCALE_SOCKET
+    return env
+
+
+def install_tailscale(mode: str = "ensure", *, timeout: float = 420.0) -> dict:
+    """Run the bundled installer. ``mode`` is ensure | install | update.
+
+    Raises RuntimeError with a user-facing message on failure. The script is
+    responsible for staging, rollback and the daemon restart; this is only the
+    Python entry point onto it (web button, self-update hook).
+    """
+    normalized = str(mode or "ensure").strip().lower()
+    if normalized not in {"ensure", "install", "update"}:
+        raise ValueError("mode must be ensure, install, or update")
+    installer = _installer_script()
+    if not installer.is_file():
+        raise RuntimeError(
+            "This Drone's app bundle does not include install_tailscale.sh. "
+            "Update the Drone app, then try again."
+        )
+    try:
+        proc = subprocess.run(
+            ["sh", str(installer), normalized],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_installer_env(),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Tailscale install timed out; check this Drone's internet access.") from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"Tailscale install could not run: {error}") from error
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        detail = [line for line in output.splitlines() if line.strip()]
+        raise RuntimeError(
+            "Tailscale install failed: " + (detail[-1] if detail else f"exit code {proc.returncode}")
+        )
+    return {"status": "ok", "mode": normalized, "log": output, **tailscale_install_status()}
+
+
+def ensure_tailscale_installed(*, upgrade: bool = True) -> dict:
+    """Self-update hook: guarantee Tailscale is present and current.
+
+    Called after every successful Drone app update so a drone that was
+    installed before the mesh existed (or with the binaries skipped) repairs
+    itself with no manual step. Never raises -- a mesh problem must not be
+    able to fail or roll back an app update -- and returns a dict describing
+    what happened for the update log.
+    """
+    try:
+        before = tailscale_install_status()
+        result = install_tailscale("ensure" if upgrade else "install")
+        return {
+            "ok": True,
+            "previous_version": before.get("version") or "",
+            "version": result.get("version") or "",
+            "installed_now": not before.get("installed"),
+        }
+    except Exception as error:  # noqa: BLE001 - best effort by contract
+        return {"ok": False, "error": str(error) or error.__class__.__name__}
+
+
 def ensure_tailnet_networking(settings: Optional[Any] = None) -> None:
     """Apply the Batocera-compatible netfilter preference, best effort.
 
@@ -241,8 +360,8 @@ def _start_daemon_if_needed() -> Optional[str]:
         pass
     if not TAILNET_SERVICE.exists():
         return (
-            "The DRONE_TAILNET service is not installed. Re-run the Drone installer "
-            "(batocera_install.sh) once to add the mesh daemon, then try again."
+            "The DRONE_TAILNET service is not installed. Use Install Tailscale on the "
+            "Controls page to add the mesh daemon, then try again."
         )
     try:
         subprocess.run(
@@ -365,8 +484,8 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
         raise ValueError("auth key is required")
     if not TAILSCALE_CLI.exists():
         raise RuntimeError(
-            "Tailscale is not installed on this Drone. Re-run the Drone installer "
-            "(batocera_install.sh) once to add it, then paste the key again."
+            "Tailscale is not installed on this Drone. Use Install Tailscale on the "
+            "Controls page (or the Swarm page's Tailnet card), then paste the key again."
         )
     daemon_error = _start_daemon_if_needed()
     if daemon_error:

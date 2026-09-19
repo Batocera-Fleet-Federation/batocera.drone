@@ -630,7 +630,11 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "swarm" and parts[2] == "overview":
-                self._handle_admin_swarm_overview()
+                self._handle_admin_swarm_overview(query_params)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "swarm" and parts[2] == "peers" and parts[4] == "probe":
+                self._handle_admin_swarm_peer_probe(parts[3])
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-shares":
@@ -802,6 +806,11 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "enroll":
                 payload = self._read_json_body()
                 self._handle_admin_tailnet_enroll(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "install":
+                payload = self._read_json_body()
+                self._handle_admin_tailnet_install(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "rotate-auth-key":

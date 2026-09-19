@@ -700,9 +700,11 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
         end = self.js.index("Game Collections", start)
         body = self.js[start:end]
         self.assertIn("row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3", body)
-        self.assertEqual(body.count('class="col">'), 4)
-        self.assertEqual(body.count("control-tile"), 4)
-        for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver"):
+        # Five tiles: the four device controls plus Tailnet (install/update
+        # Tailscale, which belongs with the page's other maintenance actions).
+        self.assertEqual(body.count('class="col">'), 5)
+        self.assertEqual(body.count("control-tile"), 5)
+        for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver", "Tailnet</span>"):
             self.assertIn(marker, body)
         # Screen Mode, Music Volume, and Screensaver restart EmulationStation;
         # System Volume never restarts (OS-level ALSA).
