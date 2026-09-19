@@ -43,3 +43,7 @@ server.key
 # in case that regresses, or a pre-fix run already dropped one locally)
 /ports-client/imgui.ini
 /ports-client/Batocera_Drone.ini
+
+# Stray SQLite files from tests that pass a MagicMock as userdata_root to
+# database_path(); the mock repr becomes a literal filename in the repo root.
+<MagicMock*
