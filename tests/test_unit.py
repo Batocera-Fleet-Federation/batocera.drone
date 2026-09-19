@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import sqlite3
+import ssl
 import subprocess
 import tempfile
 import time
@@ -9204,3 +9205,80 @@ class TailnetPeerMetadataRefreshTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
         self.assertIn("peer_mtls", routes.lower())
+
+
+class OneSidedPairingRepairTests(unittest.TestCase):
+    """Pairing is mutual -- POST /v1/api/peer/pair makes each side store the
+    other's certificate -- but only our half survives the peer being
+    reinstalled or restored from a backup. The peer then answers mTLS with
+    `unknown ca` forever while our own record still looks complete, so nothing
+    retried the handshake and the Drone showed as permanently Offline. Before
+    this, the only fix was a human re-pairing by hand from the other machine."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.handlers = root.joinpath("app/web/handlers_network.py").read_text(encoding="utf-8")
+
+    def _repair_block(self) -> str:
+        start = self.handlers.index("def _repair_one_sided_pairing(")
+        return self.handlers[start:self.handlers.index("def _sync_tailnet_peers(", start)]
+
+    def test_discovery_runs_the_repair_for_already_paired_peers(self) -> None:
+        start = self.handlers.index("def _sync_tailnet_device(")
+        block = self.handlers[start:self.handlers.index("def _repair_one_sided_pairing(", start)]
+        self.assertIn("self._repair_one_sided_pairing(restored)", block)
+
+    def test_repair_only_fires_on_a_trust_failure(self) -> None:
+        # Offline / unroutable / plain HTTP errors are not trust problems, and
+        # re-pairing would fix nothing.
+        block = self._repair_block()
+        self.assertIn("if not _is_tls_identity_error(error):", block)
+        self.assertIn("return peer", block)
+
+    def test_repair_requires_a_tailnet_address(self) -> None:
+        # tailnet_auto_pair is authorized by the peer checking the caller
+        # against its own live tailnet membership, so there is nothing to
+        # authorize the re-pair without one.
+        block = self._repair_block()
+        self.assertIn('not str(peer.get("tailnet_ip") or "").strip()', block)
+        self.assertIn("tailnet_auto_pair=True", block)
+
+    def test_repair_is_best_effort_and_activates_the_new_cert(self) -> None:
+        block = self._repair_block()
+        self.assertIn("tailnet_pair_error", block)
+        self.assertIn("self._activate_local_peer_certificate(repaired)", block)
+
+
+class DiagnosticPeerErrorTests(unittest.TestCase):
+    """When several candidate routes fail, report the informative one. A stale
+    LAN IP timing out last used to mask an `unknown ca` from the tailnet route
+    that actually reached the peer -- the difference between "that machine is
+    off" and "that machine is up and refusing us"."""
+
+    def test_tls_error_is_kept_over_a_later_timeout(self) -> None:
+        from app.transfer import peer_connectivity as pc
+
+        tls = URLError(ssl.SSLError("TLSV1_ALERT_UNKNOWN_CA"))
+        timeout = URLError("timed out")
+        self.assertIs(pc._more_diagnostic_error(tls, timeout), tls)
+
+    def test_tls_error_wins_when_it_arrives_later(self) -> None:
+        from app.transfer import peer_connectivity as pc
+
+        tls = URLError(ssl.SSLError("TLSV1_ALERT_UNKNOWN_CA"))
+        self.assertIs(pc._more_diagnostic_error(URLError("timed out"), tls), tls)
+
+    def test_plain_errors_keep_last_wins(self) -> None:
+        from app.transfer import peer_connectivity as pc
+
+        second = URLError("connection refused")
+        self.assertIs(pc._more_diagnostic_error(URLError("timed out"), second), second)
+
+    def test_detects_ssl_errors_wrapped_by_urlopen(self) -> None:
+        from app.transfer import peer_connectivity as pc
+
+        self.assertTrue(pc._is_tls_identity_error(ssl.SSLError("unknown ca")))
+        self.assertTrue(pc._is_tls_identity_error(URLError(ssl.SSLError("unknown ca"))))
+        self.assertFalse(pc._is_tls_identity_error(URLError("timed out")))
+        self.assertFalse(pc._is_tls_identity_error(None))

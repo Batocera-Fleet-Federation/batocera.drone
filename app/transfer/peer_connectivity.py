@@ -643,6 +643,35 @@ def _candidate_dialable(address: str, *, budget: float) -> bool:
     return _resolve_host_within(host, port, allowance)
 
 
+def _is_tls_identity_error(error: Optional[BaseException]) -> bool:
+    """True for a TLS failure, including one wrapped by urlopen in a URLError.
+
+    In practice this is how "the peer no longer trusts this Drone" surfaces:
+    an ``unknown ca`` alert, because the peer holds no certificate for us and
+    the pairing therefore exists on one side only.
+    """
+    if isinstance(error, ssl.SSLError):
+        return True
+    return isinstance(getattr(error, "reason", None), ssl.SSLError)
+
+
+def _more_diagnostic_error(current: Optional[Exception], candidate: Exception) -> Exception:
+    """Pick the error worth reporting when several candidate routes failed.
+
+    Plain "last error wins" reports whichever address happened to be tried
+    last, which in practice is a stale LAN IP that simply times out -- masking
+    a far more actionable failure on the route that actually reached the peer.
+    A TLS error means a Drone answered and rejected our identity, which is the
+    difference between "that machine is off" and "that machine is up and
+    refusing us". Keep it in preference to a timeout from another address.
+    """
+    if current is None:
+        return candidate
+    if _is_tls_identity_error(current) and not _is_tls_identity_error(candidate):
+        return current
+    return candidate
+
+
 def _peer_get_json_for_peer(
     peer: dict,
     endpoint: str,
@@ -697,7 +726,9 @@ def _peer_get_json_for_peer(
             if index < len(addresses) - 1:
                 attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
         if not _candidate_dialable(address, budget=attempt_timeout):
-            last_error = URLError(f"could not resolve {address} in time")
+            last_error = _more_diagnostic_error(
+                last_error, URLError(f"could not resolve {address} in time")
+            )
             continue
         try:
             payload = _peer_get_json(
@@ -715,7 +746,7 @@ def _peer_get_json_for_peer(
             # cannot make an authorization or endpoint error succeed.
             raise
         except (OSError, URLError, ssl.SSLError) as error:
-            last_error = error
+            last_error = _more_diagnostic_error(last_error, error)
         except Exception:
             # Malformed payloads and programming errors are not reachability
             # failures and should remain visible to the caller.
@@ -759,7 +790,9 @@ def _peer_post_json_for_peer(
             if index < len(addresses) - 1:
                 attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
         if not _candidate_dialable(address, budget=attempt_timeout):
-            last_error = URLError(f"could not resolve {address} in time")
+            last_error = _more_diagnostic_error(
+                last_error, URLError(f"could not resolve {address} in time")
+            )
             continue
         try:
             response = _peer_post_json(
@@ -776,7 +809,7 @@ def _peer_post_json_for_peer(
         except HTTPError:
             raise
         except (OSError, URLError, ssl.SSLError) as error:
-            last_error = error
+            last_error = _more_diagnostic_error(last_error, error)
         except Exception:
             raise
     if last_error is not None:
@@ -845,7 +878,7 @@ def _peer_download_file_for_peer(
                 pass
             raise
         except (OSError, URLError, ssl.SSLError) as error:
-            last_error = error
+            last_error = _more_diagnostic_error(last_error, error)
             try:
                 destination.unlink(missing_ok=True)
             except OSError:

@@ -39,6 +39,7 @@ try:
         _peer_get_json,
         _peer_get_json_for_peer,
         _public_local_peer,
+        _is_tls_identity_error,
         reset_peer_dns_cache as _reset_peer_dns_cache,
     )
     from .server_tls import load_peer_cert_everywhere
@@ -67,6 +68,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _peer_get_json,
         _peer_get_json_for_peer,
         _public_local_peer,
+        _is_tls_identity_error,
         reset_peer_dns_cache as _reset_peer_dns_cache,
     )
     from web.server_tls import load_peer_cert_everywhere  # type: ignore
@@ -273,7 +275,7 @@ class HandlersNetworkMixin:
                     "dns_name": str(row.get("dns_name") or existing.get("dns_name") or ""),
                 },
             )
-            return _public_local_peer(restored)
+            return _public_local_peer(self._repair_one_sided_pairing(restored))
         if _local_network.is_tailnet_peer_forgotten(self.settings, peer_id) and restore_peer_id != peer_id:
             return _public_local_peer({**(discovered or tailnet_peer), "tailnet_forgotten": True, "paired": False})
         try:
@@ -289,6 +291,53 @@ class HandlersNetworkMixin:
             return _public_local_peer(
                 {**(discovered or tailnet_peer), "paired": False, "tailnet_pair_error": str(error) or error.__class__.__name__}
             )
+
+    def _repair_one_sided_pairing(self, peer: dict) -> dict:
+        """Re-establish trust when a paired peer no longer holds our certificate.
+
+        Pairing is mutual: POST /v1/api/peer/pair makes each side store the
+        other's certificate. But only *our* half survives the peer being
+        reinstalled, reset, or restored from a backup. The peer then answers
+        mTLS with ``unknown ca`` forever, and because our own record still
+        looks complete, nothing ever retried the handshake -- the Drone showed
+        as permanently Offline and the only fix was a human re-pairing it by
+        hand from the other machine.
+
+        Over a tailnet we can simply redo it: POST /peer/pair authorizes
+        ``tailnet_auto_pair`` by checking the caller's address against the
+        peer's own live tailnet membership, which is the same evidence that
+        authorized the automatic pairing of a newly discovered tailnet Drone
+        just below. No pairing code is involved and no new trust is granted --
+        this restores exactly the pairing that already existed.
+
+        Best effort: a peer that is merely offline, or that rejects the
+        re-pair, is left exactly as it was.
+        """
+        peer_id = str(peer.get("drone_id") or "").strip()
+        if not peer_id or not str(peer.get("tailnet_ip") or "").strip():
+            return peer
+        try:
+            _peer_get_json_for_peer(
+                peer,
+                "/v1/api/peer/health",
+                self.settings,
+                peer_id=peer_id,
+                config={"network_mode": "local_network"},
+                timeout=SWARM_PEER_TIMEOUT_SECONDS,
+                overall_deadline=time.monotonic() + SWARM_PEER_TIMEOUT_SECONDS,
+            )
+            return peer
+        except Exception as error:
+            if not _is_tls_identity_error(error):
+                # Offline, unroutable, or a plain HTTP error: not a trust
+                # problem, so re-pairing would fix nothing.
+                return peer
+        try:
+            repaired = _local_pair_peer(self.settings, peer, "", tailnet_auto_pair=True)
+        except Exception as error:
+            return {**peer, "tailnet_pair_error": str(error) or error.__class__.__name__}
+        self._activate_local_peer_certificate(repaired)
+        return repaired
 
     def _sync_tailnet_peers(self, status: dict) -> list[dict]:
         devices = [device for device in status.get("peers") or [] if isinstance(device, dict)]
