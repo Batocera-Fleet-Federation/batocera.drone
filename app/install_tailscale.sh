@@ -107,12 +107,62 @@ start() {
     echo "[drone-tailnet] /dev/net/tun unavailable; using userspace networking" >> "$LOG_FILE"
     TUN_FLAG="--tun=userspace-networking"
   fi
+  # Byte offset of the log before launching, so wait_for_tun only ever reads
+  # lines this start produced. The log is appended across restarts, and an
+  # earlier boot's TUN errors must not condemn a run where the driver is fine.
+  LOG_OFFSET=0
+  [ -f "$LOG_FILE" ] && LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d " ")
+  launch "$TUN_FLAG"
+
+  # The presence of /dev/net/tun is not proof that it works. Right after this
+  # script mknod's the node (first boot, before the driver is ready), tailscaled
+  # opens it happily and then fails every write with "Failed to write packets to
+  # TUN device: input/output error" -- tailscale0 stays DOWN with no address, so
+  # `tailscale status` and even `tailscale ping` look healthy while no IP traffic
+  # reaches this drone at all. That is a silently half-broken tailnet: the Drone
+  # can be seen but never dialed. Verify the interface actually came up, and fall
+  # back to the userspace netstack (which still accepts inbound connections) if
+  # it did not.
+  if [ "$TUN_FLAG" = "--tun=tailscale0" ] && ! wait_for_tun; then
+    echo "[drone-tailnet] tailscale0 did not come up; retrying with userspace networking" >> "$LOG_FILE"
+    stop >/dev/null 2>&1
+    sleep 1
+    launch "--tun=userspace-networking"
+  fi
+  echo "[drone-tailnet] tailscaled started (pid $(cat "$PID_FILE"))"
+}
+
+launch() {
   nohup "$TS_DIR/bin/tailscaled" \
     --statedir="$STATE_DIR" \
     --socket="$SOCKET_DIR/tailscaled.sock" \
-    "$TUN_FLAG" >> "$LOG_FILE" 2>&1 &
+    "$1" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
-  echo "[drone-tailnet] tailscaled started (pid $(cat "$PID_FILE"))"
+}
+
+# An enrolled node gets its 100.x address on tailscale0 within a few seconds.
+# A node that has never been enrolled has no address to assign, so treat "the
+# daemon is still alive and answering" as success there rather than forcing a
+# pointless fallback on every pre-enrollment boot.
+wait_for_tun() {
+  i=0
+  while [ "$i" -lt 12 ]; do
+    if ip addr show tailscale0 2>/dev/null | grep -q "inet "; then
+      return 0
+    fi
+    if tail -c "+$((LOG_OFFSET + 1))" "$LOG_FILE" 2>/dev/null \
+      | grep -q "Failed to write packets to TUN device"; then
+      return 1
+    fi
+    if [ "$i" -ge 5 ] && ! "$TS_DIR/bin/tailscale" --socket="$SOCKET_DIR/tailscaled.sock" status >/dev/null 2>&1; then
+      # Not enrolled yet (status exits non-zero for "Logged out"): nothing will
+      # ever be assigned, and kernel TUN is still the right mode for later.
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 stop() {

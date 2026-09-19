@@ -8402,6 +8402,20 @@ class InstallerTailscaleTests(unittest.TestCase):
         self.assertIn("modprobe tun", self.ts_install)
         self.assertIn("--tun=userspace-networking", self.ts_install)
 
+    def test_service_verifies_tun_actually_works_not_just_that_it_exists(self) -> None:
+        # Observed on a real drone: right after this script mknod's
+        # /dev/net/tun, tailscaled opens it and then fails every write with
+        # "Failed to write packets to TUN device: input/output error".
+        # tailscale0 stays DOWN with no address, so `tailscale status` and even
+        # `tailscale ping` report healthy while no IP traffic reaches the drone
+        # -- it can be seen but never dialed.
+        self.assertIn("wait_for_tun", self.ts_install)
+        self.assertIn("Failed to write packets to TUN device", self.ts_install)
+        self.assertIn("retrying with userspace networking", self.ts_install)
+        # An un-enrolled node has no address to wait for; it must not be forced
+        # onto the userspace netstack on every pre-enrollment boot.
+        self.assertIn("Not enrolled yet", self.ts_install)
+
     def test_uninstaller_removes_the_mesh_and_releases_the_node(self) -> None:
         self.assertIn("remove_tailscale_mesh", self.uninstall)
         self.assertIn("logout", self.uninstall)
@@ -9137,3 +9151,56 @@ class TailscaleInstallUiTests(unittest.TestCase):
         start = self.handlers.index("def _handle_admin_tailnet_status(")
         body = self.handlers[start:self.handlers.index("def _handle_admin_tailnet_install(", start)]
         self.assertIn('payload["install"] = _tailscale_install_status()', body)
+
+
+class TailnetPeerMetadataRefreshTests(unittest.TestCase):
+    """Tailnet discovery must refresh an already-paired peer's connection
+    metadata, not just its tailnet route.
+
+    Regression: records paired before peer_mtls_port existed made every probe
+    dial /v1/api/peer/* on api_port (443). That path is served only on the
+    mTLS listener, so the peer answered 404 -- and _peer_get_json_for_peer
+    deliberately re-raises HTTPError instead of failing over, so the working
+    :8543 route was never tried. The peer advertises the correct port in
+    /v1/api/peer/info; discovery was discarding it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.handlers = root.joinpath("app/web/handlers_network.py").read_text(encoding="utf-8")
+
+    def _sync_block(self) -> str:
+        start = self.handlers.index("def _sync_tailnet_device(")
+        return self.handlers[start:self.handlers.index("def _sync_tailnet_peers(", start)]
+
+    def test_restored_peer_picks_up_the_probed_ports(self) -> None:
+        block = self._sync_block()
+        self.assertIn('for field in ("peer_mtls_port", "api_port"):', block)
+        self.assertIn("**refreshed,", block)
+        # Must be applied over the stored record, so the fresh probe wins.
+        existing_at = block.index("**existing,")
+        refreshed_at = block.index("**refreshed,")
+        self.assertLess(existing_at, refreshed_at)
+
+    def test_refresh_only_happens_after_the_fingerprint_check(self) -> None:
+        # info is only authoritative because the pinned certificate
+        # fingerprint was verified first; refreshing before that would let an
+        # impostor rewrite a paired peer's ports.
+        block = self._sync_block()
+        fingerprint_guard = block.index("tailnet_identity_error")
+        refresh_at = block.index("refreshed = {}")
+        self.assertLess(fingerprint_guard, refresh_at)
+
+    def test_bad_or_missing_ports_are_ignored(self) -> None:
+        # A peer that omits the field (or sends junk) must leave the stored
+        # record alone rather than writing 0 or crashing discovery.
+        block = self._sync_block()
+        self.assertIn("except (TypeError, ValueError):", block)
+        self.assertIn("if value > 0:", block)
+
+    def test_peer_endpoints_are_not_served_on_the_admin_port(self) -> None:
+        # The premise of the fix: api_port is not a usable fallback for
+        # /peer/* calls, which is why the port must come from the peer.
+        root = Path(__file__).resolve().parents[1]
+        routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
+        self.assertIn("peer_mtls", routes.lower())

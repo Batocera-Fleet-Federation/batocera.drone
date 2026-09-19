@@ -236,10 +236,38 @@ class HandlersNetworkMixin:
                         "tailnet_identity_error": "Tailnet peer certificate fingerprint does not match paired Drone",
                     }
                 )
+            # Refresh the connection metadata from this probe too, not just
+            # the tailnet route. ``info`` was fetched from the peer moments
+            # ago and its certificate fingerprint matched the pinned one
+            # above, so it is authoritative.
+            #
+            # This is what repairs a record paired before peer_mtls_port
+            # existed: _peer_api_port() falls back to api_port for such
+            # records, but /peer/* is served only on the mTLS listener, so
+            # every probe dialed :443 and got a hard 404 -- and because
+            # _peer_get_json_for_peer deliberately re-raises HTTPError rather
+            # than failing over, the working route was never tried. The peer
+            # has been advertising the right port in /v1/api/peer/info all
+            # along; discovery simply discarded it.
+            refreshed = {}
+            for field in ("peer_mtls_port", "api_port"):
+                try:
+                    value = int(info.get(field) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    refreshed[field] = value
+            scheme = str(info.get("scheme") or "").strip()
+            if scheme:
+                refreshed["scheme"] = scheme
+            advertised = str(info.get("reachable_url") or "").strip()
+            if advertised:
+                refreshed["advertised_reachable_url"] = advertised
             restored = _local_network.save_paired_peer(
                 self.settings,
                 {
                     **existing,
+                    **refreshed,
                     "tailnet_id": str(row.get("tailnet_id") or existing.get("tailnet_id") or ""),
                     "tailnet_ip": tailnet_ip,
                     "dns_name": str(row.get("dns_name") or existing.get("dns_name") or ""),
