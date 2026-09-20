@@ -7,5 +7,4 @@ These are **not** part of the drone release payload (`app/` and `content/`); the
 
 | Hotfix | Fixes |
 |---|---|
-| [smash-native-cli](smash-native-cli/README.md) | Preferred Smash fix: launches the native Eden/Citron frontend directly from ES with an isolated copy of RGS settings; preserves GUI-autoload as a selectable fallback. |
 | [smash-gui-autoload](smash-gui-autoload/README.md) | Super Smash Bros. Ultimate hangs (Citron) or stalls in gameplay (Eden) when RGS starts it with command-line autoboot; loads the game through the emulator GUI instead. |

@@ -2,8 +2,8 @@
 
 ## [Unreleased]
 
-- Add the independently cross-verified Smash native-CLI hotfix for Eden and Citron. It launches the AppImages' bundled native
-  frontends with disposable copies of RGS configuration and retains the GUI-autoload workaround as an immediate fallback.
+- Add Codex cross-verification for the Smash launch hotfix. Native Eden/Citron CLI frontends applied the update and reached guest
+  services but presented zero frames in real ES launches, so the experiment was reverted and GUI-autoload remains the active fix.
 
 - Add `hotfixes/smash-gui-autoload/`, an idempotent apply/check/revert bundle for a Super Smash Bros.
   Ultimate launch problem on RGS-managed Batocera machines (Citron hangs on "Launching..." and Eden stalls

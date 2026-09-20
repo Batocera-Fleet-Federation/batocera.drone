@@ -47,3 +47,9 @@ Optional tuning file `gui-autoload.conf` next to the wrapper: `GA_FULLSCREEN=f11
 * ~20 s slower start than autoboot; ~2 s of the emulator dialog is visible.
 * Depends on the emulator's File menu shortcut (Ctrl+O) and F11; a UI change upstream could break it (the fallback then runs).
 * The real fix belongs upstream (Citron/Eden autoboot ordering) or in the RGS generator source.
+
+## Independent cross-verification
+
+[Codex cross-verification](CODEX-CROSS-VERIFICATION.md) confirmed the Qt content-provider race, tested and rejected the bundled
+native CLI frontends after both produced zero presented frames in a real ES launch, and restored this GUI workaround as the best
+currently deployable path.
