@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `hotfixes/smash-gui-autoload/`, an idempotent apply/check/revert bundle for a Super Smash Bros.
+  Ultimate launch problem on RGS-managed Batocera machines (Citron hangs on "Launching..." and Eden stalls
+  in gameplay under command-line autoboot; loading through the emulator GUI works). Stored so it can be
+  re-applied after an RGS update; not part of the drone release payload.
+
 - Recover Tailscale after network resets leave its kernel interface down, remove
   its address, or lose peer routes even while the daemon reports Running. The
   startup/60-second watchdog restarts the managed service, verifies recovery,
