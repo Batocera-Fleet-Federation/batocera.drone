@@ -112,6 +112,12 @@ def _kernel_tailnet_failure(payload: dict) -> Optional[str]:
     if not set(addresses).issubset(assigned):
         return "tailscale0 has lost its assigned address"
     for peer in (payload.get("Peer") or {}).values():
+        # Offline peers can retain addresses in status while Linux quite
+        # correctly resolves them through the default route. They do not prove
+        # that the live tailnet data path is unhealthy and must not create a
+        # periodic restart loop.
+        if peer.get("Online") is not True:
+            continue
         for address in peer.get("TailscaleIPs") or []:
             if ":" in address:
                 continue

@@ -6,7 +6,7 @@
   its address, or lose peer routes even while the daemon reports Running. The
   startup/60-second watchdog restarts the managed service, verifies recovery,
   and limits restarts to once per five minutes; logged-out and userspace nodes
-  are left alone.
+  are left alone, and stale offline-peer routes do not trigger false repairs.
 
 - Make referenced ROM systems non-mutating and latency-safe: keep read-only network
   mounts under Drone's private state directory, validate selected gamelists, and use

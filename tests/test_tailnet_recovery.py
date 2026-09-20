@@ -8,7 +8,7 @@ from app.device import tailnet_service as service
 class TailnetRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.payload = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.1"],
-                        "Peer": {"peer": {"TailscaleIPs": ["100.64.0.2"]}}}
+                        "Peer": {"peer": {"Online": True, "TailscaleIPs": ["100.64.0.2"]}}}
         self.link = [{"flags": ["UP"], "addr_info": [{"local": "100.64.0.1"}]}]
         for patch in (mock.patch.object(service.Path, "read_text", return_value="123"),
                       mock.patch.object(service.Path, "read_bytes", return_value=b"tailscaled\0--tun=tailscale0\0")):
@@ -31,6 +31,15 @@ class TailnetRecoveryTests(unittest.TestCase):
     def test_healthy_interface_and_route(self):
         with mock.patch.object(service.subprocess, "run", side_effect=[self.result(self.link), self.result([{"dev": "tailscale0"}])]):
             self.assertIsNone(service._kernel_tailnet_failure(self.payload))
+
+    def test_offline_peer_route_is_not_used_as_health_signal(self):
+        self.payload["Peer"]["peer"]["Online"] = False
+        with mock.patch.object(service.subprocess, "run", return_value=self.result(self.link)) as run:
+            self.assertIsNone(service._kernel_tailnet_failure(self.payload))
+            run.assert_called_once_with(
+                ["ip", "-j", "address", "show", "dev", "tailscale0"],
+                capture_output=True, text=True, timeout=5,
+            )
 
     def test_logged_out_and_userspace_nodes_are_not_restarted(self):
         with mock.patch.object(service.subprocess, "run") as run:
