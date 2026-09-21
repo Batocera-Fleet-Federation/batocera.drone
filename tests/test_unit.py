@@ -9151,20 +9151,40 @@ class SwarmAsyncProbeTests(unittest.TestCase):
 
     def test_page_requests_the_unprobed_overview_then_fans_out(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
-        page_body = self.js[page_start:page_start + 6000]
+        page_body = self.js[page_start:self.js.index("// Issue #35", page_start)]
         self.assertIn("loadSwarmOverview(false, { probe: false })", page_body)
         # Not awaited: the cards must fill in after the page is usable.
-        self.assertIn("probeSwarmPeersAsync(drones);", page_body)
-        self.assertNotIn("await probeSwarmPeersAsync(drones);", page_body)
+        self.assertIn("probeSwarmPeersAsync(drones, generation);", page_body)
+        self.assertNotIn("await probeSwarmPeersAsync(", page_body)
+        # A render that finishes after the user has left Swarm must not
+        # rewrite the page they navigated to.
+        write_at = page_body.index("content.innerHTML = `")
+        await_at = page_body.index("await Promise.all([")
+        self.assertLess(await_at, page_body.index("if (!stillCurrent()) return;", await_at))
+        self.assertLess(page_body.index("if (!stillCurrent()) return;", await_at), write_at)
 
-    def test_probe_fan_out_is_parallel_and_replaces_cards_in_place(self) -> None:
+    def test_probe_fan_out_patches_cards_without_redrawing_the_page(self) -> None:
         start = self.js.index("async function probeSwarmPeersAsync(")
         body = self.js[start:self.js.index("function swarmSetProbeProgress(", start)]
         self.assertIn("await Promise.all(", body)
         self.assertIn("/admin/swarm/peers/${encodeURIComponent(droneId)}/probe", body)
-        self.assertIn("node.outerHTML = renderSwarmDroneCard(resolved)", body)
+        # Status lands in the existing card. Replacing the node (or the page)
+        # is what flickered and stole scroll while several machines resolved.
+        self.assertIn("patchSwarmDroneCard(resolved)", body)
+        self.assertNotIn("outerHTML", body)
+        self.assertNotIn("content.innerHTML", body)
+        self.assertIn("swarmProbeMayUpdate(generation)", body)
         # A failed probe must still resolve the card, never leave it spinning.
         self.assertIn("pending: false, online: false", body)
+
+    def test_tailnet_peer_picker_reuses_probed_drones_instead_of_a_second_overview(self) -> None:
+        # Opening Swarm must not dial every machine again just to fill the
+        # Tailnet "pull configuration" dropdown.
+        start = self.js.index("async function loadTailnetPullPeerOptions(")
+        body = self.js[start:self.js.index("async function pullTailnetConfigFromPeer(", start)]
+        self.assertIn("Object.keys(swarmDronesById).length", body)
+        self.assertIn("syncTailnetPullPeerOptions()", body)
+        self.assertLess(body.index("Object.keys(swarmDronesById).length"), body.index("loadSwarmOverview()"))
 
     def test_pending_cards_render_a_checking_state(self) -> None:
         start = self.js.index("function renderSwarmDroneCard(")
