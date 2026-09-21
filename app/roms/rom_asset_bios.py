@@ -23,6 +23,7 @@ try:
         list_rom_cache_page,
         list_rom_genre_counts,
         list_rom_rows_by_system,
+        list_rom_systems_page as list_rom_systems_cache_page,
         rom_cache_ready,
     )
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         list_rom_cache_page,
         list_rom_genre_counts,
         list_rom_rows_by_system,
+        list_rom_systems_page as list_rom_systems_cache_page,
         rom_cache_ready,
     )
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
@@ -148,6 +150,27 @@ class RomAssetBiosMixin:
             item.pop("rom_fingerprint", None)
             item.pop("absolute_path", None)
         return page
+
+    def list_rom_systems_page(
+        self,
+        *,
+        systems=None,
+        query: str = "",
+        genre: str = "",
+        limit: int = 500,
+        offset: int = 0,
+    ) -> Optional[dict]:
+        """Distinct systems matching the ROM filters, one row per system."""
+        if self.settings is None:
+            return None
+        return list_rom_systems_cache_page(
+            self.settings,
+            systems=systems,
+            query=query,
+            genre=genre,
+            limit=limit,
+            offset=offset,
+        )
 
     def list_rom_genre_facets(self, *, systems=None, query: str = "") -> List[dict]:
         if self.settings is None:

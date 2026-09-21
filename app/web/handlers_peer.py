@@ -322,7 +322,7 @@ class HandlersPeerMixin:
         # This prevents a Drone from advertising an upstream peer's ROMs or
         # artwork and creating A -> B -> A transfer loops.
         local_system_names = None
-        if normalized in {"roms", "artwork"}:
+        if normalized in {"roms", "artwork", "systems"}:
             local_by_key = {
                 name.strip().lower(): name
                 for name in self.repository.list_local_system_names()
@@ -355,6 +355,45 @@ class HandlersPeerMixin:
             )
             if page is not None:
                 return paged_response(page)
+        elif normalized == "systems":
+            # Reference ROMs links whole systems. Return one row per matching
+            # system (not the games inside it) so the page can filter and page
+            # the same way the ROM grid did.
+            page = self.repository.list_rom_systems_page(
+                systems=selected_systems,
+                query=query,
+                genre=genre,
+                limit=limit,
+                offset=offset,
+            )
+            if page is None:
+                # Cache not ready yet. Genre and game-name search need that
+                # index; a genre filter yields nothing rather than every system.
+                names = [name for name in selected_systems if not query or query in name.lower()]
+                names.sort(key=str.lower)
+                if genre:
+                    names = []
+                counts = {}
+                try:
+                    for row in self.repository.list_systems() or []:
+                        if not isinstance(row, dict):
+                            continue
+                        name = str(row.get("name") or "").strip()
+                        if name:
+                            counts[name] = int(row.get("rom_count") or 0)
+                except Exception:
+                    counts = {}
+                window = names[offset:offset + limit]
+                page = {
+                    "total": len(names),
+                    "limit": limit,
+                    "offset": offset,
+                    "items": [
+                        {"system": name, "name": name, "rom_count": int(counts.get(name) or 0)}
+                        for name in window
+                    ],
+                }
+            return paged_response(page)
         elif normalized == "bios":
             page = self.repository.list_bios_page(
                 query=query,
@@ -538,7 +577,7 @@ class HandlersPeerMixin:
                 reverse=True,
             )
         else:
-            raise ValueError("asset type must be summary, roms, bios, artwork, saves, movies, config_backups, emulator_configs, or gameplay")
+            raise ValueError("asset type must be summary, roms, bios, artwork, saves, movies, config_backups, emulator_configs, gameplay, or systems")
         rows = [
             {key: value for key, value in row.items() if key not in {"absolute_path"}}
             for row in rows

@@ -1840,7 +1840,7 @@ def _schemas() -> Dict[str, Schema]:
         "PeerInventoryResponse": _object(
             {
                 "drone_id": _string(),
-                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay"]),
+                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay", "systems"]),
                 "system": _string(nullable=True),
                 "systems": _array(_string()),
                 "total": _integer(),
@@ -1900,10 +1900,10 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
         _query_param("systems", _string(), "Comma-separated list of system filters, for example snes,ps2,_root"),
     ]
     peer_inventory_params = [
-        _query_param("type", _enum(["summary", "roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay"], default="summary"), "Peer asset type"),
+        _query_param("type", _enum(["summary", "roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay", "systems"], default="summary"), "Peer asset type"),
         *common_paging,
         *system_filter_params,
-        _query_param("genre", _string(), "Exact (case-insensitive) genre filter for type=roms"),
+        _query_param("genre", _string(), "Exact (case-insensitive) genre filter for type=roms and type=systems"),
     ]
     peer_security = [{"mutualTLS": []}]
 

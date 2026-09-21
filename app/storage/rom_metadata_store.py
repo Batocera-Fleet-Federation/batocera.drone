@@ -1716,6 +1716,74 @@ def list_rom_genre_counts(
     return [{"name": str(row[0]), "count": int(row[1])} for row in rows]
 
 
+def list_rom_systems_page(
+    settings: Any,
+    *,
+    systems: Optional[Iterable[str]] = None,
+    genre: str = "",
+    query: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> Optional[dict]:
+    """Paged distinct ROM systems using the same filters as ``list_rom_cache_page``.
+
+    A system is included when at least one of its ROMs matches. ``query`` matches
+    the system name or a ROM name/path, so searching for a game still finds the
+    system that contains it without returning the games themselves. ``rom_count``
+    is the number of matching ROMs (the whole system when genre and search are
+    empty). Returns None when the relational cache is not ready.
+    """
+    safe_limit, safe_offset = _page_bounds(limit, offset)
+    selected_systems = _normalized_filters(systems)
+    normalized_genre = str(genre or "").strip()
+    normalized_query = str(query or "").strip()
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    join = ""
+    if normalized_genre:
+        join = " JOIN rom_genres ON rom_genres.entry_key = rom_cache_entries.entry_key"
+        where_parts.append("rom_genres.genre COLLATE NOCASE = ?")
+        parameters.append(normalized_genre)
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            "(rom_cache_entries.system COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.file_path COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    grouped = (
+        "SELECT rom_cache_entries.system AS system, "
+        "COUNT(DISTINCT rom_cache_entries.entry_key) AS rom_count "
+        f"FROM rom_cache_entries{join}{where} "
+        "GROUP BY rom_cache_entries.system COLLATE NOCASE"
+    )
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            total = int(connection.execute(f"SELECT COUNT(*) FROM ({grouped})", parameters).fetchone()[0])
+            rows = connection.execute(
+                f"SELECT system, rom_count FROM ({grouped}) ORDER BY system COLLATE NOCASE LIMIT ? OFFSET ?",
+                [*parameters, safe_limit, safe_offset],
+            ).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM system page query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    items = []
+    for row in rows:
+        system = str(row[0] or "").strip()
+        if not system:
+            continue
+        items.append({"system": system, "name": system, "rom_count": int(row[1] or 0)})
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "items": items}
+
+
 def _bios_row_payload(values: tuple) -> dict:
     return BiosCacheRow(
         entry_key=values[0],
