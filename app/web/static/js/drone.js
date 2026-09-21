@@ -914,6 +914,28 @@ function scrollContentToTop() {
   const main = document.querySelector("main");
   if (main) main.scrollTop = 0;
 }
+// innerHTML swaps (a drone card resolving, the tailnet peer <select> gaining
+// an option) make the browser drop scroll anchoring and jump to the top.
+// Snapshot before the write and put the viewport back, including on the next
+// frame, which is when that jump actually lands.
+function preservePageScroll(fn) {
+  const main = document.querySelector("main");
+  const snapshot = { x: window.scrollX, y: window.scrollY, main: main ? main.scrollTop : 0 };
+  let result;
+  try {
+    result = fn();
+  } finally {
+    const restore = () => {
+      if (window.scrollX !== snapshot.x || window.scrollY !== snapshot.y) {
+        window.scrollTo(snapshot.x, snapshot.y);
+      }
+      if (main && main.isConnected && main.scrollTop !== snapshot.main) main.scrollTop = snapshot.main;
+    };
+    restore();
+    requestAnimationFrame(restore);
+  }
+  return result;
+}
 // Counterpart to the scroll-reset above, for the one deliberate exception to
 // it -- see movieListScrollPositions.
 function restoreMovieListScroll(hash) {
@@ -8474,10 +8496,13 @@ function syncTailnetPullPeerOptions() {
   if (select.dataset.peerSignature === signature) return;
   const previous = select.value;
   select.dataset.peerSignature = signature;
-  select.innerHTML = onlinePeers.length
+  const optionsHtml = onlinePeers.length
     ? onlinePeers.map((drone) => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
     : '<option value="">No paired drones online</option>';
-  if (previous && Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
+  preservePageScroll(() => {
+    select.innerHTML = optionsHtml;
+    if (previous && Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
+  });
 }
 async function loadTailnetPullPeerOptions() {
   const select = document.getElementById("tailnetPullPeer");
@@ -10868,12 +10893,19 @@ function patchSwarmDroneCard(drone) {
   holder.innerHTML = renderSwarmDroneCard(drone).trim();
   const next = holder.content.firstElementChild;
   if (!next) return;
+  const updates = [];
   ["[data-swarm-meta]", "[data-swarm-addresses]", "[data-swarm-stats]", "[data-swarm-actions]"].forEach((selector) => {
     const current = node.querySelector(selector);
     const updated = next.querySelector(selector);
     if (!current || !updated || current.innerHTML === updated.innerHTML) return;
     if (current.contains(document.activeElement)) return;
-    current.innerHTML = updated.innerHTML;
+    updates.push([current, updated.innerHTML]);
+  });
+  if (!updates.length) return;
+  preservePageScroll(() => {
+    updates.forEach(([current, html]) => {
+      current.innerHTML = html;
+    });
   });
 }
 
@@ -11216,10 +11248,14 @@ async function renderSwarmPage() {
   if (!stillCurrent()) return;
   titleNode.textContent = "Swarm";
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
-  // A second render while the user is already on this page (forget, enroll,
-  // rotate) must not flash the loading toast over the cards they are using.
-  const revisiting = !!document.getElementById("swarmDroneGrid");
-  if (!revisiting) setLoading(true, "Loading swarm...");
+  // Drop a toast left up by the page we just left. Never open a "Loading
+  // swarm..." toast here: it was shown again on every re-render, and each
+  // show ran through router()'s scroll reset.
+  setLoading(false);
+  // A shell already on screen (a second router pass, forget, enroll) is
+  // updated in place. Replacing #content is what flickered and jumped scroll.
+  const existingGrid = document.getElementById("swarmDroneGrid");
+  if (existingGrid) existingGrid.dataset.swarmGeneration = String(generation);
   try {
     // Independent calls run concurrently. Default Tailnet/local-network state
     // is read-only here; active discovery is reserved for the page's explicit
@@ -11239,10 +11275,11 @@ async function renderSwarmPage() {
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
     swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
-    const main = document.querySelector("main");
-    const scrollY = revisiting ? window.scrollY : 0;
-    const mainTop = revisiting && main ? main.scrollTop : 0;
-    content.innerHTML = `
+    const cardsHtml = drones.map(renderSwarmDroneCard).join("");
+    const tailnetHtml = renderSwarmTailnetCard(tailnet);
+    if (!document.getElementById("swarmPageShell")) {
+      content.innerHTML = `
+      <div id="swarmPageShell">
       ${renderSwarmTabBar("swarm")}
       <div class="d-none mb-2" id="swarmProbeProgress">
         <div class="d-flex align-items-center gap-2">
@@ -11253,10 +11290,10 @@ async function renderSwarmPage() {
         </div>
       </div>
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid" data-swarm-generation="${generation}">
-        ${drones.map(renderSwarmDroneCard).join("")}
+        ${cardsHtml}
       </div>
       <div class="row g-3 mb-3 align-items-stretch">
-        <div class="col-12 col-lg-6">${renderSwarmTailnetCard(tailnet)}</div>
+        <div class="col-12 col-lg-6" id="swarmTailnetSlot">${tailnetHtml}</div>
         <div class="col-12 col-lg-6"><div class="card log-card h-100">
           <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
           <div class="card-body">
@@ -11268,10 +11305,18 @@ async function renderSwarmPage() {
       <div class="card log-card mb-3">
         <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
+      </div>
       </div>`;
-    if (revisiting) {
-      window.scrollTo(0, scrollY);
-      if (main) main.scrollTop = mainTop;
+    } else {
+      preservePageScroll(() => {
+        const grid = document.getElementById("swarmDroneGrid");
+        if (grid) {
+          grid.dataset.swarmGeneration = String(generation);
+          grid.innerHTML = cardsHtml;
+        }
+        const tailnetSlot = document.getElementById("swarmTailnetSlot");
+        if (tailnetSlot) tailnetSlot.innerHTML = tailnetHtml;
+      });
     }
     loadTailnetPullPeerOptions();
 
@@ -11281,29 +11326,42 @@ async function renderSwarmPage() {
           ? (await loadTailnetDiscovery(true)).network
           : await api("/admin/local-network/status");
       }
-      document.getElementById("localPairingBody").innerHTML = status.active
+      if (!stillCurrent()) return;
+      const pairingHtml = status.active
         ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}.</div></div>`
         : '<div class="themed-empty">Local networking is disabled; enable it above to pair Drones.</div>';
-      document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
-      document.getElementById("localDiscoverBtn").disabled = !status.active;
-      document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
+      const peersHtml = renderLocalPeerRows(status.peers || []);
+      preservePageScroll(() => {
+        const pairingBody = document.getElementById("localPairingBody");
+        const peersBody = document.getElementById("localPeersBody");
+        if (pairingBody) pairingBody.innerHTML = pairingHtml;
+        if (peersBody) peersBody.innerHTML = peersHtml;
+        const discoverBtn = document.getElementById("localDiscoverBtn");
+        const rotateBtn = document.getElementById("localPairCodeRotateBtn");
+        if (discoverBtn) discoverBtn.disabled = !status.active;
+        if (rotateBtn) rotateBtn.disabled = !status.active;
+      });
     }
     window.refreshLocalNetwork = refreshPairing;
-    document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refreshPairing(null, true); });
-    document.getElementById("localRefreshBtn").addEventListener("click", () => refreshPairing(null, true));
-    document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(null, true); });
+    const discoverBtn = document.getElementById("localDiscoverBtn");
+    if (discoverBtn && !discoverBtn.dataset.bound) {
+      discoverBtn.dataset.bound = "1";
+      discoverBtn.addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await window.refreshLocalNetwork(null, true); });
+      document.getElementById("localRefreshBtn").addEventListener("click", () => window.refreshLocalNetwork(null, true));
+      document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await window.refreshLocalNetwork(null, true); });
+    }
     await refreshPairing(discovery.network || null);
     if (!stillCurrent()) return;
     // Deliberately not awaited before the page is usable: each card's status
-    // fills in as its own probe lands, without redrawing the page.
-    // setLoading(false) has to run first, which the finally block below guarantees.
+    // fills in as its own probe lands, without redrawing the page or moving
+    // the viewport.
     probeSwarmPeersAsync(drones, generation);
   } catch (err) {
     if (!stillCurrent()) return;
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
-  } finally {
-    if (stillCurrent()) setLoading(false);
+    if (!document.getElementById("swarmPageShell")) {
+      content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
+    }
   }
 }
 
@@ -14083,14 +14141,18 @@ async function redirectRouterHash(hash) {
 async function router(retryDepth = 0) {
   const myNavToken = ++routerNavToken;
   clearError();
+  const hash = window.location.hash || "";
+  // A second pass over the page the user is already on (theme re-render,
+  // stale-token retry, overlapping hashchange) must not throw them to the
+  // top. Scroll reset is only for an actual navigation.
+  const samePage = hash === lastRenderedHash;
   const outgoingScrollBucket = movieListScrollBucket(lastRenderedHash);
-  if (outgoingScrollBucket) {
+  if (!samePage && outgoingScrollBucket) {
     const main = document.querySelector("main");
     movieListScrollPositions[outgoingScrollBucket] = { windowY: window.scrollY, mainTop: main ? main.scrollTop : 0 };
   }
-  scrollContentToTop();
+  if (!samePage) scrollContentToTop();
   try {
-    const hash = window.location.hash || "";
     lastRenderedHash = hash;
     if (!hash.startsWith("#admin/logs/")) {
       stopLogAutoRefresh();

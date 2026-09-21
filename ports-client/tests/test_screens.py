@@ -12,7 +12,7 @@ from ui.screens.about import AboutScreen
 from ui.screens.backups import BackupsScreen
 from ui.screens.base import Screen
 from ui.screens.login import LoginScreen
-from ui.screens.swarm import SwarmScreen, _download_job_label
+from ui.screens.swarm import SwarmScreen, _download_job_label, _drone_status_text
 from ui.screens.vpn import VpnScreen
 from ui.shell import AppShell
 
@@ -46,7 +46,8 @@ class _FakeApiClient:
         self.get_calls.append(path)
         if self._get_error is not None:
             raise self._get_error
-        response = self._get_responses.get(path, {})
+        key = path if path in self._get_responses else path.split("?", 1)[0]
+        response = self._get_responses.get(key, {})
         if isinstance(response, list):
             return response.pop(0) if response else {}
         return response
@@ -135,6 +136,44 @@ class SwarmScreenTests(unittest.TestCase):
         self.assertTrue(screen.active)
         self.assertEqual(len(screen.drones), 1)
         self.assertIsNone(screen.overview_error)
+        self.assertIn("/admin/swarm/overview?probe=0", client.get_calls)
+
+    def test_overview_probes_each_peer_without_holding_the_loading_panel(self) -> None:
+        class _GatedClient(_FakeApiClient):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.release_probes = threading.Event()
+
+            def get(self, path, *, timeout=None):
+                if path.endswith("/probe"):
+                    self.release_probes.wait(2)
+                return super().get(path, timeout=timeout)
+
+        client = _GatedClient(get_responses={
+            "/admin/swarm/overview?probe=0": {
+                "active": True,
+                "drones": [
+                    {"drone_id": "self", "is_self": True, "online": True},
+                    {"drone_id": "peer1", "name": "Arcade", "pending": True, "online": None},
+                ],
+            },
+            "/admin/swarm/peers/peer1/probe": {
+                "drone": {"drone_id": "peer1", "name": "Arcade", "online": True, "pending": False},
+            },
+        })
+        screen = SwarmScreen(client)
+        screen._reload_overview()
+        self.assertIsNone(screen.deferred_action_label)
+        self.assertEqual(client.get_calls, ["/admin/swarm/overview?probe=0"])
+        pending = next(drone for drone in screen.drones if drone.get("drone_id") == "peer1")
+        self.assertEqual(_drone_status_text(pending), "Checking...")
+        client.release_probes.set()
+        screen.wait_for_peer_probes()
+        resolved = next(drone for drone in screen.drones if drone.get("drone_id") == "peer1")
+        self.assertTrue(resolved.get("online"))
+        self.assertFalse(resolved.get("pending"))
+        self.assertEqual(_drone_status_text(resolved), "Online")
+        self.assertIn("/admin/swarm/peers/peer1/probe", client.get_calls)
 
     def test_on_enter_surfaces_error(self) -> None:
         client = _FakeApiClient(get_error=DroneApiError("swarm unavailable"))
@@ -963,7 +1002,8 @@ class AppShellTests(unittest.TestCase):
         self.assertEqual(client.get_calls, calls_before)
         self.assertEqual(shell.deferred_action_label, "Loading Swarm...")
         shell.wait_for_deferred_action()
-        self.assertIn("/admin/swarm/overview", client.get_calls[len(calls_before):])
+        overview_calls = [call for call in client.get_calls[len(calls_before):] if "/admin/swarm/overview" in call]
+        self.assertEqual(overview_calls, ["/admin/swarm/overview?probe=0"])
         self.assertIsNone(shell.deferred_action_label)
 
 

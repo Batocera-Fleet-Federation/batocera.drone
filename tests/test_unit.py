@@ -7339,6 +7339,12 @@ class SwarmPageTests(unittest.TestCase):
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
         self.assertIn('hash === "#admin/swarm"', router_body)
         self.assertIn("await renderSwarmPage();", router_body)
+        # Same-page re-entry (the swarm probes do not navigate) must not
+        # scroll. A real hash change still does.
+        router_fn = self.js[router_start:self.js.index("backBtn.addEventListener", router_start)]
+        self.assertIn("const samePage = hash === lastRenderedHash;", router_fn)
+        self.assertIn("if (!samePage) scrollContentToTop();", router_fn)
+        self.assertNotIn("\n  scrollContentToTop();\n", router_fn)
 
     def test_swarm_page_loads_overview_and_renders_cards(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
@@ -9156,6 +9162,11 @@ class SwarmAsyncProbeTests(unittest.TestCase):
         # Not awaited: the cards must fill in after the page is usable.
         self.assertIn("probeSwarmPeersAsync(drones, generation);", page_body)
         self.assertNotIn("await probeSwarmPeersAsync(", page_body)
+        # The loading toast was the flicker: every re-render showed
+        # "Loading swarm..." and router() scrolled to the top to match.
+        self.assertNotIn('setLoading(true, "Loading swarm...")', page_body)
+        self.assertIn("preservePageScroll(", page_body)
+        self.assertIn('id="swarmPageShell"', page_body)
         # A render that finishes after the user has left Swarm must not
         # rewrite the page they navigated to.
         write_at = page_body.index("content.innerHTML = `")
@@ -9173,6 +9184,9 @@ class SwarmAsyncProbeTests(unittest.TestCase):
         self.assertIn("patchSwarmDroneCard(resolved)", body)
         self.assertNotIn("outerHTML", body)
         self.assertNotIn("content.innerHTML", body)
+        patch_start = self.js.index("function patchSwarmDroneCard(")
+        patch_body = self.js[patch_start:self.js.index("function swarmBrowsePeerAssets(", patch_start)]
+        self.assertIn("preservePageScroll(", patch_body)
         self.assertIn("swarmProbeMayUpdate(generation)", body)
         # A failed probe must still resolve the card, never leave it spinning.
         self.assertIn("pending: false, online: false", body)

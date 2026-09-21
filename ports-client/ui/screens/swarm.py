@@ -16,6 +16,7 @@ transfer queue rather than treating the initial queue request as completion.
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from imgui_bundle import imgui
 
@@ -51,6 +52,20 @@ _TABS = (
 _REQUEST_KIND_SYSTEMS = "systems"
 _REQUEST_KIND_MOVIES = "movies"
 _REQUEST_KINDS = ((_REQUEST_KIND_SYSTEMS, "Systems"), (_REQUEST_KIND_MOVIES, "Movies"))
+
+
+def _drone_status_text(drone: dict) -> str:
+    """Online / Offline / Checking for one overview row.
+
+    ``online is None`` (or ``pending``) means the row was painted from stored
+    state and the per-drone probe has not finished. That must not read as
+    Offline, and it must not block the rest of the page.
+    """
+    if drone.get("pending") or drone.get("online") is None:
+        return "Checking..."
+    if drone.get("online"):
+        return "Online"
+    return "Offline"
 
 
 def _request_item_key(item: dict) -> str:
@@ -119,6 +134,8 @@ class SwarmScreen(Screen):
         self.active = False
         self.drones = []
         self.overview_error = None
+        self._probe_generation = 0
+        self._probe_thread = None
 
         # Tailnet
         self.tailnet = {}
@@ -201,12 +218,67 @@ class SwarmScreen(Screen):
 
     def _reload_overview(self) -> None:
         try:
-            result = endpoints.swarm_overview(self.api_client)
+            # Stored state only. Probing every peer inside this call is what
+            # held the "Loading Swarm..." panel up -- and pinned scroll to the
+            # top -- until the slowest machine answered.
+            result = endpoints.swarm_overview(self.api_client, probe=False)
             self.active = bool(result.get("active")) if isinstance(result, dict) else False
             self.drones = result.get("drones", []) if isinstance(result, dict) else []
             self.overview_error = None
+            self._start_peer_probes(self.drones)
         except DroneApiError as error:
             self.overview_error = str(error)
+
+    def _start_peer_probes(self, drones) -> None:
+        pending = [
+            drone for drone in drones
+            if isinstance(drone, dict) and not drone.get("is_self") and drone.get("drone_id")
+        ]
+        self._probe_generation += 1
+        generation = self._probe_generation
+        if not pending:
+            self._probe_thread = None
+            return
+        thread = threading.Thread(
+            target=self._probe_peers,
+            args=(pending, generation),
+            name="drone-ports-swarm-probes",
+            daemon=True,
+        )
+        self._probe_thread = thread
+        thread.start()
+
+    def _probe_peers(self, pending, generation: int) -> None:
+        workers = min(8, len(pending))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda drone: self._probe_one(drone, generation), pending))
+
+    def _probe_one(self, drone: dict, generation: int) -> None:
+        if generation != self._probe_generation:
+            return
+        drone_id = str(drone.get("drone_id") or "")
+        try:
+            payload = endpoints.swarm_probe_peer(self.api_client, drone_id)
+            resolved = payload.get("drone") if isinstance(payload, dict) else None
+            if not isinstance(resolved, dict) or not resolved.get("drone_id"):
+                raise DroneApiError("probe failed")
+        except DroneApiError as error:
+            resolved = {**drone, "pending": False, "online": False, "error": str(error)}
+        if generation != self._probe_generation:
+            return
+        resolved_id = str(resolved.get("drone_id") or drone_id)
+        self.drones = [
+            resolved if str(existing.get("drone_id") or "") == resolved_id else existing
+            for existing in self.drones
+            if isinstance(existing, dict)
+        ]
+
+    def wait_for_peer_probes(self, timeout: float = 5.0) -> None:
+        thread = self._probe_thread
+        if thread is not None:
+            thread.join(timeout)
+            if thread.is_alive():
+                raise TimeoutError("Timed out waiting for swarm peer probes")
 
     def _draw_overview(self) -> None:
         if imgui.button("Refresh"):
@@ -236,10 +308,13 @@ class SwarmScreen(Screen):
         imgui.text(name)
 
         imgui.same_line(_STATUS_COLUMN_X)
-        if drone.get("online"):
-            imgui.text_colored(SUCCESS_COLOR, "Online")
+        status = _drone_status_text(drone)
+        if status == "Online":
+            imgui.text_colored(SUCCESS_COLOR, status)
+        elif status == "Checking...":
+            imgui.text_disabled(status)
         else:
-            imgui.text_colored(ERROR_COLOR, "Offline")
+            imgui.text_colored(ERROR_COLOR, status)
 
         error = drone.get("error")
         if error:
