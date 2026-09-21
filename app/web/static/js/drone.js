@@ -6299,7 +6299,7 @@ function renderAdminFixCard(fix) {
             </div>
           </div>
           <p class="mt-3 mb-0">${escapeHtml(fix.summary || "")}</p>
-          ${fix.status === "modified" ? `<div class="alert alert-warning py-2 small mt-3 mb-0">A legacy or modified version is active. Saving this panel migrates it to Drone's current managed version.</div>` : ""}
+          ${fix.status === "modified" ? `<div class="alert alert-warning py-2 small mt-3 mb-0 d-flex align-items-center justify-content-between gap-2 flex-wrap"><span>A legacy or modified version is active.</span><button type="button" class="btn btn-sm btn-warning" onclick="repairAdminFix('${fix.id}')"><i class="bi bi-arrow-repeat me-1"></i>Migrate / repair</button></div>` : ""}
           ${renderAdminFixOptions(fix)}
         </div>
       </section>
@@ -6361,6 +6361,10 @@ async function updateAdminFix(fixId, payload) {
 
 async function toggleAdminFix(fixId, enabled) {
   await updateAdminFix(fixId, adminFixPayload(fixId, enabled));
+}
+
+async function repairAdminFix(fixId) {
+  await updateAdminFix(fixId, adminFixPayload(fixId));
 }
 
 async function saveAdminFixConfiguration(fixId) {

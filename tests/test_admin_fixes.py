@@ -248,5 +248,6 @@ class AdminFixUiContractTests(unittest.TestCase):
         self.assertIn('setHash(\'#admin/fixes\')', source)
         self.assertIn('async function renderAdminFixesPage()', source)
         self.assertIn('function showAdminFixDetails(fixId)', source)
+        self.assertIn('async function repairAdminFix(fixId)', source)
         self.assertIn('value="all"', source)
         self.assertIn('class="form-check-input switch-fix-game"', source)
