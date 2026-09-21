@@ -83,15 +83,17 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
     os.environ.get("DRONE_PEER_INVENTORY_ROUTE_BUDGET_SECONDS", "30")
 )
 
-# Per-peer budget for the Swarm-overview fan-out. Deliberately short: an
-# offline drone should read as "Offline" quickly, not stall the whole page for
-# the full inventory timeout.
-# Total wall-clock budget for probing one peer, inventory + health fallback
-# combined. Lowered from 4s now that a hostname candidate can no longer burn
-# ~15s in getaddrinfo (see PEER_DNS_TIMEOUT_SECONDS in peer_connectivity):
-# with DNS bounded, a reachable peer answers well inside this and an
-# unreachable one fails fast, so the old headroom just made dead peers slow.
-SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "2.5"))
+# Per-peer budget for the Swarm-overview fan-out. Each peer is probed by its own
+# async request from the page (one card updates in place as each answers), so a
+# slow or offline drone no longer stalls the rest of the page and can be given
+# real headroom before it reads as "Offline".
+# Total wall-clock budget for probing one peer's inventory summary across every
+# candidate address. Raised from 2.5s now that the probes are async: a busy
+# drone (large transfer, metadata refresh, slow wifi) gets time to answer
+# instead of being reported Offline. Hostname candidates stay bounded by
+# PEER_DNS_TIMEOUT_SECONDS in peer_connectivity, and non-final candidates by
+# PEER_CHECK_TIMEOUT_SECONDS, so a dead route still fails over quickly.
+SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "10"))
 
 # The health fallback's own guaranteed budget, never taken from the summary's.
 # Liveness and inventory are different questions: /peer/health is ~150 bytes
