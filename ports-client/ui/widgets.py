@@ -77,25 +77,39 @@ def spinner(radius: float = 7.0, thickness: float = 3.0) -> None:
 
 
 def loading_panel(text: str = "Loading...") -> None:
-    """Draw a prominent, controller-safe loading panel over page content.
+    """Draw a loading panel over the viewport, not in the scrolling layout.
 
-    It is emitted after the page has drawn, so it sits above existing widgets
-    and is the last frame the user sees while the deferred network call runs.
+    A child window placed at content y=72 lived inside the page scroll. Dear
+    ImGui then brought that focused child on screen, which yanked the page
+    back to the top on every frame the panel was visible. This is its own
+    window, pinned to the top of the current viewport, and it does not take
+    nav focus.
     """
-    previous = imgui.get_cursor_pos()
+    text = str(text or "Loading...")
     width = min(420.0, max(260.0, imgui.get_window_width() - 80.0))
-    x = max(20.0, (imgui.get_window_width() - width) / 2.0)
-    imgui.set_cursor_pos(imgui.ImVec2(x, 72.0))
-    imgui.begin_child("##global_loading_panel", imgui.ImVec2(width, 64.0), True)
-    imgui.set_cursor_pos_y(20.0)
-    imgui.set_cursor_pos_x(22.0)
-    spinner(radius=10.0, thickness=3.5)
-    imgui.same_line()
-    imgui.text(str(text or "Loading..."))
-    imgui.end_child()
-    imgui.set_cursor_pos(previous)
-    # Dear ImGui 1.92 asserts at End() when SetCursorPos() is the final
-    # layout operation in a window. Submit a zero-size item after restoring
-    # the caller's cursor so the parent window's layout state is finalized
-    # without adding visible content.
-    imgui.dummy(imgui.ImVec2(0.0, 0.0))
+    origin = imgui.get_window_pos()
+    x = origin.x + max(20.0, (imgui.get_window_width() - width) / 2.0)
+    y = origin.y + 72.0
+    imgui.set_next_window_pos(imgui.ImVec2(x, y))
+    imgui.set_next_window_size(imgui.ImVec2(width, 64.0))
+    flags = (
+        imgui.WindowFlags_.no_title_bar.value
+        | imgui.WindowFlags_.no_resize.value
+        | imgui.WindowFlags_.no_move.value
+        | imgui.WindowFlags_.no_scrollbar.value
+        | imgui.WindowFlags_.no_collapse.value
+        | imgui.WindowFlags_.no_saved_settings.value
+        | imgui.WindowFlags_.no_nav.value
+        | imgui.WindowFlags_.no_focus_on_appearing.value
+        | imgui.WindowFlags_.no_inputs.value
+    )
+    opened, _shown = imgui.begin("##global_loading_panel", flags=flags)
+    if opened:
+        imgui.set_cursor_pos(imgui.ImVec2(22.0, 20.0))
+        spinner(radius=10.0, thickness=3.5)
+        imgui.same_line()
+        imgui.text(text)
+        # Dear ImGui 1.92 asserts at End() when SetCursorPos() is the final
+        # layout operation in a window.
+        imgui.dummy(imgui.ImVec2(0.0, 0.0))
+    imgui.end()

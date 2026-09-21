@@ -13,8 +13,22 @@ from urllib.parse import quote
 from .http_client import DroneApiClient
 
 
-def swarm_overview(client: DroneApiClient) -> dict:
-    return client.get("/admin/swarm/overview")
+def swarm_overview(client: DroneApiClient, *, probe: bool = True) -> dict:
+    # probe=0 is the stored-state snapshot. The Swarm screen uses it so the
+    # list can paint before any peer is dialed; other callers keep the
+    # probing default.
+    path = "/admin/swarm/overview" if probe else "/admin/swarm/overview?probe=0"
+    return client.get(path)
+
+
+def swarm_probe_peer(client: DroneApiClient, peer_id: str) -> dict:
+    # Server budget is 10s for inventory plus a 1.5s health fallback. The
+    # client's 15s default can fire first and turn a slow drone into a
+    # transport error, so this call gets its own headroom.
+    return client.get(
+        f"/admin/swarm/peers/{quote(peer_id, safe='')}/probe",
+        timeout=20,
+    )
 
 
 # --- Tailnet (join an existing swarm over Tailscale) ------------------------
