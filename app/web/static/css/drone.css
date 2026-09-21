@@ -670,7 +670,7 @@
       }
       /* Reference ROMs intentionally mirrors the stable, compact Torrents
          grid. Its bounded columns keep large peer libraries easy to scan and
-         prevent long game/genre names from resizing the action column. */
+         prevent long system names from resizing the action column. */
       .reference-roms-table {
         table-layout: fixed;
       }
