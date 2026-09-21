@@ -225,6 +225,11 @@ let musicBulkScrapeBreakdownOffset = 0;
 const MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
 let musicBulkScrapeStopRequested = false;
 let swarmDronesById = {};
+// Bumped at the start of every renderSwarmPage(). In-flight overview fetches
+// and per-peer probes capture the value and refuse to write the DOM once a
+// newer render (or a navigation away from Swarm) has superseded them, so a
+// slow fleet cannot repaint the page out from under the user.
+let swarmPageGeneration = 0;
 const SWARM_DATA_CACHE_TTL_MS = 30000;
 let swarmOverviewCache = null;
 let swarmOverviewCachedAt = 0;
@@ -492,13 +497,23 @@ async function loadSwarmOverview(force = false, { probe = true } = {}) {
   }
 }
 
-// Probe every pending peer in parallel, replacing each card in place as its
-// own request returns. Each probe is independently bounded server-side, so a
-// dead peer resolves to an Offline card instead of holding the page.
-async function probeSwarmPeersAsync(drones) {
+function swarmProbeMayUpdate(generation) {
+  if (generation !== swarmPageGeneration) return false;
+  if (window.location.hash !== "#admin/swarm") return false;
+  const grid = document.getElementById("swarmDroneGrid");
+  return !!(grid && grid.isConnected && String(grid.dataset.swarmGeneration || "") === String(generation));
+}
+
+// Probe every pending peer in parallel. Each result patches the existing card
+// (badge, stats, buttons) and never replaces the card node or the page, so
+// scroll position and anything the user is interacting with stay put. Each
+// probe is independently bounded server-side, so a dead peer resolves to an
+// Offline card instead of holding the page.
+async function probeSwarmPeersAsync(drones, generation) {
   const pending = (Array.isArray(drones) ? drones : []).filter(
     (drone) => drone && !drone.is_self && String(drone.drone_id || ""),
   );
+  if (!swarmProbeMayUpdate(generation)) return;
   if (!pending.length) {
     swarmSetProbeProgress(0, 0);
     return;
@@ -515,13 +530,12 @@ async function probeSwarmPeersAsync(drones) {
       } catch (err) {
         resolved = { ...drone, pending: false, online: false, error: err.message || "probe failed" };
       }
+      if (!swarmProbeMayUpdate(generation)) return;
       done += 1;
       swarmDronesById[droneId] = resolved;
       swarmSetProbeProgress(done, pending.length);
-      // The page may have navigated away mid-probe; only touch the card if
-      // its container is still on screen.
-      const node = document.getElementById(swarmDroneCardId(droneId));
-      if (node) node.outerHTML = renderSwarmDroneCard(resolved);
+      patchSwarmDroneCard(resolved);
+      syncTailnetPullPeerOptions();
     }),
   );
 }
@@ -529,19 +543,29 @@ async function probeSwarmPeersAsync(drones) {
 function swarmSetProbeProgress(done, total) {
   const wrap = document.getElementById("swarmProbeProgress");
   if (!wrap) return;
-  if (!total || done >= total) {
+  if (!total) {
     wrap.classList.add("d-none");
     return;
   }
+  // Shown on the first paint (this runs before the browser paints) and then
+  // only its label/width change. Hiding it again when the last probe lands
+  // would shift the whole grid under the user's scroll.
   wrap.classList.remove("d-none");
+  const finished = done >= total;
   const bar = document.getElementById("swarmProbeProgressBar");
   const label = document.getElementById("swarmProbeProgressLabel");
-  const pct = Math.round((done / total) * 100);
+  const pct = finished ? 100 : Math.round((done / total) * 100);
   if (bar) {
     bar.style.width = `${pct}%`;
     bar.setAttribute("aria-valuenow", String(pct));
+    bar.classList.toggle("progress-bar-striped", !finished);
+    bar.classList.toggle("progress-bar-animated", !finished);
   }
-  if (label) label.textContent = `Checking ${total - done} of ${total} Drone${total === 1 ? "" : "s"}...`;
+  if (label) {
+    label.textContent = finished
+      ? `${total} Drone${total === 1 ? "" : "s"} checked`
+      : `Checking ${total - done} of ${total} Drone${total === 1 ? "" : "s"}...`;
+  }
 }
 
 async function loadTailnetDiscovery(force = false) {
@@ -8440,10 +8464,32 @@ async function setTailnetSharing(enabled) {
     showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
+function syncTailnetPullPeerOptions() {
+  const select = document.getElementById("tailnetPullPeer");
+  const button = document.getElementById("tailnetPullBtn");
+  if (!select || select === document.activeElement) return;
+  const onlinePeers = Object.values(swarmDronesById).filter((drone) => drone && !drone.is_self && drone.online);
+  const signature = onlinePeers.map((drone) => `${drone.drone_id || ""}\t${drone.name || drone.hostname || ""}`).join("\n");
+  if (button) button.disabled = !onlinePeers.length;
+  if (select.dataset.peerSignature === signature) return;
+  const previous = select.value;
+  select.dataset.peerSignature = signature;
+  select.innerHTML = onlinePeers.length
+    ? onlinePeers.map((drone) => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
+    : '<option value="">No paired drones online</option>';
+  if (previous && Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
+}
 async function loadTailnetPullPeerOptions() {
   const select = document.getElementById("tailnetPullPeer");
   const button = document.getElementById("tailnetPullBtn");
   if (!select) return;
+  // The Swarm page already probes each peer itself and keeps the results in
+  // swarmDronesById. Fetching the probing overview here would dial every
+  // machine a second time and redraw this control as that batch returned.
+  if (Object.keys(swarmDronesById).length) {
+    syncTailnetPullPeerOptions();
+    return;
+  }
   try {
     const overview = await loadSwarmOverview();
     const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
@@ -10802,14 +10848,33 @@ function renderSwarmDroneCard(drone) {
     <div class="col" id="${swarmDroneCardId(drone.drone_id)}"><div class="card log-card h-100">
       <div class="card-header d-flex justify-content-between align-items-center gap-2">
         <span class="text-truncate"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</span>
-        <span class="d-flex align-items-center gap-2">${latency}${badge}</span>
+        <span class="d-flex align-items-center gap-2" data-swarm-meta>${latency}${badge}</span>
       </div>
       <div class="card-body">
-        ${addressLines.join("") || '<div class="small text-muted">No address recorded.</div>'}
-        ${stats}
-        ${actions}
+        <div data-swarm-addresses>${addressLines.join("") || '<div class="small text-muted">No address recorded.</div>'}</div>
+        <div data-swarm-stats>${stats}</div>
+        <div data-swarm-actions>${actions}</div>
       </div>
     </div></div>`;
+}
+
+// Swap only the regions of an existing card whose text actually changed.
+// Replacing the card node (or the page) drops scroll position and any
+// control the user is in the middle of using.
+function patchSwarmDroneCard(drone) {
+  const node = document.getElementById(swarmDroneCardId(drone && drone.drone_id));
+  if (!node || !node.isConnected) return;
+  const holder = document.createElement("template");
+  holder.innerHTML = renderSwarmDroneCard(drone).trim();
+  const next = holder.content.firstElementChild;
+  if (!next) return;
+  ["[data-swarm-meta]", "[data-swarm-addresses]", "[data-swarm-stats]", "[data-swarm-actions]"].forEach((selector) => {
+    const current = node.querySelector(selector);
+    const updated = next.querySelector(selector);
+    if (!current || !updated || current.innerHTML === updated.innerHTML) return;
+    if (current.contains(document.activeElement)) return;
+    current.innerHTML = updated.innerHTML;
+  });
 }
 
 function swarmBrowsePeerAssets(peerId) {
@@ -11141,11 +11206,20 @@ function showTailnetGuideModal() {
 }
 
 async function renderSwarmPage() {
+  const generation = ++swarmPageGeneration;
+  const navToken = routerNavToken;
+  const stillCurrent = () => generation === swarmPageGeneration
+    && navToken === routerNavToken
+    && window.location.hash === "#admin/swarm";
   currentSystemContext = null;
   clearSystemTheme();
+  if (!stillCurrent()) return;
   titleNode.textContent = "Swarm";
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
-  setLoading(true, "Loading swarm...");
+  // A second render while the user is already on this page (forget, enroll,
+  // rotate) must not flash the loading toast over the cards they are using.
+  const revisiting = !!document.getElementById("swarmDroneGrid");
+  if (!revisiting) setLoading(true, "Loading swarm...");
   try {
     // Independent calls run concurrently. Default Tailnet/local-network state
     // is read-only here; active discovery is reserved for the page's explicit
@@ -11158,10 +11232,16 @@ async function renderSwarmPage() {
       loadSwarmOverview(false, { probe: false }),
       api("/admin/network-shares").catch(() => ({ shares: [] })),
     ]);
+    // The user may have scrolled on to another page while this was in flight.
+    // Writing content.innerHTML now would wipe that page and yank them back.
+    if (!stillCurrent()) return;
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
     swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
+    const main = document.querySelector("main");
+    const scrollY = revisiting ? window.scrollY : 0;
+    const mainTop = revisiting && main ? main.scrollTop : 0;
     content.innerHTML = `
       ${renderSwarmTabBar("swarm")}
       <div class="d-none mb-2" id="swarmProbeProgress">
@@ -11172,7 +11252,7 @@ async function renderSwarmPage() {
           <span class="small text-muted text-nowrap" id="swarmProbeProgressLabel">Checking Drones...</span>
         </div>
       </div>
-      <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
+      <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid" data-swarm-generation="${generation}">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
       <div class="row g-3 mb-3 align-items-stretch">
@@ -11189,6 +11269,10 @@ async function renderSwarmPage() {
         <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
       </div>`;
+    if (revisiting) {
+      window.scrollTo(0, scrollY);
+      if (main) main.scrollTop = mainTop;
+    }
     loadTailnetPullPeerOptions();
 
     async function refreshPairing(status = null, includeTailnet = false) {
@@ -11209,15 +11293,17 @@ async function renderSwarmPage() {
     document.getElementById("localRefreshBtn").addEventListener("click", () => refreshPairing(null, true));
     document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(null, true); });
     await refreshPairing(discovery.network || null);
-    // Deliberately not awaited before the page is usable: the cards fill in
-    // as each probe lands. setLoading(false) has to run first, which the
-    // finally block below guarantees.
-    probeSwarmPeersAsync(drones);
+    if (!stillCurrent()) return;
+    // Deliberately not awaited before the page is usable: each card's status
+    // fills in as its own probe lands, without redrawing the page.
+    // setLoading(false) has to run first, which the finally block below guarantees.
+    probeSwarmPeersAsync(drones, generation);
   } catch (err) {
+    if (!stillCurrent()) return;
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
   } finally {
-    setLoading(false);
+    if (stillCurrent()) setLoading(false);
   }
 }
 
