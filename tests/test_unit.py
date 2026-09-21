@@ -5386,6 +5386,28 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertEqual(payload["counts"]["roms"], 2)
             self.assertEqual(payload["counts"]["bios"], 10)
 
+    def test_systems_inventory_falls_back_to_local_names_when_cache_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            repo = mock.Mock()
+            repo.list_local_system_names.return_value = ["snes", "gba"]
+            repo.list_rom_systems_page.return_value = None
+            repo.list_systems.return_value = [
+                {"name": "snes", "rom_count": 3},
+                {"name": "gba", "rom_count": 1},
+            ]
+            handler = self._handler(settings, repo)
+
+            named = handler._collect_peer_inventory("systems", {"q": ["gb"]})
+            self.assertEqual(named["asset_type"], "systems")
+            self.assertEqual(named["total"], 1)
+            self.assertEqual(named["items"], [{"system": "gba", "name": "gba", "rom_count": 1}])
+
+            genre = handler._collect_peer_inventory("systems", {"genre": ["Platform"]})
+            self.assertEqual(genre["total"], 0)
+            self.assertEqual(genre["items"], [])
+
     def test_peer_summary_can_include_bios_paths_from_sqlite_without_filesystem_scan(self):
         from app.web import handlers_peer
 
@@ -6426,6 +6448,56 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
             page = list_rom_cache_page(settings, systems=["genesis"], genre="Platform", limit=10, offset=0)
             names = {item["rom_name"] for item in page["items"]}
             self.assertEqual(names, {"Sonic"})
+
+    def test_systems_page_returns_matching_systems_not_games(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_systems_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            page = list_rom_systems_page(settings, limit=10, offset=0)
+            self.assertEqual(page["total"], 2)
+            self.assertEqual(
+                [(item["system"], item["rom_count"]) for item in page["items"]],
+                [("genesis", 2), ("snes", 2)],
+            )
+            self.assertTrue(all("rom_name" not in item for item in page["items"]))
+
+            adventure = list_rom_systems_page(settings, genre="Adventure")
+            self.assertEqual([(item["system"], item["rom_count"]) for item in adventure["items"]], [("snes", 1)])
+
+            by_game = list_rom_systems_page(settings, query="mario")
+            self.assertEqual([item["system"] for item in by_game["items"]], ["snes"])
+            self.assertEqual(by_game["items"][0]["rom_count"], 1)
+
+            by_system_name = list_rom_systems_page(settings, query="snes")
+            self.assertEqual([(item["system"], item["rom_count"]) for item in by_system_name["items"]], [("snes", 2)])
+
+            empty = list_rom_systems_page(settings, systems=["genesis"], genre="Adventure")
+            self.assertEqual(empty["total"], 0)
+            self.assertEqual(empty["items"], [])
+
+            second = list_rom_systems_page(settings, limit=1, offset=1)
+            self.assertEqual(second["total"], 2)
+            self.assertEqual(second["items"][0]["system"], "snes")
+
+    def test_collect_peer_inventory_systems_lists_local_systems_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            (settings.roms_root / "snes").mkdir(parents=True)
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+
+            payload = handler._collect_peer_inventory("systems", {})
+            self.assertEqual(payload["asset_type"], "systems")
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["items"], [{"system": "snes", "name": "snes", "rom_count": 2}])
+
+            (settings.roms_root / "genesis").mkdir()
+            both = handler._collect_peer_inventory("systems", {"genre": ["Platform"], "limit": ["1"], "offset": ["0"]})
+            self.assertEqual(both["total"], 2)
+            self.assertEqual(len(both["items"]), 1)
+            self.assertEqual(both["items"][0]["system"], "genesis")
+            self.assertNotIn("rom_name", both["items"][0])
 
     def test_genre_counts_reflect_multi_valued_membership(self) -> None:
         from app.storage.rom_metadata_store import list_rom_genre_counts
@@ -7948,11 +8020,41 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn("/admin/network-shares/${encodeURIComponent(st.peerId)}/disable", fn_body)
         self.assertIn("Select at least one system", fn_body)
 
-    def test_reference_roms_selecting_a_game_selects_its_system(self) -> None:
+    def test_reference_roms_selecting_a_system_toggles_that_system(self) -> None:
         fn_start = self.js.index("function toggleReferenceRomSystem(")
         fn_body = self.js[fn_start:self.js.index("\nfunction removeReferenceSystem(", fn_start)]
         self.assertIn("selectedSystems", fn_body)
         self.assertIn("renderReferenceRomsSummary()", fn_body)
+        self.assertIn("renderReferenceRomsTable()", fn_body)
+
+    def test_reference_roms_lists_systems_instead_of_games(self) -> None:
+        # Issue #57: a reference can only link a whole system, so the grid
+        # rows are systems. Filters and paging stay on the page.
+        fn_start = self.js.index("function referenceRomsBodyHtml(")
+        fn_body = self.js[fn_start:self.js.index("\nfunction wireReferenceRomsControls(", fn_start)]
+        self.assertIn("referenceRomsSystem", fn_body)
+        self.assertIn("referenceRomsGenre", fn_body)
+        self.assertIn("referenceRomsQuery", fn_body)
+        self.assertIn("referenceRomsPageSize", fn_body)
+        self.assertIn("referenceRomsPagination", fn_body)
+        self.assertIn("<th>System</th>", fn_body)
+        self.assertIn("<th>Games</th>", fn_body)
+        self.assertNotIn("<th>Game</th>", fn_body)
+        self.assertIn("Loading systems...", fn_body)
+        self.assertNotIn("Loading games", fn_body)
+        load_start = self.js.index("async function loadReferenceRoms(")
+        load_body = self.js[load_start:self.js.index("\nfunction applyReferenceSystemsFallback(", load_start)]
+        self.assertIn('type: "systems"', load_body)
+        self.assertNotIn('type: "roms"', load_body)
+        table_start = self.js.index("function renderReferenceRomsTable(")
+        table_body = self.js[table_start:self.js.index("\nfunction renderReferenceRomsPagination(", table_start)]
+        self.assertIn("toggleReferenceRomSystem(", table_body)
+        self.assertNotIn("showReferenceRomDetail", table_body)
+        self.assertNotIn("item.title", table_body)
+        # The games column is the whole system, not the filtered match count.
+        row_start = self.js.index("function referenceSystemRow(")
+        row_body = self.js[row_start:self.js.index("\nfunction showReferenceSystemsNote(", row_start)]
+        self.assertIn("systemCounts[system]", row_body)
 
     def test_reference_roms_uses_the_compact_torrent_style_grid(self) -> None:
         fn_start = self.js.index("function referenceRomsBodyHtml(")

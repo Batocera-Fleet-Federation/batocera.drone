@@ -11221,11 +11221,11 @@ async function renderSwarmPage() {
   }
 }
 
-// Issue #35: the Reference ROMs page. Referencing shares whole *systems* over
-// a read-only network mount (NFS/SMB) -- individual ROMs can't be symlinked
-// thousands at a time -- but the operator finds the systems they want by
-// searching the peer's games. Selecting any game selects its whole system.
-// The chosen peer + systems persist server-side across OFF/ON toggles.
+// Issue #35 / #57: the Reference ROMs page. Referencing shares whole *systems*
+// over a read-only network mount (NFS/SMB). Individual games cannot be linked,
+// so the grid lists systems. System, genre, and search filters still narrow
+// that list (a game-name search finds the system that contains the game) and
+// the chosen peer + systems persist server-side across OFF/ON toggles.
 let referenceRomsState = {
   peerId: "",
   peerName: "",
@@ -11245,6 +11245,7 @@ let referenceRomsState = {
   offset: 0,
   total: 0,
   items: [],
+  systemsNote: "",
 };
 
 function referenceRomsSetsEqual(a, b) {
@@ -11298,6 +11299,7 @@ async function renderReferenceRomsPage(peerId) {
       offset: 0,
       total: 0,
       items: [],
+      systemsNote: "",
     };
 
     if (!targetPeer) {
@@ -11342,7 +11344,7 @@ function referenceRomsBodyHtml() {
     </div>
     <div id="referenceRomsSummary" class="mb-3"></div>
     <div class="download-section mb-3">
-      <div class="download-section-title"><span><i class="bi bi-funnel me-2"></i>Find games</span></div>
+      <div class="download-section-title"><span><i class="bi bi-funnel me-2"></i>Find systems</span></div>
       <div class="row g-2">
       <div class="col-12 col-lg-3">
         <label class="form-label small" for="referenceRomsSystem">System</label>
@@ -11353,8 +11355,8 @@ function referenceRomsBodyHtml() {
         <select id="referenceRomsGenre" class="form-select form-select-sm"><option value="">All genres</option></select>
       </div>
       <div class="col-12 col-lg-4">
-        <label class="form-label small" for="referenceRomsQuery">Search games</label>
-        <input id="referenceRomsQuery" class="form-control form-control-sm" placeholder="Search by game name">
+        <label class="form-label small" for="referenceRomsQuery">Search</label>
+        <input id="referenceRomsQuery" class="form-control form-control-sm" placeholder="Search systems or games">
       </div>
       <div class="col-12 col-lg-2">
         <label class="form-label small" for="referenceRomsPageSize">Per page</label>
@@ -11362,19 +11364,19 @@ function referenceRomsBodyHtml() {
       </div>
       </div>
     </div>
+    <div id="referenceRomsNote" class="small text-muted mb-2 d-none"></div>
     <div class="table-responsive">
       <table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack reference-roms-table">
         <colgroup>
-          <col style="width:34%"><col style="width:15%"><col style="width:14%"><col style="width:23%"><col style="width:14%">
+          <col style="width:40%"><col style="width:22%"><col style="width:20%"><col style="width:18%">
         </colgroup>
         <thead><tr>
-          <th>Game</th>
-          <th>Status</th>
           <th>System</th>
-          <th>Genre</th>
+          <th>Status</th>
+          <th>Games</th>
           <th class="download-actions">Actions</th>
         </tr></thead>
-        <tbody id="referenceRomsRows"><tr><td colspan="5" class="text-muted">Loading games...</td></tr></tbody>
+        <tbody id="referenceRomsRows"><tr><td colspan="4" class="text-muted">Loading systems...</td></tr></tbody>
       </table>
     </div>
     <div id="referenceRomsPagination"></div>`;
@@ -11427,34 +11429,73 @@ async function loadReferencePeerSystems() {
   renderReferenceRomsSummary();
 }
 
+function referenceSystemRow(system, romCount) {
+  const fullCount = referenceRomsState.systemCounts[system];
+  return {
+    system,
+    rom_count: fullCount == null ? Number(romCount || 0) : Number(fullCount),
+  };
+}
+
+function showReferenceSystemsNote(note) {
+  referenceRomsState.systemsNote = note || "";
+  const node = document.getElementById("referenceRomsNote");
+  if (!node) return;
+  node.textContent = referenceRomsState.systemsNote;
+  node.classList.toggle("d-none", !referenceRomsState.systemsNote);
+}
+
 async function loadReferenceRoms() {
   const rows = document.getElementById("referenceRomsRows");
-  if (rows) rows.innerHTML = '<tr><td colspan="5" class="text-muted">Loading games...</td></tr>';
+  if (rows) rows.innerHTML = '<tr><td colspan="4" class="text-muted">Loading systems...</td></tr>';
   const st = referenceRomsState;
-  const params = new URLSearchParams({ type: "roms", limit: String(st.limit), offset: String(st.offset) });
+  const params = new URLSearchParams({ type: "systems", limit: String(st.limit), offset: String(st.offset) });
   if (st.filterSystem) params.set("system", st.filterSystem);
   if (st.filterGenre) params.set("genre", st.filterGenre);
   if (st.query) params.set("q", st.query);
   try {
     const page = await api(`/admin/local-network/peers/${encodeURIComponent(st.peerId)}/assets?${params.toString()}`);
-    st.items = Array.isArray(page.items) ? page.items : [];
+    // Older peers reject type=systems or answer with a ROM page. Never paint
+    // those games: fall back to the system summary instead.
+    if (String(page.asset_type || "") !== "systems" || !Array.isArray(page.items)) {
+      throw new Error("systems inventory unavailable");
+    }
+    st.items = page.items.map((item) => referenceSystemRow(String(item.system || item.name || ""), item.rom_count)).filter((item) => item.system);
     st.total = Number(page.total || 0);
     st.offset = Number(page.offset || 0);
+    showReferenceSystemsNote("");
   } catch (err) {
-    if (rows) rows.innerHTML = `<tr><td colspan="5" class="text-danger">Could not load games: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
-    return;
+    if (!st.availableSystems.length) {
+      showReferenceSystemsNote("");
+      if (rows) rows.innerHTML = `<tr><td colspan="4" class="text-danger">Could not load systems: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
+      return;
+    }
+    applyReferenceSystemsFallback();
   }
   renderReferenceRomsTable();
   renderReferenceRomsPagination();
   renderReferenceRomsSummary();
 }
 
-function referenceRomItemGenre(item) {
-  const gl = item.gamelist || {};
-  let genre = item.genre || gl.genre || "";
-  if (Array.isArray(genre)) genre = genre[0];
-  if (genre && typeof genre === "object") genre = genre.text || "";
-  return String(genre || "").trim();
+function applyReferenceSystemsFallback() {
+  // The peer has no systems inventory (or it failed). Still list systems from
+  // the summary already loaded for the filter dropdowns. Genre and game-name
+  // search need that inventory, so they narrow by system name only.
+  const st = referenceRomsState;
+  const query = st.query.toLowerCase();
+  const names = (st.availableSystems || []).filter((name) => {
+    if (st.filterSystem && name !== st.filterSystem) return false;
+    if (query && !String(name).toLowerCase().includes(query)) return false;
+    return true;
+  }).sort((a, b) => String(a).localeCompare(String(b)));
+  st.total = names.length;
+  st.items = names.slice(st.offset, st.offset + st.limit).map((name) => referenceSystemRow(name, st.systemCounts[name]));
+  const skipped = [];
+  if (st.filterGenre) skipped.push("genre");
+  if (st.query) skipped.push("game name");
+  showReferenceSystemsNote(skipped.length
+    ? `This machine cannot filter systems by ${skipped.join(" or ")}; showing systems by name.`
+    : "");
 }
 
 function renderReferenceRomsTable() {
@@ -11462,31 +11503,28 @@ function renderReferenceRomsTable() {
   if (!rows) return;
   const st = referenceRomsState;
   if (!st.items.length) {
-    rows.innerHTML = '<tr><td colspan="5" class="text-muted">No games match these filters.</td></tr>';
+    rows.innerHTML = '<tr><td colspan="4" class="text-muted">No systems match these filters.</td></tr>';
     return;
   }
-  rows.innerHTML = st.items.map((item, index) => {
-    const system = String(item.system || item.system_name || "");
-    const name = String(item.title || item.name || item.rom_file || "Unknown");
+  rows.innerHTML = st.items.map((item) => {
+    const system = String(item.system || "");
+    const count = Number(item.rom_count || 0);
     const selected = st.selectedSystems.has(system);
-    const genre = referenceRomItemGenre(item);
     const status = selected
       ? (st.active
         ? '<span class="badge text-bg-success"><i class="bi bi-link-45deg me-1"></i>Referenced</span>'
         : '<span class="badge text-bg-info"><i class="bi bi-check2 me-1"></i>Selected</span>')
       : '<span class="badge text-bg-secondary">Not selected</span>';
     const selectTitle = selected ? `Stop referencing the ${system} system` : `Reference the ${system} system`;
+    const gamesLabel = count.toLocaleString();
     return `<tr class="${selected ? "reference-roms-row-selected" : ""}">
-      <td class="download-file" title="${escapeHtml(name)}">${escapeHtml(name)}</td>
+      <td class="download-file" title="${escapeHtml(system)}">${escapeHtml(system)}</td>
       <td>${status}</td>
-      <td class="text-truncate" title="${escapeHtml(system)}">${escapeHtml(system)}</td>
-      <td class="text-truncate" title="${escapeHtml(genre)}">${escapeHtml(genre || "\u2014")}</td>
+      <td title="${escapeHtml(`${gamesLabel} games in ${system}`)}">${escapeHtml(gamesLabel)}</td>
       <td class="download-actions">
         <button class="btn btn-sm ${selected ? "btn-outline-warning" : "btn-outline-success"}" type="button"
           title="${escapeHtml(selectTitle)}" aria-label="${escapeHtml(selectTitle)}" ${st.active ? "disabled" : ""}
           onclick="toggleReferenceRomSystem(${jsAttr(system)})"><i class="bi ${selected ? "bi-dash-circle" : "bi-plus-circle"}"></i></button>
-        <button class="btn btn-sm btn-outline-info" type="button" title="Game details" aria-label="Game details"
-          onclick="showReferenceRomDetail(${index})"><i class="bi bi-info-circle"></i></button>
       </td>
     </tr>`;
   }).join("");
@@ -11549,14 +11587,14 @@ function renderReferenceRomsSummary() {
     <div class="download-summary-grid mb-3">
       <div class="download-summary-card"><i class="bi bi-collection"></i><div><strong>${st.availableSystems.length.toLocaleString()}</strong><span>Peer systems</span></div></div>
       <div class="download-summary-card tone-info"><i class="bi bi-check2-square"></i><div><strong>${st.selectedSystems.size.toLocaleString()}</strong><span>Selected</span></div></div>
-      <div class="download-summary-card"><i class="bi bi-controller"></i><div><strong>${st.total.toLocaleString()}</strong><span>Matching games</span></div></div>
+      <div class="download-summary-card"><i class="bi bi-controller"></i><div><strong>${st.total.toLocaleString()}</strong><span>Matching systems</span></div></div>
       <div class="download-summary-card ${st.active ? "tone-success" : ""}"><i class="bi ${st.active ? "bi-hdd-network" : "bi-pause-circle"}"></i><div><strong>${st.active ? "On" : "Off"}</strong><span>Referencing</span></div></div>
     </div>
     <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
       ${statusNote}
       <button class="btn btn-sm btn-primary ms-auto" id="referenceRomsSaveBtn" ${st.active || !dirty ? "disabled" : ""} onclick="saveReferenceSelection()"><i class="bi bi-save me-1"></i>Save Selection</button>
     </div>
-    <div>${chips || '<span class="text-muted small">No systems selected yet &mdash; find a game below and switch on its system.</span>'}</div>
+    <div>${chips || '<span class="text-muted small">No systems selected yet &mdash; choose a system below.</span>'}</div>
     ${st.active ? '<div class="small text-muted mt-1">Switch referencing OFF to change which systems are selected.</div>' : ""}`;
 }
 
@@ -11640,63 +11678,6 @@ async function referenceRomsWaitForSettled(wantOn) {
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
   }
   throw new Error("still working in the background; check this page again shortly");
-}
-
-function showReferenceRomDetail(index) {
-  const item = referenceRomsState.items[index];
-  if (!item) return;
-  const gl = item.gamelist || {};
-  const gv = (value) => (value && typeof value === "object" ? String(value.text || "") : String(value || ""));
-  const fields = [
-    ["Name", item.title || item.name],
-    ["System", item.system || item.system_name],
-    ["Genre", referenceRomItemGenre(item)],
-    ["Players", gv(gl.players)],
-    ["Developer", gv(gl.developer)],
-    ["Publisher", gv(gl.publisher)],
-    ["Release date", gv(gl.releasedate)],
-    ["Rating", gv(gl.rating)],
-    ["File", item.relative_path || item.rom_file],
-  ];
-  const rowsHtml = fields
-    .filter(([, value]) => String(value || "").trim())
-    .map(([label, value]) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`)
-    .join("");
-  const description = gv(gl.desc || gl.description).trim();
-  const system = String(item.system || item.system_name || "");
-  const selected = referenceRomsState.selectedSystems.has(system);
-  const modalId = "referenceRomDetailModal";
-  let modal = document.getElementById(modalId);
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = modalId;
-    modal.className = "modal fade";
-    modal.tabIndex = -1;
-    modal.setAttribute("aria-hidden", "true");
-    document.body.appendChild(modal);
-  }
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered modal-lg">
-      <div class="modal-content themed-modal">
-        <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-controller me-2"></i>${escapeHtml(String(item.title || item.name || "Game"))}</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div class="mb-2">${selected
-            ? (referenceRomsState.active
-              ? '<span class="badge text-bg-success"><i class="bi bi-link-45deg me-1"></i>System is referenced</span>'
-              : '<span class="badge text-bg-info"><i class="bi bi-check-circle me-1"></i>System is selected</span>')
-            : '<span class="badge text-bg-secondary">System is not referenced</span>'}</div>
-          ${rowsHtml}
-          ${description ? `<div class="mt-3 small">${escapeHtml(description)}</div>` : ""}
-          ${referenceRomsState.active ? "" : `<div class="mt-3"><button class="btn btn-sm btn-outline-info" type="button" onclick="toggleReferenceRomSystem(${jsAttr(system)});showReferenceRomDetail(${index})">${selected ? "Remove" : "Reference"} the ${escapeHtml(system)} system</button></div>`}
-        </div>
-      </div>
-    </div>`;
-  if (window.bootstrap?.Modal) {
-    window.bootstrap.Modal.getOrCreateInstance(modal).show();
-  }
 }
 
 async function renderIntegrationTransfersPanel(target) {
