@@ -30,8 +30,9 @@ def relative_game_id(rom):
 
 
 def main(argv):
-    if len(argv) != 2 or argv[0] not in {"eden", "citron"}:
-        print("usage: switch_gui_launcher.py <eden|citron> <rom>", file=sys.stderr)
+    supported = {"eden", "eden-legacy", "eden-pgo", "citron", "citron-legacy"}
+    if len(argv) != 2 or argv[0] not in supported:
+        print("usage: switch_gui_launcher.py <eden|eden-legacy|eden-pgo|citron|citron-legacy> <rom>", file=sys.stderr)
         return 2
     emulator, rom = argv
     config = load_config()

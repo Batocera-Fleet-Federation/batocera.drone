@@ -24,6 +24,7 @@ SWITCH_LAUNCHER_ASSET = ASSET_ROOT / "switch_gui_launcher.py"
 SWITCH_WRAPPER_ASSET = ASSET_ROOT / "switch_gui_autoload.sh"
 SWITCH_GENERATOR_MARKER_START = "# >>> drone switch-gui-autoload fix"
 SWITCH_GENERATOR_MARKER_END = "# <<< drone switch-gui-autoload fix"
+SWITCH_EMULATOR_CONDITION = "if emulator in ('eden', 'eden-legacy', 'eden-pgo', 'citron', 'citron-legacy'):"
 
 FIX_CATALOG = (
     {
@@ -203,6 +204,7 @@ def _switch_fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str
     paths = _paths(settings)
     config = _read_switch_config(settings)
     patched = _generator_has_marker(paths["switch_generator"], SWITCH_GENERATOR_MARKER_START)
+    dispatch_current = _generator_has_marker(paths["switch_generator"], SWITCH_EMULATOR_CONDITION)
     legacy_patched = _generator_has_marker(paths["switch_generator"], "# >>> gui-autoload hotfix")
     games = list_switch_games(settings)
     if legacy_patched and not config["selected_games"]:
@@ -211,6 +213,7 @@ def _switch_fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str
     assets_current = (
         _sha256(paths["switch_launcher"]) == _sha256(SWITCH_LAUNCHER_ASSET)
         and _sha256(paths["switch_wrapper"]) == _sha256(SWITCH_WRAPPER_ASSET)
+        and dispatch_current
     )
     enabled = bool((config["enabled"] and patched) or legacy_patched)
     payload = dict(metadata)
@@ -341,7 +344,8 @@ def _patch_switch_generator(settings: Settings) -> None:
         + SWITCH_GENERATOR_MARKER_START
         + ": scope is read dynamically by the managed launcher\n"
         + indent
-        + "if emulator in ('eden', 'citron'):\n"
+        + SWITCH_EMULATOR_CONDITION
+        + "\n"
         + indent
         + "    commandArray = [\"python3\", \"/userdata/system/rgs/generators/yuzu/drone-switch-gui-launcher.py\", emulator, str(rom)]\n"
         + indent
@@ -397,6 +401,7 @@ def _enable_switch_gui_workaround(settings: Settings, scope: str, selected_games
         _generator_has_marker(paths["switch_generator"], SWITCH_GENERATOR_MARKER_START)
         and _generator_has_marker(paths["switch_generator"], SWITCH_GENERATOR_MARKER_END)
     )
+    dispatch_current = _generator_has_marker(paths["switch_generator"], SWITCH_EMULATOR_CONDITION)
     # Assets land first and config remains disabled until the generator has
     # compiled successfully, so a partial failure cannot redirect launches.
     _atomic_write(paths["switch_launcher"], SWITCH_LAUNCHER_ASSET.read_bytes(), 0o755)
@@ -404,7 +409,7 @@ def _enable_switch_gui_workaround(settings: Settings, scope: str, selected_games
     _save_switch_config(settings, enabled=False, scope=scope, selected_games=selected_games)
     # Selection-only changes are config writes. Re-patch only on first enable,
     # migration, repair, or re-enable after a clean disable.
-    if not (current["enabled"] and marker_complete):
+    if not (current["enabled"] and marker_complete and dispatch_current):
         _patch_switch_generator(settings)
     _save_switch_config(settings, enabled=True, scope=scope, selected_games=selected_games)
 

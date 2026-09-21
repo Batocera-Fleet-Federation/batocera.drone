@@ -108,6 +108,9 @@ class AdminFixManagerTests(unittest.TestCase):
             self.assertTrue(status["enabled"])
             self.assertTrue(status["managed"])
             self.assertIn(admin_fixes.SWITCH_GENERATOR_MARKER_START, source)
+            self.assertIn("'eden-legacy'", source)
+            self.assertIn("'eden-pgo'", source)
+            self.assertIn("'citron-legacy'", source)
             self.assertNotIn("# >>> gui-autoload hotfix", source)
             self.assertEqual(config["selected_games"], [smash])
             self.assertEqual(config["game_names"][smash], "Super Smash Bros. Ultimate")
@@ -143,6 +146,37 @@ class AdminFixManagerTests(unittest.TestCase):
             source = generator.read_text(encoding="utf-8")
             self.assertNotIn("# >>> gui-autoload hotfix", source)
             self.assertIn('commandArray = ["./"+emulator+".AppImage", "-f",  "-g", rom ]', source)
+
+    def test_switch_reenable_repairs_an_older_managed_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = build_settings(root)
+            generator = write_generator(root)
+            write_switch_library(root)
+            smash = "Smash [01006A800016E000].xci"
+            admin_fixes.set_fix_enabled(
+                settings,
+                admin_fixes.SWITCH_GUI_WORKAROUND_ID,
+                True,
+                scope="selected",
+                selected_games=[smash],
+            )
+            old_source = generator.read_text(encoding="utf-8").replace(
+                admin_fixes.SWITCH_EMULATOR_CONDITION,
+                "if emulator in ('eden', 'citron'):",
+            )
+            generator.write_text(old_source, encoding="utf-8")
+            self.assertEqual(admin_fixes.get_fix(settings, admin_fixes.SWITCH_GUI_WORKAROUND_ID)["status"], "modified")
+
+            repaired = admin_fixes.set_fix_enabled(
+                settings,
+                admin_fixes.SWITCH_GUI_WORKAROUND_ID,
+                True,
+                scope="selected",
+                selected_games=[smash],
+            )
+            self.assertTrue(repaired["managed"])
+            self.assertIn(admin_fixes.SWITCH_EMULATOR_CONDITION, generator.read_text(encoding="utf-8"))
 
     def test_switch_fix_refuses_unknown_generator_without_modifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,14 +228,14 @@ class InstalledFixAssetTests(unittest.TestCase):
                  mock.patch.object(switch_gui_launcher, "EMU_ROOT", root), \
                  mock.patch.object(switch_gui_launcher.os, "execv", side_effect=RuntimeError) as execute:
                 with self.assertRaises(RuntimeError):
-                    switch_gui_launcher.main(["eden", str(selected_rom)])
+                    switch_gui_launcher.main(["eden-legacy", str(selected_rom)])
                 self.assertEqual(execute.call_args.args[0], "/bin/bash")
                 self.assertEqual(execute.call_args.args[1][-1], "Super Smash Bros. Ultimate")
 
                 execute.reset_mock()
                 with self.assertRaises(RuntimeError):
-                    switch_gui_launcher.main(["eden", str(other_rom)])
-                self.assertEqual(execute.call_args.args[0], str(root / "eden.AppImage"))
+                    switch_gui_launcher.main(["eden-legacy", str(other_rom)])
+                self.assertEqual(execute.call_args.args[0], str(root / "eden-legacy.AppImage"))
                 self.assertEqual(execute.call_args.args[1][-3:-1], ["-f", "-g"])
 
 

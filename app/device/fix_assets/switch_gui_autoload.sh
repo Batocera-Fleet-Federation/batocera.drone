@@ -2,10 +2,11 @@
 # Load an Eden/Citron game through File > Load File after GUI indexing settles.
 # Installed by Batocera Drone; invoked only by drone-switch-gui-launcher.py.
 EMU="$1"; ROM="$2"; PAT="${3:-$(basename "$2")}";
-[ -n "$EMU" ] && [ -n "$ROM" ] || { echo "usage: $0 <citron|eden> rom [window-title-pattern]" >&2; exit 2; }
+[ -n "$EMU" ] && [ -n "$ROM" ] || { echo "usage: $0 <eden/citron variant> rom [window-title-pattern]" >&2; exit 2; }
+FAMILY="${EMU%%-*}"
 GA_START_FLAGS=""; GA_FULLSCREEN="f11"; GA_HIDE="cover"
 CONF="$(dirname "$(readlink -f "$0")")/gui-autoload.conf"; [ -f "$CONF" ] && . "$CONF"
-LOG="/userdata/system/configs/yuzu/log/${EMU}_log.txt"
+LOG="/userdata/system/configs/yuzu/log/${FAMILY}_log.txt"
 export DISPLAY="${DISPLAY:-:0}"
 cd /userdata/system/rgs/emulators/switch || exit 1
 MARK=$(mktemp /tmp/gui-autoload.XXXXXX)
@@ -31,7 +32,7 @@ fallback() {
   kill -TERM "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; cleanup
   exec "./${EMU}.AppImage" -f -g "$ROM"
 }
-winid() { wmctrl -l 2>/dev/null | command grep -i "$EMU" | command grep -vi "EmulationStation" | head -1 | awk '{print $1}'; }
+winid() { wmctrl -l 2>/dev/null | command grep -i "$FAMILY" | command grep -vi "EmulationStation" | head -1 | awk '{print $1}'; }
 trap cleanup EXIT
 
 if [ "$GA_FULLSCREEN" = config ]; then
@@ -54,7 +55,7 @@ done
 for i in $(seq 1 60); do [ -n "$(cover_win)" ] && break; sleep 0.05; done
 focus_cover
 
-if [ "$EMU" = citron ]; then
+if [ "$FAMILY" = citron ]; then
   for i in $(seq 1 80); do sleep 0.5; focus_cover; [ "$LOG" -nt "$MARK" ] && command grep -q DonePopulating "$LOG" 2>/dev/null && break; done
 else
   last=-1; stable=0
@@ -89,7 +90,7 @@ OK=""
 for i in $(seq 1 60); do
   sleep 0.5
   kill -0 "$PID" 2>/dev/null || { cleanup; exit 1; }
-  wmctrl -l 2>/dev/null | command grep -i "$EMU" | command grep -Fqi -- "$PAT" && { OK=1; break; }
+  wmctrl -l 2>/dev/null | command grep -i "$FAMILY" | command grep -Fqi -- "$PAT" && { OK=1; break; }
 done
 [ -n "$OK" ] || fallback
 
