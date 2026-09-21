@@ -1,5 +1,7 @@
 # Hotfix: Smash Ultimate GUI-autoload (Eden + Citron on RGS Batocera)
 
+> The Drone Admin **Fixes** page now provides the managed, generic successor to this bundle, including all-games and selected-games scope. This directory remains the independently verified reference and manual recovery path.
+
 ## Problem
 RGS launches Switch games with command-line autoboot: `./<emulator>.AppImage -f -g <rom>`.
 For Super Smash Bros. Ultimate (title ID `01006A800016E000`, with an installed update and DLC) that autoboot starts the game

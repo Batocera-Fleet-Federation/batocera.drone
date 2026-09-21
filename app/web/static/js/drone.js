@@ -6231,8 +6231,179 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/fixes')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-wrench-adjustable-circle me-2"></i>Fixes</h5>
+            <p class="card-text">Enable narrowly-scoped compatibility workarounds, review exactly what each one changes, and configure game-specific behavior.</p>
+          </div>
+        </div>
+      </div>
     </div>
   `;
+}
+
+let adminFixesById = new Map();
+
+function renderAdminFixOptions(fix) {
+  if (fix.id !== "switch-gui-autoload") return "";
+  const selected = new Set(Array.isArray(fix.selected_games) ? fix.selected_games : []);
+  const games = Array.isArray(fix.games) ? fix.games : [];
+  return `
+    <div class="admin-fix-options mt-3" data-fix-options="${escapeHtml(fix.id)}">
+      <div class="small fw-semibold mb-2">Apply GUI-autoload to</div>
+      <div class="d-flex flex-wrap gap-3 mb-3">
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="switch-fix-scope" id="switchFixSelected" value="selected" ${fix.scope !== "all" ? "checked" : ""} onchange="saveAdminFixConfiguration('${fix.id}')">
+          <label class="form-check-label" for="switchFixSelected">Selected games</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="switch-fix-scope" id="switchFixAll" value="all" ${fix.scope === "all" ? "checked" : ""} onchange="saveAdminFixConfiguration('${fix.id}')">
+          <label class="form-check-label" for="switchFixAll">All Switch games</label>
+        </div>
+      </div>
+      <div class="admin-fix-game-list ${fix.scope === "all" ? "scope-all" : ""}" id="switchFixGameList">
+        ${games.length ? games.map((game) => `
+          <label class="admin-fix-game form-check">
+            <input class="form-check-input switch-fix-game" type="checkbox" value="${escapeHtml(game.id)}" ${selected.has(game.id) ? "checked" : ""} ${fix.scope === "all" ? "disabled" : ""} onchange="saveAdminFixConfiguration('${fix.id}')">
+            <span class="form-check-label">
+              <span class="d-block">${escapeHtml(game.name)}</span>
+              <span class="text-muted small">${escapeHtml(game.path)}</span>
+            </span>
+          </label>
+        `).join("") : `<p class="text-muted small mb-0">No .xci, .nsp, .nca, or .nro games were found in the Switch ROM folder.</p>`}
+      </div>
+      <p class="text-muted small mt-2 mb-0">Selection changes are saved immediately and are read again for every launch.</p>
+    </div>
+  `;
+}
+
+function renderAdminFixCard(fix) {
+  const enabled = Boolean(fix.enabled);
+  const stateClass = enabled ? "enabled" : "disabled";
+  const stateLabel = enabled ? "Enabled" : "Disabled";
+  return `
+    <div class="col-xl-6 mb-4">
+      <section class="card admin-fix-card h-100 ${stateClass}" data-fix-id="${escapeHtml(fix.id)}">
+        <div class="card-body">
+          <div class="d-flex align-items-start justify-content-between gap-3">
+            <div class="min-w-0">
+              <button type="button" class="admin-fix-heading" onclick="showAdminFixDetails('${fix.id}')" aria-label="Learn how ${escapeHtml(fix.name)} works">
+                <i class="bi bi-info-circle me-2"></i>${escapeHtml(fix.name)}
+              </button>
+              <div class="text-muted small mt-1">${escapeHtml(fix.applies_to || "")}</div>
+            </div>
+            <div class="form-check form-switch admin-fix-toggle-wrap">
+              <input class="form-check-input admin-fix-toggle" type="checkbox" role="switch" id="fixToggle-${escapeHtml(fix.id)}" ${enabled ? "checked" : ""} onchange="toggleAdminFix('${fix.id}', this.checked)">
+              <label class="form-check-label" for="fixToggle-${escapeHtml(fix.id)}">${stateLabel}</label>
+            </div>
+          </div>
+          <p class="mt-3 mb-0">${escapeHtml(fix.summary || "")}</p>
+          ${fix.status === "modified" ? `<div class="alert alert-warning py-2 small mt-3 mb-0">A legacy or modified version is active. Saving this panel migrates it to Drone's current managed version.</div>` : ""}
+          ${renderAdminFixOptions(fix)}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+async function renderAdminFixesPage() {
+  currentSystemContext = null;
+  setLoading(true, "Loading compatibility fixes...");
+  clearSystemTheme();
+  titleNode.textContent = "Admin Fixes";
+  subtitleNode.textContent = "Opt-in compatibility workarounds";
+  try {
+    const payload = await api("/admin/fixes");
+    const fixes = Array.isArray(payload.fixes) ? payload.fixes : [];
+    adminFixesById = new Map(fixes.map((fix) => [fix.id, fix]));
+    content.innerHTML = `
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <p class="text-muted mb-0">These fixes are reversible and intentionally disabled until you turn them on.</p>
+        <button class="btn btn-sm btn-outline-secondary" type="button" onclick="setHash('#admin')"><i class="bi bi-arrow-left me-1"></i>Admin</button>
+      </div>
+      <div class="row">${fixes.map(renderAdminFixCard).join("")}</div>
+    `;
+  } catch (error) {
+    showError(error.message || "Unable to load admin fixes.");
+    content.innerHTML = `<div class="alert alert-danger">Unable to load compatibility fixes.</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+
+function adminFixPayload(fixId, enabledOverride = null) {
+  const fix = adminFixesById.get(fixId) || {};
+  const toggle = document.getElementById(`fixToggle-${fixId}`);
+  const scope = document.querySelector('input[name="switch-fix-scope"]:checked')?.value || fix.scope || "selected";
+  const selectedGames = Array.from(document.querySelectorAll(".switch-fix-game:checked")).map((node) => node.value);
+  return {
+    enabled: enabledOverride === null ? Boolean(toggle?.checked) : Boolean(enabledOverride),
+    scope,
+    selected_games: selectedGames,
+  };
+}
+
+async function updateAdminFix(fixId, payload) {
+  const card = document.querySelector(`[data-fix-id="${fixId}"]`);
+  const controls = card ? card.querySelectorAll("input") : [];
+  controls.forEach((control) => { control.disabled = true; });
+  try {
+    const response = await apiPost(`/admin/fixes/${encodeURIComponent(fixId)}`, payload);
+    adminFixesById.set(fixId, response.fix);
+    showToast(`${escapeHtml(response.fix.name)} ${response.fix.enabled ? "enabled" : "disabled"}.`, "success");
+    await renderAdminFixesPage();
+  } catch (error) {
+    showToast(`Could not update fix: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
+    await renderAdminFixesPage();
+  }
+}
+
+async function toggleAdminFix(fixId, enabled) {
+  await updateAdminFix(fixId, adminFixPayload(fixId, enabled));
+}
+
+async function saveAdminFixConfiguration(fixId) {
+  const scope = document.querySelector('input[name="switch-fix-scope"]:checked')?.value || "selected";
+  document.querySelectorAll(".switch-fix-game").forEach((node) => { node.disabled = scope === "all"; });
+  await updateAdminFix(fixId, adminFixPayload(fixId));
+}
+
+function showAdminFixDetails(fixId) {
+  const fix = adminFixesById.get(fixId);
+  if (!fix) return;
+  const modalId = "adminFixDetailsModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-wrench-adjustable-circle me-2"></i>${escapeHtml(fix.name)}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="badge text-bg-secondary mb-3">${escapeHtml(fix.applies_to || "")}</div>
+          ${(fix.details || []).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}
+          <h6 class="mt-4">What changes on this machine</h6>
+          <ul>${(fix.changes || []).map((change) => `<li>${escapeHtml(change)}</li>`).join("")}</ul>
+          ${fix.caution ? `<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>${escapeHtml(fix.caution)}</div>` : ""}
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.bootstrap?.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  else { modal.classList.add("show"); modal.style.display = "block"; }
 }
 
 async function monitorDroneUpdateWorker() {
@@ -14062,6 +14233,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderAutomationPage();
+    } else if (hash === "#admin/fixes") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAdminFixesPage();
     } else if (hash === "#admin/torrents") {
       if (!adminEnabled) {
         setHash("");

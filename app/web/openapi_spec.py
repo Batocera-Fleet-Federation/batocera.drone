@@ -1371,6 +1371,39 @@ def _schemas() -> Dict[str, Schema]:
         "IdleGameExitResponse": _object({"idle_game_exit": _ref("IdleGameExitConfig")}, ("idle_game_exit",)),
         "WifiRecoveryUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "WifiRecoveryResponse": _object({"wifi_recovery": _ref("WifiRecoveryConfig")}, ("wifi_recovery",)),
+        "AdminFixGame": _object({"id": _string(), "name": _string(), "path": _string()}, ("id", "name", "path")),
+        "AdminFix": _object(
+            {
+                "id": _string(),
+                "name": _string(),
+                "summary": _string(),
+                "applies_to": _string(),
+                "details": _array(_string()),
+                "changes": _array(_string()),
+                "caution": _string(),
+                "enabled": _boolean(),
+                "managed": _boolean(),
+                "status": _enum(("enabled", "disabled", "modified")),
+                "scope": _enum(("all", "selected")),
+                "selected_games": _array(_string()),
+                "games": _array(_ref("AdminFixGame")),
+                "legacy_detected": _boolean(),
+                "installed_path": _string(),
+                "log_path": _string(),
+            },
+            ("id", "name", "summary", "enabled", "status"),
+            description="An opt-in, reversible Batocera compatibility workaround and its live installation state.",
+        ),
+        "AdminFixListResponse": _object({"fixes": _array(_ref("AdminFix"))}, ("fixes",)),
+        "AdminFixUpdateRequest": _object(
+            {
+                "enabled": _boolean(),
+                "scope": _enum(("all", "selected")),
+                "selected_games": _array(_string()),
+            },
+            ("enabled",),
+        ),
+        "AdminFixUpdateResponse": _object({"fix": _ref("AdminFix")}, ("fix",)),
         "ArtworkMissingResponse": _object(
             {
                 "roms": _array(freeform),
@@ -2509,6 +2542,17 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation/idle-volume": {"post": _operation("Update idle-volume automation", {"200": _json_response("IdleVolumeResponse")}, request_body=_json_request("IdleVolumeUpdateRequest"), tags=["admin"])},
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
             "/admin/automation/wifi-recovery": {"post": _operation("Update Wi-Fi recovery automation", {"200": _json_response("WifiRecoveryResponse")}, request_body=_json_request("WifiRecoveryUpdateRequest"), tags=["admin"])},
+            "/admin/fixes": {"get": _operation("List opt-in compatibility fixes and their live installation state", {"200": _json_response("AdminFixListResponse")}, tags=["admin", "fixes"])},
+            "/admin/fixes/{fix_id}": {
+                "post": _operation(
+                    "Enable, disable, or configure one compatibility fix",
+                    {"200": _json_response("AdminFixUpdateResponse"), "404": _json_response("ErrorResponse", "Unknown fix")},
+                    request_body=_json_request("AdminFixUpdateRequest"),
+                    parameters=[_path_param("fix_id")],
+                    tags=["admin", "fixes"],
+                    error_codes=("400", "401", "403", "404", "429", "500"),
+                )
+            },
             "/admin/system/update-drone": {
                 "get": _operation("Get the API worker's current or most recent Drone update job", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"]),
                 "post": _operation(

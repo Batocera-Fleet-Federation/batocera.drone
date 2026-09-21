@@ -491,6 +491,10 @@ class ApiRoutesMixin:
                 self._handle_admin_automation_status()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "fixes":
+                self._handle_admin_fixes_list()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "auto-update":
                 self._handle_admin_drone_auto_update_get()
                 return
@@ -888,6 +892,11 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-volume":
                 payload = self._read_json_body()
                 self._handle_admin_automation_idle_volume(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "fixes":
+                payload = self._read_json_body()
+                self._handle_admin_fix_update(parts[2], payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-game-exit":

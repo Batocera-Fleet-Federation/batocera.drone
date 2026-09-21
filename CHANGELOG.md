@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Add an Admin Fixes catalog with reversible toggles, detailed explanation modals, and managed lifecycle handling. It includes a
+  Lindbergh input-device budget guard and a generic Eden/Citron GUI-autoload workaround that can target selected Switch games or
+  the entire Switch library, while recognizing and migrating the independently verified Smash-only patch.
+
 - Add Codex cross-verification for the Smash launch hotfix. Native Eden/Citron CLI frontends applied the update and reached guest
   services but presented zero frames in real ES launches, so the experiment was reverted and GUI-autoload remains the active fix.
 

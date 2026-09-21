@@ -25,6 +25,7 @@ try:
         _wifi_recovery_status,
     )
     from ..device.device_control import _get_audio_volume, _restart_emulationstation
+    from ..device import admin_fixes as _admin_fixes
     from ..device import notifications as _notifications
     from ..device.pixen import run_pixen_upgrade
     from ..device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _wifi_recovery_status,
     )
     from device.device_control import _get_audio_volume, _restart_emulationstation  # type: ignore
+    from device import admin_fixes as _admin_fixes  # type: ignore
     from device import notifications as _notifications  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
     from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
@@ -56,6 +58,38 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 
 class HandlersSystemMixin:
+    def _handle_admin_fixes_list(self) -> None:
+        self._send_json(200, {"fixes": _admin_fixes.list_fixes(self.settings)})
+
+    def _handle_admin_fix_update(self, fix_id: str, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            self._send_json(400, {"error": "enabled must be true or false"})
+            return
+        selected_games = payload.get("selected_games", [])
+        if not isinstance(selected_games, list) or not all(isinstance(value, str) for value in selected_games):
+            self._send_json(400, {"error": "selected_games must be a list of game ids"})
+            return
+        try:
+            fix = _admin_fixes.set_fix_enabled(
+                self.settings,
+                fix_id,
+                enabled,
+                scope=str(payload.get("scope") or "selected"),
+                selected_games=selected_games,
+            )
+        except KeyError:
+            self._send_json(404, {"error": "unknown admin fix"})
+            return
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except OSError as error:
+            self._send_json(500, {"error": f"Unable to update fix: {error}"})
+            return
+        self._send_json(200, {"fix": fix})
+
     def _handle_admin_drone_update(self) -> None:
         # This route only submits intent. The API-owned worker checks GitHub,
         # downloads both UI bundles, overlays them, and restarts the service.
