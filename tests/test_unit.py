@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import importlib
 import io
@@ -8049,9 +8050,12 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn("Loading systems...", fn_body)
         self.assertNotIn("Loading games", fn_body)
         load_start = self.js.index("async function loadReferenceRoms(")
-        load_body = self.js[load_start:self.js.index("\nfunction applyReferenceSystemsFallback(", load_start)]
+        load_body = self.js[load_start:self.js.index("\nfunction renderReferenceRomsTable(", load_start)]
         self.assertIn('type: "systems"', load_body)
         self.assertNotIn('type: "roms"', load_body)
+        # A payload that is not a systems page is refused outright rather than
+        # painted, so a game row can never reach the grid.
+        self.assertIn('!== "systems"', load_body)
         table_start = self.js.index("function renderReferenceRomsTable(")
         table_body = self.js[table_start:self.js.index("\nfunction renderReferenceRomsPagination(", table_start)]
         self.assertIn("toggleReferenceRomSystem(", table_body)
@@ -8059,7 +8063,7 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertNotIn("item.title", table_body)
         # The games column is the whole system, not the filtered match count.
         row_start = self.js.index("function referenceSystemRow(")
-        row_body = self.js[row_start:self.js.index("\nfunction showReferenceSystemsNote(", row_start)]
+        row_body = self.js[row_start:self.js.index("\nasync function loadReferenceRoms(", row_start)]
         self.assertIn("systemCounts[system]", row_body)
 
     def test_reference_roms_uses_the_compact_torrent_style_grid(self) -> None:
@@ -9525,3 +9529,121 @@ class SwarmProbeHealthFallbackBehaviourTests(unittest.TestCase):
         self.assertTrue(entry["online"])
         self.assertIsNone(entry["summary_error"])
         self.assertEqual(len(calls), 1)
+
+
+class ReferenceRomsSystemsInventoryTests(unittest.TestCase):
+    """Issue #57: the Reference ROMs page lists systems, never games. A peer
+    that predates the ``systems`` inventory type rejects the request, so this
+    Drone folds that peer's ROM inventory into systems itself rather than
+    losing the genre/search filters (or, worse, painting game rows)."""
+
+    def _probe(self, responses):
+        from app.web import handlers_network
+
+        handler = mock.Mock()
+        handler._peer_inventory_request = functools.partial(
+            handlers_network.HandlersNetworkMixin._peer_inventory_request, handler
+        )
+        handler._aggregate_peer_systems = functools.partial(
+            handlers_network.HandlersNetworkMixin._aggregate_peer_systems, handler
+        )
+        handler._peer_systems_matching_roms = functools.partial(
+            handlers_network.HandlersNetworkMixin._peer_systems_matching_roms, handler
+        )
+        calls = []
+
+        def fake_get(peer, endpoint, settings, **kwargs):
+            calls.append(endpoint)
+            for marker, value in responses:
+                if marker in endpoint:
+                    if isinstance(value, Exception):
+                        raise value
+                    return value, "https://100.64.0.5:8543"
+            raise AssertionError(f"unexpected peer request: {endpoint}")
+
+        def run(query_params):
+            with mock.patch.object(handlers_network, "_peer_get_json_for_peer", side_effect=fake_get):
+                return handlers_network.HandlersNetworkMixin._peer_systems_inventory(
+                    handler, {"drone_id": "aa:bb"}, "aa:bb", query_params
+                )
+
+        return run, calls
+
+    _OLD_PEER = HTTPError("https://peer/v1/api/peer/inventory/systems", 400, "bad request", {}, None)
+    _SUMMARY = {
+        "drone_id": "aa:bb",
+        "systems": ["gba", "snes"],
+        "system_counts": {"gba": 4, "snes": 9},
+    }
+
+    def test_new_peer_systems_page_is_passed_through(self) -> None:
+        page = {"asset_type": "systems", "total": 1, "items": [{"system": "snes", "rom_count": 9}]}
+        run, calls = self._probe([("/inventory/systems", page)])
+        self.assertEqual(run({}), page)
+        self.assertEqual(len(calls), 1)
+
+    def test_old_peer_unfiltered_page_comes_from_the_summary_alone(self) -> None:
+        run, calls = self._probe([
+            ("/inventory/systems", self._OLD_PEER),
+            ("/inventory/summary", self._SUMMARY),
+        ])
+        page = run({"limit": ["50"], "offset": ["0"]})
+        self.assertEqual(page["asset_type"], "systems")
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(
+            page["items"],
+            [
+                {"system": "gba", "name": "gba", "rom_count": 4},
+                {"system": "snes", "name": "snes", "rom_count": 9},
+            ],
+        )
+        # No ROM inventory is fetched when nothing needs matching.
+        self.assertEqual([call for call in calls if "/inventory/roms" in call], [])
+
+    def test_old_peer_genre_filter_still_narrows_to_matching_systems(self) -> None:
+        roms_page = {
+            "total": 2,
+            "items": [
+                {"system": "snes", "name": "Super Mario World"},
+                {"system": "snes", "name": "Yoshi's Island"},
+            ],
+        }
+        run, calls = self._probe([
+            ("/inventory/systems", self._OLD_PEER),
+            ("/inventory/summary", self._SUMMARY),
+            ("/inventory/roms", roms_page),
+        ])
+        page = run({"genre": ["Platform"], "limit": ["50"]})
+        self.assertEqual(page["items"], [{"system": "snes", "name": "snes", "rom_count": 9}])
+        self.assertEqual(page["total"], 1)
+        # The genre filter really is handed to the peer, and the games it
+        # answered with are folded away -- only the system survives.
+        self.assertTrue(any("genre=Platform" in call for call in calls))
+        for item in page["items"]:
+            self.assertNotIn("Mario", str(item))
+
+    def test_old_peer_game_search_returns_the_system_that_holds_the_game(self) -> None:
+        roms_page = {"total": 1, "items": [{"system": "gba", "name": "Mario Kart"}]}
+        run, _ = self._probe([
+            ("/inventory/systems", self._OLD_PEER),
+            ("/inventory/summary", self._SUMMARY),
+            ("/inventory/roms", roms_page),
+        ])
+        page = run({"q": ["mario"], "limit": ["50"]})
+        self.assertEqual(page["items"], [{"system": "gba", "name": "gba", "rom_count": 4}])
+
+    def test_old_peer_page_respects_limit_and_offset(self) -> None:
+        run, _ = self._probe([
+            ("/inventory/systems", self._OLD_PEER),
+            ("/inventory/summary", self._SUMMARY),
+        ])
+        page = run({"limit": ["1"], "offset": ["1"]})
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["items"], [{"system": "snes", "name": "snes", "rom_count": 9}])
+
+    def test_denied_peer_error_is_not_swallowed_by_the_fallback(self) -> None:
+        denied = HTTPError("https://peer/v1/api/peer/inventory/systems", 403, "forbidden", {}, None)
+        run, _ = self._probe([("/inventory/systems", denied)])
+        with self.assertRaises(HTTPError):
+            run({})

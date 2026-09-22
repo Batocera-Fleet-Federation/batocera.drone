@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Reference ROMs lists systems instead of individual games. A reference can only link a whole system, so the grid, filters, and pager now select systems. Searching a game name still finds the system that contains it.
+  A paired machine that predates the systems inventory no longer degrades that page: this Drone folds the peer's ROM inventory into systems itself, so the genre and game-name filters keep working and a game row can never appear.
 
 - Add an Admin Fixes catalog with reversible toggles, detailed explanation modals, and managed lifecycle handling. It includes a
   Lindbergh input-device budget guard and a generic Eden/Citron GUI-autoload workaround that can target selected Switch games or
