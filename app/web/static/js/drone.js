@@ -11389,7 +11389,6 @@ let referenceRomsState = {
   offset: 0,
   total: 0,
   items: [],
-  systemsNote: "",
 };
 
 function referenceRomsSetsEqual(a, b) {
@@ -11443,7 +11442,6 @@ async function renderReferenceRomsPage(peerId) {
       offset: 0,
       total: 0,
       items: [],
-      systemsNote: "",
     };
 
     if (!targetPeer) {
@@ -11508,7 +11506,6 @@ function referenceRomsBodyHtml() {
       </div>
       </div>
     </div>
-    <div id="referenceRomsNote" class="small text-muted mb-2 d-none"></div>
     <div class="table-responsive">
       <table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack reference-roms-table">
         <colgroup>
@@ -11581,14 +11578,6 @@ function referenceSystemRow(system, romCount) {
   };
 }
 
-function showReferenceSystemsNote(note) {
-  referenceRomsState.systemsNote = note || "";
-  const node = document.getElementById("referenceRomsNote");
-  if (!node) return;
-  node.textContent = referenceRomsState.systemsNote;
-  node.classList.toggle("d-none", !referenceRomsState.systemsNote);
-}
-
 async function loadReferenceRoms() {
   const rows = document.getElementById("referenceRomsRows");
   if (rows) rows.innerHTML = '<tr><td colspan="4" class="text-muted">Loading systems...</td></tr>';
@@ -11599,47 +11588,21 @@ async function loadReferenceRoms() {
   if (st.query) params.set("q", st.query);
   try {
     const page = await api(`/admin/local-network/peers/${encodeURIComponent(st.peerId)}/assets?${params.toString()}`);
-    // Older peers reject type=systems or answer with a ROM page. Never paint
-    // those games: fall back to the system summary instead.
+    // This Drone always answers with systems -- it folds an older peer's ROM
+    // inventory into systems itself -- so a game row can never be painted here.
     if (String(page.asset_type || "") !== "systems" || !Array.isArray(page.items)) {
       throw new Error("systems inventory unavailable");
     }
     st.items = page.items.map((item) => referenceSystemRow(String(item.system || item.name || ""), item.rom_count)).filter((item) => item.system);
     st.total = Number(page.total || 0);
     st.offset = Number(page.offset || 0);
-    showReferenceSystemsNote("");
   } catch (err) {
-    if (!st.availableSystems.length) {
-      showReferenceSystemsNote("");
-      if (rows) rows.innerHTML = `<tr><td colspan="4" class="text-danger">Could not load systems: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
-      return;
-    }
-    applyReferenceSystemsFallback();
+    if (rows) rows.innerHTML = `<tr><td colspan="4" class="text-danger">Could not load systems: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
+    return;
   }
   renderReferenceRomsTable();
   renderReferenceRomsPagination();
   renderReferenceRomsSummary();
-}
-
-function applyReferenceSystemsFallback() {
-  // The peer has no systems inventory (or it failed). Still list systems from
-  // the summary already loaded for the filter dropdowns. Genre and game-name
-  // search need that inventory, so they narrow by system name only.
-  const st = referenceRomsState;
-  const query = st.query.toLowerCase();
-  const names = (st.availableSystems || []).filter((name) => {
-    if (st.filterSystem && name !== st.filterSystem) return false;
-    if (query && !String(name).toLowerCase().includes(query)) return false;
-    return true;
-  }).sort((a, b) => String(a).localeCompare(String(b)));
-  st.total = names.length;
-  st.items = names.slice(st.offset, st.offset + st.limit).map((name) => referenceSystemRow(name, st.systemCounts[name]));
-  const skipped = [];
-  if (st.filterGenre) skipped.push("genre");
-  if (st.query) skipped.push("game name");
-  showReferenceSystemsNote(skipped.length
-    ? `This machine cannot filter systems by ${skipped.join(" or ")}; showing systems by name.`
-    : "");
 }
 
 function renderReferenceRomsTable() {
