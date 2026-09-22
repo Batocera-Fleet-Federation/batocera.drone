@@ -880,25 +880,140 @@ class HandlersNetworkMixin:
         asset_type = str((query_params.get("type") or ["summary"])[0]).strip().lower()
         if self.settings.use_fake_data and peer.get("fake_data"):
             result = self._collect_peer_inventory(asset_type, query_params)
+        elif asset_type == "systems":
+            result = self._peer_systems_inventory(peer, peer_id, query_params)
         else:
-            params = []
-            for key in ("system", "systems", "q", "genre", "limit", "offset"):
-                value = str((query_params.get(key) or [""])[0]).strip()
-                if value:
-                    params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
-            suffix = f"?{'&'.join(params)}" if params else ""
-            result, _ = _peer_get_json_for_peer(
-                peer,
-                f"/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
-                self.settings,
-                peer_id=peer_id,
-                config={"network_mode": "local_network"},
-                timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
-                overall_deadline=time.monotonic() + PEER_INVENTORY_ROUTE_BUDGET_SECONDS,
-            )
+            result = self._peer_inventory_request(peer, peer_id, asset_type, query_params)
         if asset_type == "roms" and isinstance(result, dict):
             self._annotate_roms_exist_locally(result.get("items") or [])
         self._send_json(200, result)
+
+    def _peer_inventory_request(
+        self,
+        peer: dict,
+        peer_id: str,
+        asset_type: str,
+        query_params: dict,
+        overrides: Optional[dict] = None,
+    ) -> dict:
+        """GET one page of a peer's inventory. ``overrides`` replaces individual
+        query values (a blank override drops the parameter)."""
+        params = []
+        for key in ("system", "systems", "q", "genre", "limit", "offset"):
+            if overrides is not None and key in overrides:
+                value = str(overrides.get(key) or "").strip()
+            else:
+                value = str((query_params.get(key) or [""])[0]).strip()
+            if value:
+                params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        result, _ = _peer_get_json_for_peer(
+            peer,
+            f"/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+            self.settings,
+            peer_id=peer_id,
+            config={"network_mode": "local_network"},
+            timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
+            overall_deadline=time.monotonic() + PEER_INVENTORY_ROUTE_BUDGET_SECONDS,
+        )
+        return result
+
+    def _peer_systems_inventory(self, peer: dict, peer_id: str, query_params: dict) -> dict:
+        """One row per system for the Reference ROMs page.
+
+        Referencing links whole systems, never individual games, so this never
+        returns ROM rows. A peer that predates the ``systems`` inventory type
+        rejects the request outright; rather than degrade the page to a plain
+        system list (which would silently drop the genre and game-name filters
+        the operator just used), fold that peer's ROM inventory into distinct
+        systems here, on the requesting side."""
+        result = None
+        try:
+            result = self._peer_inventory_request(peer, peer_id, "systems", query_params)
+        except HTTPError as error:
+            # An older peer rejects the unknown inventory type outright; fall
+            # through to the local aggregation below. Anything else (denied,
+            # unreachable, a transport failure) is a real error and propagates.
+            if int(getattr(error, "code", 0) or 0) not in {400, 404, 405, 422, 501}:
+                raise
+        if isinstance(result, dict) and str(result.get("asset_type") or "") == "systems" \
+                and isinstance(result.get("items"), list):
+            return result
+        return self._aggregate_peer_systems(peer, peer_id, query_params)
+
+    def _aggregate_peer_systems(self, peer: dict, peer_id: str, query_params: dict) -> dict:
+        """Build the systems page from an older peer's summary + ROM inventory."""
+        try:
+            limit = max(1, min(int((query_params.get("limit") or ["500"])[0]), 2000))
+            offset = max(0, int((query_params.get("offset") or ["0"])[0]))
+        except (TypeError, ValueError):
+            raise ValueError("limit and offset must be integers")
+        query = str((query_params.get("q") or [""])[0]).strip()
+        genre = str((query_params.get("genre") or [""])[0]).strip()
+        system = str((query_params.get("system") or [""])[0]).strip()
+
+        summary = self._peer_inventory_request(
+            peer, peer_id, "summary", query_params,
+            overrides={"q": "", "genre": "", "limit": "", "offset": "", "system": ""},
+        )
+        summary = summary if isinstance(summary, dict) else {}
+        counts = {
+            str(name): int(value or 0)
+            for name, value in (summary.get("system_counts") or {}).items()
+            if str(name).strip()
+        }
+        names = [str(name) for name in (summary.get("systems") or []) if str(name).strip()]
+        for name in counts:
+            if name not in names:
+                names.append(name)
+        every_system = sorted(names, key=str.lower)
+
+        if genre or query:
+            matched = self._peer_systems_matching_roms(peer, peer_id, query_params)
+            names = [name for name in names if name.lower() in matched]
+        if system:
+            names = [name for name in names if name.lower() == system.lower()]
+        names.sort(key=str.lower)
+        window = names[offset:offset + limit]
+        return {
+            "drone_id": str(summary.get("drone_id") or peer_id),
+            "asset_type": "systems",
+            "system": system or None,
+            "systems": every_system,
+            "total": len(names),
+            "limit": limit,
+            "offset": offset,
+            "items": [
+                {"system": name, "name": name, "rom_count": int(counts.get(name) or 0)}
+                for name in window
+            ],
+        }
+
+    def _peer_systems_matching_roms(self, peer: dict, peer_id: str, query_params: dict) -> set:
+        """Lowercased names of the peer's systems holding at least one ROM that
+        matches the genre/search filters, read from its paged ROM inventory."""
+        matched = set()
+        offset = 0
+        page_size = 2000
+        # A library big enough to exceed this is already far past what the page
+        # can usefully list; stop rather than hold the request open.
+        max_rows = 40000
+        while offset < max_rows:
+            page = self._peer_inventory_request(
+                peer, peer_id, "roms", query_params,
+                overrides={"limit": str(page_size), "offset": str(offset)},
+            )
+            items = (page or {}).get("items") if isinstance(page, dict) else None
+            items = items if isinstance(items, list) else []
+            for row in items:
+                if isinstance(row, dict):
+                    name = str(row.get("system") or row.get("system_name") or "").strip()
+                    if name:
+                        matched.add(name.lower())
+            offset += len(items)
+            if not items or offset >= int((page or {}).get("total") or 0):
+                break
+        return matched
 
     def _annotate_roms_exist_locally(self, items: List[dict]) -> None:
         """Flag each peer ROM row with whether it already exists on this machine
