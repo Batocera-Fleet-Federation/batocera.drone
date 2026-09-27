@@ -1690,6 +1690,114 @@ class TorrentAria2ReconciliationTests(unittest.TestCase):
 
             self.assertEqual(len(manager.snapshot()["torrents"]), 1)
 
+    def test_reconciles_hidden_same_hash_gid_to_the_most_advanced_download(self) -> None:
+        """Issue #69: an extra aria2 GID for a known info-hash must not keep
+        downloading invisibly behind a paused/zero-progress visible row."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            with manager._lock:
+                entry = next(iter(manager._torrents.values()))
+                old_gid = entry["gid"]
+
+            info_hash = "abc123"
+            rpc.statuses[old_gid].update(
+                {
+                    "status": "paused",
+                    "totalLength": "1000",
+                    "completedLength": "0",
+                    "infoHash": info_hash,
+                }
+            )
+            rpc.statuses["hidden-active"] = {
+                "gid": "hidden-active",
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "730",
+                "downloadSpeed": "25",
+                "infoHash": info_hash,
+                "bittorrent": {"info": {"name": "a"}},
+            }
+            rpc.active = [rpc.statuses["hidden-active"]]
+
+            manager._tick()
+
+            row = manager.snapshot()["torrents"][0]
+            self.assertEqual(row["status"], "downloading")
+            self.assertEqual(row["progress_percent"], 73.0)
+            with manager._lock:
+                self.assertEqual(manager._torrents[row["id"]]["gid"], "hidden-active")
+            self.assertIn([old_gid], rpc.method_calls("aria2.forceRemove"))
+            self.assertNotIn(["hidden-active"], rpc.method_calls("aria2.forceRemove"))
+
+    def test_delete_drains_every_aria2_gid_for_the_same_info_hash(self) -> None:
+        """Issue #69: deleting the visible GID must tombstone the torrent's
+        stable identity so an unseen same-hash GID cannot resurrect it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            row = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                entry = manager._torrents[row["id"]]
+                entry["info_hash"] = "abc123"
+
+            rpc.statuses["hidden-active"] = {
+                "gid": "hidden-active",
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "730",
+                "downloadSpeed": "25",
+                "infoHash": "ABC123",
+                "bittorrent": {"info": {"name": "a"}},
+            }
+            rpc.active = [rpc.statuses["hidden-active"]]
+
+            manager.delete(row["id"])
+            manager._tick()
+
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertIn(["hidden-active"], rpc.method_calls("aria2.forceRemove"))
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_info_hashes, ["abc123"])
+
+            # A separate, later inventory proves the duplicate is gone and
+            # releases the persisted tombstone.
+            rpc.active = []
+            manager._tick()
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_info_hashes, [])
+
+    def test_terminal_removal_info_hash_tombstone_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            row = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                manager._torrents[row["id"]]["info_hash"] = "ABC123"
+                manager._persist_locked()
+
+            manager.delete(row["id"])
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+
+            with restarted._lock:
+                self.assertEqual(restarted._pending_removal_info_hashes, ["abc123"])
+            self.assertEqual(restarted.snapshot()["torrents"], [])
+
     def test_collapses_orphan_row_sharing_info_hash_after_its_gid_has_gone_stale(self) -> None:
         """The gid-keyed dedup pass alone can permanently miss a duplicate
         whose gid has since diverged from the real entry's -- e.g. it already
@@ -2920,6 +3028,44 @@ class TorrentMoveJobAsyncTests(unittest.TestCase):
             self.assertEqual(manager.snapshot()["torrents"], [])
             with manager._lock:
                 self.assertEqual(manager._pending_removal_gids, [])
+
+    def test_move_cleanup_drains_hidden_same_hash_gid(self) -> None:
+        """Issue #69: Move + delete is a terminal removal just like Delete,
+        so an unseen duplicate aria2 registration must not bring it back."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            watch = root / "watch"
+            subfolder = watch / "pack"
+            subfolder.mkdir(parents=True)
+            payload = subfolder / "one.bin"
+            payload.write_bytes(b"one")
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [payload]})
+            row = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                manager._torrents[row["id"]]["info_hash"] = "abc123"
+                manager._persist_locked()
+
+            rpc.statuses["hidden-active"] = {
+                "gid": "hidden-active",
+                "status": "active",
+                "totalLength": "3",
+                "completedLength": "3",
+                "downloadSpeed": "0",
+                "infoHash": "abc123",
+                "dir": str(watch),
+                "bittorrent": {"info": {"name": "pack"}},
+            }
+            rpc.active = [rpc.statuses["hidden-active"]]
+
+            result = manager.move_files(row["id"], [str(payload)], str(root / "moved"), cleanup=True)
+            self.assertEqual(result["status"], "queued")
+            _drain_move_jobs(manager)
+            manager._tick()
+
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertIn(["hidden-active"], rpc.method_calls("aria2.forceRemove"))
+            self.assertFalse(Path(row["torrent_file"]).exists())
 
 
 class TorrentQueueControlTests(unittest.TestCase):

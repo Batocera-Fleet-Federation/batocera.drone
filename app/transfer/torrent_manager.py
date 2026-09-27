@@ -639,6 +639,13 @@ class TorrentManager:
         # aria2 confirms, so a removal can never silently strand a still-
         # running download that nothing in the UI can see or control anymore.
         self._pending_removal_gids: List[str] = []
+        # Terminal removals (Delete, Remove from list, bulk clear, and a
+        # successful move+cleanup) are also tombstoned by BitTorrent
+        # info-hash.  aria2 can retain more than one GID for the same torrent
+        # after a timed-out add or metadata hand-off race; removing only the
+        # visible row's GID lets a hidden twin keep downloading and be adopted
+        # back into the UI on the next poll (issue #69).
+        self._pending_removal_info_hashes: List[str] = []
         # Info-hashes we've already fired a torrent_completed notification
         # for this process's lifetime -- belt-and-suspenders against a
         # source-less duplicate entry (see _deduplicate_shared_gid_entries_
@@ -680,6 +687,12 @@ class TorrentManager:
         self._recent_move_locations = [str(p) for p in recent][:MOVE_RECENT_LOCATIONS_MAX] if isinstance(recent, list) else []
         pending_removals = stored.get("pending_removal_gids")
         self._pending_removal_gids = [str(g) for g in pending_removals if g] if isinstance(pending_removals, list) else []
+        pending_hashes = stored.get("pending_removal_info_hashes")
+        self._pending_removal_info_hashes = (
+            [str(info_hash).lower() for info_hash in pending_hashes if info_hash]
+            if isinstance(pending_hashes, list)
+            else []
+        )
         entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
@@ -804,11 +817,12 @@ class TorrentManager:
             _state_database_path(self.settings.userdata_root),
             TORRENT_STATE_NAMESPACE,
             {
-                "version": 2,
+                "version": 3,
                 "settings": dict(self._config),
                 "paused": bool(self._paused),
                 "recent_move_locations": list(self._recent_move_locations),
                 "pending_removal_gids": list(self._pending_removal_gids),
+                "pending_removal_info_hashes": list(self._pending_removal_info_hashes),
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -1138,7 +1152,9 @@ class TorrentManager:
             stale_gids = self._refresh_pending_download_dirs_locked(config)
             if stale_gids:
                 dirty = True
-            has_pending_removals = bool(self._pending_removal_gids)
+            has_pending_removals = bool(
+                self._pending_removal_gids or self._pending_removal_info_hashes
+            )
             to_add = [
                 dict(entry)
                 for entry in self._scheduler_entries_locked()
@@ -1947,7 +1963,7 @@ class TorrentManager:
             # the still-registered gid as an "Adopted download" before the
             # forceRemove below lands -- the torrent "deletes and adds itself
             # right back" (issue #42). Same fix as the move+cleanup path.
-            self._begin_gid_removal_locked(gid)
+            self._begin_terminal_removal_locked(gid, entry.get("info_hash"))
             torrent_file_removed = True
             torrent_file = entry.get("torrent_file")
             if torrent_file:
@@ -1958,7 +1974,7 @@ class TorrentManager:
                 except OSError as error:
                     print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
             self._persist_locked()
-        self._finish_gid_removal(gid)
+        self._finish_terminal_removal(gid)
         downloaded_files_removed = _remove_downloaded_payload(entry)
         self.wake()
         return {
@@ -1985,7 +2001,7 @@ class TorrentManager:
             # Same under-the-lock atomicity as delete(): register the gid for
             # removal and unlink the .torrent before releasing the lock so a
             # concurrent tick can neither rescan nor re-adopt it (issue #42).
-            self._begin_gid_removal_locked(gid)
+            self._begin_terminal_removal_locked(gid, entry.get("info_hash"))
             torrent_file_removed = True
             torrent_file = entry.get("torrent_file")
             if torrent_file:
@@ -1996,7 +2012,7 @@ class TorrentManager:
                 except OSError as error:
                     print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
             self._persist_locked()
-        self._finish_gid_removal(gid)
+        self._finish_terminal_removal(gid)
         self.wake()
         return {
             "status": "removed",
@@ -2098,7 +2114,7 @@ class TorrentManager:
                 for entry in targets:
                     if delete_from_ui:
                         self._torrents.pop(entry["id"], None)
-                        self._begin_gid_removal_locked(entry.get("gid"))
+                        self._begin_terminal_removal_locked(entry.get("gid"), entry.get("info_hash"))
                     if delete_torrent_file and entry.get("torrent_file"):
                         # Unlink under the lock so a concurrent watch-folder
                         # rescan can't re-register a torrent this bulk-clear
@@ -2112,7 +2128,7 @@ class TorrentManager:
 
         for entry in targets:
             if delete_downloaded_files or delete_from_ui:
-                self._finish_gid_removal(entry.get("gid"))
+                self._finish_terminal_removal(entry.get("gid"))
             if delete_downloaded_files:
                 _remove_downloaded_payload(entry)
 
@@ -2636,7 +2652,7 @@ class TorrentManager:
                 # reappears in the list (issue #40). The watched .torrent file
                 # is already unlinked under the lock in
                 # _finalize_move_job_locked, atomically with dropping the entry.
-                self._finish_gid_removal(finalize_result["removed_gid"])
+                self._finish_terminal_removal(finalize_result["removed_gid"])
                 self.wake()
             _notifications.record_event(
                 self.settings,
@@ -2686,7 +2702,7 @@ class TorrentManager:
             # Same rationale as delete(): hold the gid in the pending-removal
             # list from here (still under the lock) so a poll tick can't
             # re-adopt it before the caller's forceRemove lands (issue #42).
-            self._begin_gid_removal_locked(removed_gid)
+            self._begin_terminal_removal_locked(removed_gid, entry.get("info_hash"))
             removed_from_list = True
         elif moved_sources:
             moved_set = set(moved_sources)
@@ -2774,6 +2790,19 @@ class TorrentManager:
         if gid and gid not in self._pending_removal_gids:
             self._pending_removal_gids.append(gid)
 
+    def _begin_terminal_removal_locked(self, gid: Optional[str], info_hash: Optional[str]) -> None:
+        """Tombstone a torrent before its final UI removal.
+
+        A GID is only one aria2 registration.  A timed-out add or a magnet
+        metadata race can leave multiple registrations for one info-hash, so
+        final deletion must suppress adoption and drain every matching GID,
+        including twins the manager never attached to the visible row.
+        """
+        self._begin_gid_removal_locked(gid)
+        normalized_hash = str(info_hash or "").strip().lower()
+        if normalized_hash and normalized_hash not in self._pending_removal_info_hashes:
+            self._pending_removal_info_hashes.append(normalized_hash)
+
     def _finish_gid_removal(self, gid: Optional[str]) -> None:
         """Do the real aria2 stop for a ``gid`` handed to
         ``_begin_gid_removal_locked``: drop it from the pending list once
@@ -2792,15 +2821,69 @@ class TorrentManager:
                 self._pending_removal_gids.remove(gid)
                 self._persist_locked()
 
+    def _finish_terminal_removal(self, gid: Optional[str]) -> None:
+        """Remove the visible GID now; the info-hash tombstone is drained by
+        ``_retry_pending_removals`` and retained until a later aria2 snapshot
+        confirms that no hidden registration for the torrent remains."""
+        self._finish_gid_removal(gid)
+        self.wake()
+
     def _retry_pending_removals(self, rpc) -> None:
         with self._lock:
-            pending = list(self._pending_removal_gids)
-        if not pending:
+            pending_gids = list(self._pending_removal_gids)
+            pending_hashes = list(self._pending_removal_info_hashes)
+        if not pending_gids and not pending_hashes:
             return
-        still_pending = [gid for gid in pending if not self._remove_from_aria2(gid, rpc)]
+
+        still_pending_gids = [gid for gid in pending_gids if not self._remove_from_aria2(gid, rpc)]
+        still_pending_hashes = list(pending_hashes)
+        if pending_hashes:
+            try:
+                keys = ["gid", "infoHash"]
+                active = rpc.call("aria2.tellActive", [keys]) or []
+                waiting = rpc.call("aria2.tellWaiting", [0, 1000, keys]) or []
+            except Aria2RpcError:
+                # Keep every hash tombstone until aria2 can provide a complete
+                # active/waiting inventory.  Clearing on an RPC failure would
+                # reopen the exact adoption race the tombstone closes.
+                active = waiting = None
+            if active is not None and waiting is not None:
+                pending_hash_set = set(pending_hashes)
+                matching_gids = {
+                    str(result.get("gid") or "")
+                    for result in [*active, *waiting]
+                    if isinstance(result, dict)
+                    and str(result.get("infoHash") or "").lower() in pending_hash_set
+                    and result.get("gid")
+                }
+                if matching_gids:
+                    # Retain the hash for one more poll after issuing removal;
+                    # only an independently-fetched empty inventory proves
+                    # aria2 no longer has a hidden twin to resurrect.
+                    for matching_gid in matching_gids:
+                        if not self._remove_from_aria2(matching_gid, rpc):
+                            still_pending_gids.append(matching_gid)
+                else:
+                    still_pending_hashes = []
+
         with self._lock:
-            if still_pending != self._pending_removal_gids:
-                self._pending_removal_gids = still_pending
+            # Preserve work registered concurrently while the RPC calls above
+            # were outside the lock; the old implementation could overwrite a
+            # newly-added pending GID with its stale local snapshot.
+            new_gids = [gid for gid in self._pending_removal_gids if gid not in pending_gids]
+            merged_gids = list(dict.fromkeys([*still_pending_gids, *new_gids]))
+            new_hashes = [
+                info_hash
+                for info_hash in self._pending_removal_info_hashes
+                if info_hash not in pending_hashes
+            ]
+            merged_hashes = list(dict.fromkeys([*still_pending_hashes, *new_hashes]))
+            if (
+                merged_gids != self._pending_removal_gids
+                or merged_hashes != self._pending_removal_info_hashes
+            ):
+                self._pending_removal_gids = merged_gids
+                self._pending_removal_info_hashes = merged_hashes
                 self._persist_locked()
 
     def _adopt_orphaned_gids(self, rpc) -> None:
@@ -2810,28 +2893,32 @@ class TorrentManager:
         cancel/clear regardless, per the docstring above), but also possibly
         something added directly against aria2's RPC port by another caller.
         Either way, the goal is a UI that's an honest mirror of what aria2 is
-        actually doing and lets the user act on it -- so any gid aria2
-        reports that isn't attached to one of our own entries gets a normal,
-        fully manageable entry created for it, reusing the exact same status-
-        mapping code path (_apply_aria2_status_locked) a regularly-tracked
-        entry goes through on every tick.
+        actually doing and lets the user act on it. A genuinely unknown GID
+        gets a normal, fully manageable entry. A GID sharing a tracked
+        info-hash is reconciled into that existing row and the duplicate is
+        removed; a terminally-removing hash is drained without ever being
+        re-adopted (issue #69).
         """
         try:
             active = rpc.call("aria2.tellActive", [_TELL_STATUS_KEYS]) or []
             waiting = rpc.call("aria2.tellWaiting", [0, 1000, _TELL_STATUS_KEYS]) or []
         except Aria2RpcError:
             return
+        duplicate_gids_to_remove: List[str] = []
         with self._lock:
             known_gids = {entry.get("gid") for entry in self._torrents.values() if entry.get("gid")}
-            known_info_hashes = {
-                entry.get("info_hash") for entry in self._torrents.values() if entry.get("info_hash")
-            }
+            entries_by_info_hash: Dict[str, List[dict]] = {}
+            for entry in self._torrents.values():
+                info_hash = str(entry.get("info_hash") or "").lower()
+                if info_hash:
+                    entries_by_info_hash.setdefault(info_hash, []).append(entry)
             # A gid we've already dropped an entry for and are still trying to
             # remove from aria2 (delete/cancel/clear, or a move+cleanup whose
             # forceRemove hasn't landed yet) must not be resurrected here as an
             # "Adopted download" -- _retry_pending_removals runs just before
             # this on the same tick and will clear it (issue #40).
             pending_removal_gids = set(self._pending_removal_gids)
+            pending_removal_hashes = set(self._pending_removal_info_hashes)
             dirty = False
             for result in [*active, *waiting]:
                 gid = str(result.get("gid") or "")
@@ -2850,22 +2937,52 @@ class TorrentManager:
                     # followedBy handling) -- that gid will surface in its
                     # own right on this same sweep once aria2 reports it.
                     continue
-                result_info_hash = str(result.get("infoHash") or "")
-                if result_info_hash and result_info_hash in known_info_hashes:
-                    # Belt-and-suspenders on top of the `following`/
-                    # `followedBy` checks above: those key off the specific
-                    # GID chain and can miss a real-world timing gap (a
-                    # tracked entry's own status poll hasn't run yet this
-                    # tick, or its stale metadata GID already dropped out of
-                    # aria2's active/waiting lists before its parent's `gid`
-                    # field got retargeted) -- confirmed live on a real
-                    # drone: 4 of 6 magnet torrents each grew a source-less
-                    # "Adopted download" twin of themselves this way, and the
-                    # older ones calcified into permanent duplicate `error`
-                    # rows once their orphan twin's gid was lost (nothing to
-                    # re-add it from). The info-hash is intrinsic to the
-                    # torrent's content, not to a particular GID, so it holds
-                    # even when the GID-based checks race.
+                result_info_hash = str(result.get("infoHash") or "").lower()
+                if result_info_hash in pending_removal_hashes:
+                    # A terminal deletion tombstones the stable torrent
+                    # identity, not merely the one visible GID.  The pending
+                    # removal pass will drain this hidden twin; adopting it
+                    # here would make a deleted torrent reappear (issue #69).
+                    continue
+                matching_entries = entries_by_info_hash.get(result_info_hash, [])
+                if result_info_hash and matching_entries:
+                    # This is a second aria2 registration for a torrent the UI
+                    # already owns.  Previously it was merely hidden, which
+                    # let it download behind the visible paused row and later
+                    # jump the UI far ahead; it also survived Delete and move
+                    # +cleanup.  Keep whichever registration has made more
+                    # progress (prefer an active one on ties), retarget the
+                    # visible row when needed, and explicitly drain the loser.
+                    matching_entries.sort(
+                        key=lambda entry: (
+                            0 if entry.get("torrent_file") or entry.get("magnet_uri") else 1,
+                            entry.get("added_at") or "",
+                            entry.get("id") or "",
+                        )
+                    )
+                    keeper = matching_entries[0]
+                    candidate_score = (
+                        int(result.get("completedLength") or 0),
+                        1 if str(result.get("status") or "") == "active" else 0,
+                    )
+                    keeper_score = (
+                        int(keeper.get("completed_bytes") or 0),
+                        1 if keeper.get("status") in ("downloading", "complete") else 0,
+                    )
+                    loser_gid = gid
+                    if candidate_score > keeper_score and not self._migration_active(keeper):
+                        old_gid = str(keeper.get("gid") or "")
+                        keeper["gid"] = gid
+                        self._apply_aria2_status_locked(keeper, {"result": result})
+                        known_gids.discard(old_gid)
+                        known_gids.add(gid)
+                        loser_gid = old_gid
+                        dirty = True
+                    if loser_gid:
+                        self._begin_gid_removal_locked(loser_gid)
+                        pending_removal_gids.add(loser_gid)
+                        duplicate_gids_to_remove.append(loser_gid)
+                        dirty = True
                     continue
                 entry_id = uuid.uuid4().hex[:12]
                 entry = {
@@ -2895,10 +3012,12 @@ class TorrentManager:
                 self._torrents[entry_id] = entry
                 known_gids.add(gid)
                 if result_info_hash:
-                    known_info_hashes.add(result_info_hash)
+                    entries_by_info_hash.setdefault(result_info_hash, []).append(entry)
                 dirty = True
             if dirty:
                 self._persist_locked()
+        for duplicate_gid in duplicate_gids_to_remove:
+            self._finish_gid_removal(duplicate_gid)
 
     # ------------------------------------------------------- settings/install
 
