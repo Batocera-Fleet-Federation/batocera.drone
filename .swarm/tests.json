@@ -5,6 +5,38 @@
     "language": "python",
     "suites": []
   },
-  "suites": [],
+  "suites": [
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_69_torrent_lifecycle.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-69-torrent-lifecycle",
+      "name": "Issue #69 torrent reconciliation and terminal removal acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_69_torrent_lifecycle.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    }
+  ],
   "version": 1
 }
