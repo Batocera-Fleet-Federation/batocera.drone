@@ -2961,12 +2961,20 @@ class TorrentManager:
                         )
                     )
                     keeper = matching_entries[0]
+                    try:
+                        candidate_completed = int(result.get("completedLength") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        candidate_completed = 0
+                    try:
+                        keeper_completed = int(keeper.get("completed_bytes") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        keeper_completed = 0
                     candidate_score = (
-                        int(result.get("completedLength") or 0),
+                        candidate_completed,
                         1 if str(result.get("status") or "") == "active" else 0,
                     )
                     keeper_score = (
-                        int(keeper.get("completed_bytes") or 0),
+                        keeper_completed,
                         1 if keeper.get("status") in ("downloading", "complete") else 0,
                     )
                     loser_gid = gid
