@@ -1,0 +1,10 @@
+{
+  "adversarialBootstrap": {
+    "framework": "unittest",
+    "instructions": "Use Python unittest (no dependencies); add tests/adversarial/test_*.py and run python3 -m unittest discover -s tests/adversarial.",
+    "language": "python",
+    "suites": []
+  },
+  "suites": [],
+  "version": 1
+}
