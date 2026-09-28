@@ -366,8 +366,7 @@ def _install_unlink_guard(guarded, real_unlink):
         setattr(obj, attr, guarded)
 
     install(os, "unlink")
-    if os.remove is real_unlink:
-        install(os, "remove")
+    install(os, "remove")
     try:
         import pathlib as pathlib_mod
     except ImportError:  # pragma: no cover
