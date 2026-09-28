@@ -253,6 +253,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_84_pending_removal_nonblock.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-84-pending-removal-nonblock",
+      "name": "Issue #84 pending-removal retry must not block on a non-regular occupant",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_84_pending_removal_nonblock.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
