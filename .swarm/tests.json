@@ -222,6 +222,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_83_os_remove_unlink_guard.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-83-os-remove-unlink-guard",
+      "name": "Issue #83 unlink guard must patch os.remove even when it is not os.unlink",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_83_os_remove_unlink_guard.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
