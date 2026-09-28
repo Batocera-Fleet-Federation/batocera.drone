@@ -129,6 +129,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_77_pending_removal_replacement.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-77-pending-removal-replacement",
+      "name": "Issue #77 pending-removal tombstone must not delete a same-name replacement",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_77_pending_removal_replacement.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
