@@ -260,6 +260,17 @@ def effective_download_directory(config: dict) -> str:
     return config.get("download_directory") or config["directory"]
 
 
+def _optional_json_int(value) -> Optional[int]:
+    """Coerce a JSON number to int, rejecting bools and non-integral floats."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -653,6 +664,16 @@ class TorrentManager:
         # tick's rescan (issue #74), and retried opportunistically on every
         # scan until the unlink finally succeeds.
         self._pending_removal_torrent_files: List[str] = []
+        # Companion to the above: resolved path -> the (st_dev, st_ino,
+        # st_size, st_mtime_ns) identity of the file at tombstone time (or
+        # None if it couldn't be stat'd then). The retry re-checks this
+        # identity before unlinking so a brand-new, unrelated file dropped
+        # under the same reused filename in the interim is never
+        # collaterally deleted -- the stale tombstone is dropped and the
+        # next scan discovers the replacement as a new entry (issue #77).
+        # Kept out of _pending_removal_torrent_files itself so that field
+        # stays the plain path list callers/tests expect.
+        self._pending_removal_torrent_file_fingerprints: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
         # Info-hashes we've already fired a torrent_completed notification
         # for this process's lifetime -- belt-and-suspenders against a
         # source-less duplicate entry (see _deduplicate_shared_gid_entries_
@@ -704,6 +725,32 @@ class TorrentManager:
         self._pending_removal_torrent_files = (
             [str(p) for p in pending_files if p] if isinstance(pending_files, list) else []
         )
+        pending_fingerprints = stored.get("pending_removal_torrent_file_fingerprints")
+        self._pending_removal_torrent_file_fingerprints = {}
+        if isinstance(pending_fingerprints, list):
+            for item in pending_fingerprints:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                if not path:
+                    continue
+                dev = _optional_json_int(item.get("dev"))
+                ino = _optional_json_int(item.get("ino"))
+                size = _optional_json_int(item.get("size"))
+                mtime_ns = _optional_json_int(item.get("mtime_ns"))
+                fingerprint = (
+                    (dev, ino, size, mtime_ns)
+                    if None not in (dev, ino, size, mtime_ns)
+                    else None
+                )
+                self._pending_removal_torrent_file_fingerprints[path] = fingerprint
+        # Pre-#77 persisted state (or a path added this run before a
+        # fingerprint could be recorded) has no identity entry. Default to
+        # None so retry refuses to unlink rather than KeyError-ing -- an
+        # unknown identity must not collaterally delete a replacement file
+        # at the same path (issue #77).
+        for path in self._pending_removal_torrent_files:
+            self._pending_removal_torrent_file_fingerprints.setdefault(path, None)
         entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
@@ -835,6 +882,10 @@ class TorrentManager:
                 "pending_removal_gids": list(self._pending_removal_gids),
                 "pending_removal_info_hashes": list(self._pending_removal_info_hashes),
                 "pending_removal_torrent_files": list(self._pending_removal_torrent_files),
+                "pending_removal_torrent_file_fingerprints": [
+                    self._pending_removal_fingerprint_payload(path)
+                    for path in self._pending_removal_torrent_files
+                ],
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -1299,29 +1350,73 @@ class TorrentManager:
             self._retry_pending_removals(rpc)
             self._adopt_orphaned_gids(rpc)
 
+    def _pending_removal_fingerprint_payload(self, path: str) -> dict:
+        fingerprint = self._pending_removal_torrent_file_fingerprints.get(path)
+        return {
+            "path": path,
+            "dev": fingerprint[0] if fingerprint else None,
+            "ino": fingerprint[1] if fingerprint else None,
+            "size": fingerprint[2] if fingerprint else None,
+            "mtime_ns": fingerprint[3] if fingerprint else None,
+        }
+
+    @staticmethod
+    def _torrent_file_fingerprint(path: str) -> Optional[Tuple[int, int, int, int]]:
+        """Identity of the file currently at ``path``: device, inode, size,
+        and mtime. Stat-only so a locked file (the usual reason unlink
+        failed) can still be fingerprinted without opening it."""
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
     def _retry_pending_removal_torrent_files_locked(self) -> bool:
         """Re-attempt unlinking .torrent files whose delete failed earlier
         (see _queue_pending_removal_torrent_file) so a transient failure
         (e.g. the file was briefly locked by another process) doesn't leave
         the path tombstoned forever. Safe to run under self._lock since it's
-        a local filesystem call, not an RPC."""
+        a local filesystem call, not an RPC.
+
+        Before unlinking, re-checks the file currently at that path against
+        the identity captured when it was tombstoned. If the file is gone,
+        identity was never recorded, or a different file now occupies the
+        same path (out-of-band delete + a brand-new .torrent reusing the
+        filename), the tombstone is dropped without touching the path --
+        unlinking purely by path would otherwise delete that unrelated file
+        as collateral damage (issue #77)."""
         if not self._pending_removal_torrent_files:
             return False
-        still_pending = []
+        still_pending: List[str] = []
+        still_fingerprints: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
         for path in self._pending_removal_torrent_files:
+            fingerprint = self._pending_removal_torrent_file_fingerprints.get(path)
+            current = self._torrent_file_fingerprint(path)
+            if current is None:
+                # Already gone -- nothing left to retry.
+                continue
+            if fingerprint is None or current != fingerprint:
+                # Unknown identity, or a different file now lives at this
+                # path. Leave whatever is there for the directory scan.
+                continue
             try:
                 Path(path).unlink(missing_ok=True)
             except OSError:
                 still_pending.append(path)
+                still_fingerprints[path] = fingerprint
         changed = still_pending != self._pending_removal_torrent_files
         self._pending_removal_torrent_files = still_pending
+        self._pending_removal_torrent_file_fingerprints = still_fingerprints
         return changed
 
     def _queue_pending_removal_torrent_file(self, torrent_file: Optional[str]) -> None:
         """Tombstone a .torrent path whose unlink just failed so the next
         watch-folder rescan (_scan_watch_directory_locked) treats it as
         already-known instead of re-adding it as a brand-new queued entry
-        (issue #74). Must be called under self._lock."""
+        (issue #74). Records the file's current (dev, ino, size, mtime_ns)
+        so a later retry can detect whether the path still refers to the
+        same file before unlinking it (issue #77). Must be called under
+        self._lock."""
         if not torrent_file:
             return
         try:
@@ -1330,6 +1425,7 @@ class TorrentManager:
             resolved = str(torrent_file)
         if resolved not in self._pending_removal_torrent_files:
             self._pending_removal_torrent_files.append(resolved)
+            self._pending_removal_torrent_file_fingerprints[resolved] = self._torrent_file_fingerprint(resolved)
 
     def _scan_watch_directory_locked(self, config: dict) -> bool:
         directory = Path(config["directory"])

@@ -3282,6 +3282,165 @@ class TorrentClearTests(unittest.TestCase):
             remaining = [e["name"] for e in manager.snapshot()["torrents"]]
             self.assertEqual(remaining, ["active"])
 
+    def _tombstone_completed_done(self, manager, torrent_path: Path) -> None:
+        real_unlink = Path.unlink
+
+        def failing_unlink(self, *args, **kwargs):
+            if self.resolve() == torrent_path.resolve():
+                raise OSError("Permission denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", failing_unlink):
+            result = manager.clear({"delete_from_ui": True, "scope": "completed"})
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(torrent_path.exists())
+
+    def test_pending_removal_tombstone_does_not_delete_replacement_file(self) -> None:
+        # Issue #77: if a new, unrelated .torrent gets dropped under the
+        # exact same filename while the original's unlink is still failing,
+        # the retry pass must not delete that new file just because it
+        # shares the tombstoned path -- it should drop the (now stale)
+        # tombstone and let the next scan pick the new file up as a fresh
+        # entry instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+            self.assertTrue(torrent_path.exists())
+            self._tombstone_completed_done(manager, torrent_path)
+
+            torrent_path.unlink()
+            torrent_path.write_bytes(b"d8:announce0:4:infod4:name8:new.romse")
+
+            manager._tick()
+
+            self.assertTrue(torrent_path.exists())
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertIn("active", names)
+            self.assertIn(torrent_path.stem, names)
+
+    def test_pending_removal_tombstone_does_not_delete_same_bytes_replacement(self) -> None:
+        # Identity is the inode/mtime of the tombstoned file, not the
+        # payload: replacing it with an identical copy at the same path
+        # is still a new drop and must survive the retry unlink.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+            original = torrent_path.read_bytes()
+            self._tombstone_completed_done(manager, torrent_path)
+
+            torrent_path.unlink()
+            torrent_path.write_bytes(original)
+
+            manager._tick()
+
+            self.assertTrue(torrent_path.exists())
+            self.assertEqual(torrent_path.read_bytes(), original)
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertIn("active", names)
+            self.assertIn("done", names)
+
+    def test_pending_removal_fingerprint_survives_reload_and_skips_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+                resolved = str(torrent_path.resolve())
+            self._tombstone_completed_done(manager, torrent_path)
+            with manager._lock:
+                fingerprint = manager._pending_removal_torrent_file_fingerprints[resolved]
+            self.assertIsNotNone(fingerprint)
+
+            torrent_path.unlink()
+            torrent_path.write_bytes(b"d8:announce0:4:infod4:name11:reloaded.ee")
+
+            reloaded = TorrentManager(_build_settings(root), start_worker=False)
+            reloaded._daemon = FakeDaemon(FakeRpc())
+            reloaded.update_settings({"directory": str(watch), "max_concurrent_downloads": 2})
+            with reloaded._lock:
+                self.assertEqual(reloaded._pending_removal_torrent_files, [resolved])
+                self.assertEqual(
+                    reloaded._pending_removal_torrent_file_fingerprints.get(resolved),
+                    fingerprint,
+                )
+
+            reloaded._tick()
+            self.assertTrue(torrent_path.exists())
+            with reloaded._lock:
+                self.assertEqual(reloaded._pending_removal_torrent_files, [])
+            names = [e["name"] for e in reloaded.snapshot()["torrents"]]
+            self.assertIn("active", names)
+            self.assertIn("done", names)
+
+    def test_pending_removal_without_fingerprint_does_not_unlink_existing_file(self) -> None:
+        # Pre-#77 persisted tombstones have a path and no identity. Retry
+        # must refuse to unlink whatever currently occupies that path.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+                resolved = str(torrent_path.resolve())
+            self._tombstone_completed_done(manager, torrent_path)
+            with manager._lock:
+                manager._pending_removal_torrent_file_fingerprints[resolved] = None
+                manager._persist_locked()
+
+            manager._tick()
+
+            self.assertTrue(torrent_path.exists())
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertIn("done", names)
+
+    def test_delete_pending_removal_tombstone_does_not_delete_replacement_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 2})
+            torrent_path = _write_torrent(watch, "solo")
+            manager._tick()
+            with manager._lock:
+                entry_id = next(iter(manager._torrents))
+
+            real_unlink = Path.unlink
+
+            def failing_unlink(self, *args, **kwargs):
+                if self.resolve() == torrent_path.resolve():
+                    raise OSError("Permission denied")
+                return real_unlink(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", failing_unlink):
+                result = manager.delete(entry_id)
+                self.assertEqual(result["status"], "deleted")
+                self.assertFalse(result["torrent_file_removed"])
+
+            torrent_path.unlink()
+            torrent_path.write_bytes(b"d8:announce0:4:infod4:name8:new.romse")
+            manager._tick()
+
+            self.assertTrue(torrent_path.exists())
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertEqual(names, ["solo"])
+
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

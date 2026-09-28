@@ -476,13 +476,34 @@ flag combination.
 Each of those four unlink sites now calls
 `_queue_pending_removal_torrent_file(torrent_file)` on `OSError`, which
 resolves and appends the path to `self._pending_removal_torrent_files`
-(persisted, same shape as `pending_removal_gids`/`_info_hashes`).
+(persisted, same shape as `pending_removal_gids`/`_info_hashes`) **and**
+records `self._pending_removal_torrent_file_fingerprints[path] =
+(st_dev, st_ino, st_size, st_mtime_ns)` of the file that failed to unlink.
 `_scan_watch_directory_locked` folds that list into its `known_files` set --
 so a tombstoned path is skipped, not rediscovered -- and opens by calling
 `_retry_pending_removal_torrent_files_locked()`, which re-attempts the unlink
 on every tick and drops any path that finally succeeds. No RPC is involved
 (unlike the GID/hash retries), so this retry safely runs synchronously under
 `self._lock` rather than needing a separate unlocked phase.
+
+**Retry must re-check file identity before unlinking (issue #77).** The retry
+runs unconditionally at the top of the watch-folder scan, *before*
+candidates are enumerated. Unlinking purely by resolved path would delete a
+brand-new, legitimate `.torrent` dropped under the same filename after the
+original was removed out-of-band (the tombstone would then be dropped as if
+the original failure had resolved, and the replacement would never
+register). The retry therefore stats the path and compares against the
+tombstoned `(dev, ino, size, mtime_ns)`:
+
+- missing file → drop the tombstone
+- identity mismatch, or no fingerprint recorded (pre-#77 persisted state)
+  → drop the tombstone **without** unlinking, so the scan can register the
+  file now at that path
+- identity matches → unlink; keep the tombstone only if that still raises
+  `OSError`
+
+Do not key the tombstone by path alone, and do not fall back to an
+unconditional `Path.unlink(missing_ok=True)` when identity is unknown.
 
 ## Restart / GID lifecycle
 
@@ -713,6 +734,10 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
 - Applying `pending_removal_info_hashes` to Cancel or partial migration. Those
   workflows intentionally re-add the same torrent; hash tombstones are only
   for terminal removal paths that drop the logical row/source.
+- Retrying a pending-removal `.torrent` unlink by resolved path alone. A
+  replacement file can reuse the filename between ticks; compare the
+  tombstoned `(dev, ino, size, mtime_ns)` first (issue #77). An unknown
+  fingerprint must skip the unlink, not delete whatever is there.
 
 ## Expected output format
 
