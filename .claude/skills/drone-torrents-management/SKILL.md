@@ -512,10 +512,16 @@ unlink (including a driver that performs that swap *inside* the patched
 unlink). `_retry_unlink_pending_removal_file` opens the tombstoned path,
 fstats the fd, and removes the directory entry only if it still names that
 inode (rename-aside to a non-`.torrent` sibling, verify, unlink the private
-name; restore on mismatch). `Path.unlink` is still invoked so a locked-file
-`OSError` (and tests that patch `Path.unlink`) keep the tombstone; the
-actual `os.unlink` of this path is intercepted so a second unlink of a
-different inode at the same filename is a no-op.
+name; restore on mismatch **only if the original name is still vacant**).
+A replacing restore after a failed aside-unlink would clobber a legitimate
+`.torrent` dropped onto the name while the original was stashed -- POSIX
+`os.rename` onto an existing destination is a silent atomic replace, so
+the failure handler must skip restore when the name is occupied and leave
+the leftover aside as a hidden non-`.torrent` sibling. `Path.unlink` is
+still invoked so a locked-file `OSError` (and tests that patch
+`Path.unlink`) keep the tombstone; the actual `os.unlink` of this path is
+intercepted so a second unlink of a different inode at the same filename
+is a no-op.
 
 ## Restart / GID lifecycle
 
@@ -751,7 +757,9 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   window between the identity check and unlink; compare the tombstoned
   `(dev, ino, size, mtime_ns)` on an open fd and unlink that inode, not
   the name (issues #77 / #80). An unknown fingerprint must skip the
-  unlink, not delete whatever is there.
+  unlink, not delete whatever is there. Restoring a stashed-aside original
+  after a failed delete must also skip the restore when the original name
+  is occupied -- a replacing rename is the same collateral deletion.
 
 ## Expected output format
 

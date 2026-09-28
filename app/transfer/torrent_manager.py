@@ -294,10 +294,31 @@ def _stat_fingerprint(st) -> Tuple[int, int, int, int]:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
+def _restore_aside_if_name_vacant(tmp: str, path: str) -> None:
+    """Move the stashed-aside original back onto ``path`` only when that
+    name is vacant.
+
+    POSIX ``os.rename`` onto an existing destination is a silent atomic
+    replace. A legitimate replacement dropped onto the name while the
+    original was aside must not be clobbered -- that is the same
+    collateral-deletion issue #77/#80 exist to prevent, on the
+    restore-after-failed-unlink leg. The leftover aside name is a hidden
+    non-``.torrent`` sibling and is not picked up by the watch-folder
+    scan.
+    """
+    try:
+        if os.path.lexists(path):
+            return
+        os.rename(tmp, path)
+    except OSError:
+        pass
+
+
 def _rename_aside_unlink_if_same_inode(path: str, held, real_unlink) -> None:
     """Move ``path`` to a unique sibling, then delete it only if that
     sibling is still the inode held in ``held``. A replacement that won
-    the name between the identity check and this rename is put back."""
+    the name between the identity check and this rename is put back
+    only if the original name is still vacant."""
     directory, name = os.path.split(path)
     if not directory or not name:
         real_unlink(path)
@@ -313,13 +334,13 @@ def _rename_aside_unlink_if_same_inode(path: str, held, real_unlink) -> None:
     try:
         tmp_st = os.lstat(tmp)
         if (tmp_st.st_dev, tmp_st.st_ino) != (held.st_dev, held.st_ino):
-            os.rename(tmp, path)
+            _restore_aside_if_name_vacant(tmp, path)
             return
         real_unlink(tmp)
     except OSError:
         try:
             if os.path.lexists(tmp):
-                os.rename(tmp, path)
+                _restore_aside_if_name_vacant(tmp, path)
         except OSError:
             pass
         raise
@@ -1544,8 +1565,10 @@ class TorrentManager:
         Identity is taken from an open fd (fstat), and the directory entry
         is removed only if it still names that inode (rename-aside, then
         unlink the private name). A replacement dropped in the stat-to-
-        unlink window -- including inside a patched Path.unlink -- is left
-        for the scan (issue #80)."""
+        unlink window -- including inside a patched Path.unlink, or onto
+        the name while the original is stashed aside and the aside unlink
+        then fails -- is left for the scan; restore must not replace an
+        occupant (issue #80)."""
         if not self._pending_removal_torrent_files:
             return False
         still_pending: List[str] = []

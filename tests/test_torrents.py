@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import io
 import os
 import shutil
@@ -3507,6 +3508,59 @@ class TorrentClearTests(unittest.TestCase):
             status = _retry_unlink_pending_removal_file(str(path.resolve()), fingerprint)
             self.assertEqual(status, "unlinked")
             self.assertFalse(path.exists())
+
+    def test_retry_unlink_helper_failed_aside_unlink_does_not_restore_over_replacement(self) -> None:
+        # Issue #80 restore-leg: rename-aside succeeds, a replacement lands
+        # on the now-free name, then the aside unlink fails. Restoring the
+        # original with a replacing os.rename would clobber the replacement.
+        replacement = b"replacement-bytes"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(b"original-bytes")
+            fingerprint = _stat_fingerprint(os.stat(path))
+            dropped: list = []
+            real_unlink = os.unlink
+
+            def hostile_unlink(target, *args, **kwargs):
+                target_str = os.fspath(target)
+                if "drone-pr-" in os.path.basename(target_str):
+                    if not dropped:
+                        dropped.append(True)
+                        path.write_bytes(replacement)
+                    raise OSError(errno.EBUSY, "simulated transient lock")
+                return real_unlink(target, *args, **kwargs)
+
+            with mock.patch("os.unlink", hostile_unlink):
+                status = _retry_unlink_pending_removal_file(str(path.resolve()), fingerprint)
+
+            self.assertTrue(dropped)
+            self.assertEqual(status, "busy")
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), replacement)
+
+    def test_retry_unlink_helper_failed_aside_unlink_restores_when_name_vacant(self) -> None:
+        original = b"original-bytes"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(original)
+            fingerprint = _stat_fingerprint(os.stat(path))
+            hit: list = []
+            real_unlink = os.unlink
+
+            def failing_aside_unlink(target, *args, **kwargs):
+                target_str = os.fspath(target)
+                if "drone-pr-" in os.path.basename(target_str):
+                    hit.append(True)
+                    raise OSError(errno.EBUSY, "simulated transient lock")
+                return real_unlink(target, *args, **kwargs)
+
+            with mock.patch("os.unlink", failing_aside_unlink):
+                status = _retry_unlink_pending_removal_file(str(path.resolve()), fingerprint)
+
+            self.assertTrue(hit)
+            self.assertEqual(status, "busy")
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), original)
 
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
