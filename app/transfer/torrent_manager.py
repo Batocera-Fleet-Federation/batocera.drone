@@ -646,6 +646,13 @@ class TorrentManager:
         # visible row's GID lets a hidden twin keep downloading and be adopted
         # back into the UI on the next poll (issue #69).
         self._pending_removal_info_hashes: List[str] = []
+        # Resolved .torrent paths whose unlink failed (e.g. read-only watch
+        # dir, or the file locked by another process) during delete/remove/
+        # clear/move+cleanup. Treated as "known" by _scan_watch_directory_
+        # locked so a failed unlink can't resurrect the row on the very next
+        # tick's rescan (issue #74), and retried opportunistically on every
+        # scan until the unlink finally succeeds.
+        self._pending_removal_torrent_files: List[str] = []
         # Info-hashes we've already fired a torrent_completed notification
         # for this process's lifetime -- belt-and-suspenders against a
         # source-less duplicate entry (see _deduplicate_shared_gid_entries_
@@ -692,6 +699,10 @@ class TorrentManager:
             [str(info_hash).lower() for info_hash in pending_hashes if info_hash]
             if isinstance(pending_hashes, list)
             else []
+        )
+        pending_files = stored.get("pending_removal_torrent_files")
+        self._pending_removal_torrent_files = (
+            [str(p) for p in pending_files if p] if isinstance(pending_files, list) else []
         )
         entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
@@ -823,6 +834,7 @@ class TorrentManager:
                 "recent_move_locations": list(self._recent_move_locations),
                 "pending_removal_gids": list(self._pending_removal_gids),
                 "pending_removal_info_hashes": list(self._pending_removal_info_hashes),
+                "pending_removal_torrent_files": list(self._pending_removal_torrent_files),
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -1287,16 +1299,49 @@ class TorrentManager:
             self._retry_pending_removals(rpc)
             self._adopt_orphaned_gids(rpc)
 
+    def _retry_pending_removal_torrent_files_locked(self) -> bool:
+        """Re-attempt unlinking .torrent files whose delete failed earlier
+        (see _queue_pending_removal_torrent_file) so a transient failure
+        (e.g. the file was briefly locked by another process) doesn't leave
+        the path tombstoned forever. Safe to run under self._lock since it's
+        a local filesystem call, not an RPC."""
+        if not self._pending_removal_torrent_files:
+            return False
+        still_pending = []
+        for path in self._pending_removal_torrent_files:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                still_pending.append(path)
+        changed = still_pending != self._pending_removal_torrent_files
+        self._pending_removal_torrent_files = still_pending
+        return changed
+
+    def _queue_pending_removal_torrent_file(self, torrent_file: Optional[str]) -> None:
+        """Tombstone a .torrent path whose unlink just failed so the next
+        watch-folder rescan (_scan_watch_directory_locked) treats it as
+        already-known instead of re-adding it as a brand-new queued entry
+        (issue #74). Must be called under self._lock."""
+        if not torrent_file:
+            return
+        try:
+            resolved = str(Path(torrent_file).resolve())
+        except OSError:
+            resolved = str(torrent_file)
+        if resolved not in self._pending_removal_torrent_files:
+            self._pending_removal_torrent_files.append(resolved)
+
     def _scan_watch_directory_locked(self, config: dict) -> bool:
         directory = Path(config["directory"])
+        dirty = self._retry_pending_removal_torrent_files_locked()
         if not directory.is_dir():
-            return False
+            return dirty
         known_files = {entry.get("torrent_file") for entry in self._torrents.values()}
-        dirty = False
+        known_files.update(self._pending_removal_torrent_files)
         try:
             candidates = sorted(directory.iterdir())
         except OSError:
-            return False
+            return dirty
         for candidate in candidates:
             if not candidate.is_file() or candidate.suffix.lower() != ".torrent":
                 continue
@@ -1973,6 +2018,7 @@ class TorrentManager:
                     torrent_file_removed = True
                 except OSError as error:
                     print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
+                    self._queue_pending_removal_torrent_file(torrent_file)
             self._persist_locked()
         self._finish_terminal_removal(gid)
         downloaded_files_removed = _remove_downloaded_payload(entry)
@@ -2011,6 +2057,7 @@ class TorrentManager:
                     torrent_file_removed = True
                 except OSError as error:
                     print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
+                    self._queue_pending_removal_torrent_file(torrent_file)
             self._persist_locked()
         self._finish_terminal_removal(gid)
         self.wake()
@@ -2128,6 +2175,14 @@ class TorrentManager:
                             Path(entry["torrent_file"]).unlink(missing_ok=True)
                         except OSError as error:
                             print(f"Torrent clear: file delete failed: {error}", file=sys.stderr, flush=True)
+                            if delete_from_ui:
+                                # The entry itself is gone from self._torrents
+                                # (popped above), so nothing else keeps this
+                                # path out of the next watch-folder rescan --
+                                # tombstone it or _scan_watch_directory_locked
+                                # re-adds it as a brand-new queued row on the
+                                # very next tick (issue #74).
+                                self._queue_pending_removal_torrent_file(entry["torrent_file"])
                 if delete_from_ui:
                     self._persist_locked()
 
@@ -2703,6 +2758,7 @@ class TorrentManager:
                     Path(torrent_file).unlink(missing_ok=True)
                 except OSError as error:
                     print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
+                    self._queue_pending_removal_torrent_file(torrent_file)
             self._torrents.pop(str(entry.get("id") or ""), None)
             # Same rationale as delete(): hold the gid in the pending-removal
             # list from here (still under the lock) so a poll tick can't

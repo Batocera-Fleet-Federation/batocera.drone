@@ -3236,6 +3236,52 @@ class TorrentClearTests(unittest.TestCase):
             remaining = [e["name"] for e in manager.snapshot()["torrents"]]
             self.assertEqual(remaining, ["active"])
 
+    def test_clear_delete_from_ui_unlink_failure_does_not_resurrect_row_on_next_tick(self) -> None:
+        # Issue #74: if the watched .torrent's unlink itself raises OSError
+        # (read-only watch dir, file locked by another process, etc.),
+        # clear() must not let the file quietly resurrect the row on the very
+        # next tick's _scan_watch_directory_locked -- it should tombstone the
+        # path (self._pending_removal_torrent_files) so the rescan treats it
+        # as already-known, and keep retrying the unlink on later ticks.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+            self.assertTrue(torrent_path.exists())
+
+            real_unlink = Path.unlink
+
+            def failing_unlink(self, *args, **kwargs):
+                if self.resolve() == torrent_path.resolve():
+                    raise OSError("Permission denied")
+                return real_unlink(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", failing_unlink):
+                result = manager.clear({"delete_from_ui": True, "scope": "completed"})
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["cleared"], 1)
+                # The row disappears from the immediate result even though the
+                # file is still on disk -- that's fine as long as it can't
+                # resurrect itself.
+                self.assertTrue(torrent_path.exists())
+                self.assertNotIn("done", [e["name"] for e in manager.snapshot()["torrents"]])
+
+                manager._tick()
+                remaining = [e["name"] for e in manager.snapshot()["torrents"]]
+                self.assertEqual(remaining, ["active"])
+                self.assertTrue(torrent_path.exists())
+
+            # Once the transient failure clears, the next scan's retry pass
+            # finally unlinks the tombstoned path and drops the tombstone.
+            manager._tick()
+            self.assertFalse(torrent_path.exists())
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            remaining = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertEqual(remaining, ["active"])
+
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
