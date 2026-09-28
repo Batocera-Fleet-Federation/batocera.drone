@@ -67,6 +67,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_71_clear_watch_file_reappear.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-71-clear-watch-file-reappear",
+      "name": "Issue #71 bulk clear delete_from_ui watch-file unlink acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_71_clear_watch_file_reappear.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

@@ -2115,10 +2115,15 @@ class TorrentManager:
                     if delete_from_ui:
                         self._torrents.pop(entry["id"], None)
                         self._begin_terminal_removal_locked(entry.get("gid"), entry.get("info_hash"))
-                    if delete_torrent_file and entry.get("torrent_file"):
+                    if (delete_torrent_file or delete_from_ui) and entry.get("torrent_file"):
                         # Unlink under the lock so a concurrent watch-folder
                         # rescan can't re-register a torrent this bulk-clear
                         # just removed (issue #42, same fix as delete()).
+                        # delete_from_ui alone must also unlink -- otherwise
+                        # the watched .torrent survives and the next tick's
+                        # _scan_watch_directory_locked rediscovers it as a
+                        # brand-new queued entry, matching remove_from_list()'s
+                        # own always-unlink guarantee (issue #71).
                         try:
                             Path(entry["torrent_file"]).unlink(missing_ok=True)
                         except OSError as error:

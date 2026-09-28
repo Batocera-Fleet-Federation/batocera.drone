@@ -3213,6 +3213,29 @@ class TorrentClearTests(unittest.TestCase):
             self.assertEqual(list(watch.glob("*.torrent")), [])
             self.assertEqual(len(rpc.method_calls("aria2.forceRemove")), 2)
 
+    def test_clear_delete_from_ui_alone_unlinks_watched_torrent_file(self) -> None:
+        # Issue #71: delete_from_ui without delete_torrent_file used to leave
+        # the watched .torrent file on disk, so the very next tick's
+        # _scan_watch_directory_locked rediscovered it as a brand-new queued
+        # entry -- clear() must unlink it just like remove_from_list() does.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            result = manager.clear(
+                {
+                    "delete_from_ui": True,
+                    "delete_downloaded_files": True,
+                    "scope": "completed",
+                }
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["cleared"], 1)
+            remaining_files = {p.stem for p in watch.glob("*.torrent")}
+            self.assertNotIn("done", remaining_files)
+            manager._tick()
+            remaining = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertEqual(remaining, ["active"])
+
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
