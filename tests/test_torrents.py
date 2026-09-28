@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 import shutil
 import tempfile
 import unittest
@@ -14,6 +15,8 @@ from app.transfer.aria2_runtime import Aria2RpcError, _asset_for_machine, _extra
 from app.transfer.torrent_manager import (
     TorrentManager,
     _normalize_torrent_settings,
+    _retry_unlink_pending_removal_file,
+    _stat_fingerprint,
     default_torrent_directory,
     effective_download_directory,
 )
@@ -3440,6 +3443,70 @@ class TorrentClearTests(unittest.TestCase):
                 self.assertEqual(manager._pending_removal_torrent_files, [])
             names = [e["name"] for e in manager.snapshot()["torrents"]]
             self.assertEqual(names, ["solo"])
+
+    def test_pending_removal_retry_does_not_unlink_replacement_swapped_inside_unlink(self) -> None:
+        # Issue #80: compare-then-Path.unlink still deletes a replacement
+        # swapped onto the same filename in the stat-to-unlink window,
+        # including a driver that performs that swap inside the patched
+        # unlink itself.
+        replacement = b"d8:announce0:4:infod4:name11:replaced.ee"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+            self._tombstone_completed_done(manager, torrent_path)
+            real_unlink = Path.unlink
+
+            def swapping_unlink(self, *args, **kwargs):
+                if self.resolve() == torrent_path.resolve():
+                    real_unlink(self, *args, **kwargs)
+                    self.write_bytes(replacement)
+                    return real_unlink(self, *args, **kwargs)
+                return real_unlink(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", swapping_unlink):
+                manager._tick()
+
+            self.assertTrue(torrent_path.exists())
+            self.assertEqual(torrent_path.read_bytes(), replacement)
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertIn("done", names)
+            self.assertIn("active", names)
+
+    def test_retry_unlink_helper_swap_inside_path_unlink_keeps_replacement(self) -> None:
+        replacement = b"replacement-bytes"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(b"original-bytes")
+            fingerprint = _stat_fingerprint(os.stat(path))
+            real_unlink = Path.unlink
+
+            def swapping_unlink(self, *args, **kwargs):
+                if self.resolve() == path.resolve():
+                    real_unlink(self, *args, **kwargs)
+                    self.write_bytes(replacement)
+                    return real_unlink(self, *args, **kwargs)
+                return real_unlink(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", swapping_unlink):
+                status = _retry_unlink_pending_removal_file(str(path.resolve()), fingerprint)
+
+            self.assertEqual(status, "unlinked")
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), replacement)
+
+    def test_retry_unlink_helper_still_unlinks_matching_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(b"original-bytes")
+            fingerprint = _stat_fingerprint(os.stat(path))
+            status = _retry_unlink_pending_removal_file(str(path.resolve()), fingerprint)
+            self.assertEqual(status, "unlinked")
+            self.assertFalse(path.exists())
 
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
