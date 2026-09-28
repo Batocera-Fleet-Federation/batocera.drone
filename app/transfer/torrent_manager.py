@@ -24,12 +24,13 @@ import math
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs
 
@@ -273,6 +274,180 @@ def _optional_json_int(value) -> Optional[int]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# Serializes the brief os.unlink swap used by inode-held pending-removal
+# retry so two managers cannot interleave a guarded unlink.
+_PENDING_REMOVAL_UNLINK_LOCK = RLock()
+
+
+def _pending_removal_open_flags() -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _stat_fingerprint(st) -> Tuple[int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _restore_aside_if_name_vacant(tmp: str, path: str) -> None:
+    """Move the stashed-aside original back onto ``path`` only when that
+    name is vacant.
+
+    POSIX ``os.rename`` onto an existing destination is a silent atomic
+    replace. A legitimate replacement dropped onto the name while the
+    original was aside must not be clobbered -- that is the same
+    collateral-deletion issue #77/#80 exist to prevent, on the
+    restore-after-failed-unlink leg. The leftover aside name is a hidden
+    non-``.torrent`` sibling and is not picked up by the watch-folder
+    scan.
+    """
+    try:
+        if os.path.lexists(path):
+            return
+        os.rename(tmp, path)
+    except OSError:
+        pass
+
+
+def _rename_aside_unlink_if_same_inode(path: str, held, real_unlink) -> None:
+    """Move ``path`` to a unique sibling, then delete it only if that
+    sibling is still the inode held in ``held``. A replacement that won
+    the name between the identity check and this rename is put back
+    only if the original name is still vacant."""
+    directory, name = os.path.split(path)
+    if not directory or not name:
+        real_unlink(path)
+        return
+    tmp = os.path.join(
+        directory,
+        f".{name}.drone-pr-{held.st_ino}-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+    )
+    try:
+        os.rename(path, tmp)
+    except FileNotFoundError:
+        return
+    try:
+        tmp_st = os.lstat(tmp)
+        if (tmp_st.st_dev, tmp_st.st_ino) != (held.st_dev, held.st_ino):
+            _restore_aside_if_name_vacant(tmp, path)
+            return
+        real_unlink(tmp)
+    except OSError:
+        try:
+            if os.path.lexists(tmp):
+                _restore_aside_if_name_vacant(tmp, path)
+        except OSError:
+            pass
+        raise
+
+
+def _install_unlink_guard(guarded, real_unlink):
+    """Patch every primitive ``Path.unlink`` may call.
+
+    Python 3.10+ looks up ``os.unlink`` at call time; 3.9 binds
+    ``pathlib._normal_accessor.unlink`` to the builtin at import, so
+    replacing ``os.unlink`` alone does not intercept ``Path.unlink``."""
+    patches = []
+    seen = set()
+
+    def install(obj, attr):
+        if obj is None or not hasattr(obj, attr):
+            return
+        key = (id(obj), attr)
+        if key in seen:
+            return
+        seen.add(key)
+        patches.append((obj, attr, getattr(obj, attr)))
+        setattr(obj, attr, guarded)
+
+    install(os, "unlink")
+    if os.remove is real_unlink:
+        install(os, "remove")
+    try:
+        import pathlib as pathlib_mod
+    except ImportError:  # pragma: no cover
+        pathlib_mod = None
+    if pathlib_mod is not None:
+        install(getattr(pathlib_mod, "_normal_accessor", None), "unlink")
+    return patches
+
+
+def _restore_unlink_guard(patches) -> None:
+    for obj, attr, original in reversed(patches):
+        setattr(obj, attr, original)
+
+
+def _unlink_path_if_held_inode(path: str, held) -> None:
+    """Call ``Path.unlink`` so OSError from a still-locked file (and tests
+    that patch ``Path.unlink``) keep working, but intercept the unlink
+    primitive of this path so only ``held``'s inode is removed (issue #80).
+
+    A replacement swapped onto the filename inside the unlink — including
+    a driver that unlinks, writes a new ``.torrent``, then unlinks again —
+    is left in place: the first unlink removes the held inode via rename-
+    aside, and the second sees a different inode at the same name and
+    becomes a no-op."""
+    real_unlink = os.unlink
+    abs_path = os.path.abspath(path)
+
+    def guarded(target, dir_fd=None, **kwargs):
+        if dir_fd is not None:
+            return real_unlink(target, dir_fd=dir_fd, **kwargs)
+        target_str = os.fspath(target)
+        try:
+            st = os.lstat(target_str)
+        except OSError:
+            return real_unlink(target, **kwargs)
+        if (st.st_dev, st.st_ino) == (held.st_dev, held.st_ino):
+            _rename_aside_unlink_if_same_inode(target_str, held, real_unlink)
+            return None
+        try:
+            if os.path.abspath(target_str) == abs_path:
+                return None
+        except OSError:
+            pass
+        return real_unlink(target, **kwargs)
+
+    with _PENDING_REMOVAL_UNLINK_LOCK:
+        patches = _install_unlink_guard(guarded, real_unlink)
+        try:
+            Path(path).unlink(missing_ok=True)
+        finally:
+            _restore_unlink_guard(patches)
+
+
+def _retry_unlink_pending_removal_file(path: str, fingerprint: Tuple[int, int, int, int]) -> str:
+    """Unlink ``path`` only if it still is ``fingerprint``.
+
+    Returns ``gone`` (nothing at the path), ``mismatch`` (different file;
+    leave it for the watch-folder scan), ``unlinked``, or ``busy`` (retry
+    later). Opens the path and fstats the fd so identity is the held inode,
+    not a second path-based stat (issue #80)."""
+    try:
+        fd = os.open(path, _pending_removal_open_flags())
+    except FileNotFoundError:
+        return "gone"
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.EISDIR):
+            return "mismatch"
+        return "busy"
+    try:
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            return "mismatch"
+        if _stat_fingerprint(held) != fingerprint:
+            return "mismatch"
+        _unlink_path_if_held_inode(path, held)
+        return "unlinked"
+    except OSError:
+        return "busy"
+    finally:
+        os.close(fd)
 
 
 _ENTRY_PERSISTED_FIELDS = (
@@ -667,12 +842,13 @@ class TorrentManager:
         # Companion to the above: resolved path -> the (st_dev, st_ino,
         # st_size, st_mtime_ns) identity of the file at tombstone time (or
         # None if it couldn't be stat'd then). The retry re-checks this
-        # identity before unlinking so a brand-new, unrelated file dropped
-        # under the same reused filename in the interim is never
-        # collaterally deleted -- the stale tombstone is dropped and the
-        # next scan discovers the replacement as a new entry (issue #77).
-        # Kept out of _pending_removal_torrent_files itself so that field
-        # stays the plain path list callers/tests expect.
+        # identity against an open fd before unlinking so a brand-new,
+        # unrelated file dropped under the same reused filename -- including
+        # in the window between that check and the unlink itself -- is never
+        # collaterally deleted (issues #77 / #80). The stale tombstone is
+        # dropped and the next scan discovers the replacement as a new
+        # entry. Kept out of _pending_removal_torrent_files itself so that
+        # field stays the plain path list callers/tests expect.
         self._pending_removal_torrent_file_fingerprints: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
         # Info-hashes we've already fired a torrent_completed notification
         # for this process's lifetime -- belt-and-suspenders against a
@@ -1384,24 +1560,27 @@ class TorrentManager:
         same path (out-of-band delete + a brand-new .torrent reusing the
         filename), the tombstone is dropped without touching the path --
         unlinking purely by path would otherwise delete that unrelated file
-        as collateral damage (issue #77)."""
+        as collateral damage (issue #77).
+
+        Identity is taken from an open fd (fstat), and the directory entry
+        is removed only if it still names that inode (rename-aside, then
+        unlink the private name). A replacement dropped in the stat-to-
+        unlink window -- including inside a patched Path.unlink, or onto
+        the name while the original is stashed aside and the aside unlink
+        then fails -- is left for the scan; restore must not replace an
+        occupant (issue #80)."""
         if not self._pending_removal_torrent_files:
             return False
         still_pending: List[str] = []
         still_fingerprints: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
         for path in self._pending_removal_torrent_files:
             fingerprint = self._pending_removal_torrent_file_fingerprints.get(path)
-            current = self._torrent_file_fingerprint(path)
-            if current is None:
-                # Already gone -- nothing left to retry.
+            if fingerprint is None:
+                # Unknown identity (pre-#77 persisted state). Leave whatever
+                # is there for the directory scan; never unlink by path.
                 continue
-            if fingerprint is None or current != fingerprint:
-                # Unknown identity, or a different file now lives at this
-                # path. Leave whatever is there for the directory scan.
-                continue
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
+            status = _retry_unlink_pending_removal_file(path, fingerprint)
+            if status == "busy":
                 still_pending.append(path)
                 still_fingerprints[path] = fingerprint
         changed = still_pending != self._pending_removal_torrent_files
@@ -1415,8 +1594,8 @@ class TorrentManager:
         already-known instead of re-adding it as a brand-new queued entry
         (issue #74). Records the file's current (dev, ino, size, mtime_ns)
         so a later retry can detect whether the path still refers to the
-        same file before unlinking it (issue #77). Must be called under
-        self._lock."""
+        same file before unlinking it (issues #77 / #80). Must be called
+        under self._lock."""
         if not torrent_file:
             return
         try:
