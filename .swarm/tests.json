@@ -98,6 +98,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_74_pending_removal_tombstone.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-74-pending-removal-tombstone",
+      "name": "Issue #74 unlink-failure tombstone acceptance across call sites and restart",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_74_pending_removal_tombstone.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

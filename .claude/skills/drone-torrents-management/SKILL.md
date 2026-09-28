@@ -461,6 +461,29 @@ intentionally remain GID-only because they keep/re-add the same logical
 torrent; applying a terminal hash tombstone there would delete the replacement
 GID too.
 
+### Watched-file tombstones for a failed unlink (issue #74)
+
+Every terminal-removal unlink (`delete()`, `remove_from_list()`, bulk
+`clear()`, and the Move+cleanup path) already runs under the manager lock so a
+concurrent watch-folder rescan can't slip in during the gap -- but that only
+covers the *race*, not an outright unlink failure (read-only watch dir, file
+locked by another process). A caught `OSError` used to just get printed to
+stderr, leaving the `.torrent` on disk with nothing to stop the very next
+`_scan_watch_directory_locked` from rediscovering it as a brand-new queued row
+-- reproducing the issue #71 symptom through a filesystem error instead of a
+flag combination.
+
+Each of those four unlink sites now calls
+`_queue_pending_removal_torrent_file(torrent_file)` on `OSError`, which
+resolves and appends the path to `self._pending_removal_torrent_files`
+(persisted, same shape as `pending_removal_gids`/`_info_hashes`).
+`_scan_watch_directory_locked` folds that list into its `known_files` set --
+so a tombstoned path is skipped, not rediscovered -- and opens by calling
+`_retry_pending_removal_torrent_files_locked()`, which re-attempts the unlink
+on every tick and drops any path that finally succeeds. No RPC is involved
+(unlike the GID/hash retries), so this retry safely runs synchronously under
+`self._lock` rather than needing a separate unlocked phase.
+
 ## Restart / GID lifecycle
 
 aria2 GIDs do not survive a daemon restart (a fresh `Aria2Daemon` is a fresh
