@@ -3,7 +3,9 @@ import errno
 import io
 import os
 import shutil
+import stat
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -16,6 +18,7 @@ from app.transfer.aria2_runtime import Aria2RpcError, _asset_for_machine, _extra
 from app.transfer.torrent_manager import (
     TorrentManager,
     _normalize_torrent_settings,
+    _pending_removal_open_flags,
     _retry_unlink_pending_removal_file,
     _stat_fingerprint,
     default_torrent_directory,
@@ -3561,6 +3564,98 @@ class TorrentClearTests(unittest.TestCase):
             self.assertEqual(status, "busy")
             self.assertTrue(path.exists())
             self.assertEqual(path.read_bytes(), original)
+
+    def test_pending_removal_open_flags_include_nonblock(self) -> None:
+        flags = _pending_removal_open_flags()
+        # os.O_RDONLY is 0 on POSIX, so it cannot be detected with a bitmask.
+        if hasattr(os, "O_NONBLOCK"):
+            self.assertTrue(
+                flags & os.O_NONBLOCK,
+                "O_NONBLOCK is required so a named FIFO at a tombstoned "
+                "path cannot stall the poller (issue #84)",
+            )
+        if hasattr(os, "O_NOFOLLOW"):
+            self.assertTrue(flags & os.O_NOFOLLOW)
+
+    def test_retry_unlink_helper_named_fifo_returns_mismatch_without_blocking(self) -> None:
+        # Issue #84: os.open(O_RDONLY) on a named FIFO blocks until a writer
+        # appears. The retry helper must return mismatch promptly and leave
+        # the FIFO in place.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("named FIFOs are not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(b"original-bytes")
+            fingerprint = _stat_fingerprint(os.stat(path))
+            path.unlink()
+            os.mkfifo(path)
+            box: list = []
+
+            def run() -> None:
+                box.append(_retry_unlink_pending_removal_file(str(path.resolve()), fingerprint))
+
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            thread.join(timeout=2.0)
+            self.assertFalse(
+                thread.is_alive(),
+                "opening the named FIFO for pending-removal retry blocked "
+                "instead of returning mismatch",
+            )
+            self.assertEqual(box, ["mismatch"])
+            self.assertTrue(stat.S_ISFIFO(os.lstat(path).st_mode))
+
+    def test_retry_unlink_helper_enxio_on_open_is_mismatch_not_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "solo.torrent"
+            path.write_bytes(b"original-bytes")
+            fingerprint = _stat_fingerprint(os.stat(path))
+            real_open = os.open
+
+            def enxio_open(target, flags, *args, **kwargs):
+                if os.fspath(target) == str(path):
+                    raise OSError(errno.ENXIO, "No such device or address")
+                return real_open(target, flags, *args, **kwargs)
+
+            with mock.patch("os.open", enxio_open):
+                status = _retry_unlink_pending_removal_file(str(path), fingerprint)
+
+            self.assertEqual(status, "mismatch")
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), b"original-bytes")
+
+    def test_pending_removal_retry_named_fifo_does_not_hang_tick(self) -> None:
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("named FIFOs are not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch, done_payload = self._two_torrents(root, FakeRpc())
+            with manager._lock:
+                done_entry = next(e for e in manager._torrents.values() if e["name"] == "done")
+                torrent_path = Path(done_entry["torrent_file"])
+            self._tombstone_completed_done(manager, torrent_path)
+            torrent_path.unlink()
+            os.mkfifo(torrent_path)
+            box: list = []
+
+            def run() -> None:
+                manager._tick()
+                box.append("returned")
+
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            thread.join(timeout=2.0)
+            self.assertFalse(
+                thread.is_alive(),
+                "TorrentManager._tick blocked on a named FIFO planted at a "
+                "pending-removal path",
+            )
+            self.assertEqual(box, ["returned"])
+            self.assertTrue(stat.S_ISFIFO(os.lstat(torrent_path).st_mode))
+            with manager._lock:
+                self.assertEqual(manager._pending_removal_torrent_files, [])
+            names = [e["name"] for e in manager.snapshot()["torrents"]]
+            self.assertEqual(names, ["active"])
 
     def test_clear_delete_downloaded_files_without_ui_removal_marks_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

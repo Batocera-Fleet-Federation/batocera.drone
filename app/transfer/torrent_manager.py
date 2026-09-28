@@ -282,11 +282,22 @@ _PENDING_REMOVAL_UNLINK_LOCK = RLock()
 
 
 def _pending_removal_open_flags() -> int:
+    """Flags for the identity-check open in pending-removal retry.
+
+    ``O_NONBLOCK`` is load-bearing: a named FIFO (``mkfifo``) dropped onto
+    the tombstoned path would otherwise stall ``os.open(..., O_RDONLY)``
+    until a writer appears, which may never happen. That open runs under
+    ``TorrentManager._lock`` on the poller thread, so one planted FIFO
+    would hang the whole torrent tick (issue #84). ``O_NOFOLLOW`` keeps
+    the identity check on the directory entry itself (issue #80).
+    """
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     return flags
 
 
@@ -426,13 +437,15 @@ def _retry_unlink_pending_removal_file(path: str, fingerprint: Tuple[int, int, i
     Returns ``gone`` (nothing at the path), ``mismatch`` (different file;
     leave it for the watch-folder scan), ``unlinked``, or ``busy`` (retry
     later). Opens the path and fstats the fd so identity is the held inode,
-    not a second path-based stat (issue #80)."""
+    not a second path-based stat (issue #80). The open is non-blocking so a
+    named FIFO or similar non-regular occupant cannot stall the poller
+    (issue #84); ``ENXIO`` and a non-regular fd are mismatches, not busy."""
     try:
         fd = os.open(path, _pending_removal_open_flags())
     except FileNotFoundError:
         return "gone"
     except OSError as error:
-        if error.errno in (errno.ELOOP, errno.EISDIR):
+        if error.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
             return "mismatch"
         return "busy"
     try:
@@ -1567,7 +1580,10 @@ class TorrentManager:
         unlink window -- including inside a patched Path.unlink, or onto
         the name while the original is stashed aside and the aside unlink
         then fails -- is left for the scan; restore must not replace an
-        occupant (issue #80)."""
+        occupant (issue #80). The identity open is non-blocking so a named
+        FIFO (or ``ENXIO`` from a socket/device with no peer) is an
+        immediate mismatch rather than hanging this locked poller pass
+        (issue #84)."""
         if not self._pending_removal_torrent_files:
             return False
         still_pending: List[str] = []

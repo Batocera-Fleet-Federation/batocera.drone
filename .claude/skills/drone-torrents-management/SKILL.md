@@ -523,6 +523,19 @@ still invoked so a locked-file `OSError` (and tests that patch
 intercepted so a second unlink of a different inode at the same filename
 is a no-op.
 
+**Retry must not block the poller on a non-regular occupant (issue #84).**
+The identity open is `O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK`. Without
+`O_NONBLOCK`, POSIX `open(O_RDONLY)` on a named FIFO (`mkfifo`) waits for
+a writer that may never appear. `_retry_pending_removal_torrent_files_locked`
+runs that open under `self._lock` on the same tick thread as the
+watch-folder scan and aria2 status polling, so one planted FIFO is a
+denial-of-service of the whole `TorrentManager` poller, not just that
+tombstone. `ENXIO` (unix socket / FIFO with no peer on some paths) and a
+successfully opened but non-regular fd (`S_ISREG` is false) are identity
+**mismatch**: drop the tombstone, leave the occupant, do not retry as
+`busy`. The subsequent scan still skips a FIFO because `Path.is_file()`
+requires a regular file.
+
 ## Restart / GID lifecycle
 
 aria2 GIDs do not survive a daemon restart (a fresh `Aria2Daemon` is a fresh
@@ -760,6 +773,10 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   unlink, not delete whatever is there. Restoring a stashed-aside original
   after a failed delete must also skip the restore when the original name
   is occupied -- a replacing rename is the same collateral deletion.
+- Opening the pending-removal identity path without `O_NONBLOCK`. A named
+  FIFO at that path blocks `os.open(O_RDONLY)` until a writer appears,
+  which hangs the locked poller thread indefinitely (issue #84). Treat
+  `ENXIO` and a non-regular fd as mismatch, not as `busy`.
 
 ## Expected output format
 
