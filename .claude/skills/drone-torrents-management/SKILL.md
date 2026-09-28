@@ -433,6 +433,34 @@ Tests: `AlreadyRegisteredRecoveryTests` (sync trigger) and
 `AsyncAlreadyRegisteredRecoveryTests` (async trigger + the unpause-suppression
 side effect) in `tests/test_torrents.py`.
 
+## Hidden same-info-hash GIDs and terminal-removal tombstones
+
+Issue #69 exposed a third consequence of duplicate aria2 registrations. A
+second GID with the same BitTorrent info-hash could be deliberately skipped by
+orphan adoption (to avoid a duplicate UI row) yet remain active inside aria2.
+That made the visible row appear queued or stalled while the hidden GID was
+already far into the download. Delete and successful Move+cleanup removed only
+the visible GID, so the hidden registration was adopted back into the queue on
+a later poll.
+
+`_adopt_orphaned_gids()` now treats an untracked GID sharing a known info-hash
+as reconciliation work, not something to silently ignore. It keeps the GID
+with the most completed bytes (preferring an active GID on a tie), retargets
+the existing visible row when the hidden registration is ahead, and explicitly
+removes the losing GID. The magnet `following`/`followedBy` guards still run
+first so a normal metadata-to-content hand-off is not mistaken for a duplicate.
+
+Terminal removals also persist `pending_removal_info_hashes` alongside the
+older `pending_removal_gids`. Delete, Remove from list, bulk removal from the
+UI, and successful Move+cleanup add the stable info-hash tombstone under the
+manager lock before dropping the row. The retry pass inventories aria2's
+active/waiting downloads, removes every matching GID, and retains the tombstone
+until a later independent inventory confirms none remain. Orphan adoption
+skips tombstoned hashes throughout that window. Cancel and partial migration
+intentionally remain GID-only because they keep/re-add the same logical
+torrent; applying a terminal hash tombstone there would delete the replacement
+GID too.
+
 ## Restart / GID lifecycle
 
 aria2 GIDs do not survive a daemon restart (a fresh `Aria2Daemon` is a fresh
@@ -513,7 +541,9 @@ rename**, not additive; anything reading the old field name needs updating.
 Applies regardless of the torrent's status (queued/downloading/error/complete)
 -- an in-flight download's partial files are removed too. The frontend's
 confirm dialog text was updated to say so explicitly; don't silently soften it
-back to "keeps files."
+back to "keeps files." Terminal removal is keyed by both the visible GID and
+the stable info-hash so a hidden duplicate aria2 registration cannot continue
+downloading or resurrect the row (see the issue #69 section above).
 
 ## Global pause / resume / bulk clear
 
@@ -653,6 +683,13 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   all. See "InfoHash already registered recovery: two independent triggers"
   above; a fix that only checks the synchronous add-time exception path
   leaves the async one flapping into `error` forever.
+- Hiding an untracked aria2 GID merely because its info-hash belongs to a
+  visible row -- reconcile the two registrations and remove the loser. A
+  hidden active twin makes progress invisible and can resurrect a terminally
+  removed torrent (issue #69).
+- Applying `pending_removal_info_hashes` to Cancel or partial migration. Those
+  workflows intentionally re-add the same torrent; hash tombstones are only
+  for terminal removal paths that drop the logical row/source.
 
 ## Expected output format
 
