@@ -492,18 +492,36 @@ candidates are enumerated. Unlinking purely by resolved path would delete a
 brand-new, legitimate `.torrent` dropped under the same filename after the
 original was removed out-of-band (the tombstone would then be dropped as if
 the original failure had resolved, and the replacement would never
-register). The retry therefore stats the path and compares against the
-tombstoned `(dev, ino, size, mtime_ns)`:
+register). The retry therefore opens the path, fstats the fd, and compares
+against the tombstoned `(dev, ino, size, mtime_ns)`:
 
 - missing file → drop the tombstone
 - identity mismatch, or no fingerprint recorded (pre-#77 persisted state)
   → drop the tombstone **without** unlinking, so the scan can register the
   file now at that path
-- identity matches → unlink; keep the tombstone only if that still raises
-  `OSError`
+- identity matches → unlink the **held inode**; keep the tombstone only if
+  that still raises `OSError`
 
 Do not key the tombstone by path alone, and do not fall back to an
 unconditional `Path.unlink(missing_ok=True)` when identity is unknown.
+
+**Retry must unlink the held inode, not whatever currently occupies the
+name (issue #80).** Compare-then-`Path.unlink(path)` still loses a
+replacement swapped onto the filename between the identity check and the
+unlink (including a driver that performs that swap *inside* the patched
+unlink). `_retry_unlink_pending_removal_file` opens the tombstoned path,
+fstats the fd, and removes the directory entry only if it still names that
+inode (rename-aside to a non-`.torrent` sibling, verify, unlink the private
+name; restore on mismatch **only if the original name is still vacant**).
+A replacing restore after a failed aside-unlink would clobber a legitimate
+`.torrent` dropped onto the name while the original was stashed -- POSIX
+`os.rename` onto an existing destination is a silent atomic replace, so
+the failure handler must skip restore when the name is occupied and leave
+the leftover aside as a hidden non-`.torrent` sibling. `Path.unlink` is
+still invoked so a locked-file `OSError` (and tests that patch
+`Path.unlink`) keep the tombstone; the actual `os.unlink` of this path is
+intercepted so a second unlink of a different inode at the same filename
+is a no-op.
 
 ## Restart / GID lifecycle
 
@@ -735,9 +753,13 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   workflows intentionally re-add the same torrent; hash tombstones are only
   for terminal removal paths that drop the logical row/source.
 - Retrying a pending-removal `.torrent` unlink by resolved path alone. A
-  replacement file can reuse the filename between ticks; compare the
-  tombstoned `(dev, ino, size, mtime_ns)` first (issue #77). An unknown
-  fingerprint must skip the unlink, not delete whatever is there.
+  replacement file can reuse the filename between ticks **and** in the
+  window between the identity check and unlink; compare the tombstoned
+  `(dev, ino, size, mtime_ns)` on an open fd and unlink that inode, not
+  the name (issues #77 / #80). An unknown fingerprint must skip the
+  unlink, not delete whatever is there. Restoring a stashed-aside original
+  after a failed delete must also skip the restore when the original name
+  is occupied -- a replacing rename is the same collateral deletion.
 
 ## Expected output format
 

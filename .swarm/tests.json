@@ -160,6 +160,68 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_80_pending_removal_toctou.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-80-pending-removal-toctou",
+      "name": "Issue #80 inode-held pending-removal unlink must not clobber a same-tick replacement",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_80_pending_removal_toctou.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_80_pending_removal_fd_robustness.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-80-pending-removal-fd-robustness",
+      "name": "Issue #80 fd-held retry: open/fstat/rename error paths, fd-leak safety, and unlink-guard blast radius",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/torrent_manager.py",
+          "tests/adversarial/test_issue_80_pending_removal_fd_robustness.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
