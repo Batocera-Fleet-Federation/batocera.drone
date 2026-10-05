@@ -43,6 +43,11 @@ def test_release_workflow_is_main_only_and_uploads_drone_assets():
     assert "tags:" not in workflow
     assert "scripts/next-release-version.sh" in workflow
     assert "dist/drone-app.tar.gz" in workflow
+    assert "app/web/static/js/integrations.js" in workflow
+    assert "app/web/handlers_integrations.py" in workflow
+    assert "app/integrations/__init__.py" in workflow
+    assert "app/integrations/registry.py" in workflow
+    assert "app/integrations/streamdeck/manager.py" in workflow
     assert "scripts/batocera_install.sh" in workflow
     assert "refs/tags/latest --force" in workflow
     assert 'args=(--version "$RELEASE_VERSION")' in workflow

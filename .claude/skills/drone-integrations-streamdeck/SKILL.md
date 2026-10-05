@@ -27,6 +27,11 @@ before non-trivial work; keep it accurate in the same change.
   `static/js/integrations.js` (all values `escapeHtml`'d, delegated
   `data-sd-*` handlers, no inline JS with data), OpenAPI paths in
   `web/openapi_spec.py::_integration_paths`, tests, docs, and this skill.
+- Delivery is atomic: release/self-update/startup validation must require
+  `integrations.js`, `handlers_integrations.py`, the registry, and the Stream Deck
+  manager together. A source tree with `VERSION=dev` must still converge through
+  the updater to the latest semantic release; otherwise a device can remain on an
+  older UI forever while appearing to run normally.
 
 ## Stream Deck shape
 
@@ -109,3 +114,7 @@ games, lifecycle, dependencies), `tests/test_streamdeck_runtime.py` (fake
 hardware runtime + real worker process against a fake `StreamDeck` package),
 `tests/test_streamdeck_content.py` (scripts, process runner, uploads, renderer,
 compiler, real `RomRepository`, handler gates, real HTTP server routes).
+Its HTTP UAT also fetches `/`, `drone.js`, and `integrations.js` and verifies the
+Admin tile, route, and both page renderers are delivered together. Release/update
+tests reject archives missing any Integrations UI/backend component and exercise
+upgrading a `dev` source deployment.

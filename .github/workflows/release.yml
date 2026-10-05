@@ -122,7 +122,12 @@ jobs:
             app/VERSION \
             app/web/templates/index.html \
             app/web/static/js/drone.js \
+            app/web/static/js/integrations.js \
             app/web/static/css/drone.css \
+            app/web/handlers_integrations.py \
+            app/integrations/__init__.py \
+            app/integrations/registry.py \
+            app/integrations/streamdeck/manager.py \
             content/batocera-swarm-mascot.jpg \
             content/drone.png; do
             test -s "$required_file"
