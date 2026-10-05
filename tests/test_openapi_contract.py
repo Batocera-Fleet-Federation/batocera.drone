@@ -169,6 +169,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/admin/emulators",
             "/admin/emulators/file",
             "/peer/pair",
+            "/peer/membership",
             "/peer/health",
             "/peer/network-share/nfs/authorize",
             "/peer/network-share/nfs/revoke",

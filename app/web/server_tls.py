@@ -12,6 +12,7 @@ import secrets
 import ssl
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Tuple
@@ -26,6 +27,31 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         certificate_alt_names,
         certificate_common_name,
     )
+
+
+_LIVE_TLS_SERVERS: list = []
+_LIVE_TLS_LOCK = threading.Lock()
+
+
+def register_live_tls_servers(servers) -> None:
+    """Remember listeners so a later membership introduction can pin a cert."""
+    with _LIVE_TLS_LOCK:
+        for server in servers or ():
+            if server is not None and server not in _LIVE_TLS_SERVERS:
+                _LIVE_TLS_SERVERS.append(server)
+
+
+def activate_peer_certificate(cert_path: Path) -> None:
+    """Trust ``cert_path`` on every listener this process is serving."""
+    with _LIVE_TLS_LOCK:
+        servers = list(_LIVE_TLS_SERVERS)
+    seen = set()
+    for server in servers:
+        identity = id(server)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        load_peer_cert_everywhere(server, cert_path)
 
 
 def load_peer_cert_everywhere(server, cert_path: Path) -> None:

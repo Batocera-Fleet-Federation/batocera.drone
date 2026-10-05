@@ -61,6 +61,7 @@ working. Layout:
   rom_artwork_gamelist, rom_scan, rom_systems, rom_asset_bios (the class is now a slim
   `__init__` + static delegators composed from these; see the god-class-split note below)
 - `transfer/` — peer_connectivity (cert trust/pinning + peer HTTP client + health/pairing),
+  swarm_membership (approved-pair roster gossip and removal tombstones over already-paired peers),
   peer_workers (public-IP probe + health-check/local-net worker threads), peer_download
   (`_download_*_from_peer` direct tier + state helpers), download_manager
   (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), download_errors
@@ -194,6 +195,12 @@ is neither on the same LAN/tailnet nor port-forwarded, it is simply unreachable.
 **Same-LAN P2P** works out of the box (same-public-IP detection, no config).
 **Cross-network P2P** needs either a shared Tailscale tailnet (recommended, zero
 router config) or the peer port-forwarded for the direct-WAN fallback.
+
+**Swarm membership** is still that paired-peer list, not a directory. An approved
+pairing (`transfer/swarm_membership.py`) is gossiped only to Drones already
+paired with the sender, so a join through any member converges on every roster.
+A newer removal beats an older add. Discovery and an unpaired caller cannot
+insert members, and gossip cannot replace a fingerprint already pinned locally.
 
 ## Integrations (`app/integrations/`) — optional local extensions
 
