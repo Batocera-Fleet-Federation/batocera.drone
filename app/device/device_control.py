@@ -284,8 +284,9 @@ def _apply_audio_volume(settings: Settings, level: int) -> int:
 #
 # The Drone runs unprivileged and cannot read the kernel input devices, so the root
 # service control worker runs ``input_activity_monitor.py``, which records the wall-clock
-# epoch of the most recent controller/keyboard/mouse event in a small file. The poller
-# below reads that file and lowers the volume once the device has been idle long enough.
+# epoch of the most recent *deliberate* controller/keyboard/mouse event in a small file
+# (periodic encoder square waves and analog jitter are ignored). The poller below
+# reads that file and lowers the volume once the device has been idle long enough.
 
 
 def _emulationstation_restart_command() -> Optional[List[str]]:
