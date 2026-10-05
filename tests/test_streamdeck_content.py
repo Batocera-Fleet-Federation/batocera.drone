@@ -625,6 +625,24 @@ class HttpRoutesTests(unittest.TestCase):
             body, status, kind = error.read(), error.code, error.headers.get("Content-Type", "")
         return status, (json.loads(body) if "json" in kind else body)
 
+    def test_admin_integrations_ui_assets_are_served_end_to_end(self):
+        """UAT guard for the deployed symptom: the Admin tile, route, and its
+        separately loaded implementation must all be present in one build."""
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as response:
+            html = response.read().decode("utf-8")
+        self.assertIn('/static/js/drone.js?v=', html)
+        self.assertIn('/static/js/integrations.js?v=', html)
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/static/js/drone.js", timeout=5) as response:
+            router_js = response.read().decode("utf-8")
+        self.assertIn("<i class=\"bi bi-puzzle me-2\"></i>Integrations", router_js)
+        self.assertIn('hash === "#admin/integrations"', router_js)
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/static/js/integrations.js", timeout=5) as response:
+            integrations_js = response.read().decode("utf-8")
+        self.assertIn("async function renderIntegrationsPage()", integrations_js)
+        self.assertIn("async function renderStreamDeckPage()", integrations_js)
+
     def test_integration_routes_end_to_end(self):
         status, cards = self.call("")
         self.assertEqual(status, 200)

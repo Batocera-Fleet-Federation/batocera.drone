@@ -63,6 +63,18 @@ DRONE_SERVICE_PID_FILE = Path("/tmp/drone-server.pid")
 # changed" -- the actual commit log between two tags always is.
 RELEASE_NOTES_MAX_COMMITS = 50
 
+# These files are the minimum complete Admin -> Integrations delivery.  Keep
+# this list aligned with the release workflow and the shell staging gates.  In
+# particular, accepting only drone.js/index.html can produce a healthy-looking
+# deployment whose Admin page has no Integrations implementation behind it.
+DRONE_INTEGRATIONS_REQUIRED_FILES = (
+    Path("app/web/static/js/integrations.js"),
+    Path("app/web/handlers_integrations.py"),
+    Path("app/integrations/__init__.py"),
+    Path("app/integrations/registry.py"),
+    Path("app/integrations/streamdeck/manager.py"),
+)
+
 _DRONE_UPDATE_LOCK = Lock()
 # Separate from _DRONE_UPDATE_LOCK: the Ports client update touches a
 # completely different directory (roms/ports, not the Drone app's own work
@@ -318,6 +330,7 @@ def _download_latest_drone_app_unlocked(settings: Settings, *, release_version: 
             Path("app/web/static/css/drone.css"),
             Path("content/batocera-swarm-mascot.jpg"),
             Path("content/drone.png"),
+            *DRONE_INTEGRATIONS_REQUIRED_FILES,
         )
         missing_files = [
             str(path)
@@ -652,14 +665,19 @@ def _run_drone_auto_update_check_once(
 
     current_version = _installed_drone_version(settings)
     current_semantic_version = _semantic_version(current_version)
-    if current_semantic_version is None:
-        return {"status": "skipped", "reason": "installed version is not semantic", "current_version": current_version}
 
     if progress_callback:
         progress_callback("checking", "Checking GitHub for the latest complete Drone release", current_version=current_version)
     latest_version = _latest_drone_release_version()
     latest_semantic_version = _semantic_version(latest_version)
-    if latest_semantic_version is None or latest_semantic_version <= current_semantic_version:
+    if latest_semantic_version is None:
+        raise ValueError(f"latest Drone release is not semantic: {latest_version!r}")
+    # A source/codeload deployment has VERSION=dev.  Older builds returned
+    # "skipped" forever here, so they could never pick up a later complete
+    # release (including newly added static assets and backend modules).  A
+    # non-semantic local version has no safe ordering relationship with a
+    # release; converge it to the latest validated release instead.
+    if current_semantic_version is not None and latest_semantic_version <= current_semantic_version:
         return {"status": "current", "current_version": current_version, "latest_version": latest_version}
 
     # The checkbox may have been cleared while the network check was in flight.
