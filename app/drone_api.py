@@ -446,6 +446,13 @@ except ImportError:
         raise
     from common.http_errors import _format_http_error  # type: ignore
 
+try:
+    from .integrations.streamdeck.manager import get_streamdeck_integration as _get_streamdeck_integration
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from integrations.streamdeck.manager import get_streamdeck_integration as _get_streamdeck_integration  # type: ignore
+
 
 try:
     from .device.system_metrics import (
@@ -917,6 +924,7 @@ _SMTP_SHARING_POLLER_STARTED = False
 _AUDIT_EMAIL_POLLER_STARTED = False
 _TAILNET_BOOTSTRAP_ATTEMPTED = False
 _TAILNET_SHARING_POLLER_STARTED = False
+_STREAMDECK_SUPERVISOR_STARTED = False
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1303,6 +1311,14 @@ except ImportError:
 
 
 try:
+    from .web.handlers_integrations import HandlersIntegrationsMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_integrations import HandlersIntegrationsMixin  # type: ignore
+
+
+try:
     from .web.mcp_server import McpServerMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1310,7 +1326,7 @@ except ImportError:
     from web.mcp_server import McpServerMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersIntegrationsMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -2434,7 +2450,7 @@ def _build_cast_http_handler(settings: Settings):
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2541,6 +2557,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         _GAME_PROCESS_MONITOR = GameProcessMonitor(settings, poll_seconds=poll_seconds)
         _GAME_PROCESS_MONITOR.start()
         _GAME_PROCESS_MONITOR_STARTED = True
+    if not _STREAMDECK_SUPERVISOR_STARTED and not settings.use_fake_data:
+        _STREAMDECK_SUPERVISOR_STARTED = True
+        # Optional integration: the background supervisor restores the Stream
+        # Deck runtime after a reboot/Drone restart only when it is enabled
+        # (and restarts a crashed worker); it never delays the web listener.
+        _get_streamdeck_integration(settings, repository).start_supervisor()
 
     handler_factory = _build_handler(
         settings=settings,

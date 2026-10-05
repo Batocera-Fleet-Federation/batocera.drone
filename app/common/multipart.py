@@ -41,6 +41,35 @@ def parse_multipart_files(raw_body: bytes, boundary: str) -> List[Tuple[str, byt
     return files
 
 
+def parse_multipart_file_parts(raw_body: bytes, boundary: str) -> List[Tuple[str, str, bytes]]:
+    """Like ``parse_multipart_files`` but also returns each part's declared
+    Content-Type: ``(filename, content_type, bytes)``. Callers that validate
+    uploads (e.g. Stream Deck button images) check it against the real bytes."""
+    delimiter = b"--" + boundary.encode("utf-8", errors="replace")
+    files = []
+    for chunk in raw_body.split(delimiter)[1:]:
+        if chunk.startswith(b"--"):
+            break
+        if chunk.startswith(b"\r\n"):
+            chunk = chunk[2:]
+        header_end = chunk.find(b"\r\n\r\n")
+        if header_end < 0:
+            continue
+        header_lines = chunk[:header_end].decode("utf-8", errors="replace").split("\r\n")
+        body = chunk[header_end + 4 :]
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        disposition = next((line for line in header_lines if line.lower().startswith("content-disposition")), "")
+        content_type = next((line.split(":", 1)[1].strip() for line in header_lines
+                             if line.lower().startswith("content-type:")), "")
+        if ' filename="' not in disposition:
+            continue
+        filename = disposition.split(' filename="')[1].split('"')[0]
+        if filename:
+            files.append((filename, content_type, body))
+    return files
+
+
 def boundary_from_content_type(content_type: str) -> str:
     """Extract the boundary token from a multipart Content-Type header value."""
     if "boundary=" not in content_type:

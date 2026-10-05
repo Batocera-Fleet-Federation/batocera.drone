@@ -127,6 +127,12 @@ any third-party package is installed. Runs as **root**, on-device
   mail is a one-shot `smtplib` call, not a persistent connection), so unlike
   VPN there's no self-heal/status-recompute concern here at all. Depth:
   `drone-smtp-notifications` skill.
+- **Optional integrations** (`app/integrations/`, Admin -> Integrations) —
+  strictly local to this machine, never peer-visible. Stream Deck is the first:
+  a supervisor thread (from `create_server()`) keeps an isolated child worker
+  running while enabled — the only process that imports its private
+  StreamDeck/Pillow libraries (the Drone stays stdlib-only). Depth:
+  `drone-integrations-streamdeck` skill.
 
 ## VPN: one subscription, the whole swarm
 
@@ -244,6 +250,7 @@ sharing" section docstrings cover the Tailscale-specific deviations inline.
 - **Torrents/aria2c + magnet links implementation depth** → `drone-torrents-management`
 - **SQLite schemas/migrations** → `drone-db-management`
 - **Debugging a real, running Drone** → `drone-live-debugging`
+- **Admin -> Integrations / Stream Deck** → `drone-integrations-streamdeck`
 
 ## Default bias
 
