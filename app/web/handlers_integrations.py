@@ -202,9 +202,9 @@ class HandlersIntegrationsMixin:
         elif sub == ["test-connection"]:
             self._send_json(200, manager.test_connection())
         elif sub == ["settings"]:
-            self._send_json(200, {"settings": manager.config.set_settings(body)})
+            self._send_json(200, manager.update_settings(body, requested_by=actor))
         elif sub == ["rules"]:
-            self._send_json(200, {"context_rules": manager.config.set_rules(body.get("rules"))})
+            self._send_json(200, manager.update_rules(body.get("rules"), requested_by=actor))
         elif len(sub) == 3 and sub[0] == "devices" and sub[2] == "settings":
             self._send_json(200, manager.set_device_settings(sub[1], body, requested_by=actor))
         elif len(sub) == 3 and sub[0] == "devices" and sub[2] in ("identify", "test-button"):

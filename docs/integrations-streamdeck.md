@@ -180,7 +180,13 @@ resolve across those serial aliases.
 The Stream Deck admin UI uses the shared dark-theme contract in
 `bff-ui-theme-functionality`: `themed-table`, `themed-modal` + `btn-close-white`,
 `themed-accordion`. Help opened from the button editor is stacked with
-`sd-modal-nested` so it is not hidden behind the editor.
+`sd-modal-nested` so it is not hidden behind the editor. Overview lists Connected
+Devices first, then Status, support, and one Device Settings panel (brightness
+defaults to 100%, plus hold safeguards and timeouts). Saved keys, device settings,
+and rules always auto-apply; there is no Apply or Save Settings control, and
+`auto_apply` cannot be turned off. Each panel heading has a single `?` that
+describes everything in that panel. The Buttons tab has no Built-In Actions
+table; Diagnostics has no Troubleshooting panel.
 
 Nothing is hard-coded to the Mini: layout and key image size come from the device.
 Multiple decks are attached independently, each with its own brightness and
@@ -208,7 +214,7 @@ attached decks; its model table is a display hint only.
   the action runs only if the key is still held after `hold_duration_ms` (default
   1500, 500-5000). Releasing early cancels and restores the key. Applying a new
   profile cancels pending holds. The safeguard can be turned off in Overview ->
-  Safeguards (the press itself then confirms). Browser tests of dangerous actions
+  Device Settings (the press itself then confirms). Browser tests of dangerous actions
   always require an explicit confirmation.
 
 ## Built-in actions
@@ -371,9 +377,9 @@ button. A specific field can be chosen; users can still generate or upload art.
 
 ```json
 {"schema_version": 1, "enabled": true, "default_profile_id": "default",
- "settings": {"confirm_dangerous_actions": true, "hold_duration_ms": 1500, "auto_apply": false,
+ "settings": {"confirm_dangerous_actions": true, "hold_duration_ms": 1500, "auto_apply": true,
               "exit_timeout_seconds": 20, "launch_confirm_timeout_seconds": 45, "script_timeout_seconds": 30},
- "devices": [{"device_id": "AL12345", "brightness": 60, "startup_profile_id": ""}],
+ "devices": [{"device_id": "AL12345", "brightness": 100, "startup_profile_id": ""}],
  "profiles": [{"id": "default", "name": "Default", "buttons": [
    {"key": 0, "action_type": "builtin", "action_id": "exit-game", "label": "",
     "image": {"type": "default", "fit": "fill", "...": "..."}}]}],
@@ -473,17 +479,17 @@ No physical hardware is needed for any automated test.
    6 keys, the 2x3 layout; Default profile exists.
 3. Diagnostics: Test Connection, Identify Buttons (1-6 for 4 s, then restored),
    Test Selected Button ("TEST", no action runs). Move the brightness slider.
-4. Key 1: Built-In -> Exit Current Game, default EXIT art -> Save -> Apply. Start a
-   game from ES, press the key: back to ES.
+4. Key 1: Built-In -> Exit Current Game, default EXIT art -> Save (applied
+   automatically). Start a game from ES, press the key: back to ES.
 5. Key 2: Launch Game, search "Super Smash Bros. Ultimate", select; artwork is
-   offered automatically; Apply. Press it from ES: the game starts exactly as from
+   offered automatically. Press it from ES: the game starts exactly as from
    the ES menu (same emulator/controllers). Exit.
 6. Key 3: another game. Start key 2's game, press key 3: the runtime log shows
    exit requested -> exit completed -> launch started; the second game starts only
    after the first is gone. Press keys rapidly during a transition: "busy", never
    two emulators.
 7. Custom Scripts: create, save, Run/Test (stdout shown), assign to key 4, upload a
-   PNG/JPEG/WebP for it, Apply, verify the key image and that the press runs it.
+   PNG/JPEG/WebP for it, verify the key image and that the press runs it.
 8. Hold Reboot for less than the hold time (cancelled), then hold fully.
 9. Unplug and replug the deck: Disconnected -> Connected, keys restored. Reboot
    Batocera: runtime restarts, keys and profile restored, buttons work.
