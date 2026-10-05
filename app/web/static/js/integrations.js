@@ -166,7 +166,7 @@ const SD_HELP_ORDER = ["what-is", "enable", "install", "modifies-batocera", "det
   "apply", "disable", "remove-what", "reset", "trouble-disconnected", "trouble-blank", "trouble-nothing", "trouble-game", "logs", "remote"];
 
 function sdHelpAccordion(topics, id) {
-  return `<div class="accordion sd-help" id="${sdEsc(id)}">${topics.map((topic, index) => {
+  return `<div class="accordion themed-accordion sd-help" id="${sdEsc(id)}">${topics.map((topic, index) => {
     const entry = SD_HELP[topic];
     if (!entry) return "";
     const target = `${id}-${index}`;
@@ -184,18 +184,31 @@ function sdShowHelp(topic) {
 
 // ----------------------------------------------------------------- modals
 function sdShowModal(id, title, bodyHtml, footerHtml, size = "") {
+  const alreadyOpen = document.querySelector(".modal.show");
   let modal = document.getElementById(id);
   if (!modal) {
     modal = document.createElement("div");
     modal.id = id;
-    modal.className = "modal fade sd-modal";
     modal.tabIndex = -1;
     document.body.appendChild(modal);
   }
-  modal.innerHTML = `<div class="modal-dialog modal-dialog-scrollable ${sdEsc(size)}"><div class="modal-content">
-    <div class="modal-header"><h5 class="modal-title">${sdEsc(title)}</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  modal.className = `modal fade sd-modal${alreadyOpen ? " sd-modal-nested" : ""}`;
+  modal.innerHTML = `<div class="modal-dialog modal-dialog-scrollable ${sdEsc(size)}"><div class="modal-content themed-modal">
+    <div class="modal-header"><h5 class="modal-title">${sdEsc(title)}</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body">${bodyHtml}</div><div class="modal-footer">${footerHtml}</div></div></div>`;
-  window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  const instance = window.bootstrap.Modal.getOrCreateInstance(modal);
+  if (alreadyOpen) {
+    modal.addEventListener("shown.bs.modal", () => {
+      modal.style.zIndex = "1080";
+      const backdrops = document.querySelectorAll(".modal-backdrop");
+      const last = backdrops[backdrops.length - 1];
+      if (last) {
+        last.classList.add("sd-modal-nested-backdrop");
+        last.style.zIndex = "1070";
+      }
+    }, { once: true });
+  }
+  instance.show();
   return modal;
 }
 
@@ -396,7 +409,7 @@ function sdStatusPanelHtml() {
       ${sdBadge(`Health: ${s.health || "unknown"}`, sdHealthTone(s.health))}
     </div>
     <p class="small mb-2">${sdEsc(s.health_message || "")}${s.tooling_reason && s.enabled ? ` <span class="text-warning">${sdEsc(s.tooling_reason)}</span>` : ""}</p>
-    <div class="table-responsive"><table class="table table-sm align-middle sd-status-table mb-0"><tbody>
+    <div class="table-responsive"><table class="table table-sm align-middle themed-table sd-status-table mb-0"><tbody>
       ${sdField("Selected device", device ? `${sdEsc(device.model)} ${device.source === "runtime" ? sdBadge("open", "success") : device.connected ? sdBadge("detected", "info") : sdBadge("disconnected", "secondary")}` : "None detected")}
       ${sdField("Model", sdEsc(device ? device.model : "—"))}
       ${sdField("Serial number", sdEsc(device && device.serial ? device.serial : "—"))}
@@ -453,7 +466,7 @@ function sdDeviceDetailsHtml() {
       <td>${device.key_count ? `${sdEsc(device.key_count)} (${sdEsc(device.rows)}×${sdEsc(device.columns)})` : "—"}</td>
       <td>${sdEsc(size)}</td><td>${state}</td></tr>`;
   }).join("");
-  return `<div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th></th><th>Model</th><th>Serial / ID</th><th>Firmware</th><th>Keys</th><th>Key image</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><thead><tr><th></th><th>Model</th><th>Serial / ID</th><th>Firmware</th><th>Keys</th><th>Key image</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function sdDeviceSettingsHtml() {
@@ -489,7 +502,7 @@ function sdOverviewHtml() {
     <div class="col-lg-5"><section class="card mb-3"><div class="card-body"><h2 class="h5">Stream Deck support</h2>
       <p class="small text-muted">Enabling installs two Python libraries into the Drone folder only and starts a background runtime that reconnects automatically after reboots and re-plugging.</p>
       ${sdLifecycleHtml()}</div></section>
-      <section class="card"><div class="card-body"><h2 class="h5">Tooling / Runtime</h2><div class="table-responsive"><table class="table table-sm mb-0"><tbody>
+      <section class="card"><div class="card-body"><h2 class="h5">Tooling / Runtime</h2><div class="table-responsive"><table class="table table-sm themed-table mb-0"><tbody>
         ${sdField("Install method", sdEsc(s.tooling_method || "—"))}
         ${sdField("HID transport", sdEsc(s.hid_transport || "—"))}
         ${sdField("Started", sdEsc(sdTime(s.runtime_started_at)))}
@@ -567,7 +580,7 @@ function sdActionsTableHtml() {
     <td>${sdEsc(action.category)}</td>
     <td>${action.availability && action.availability.available ? sdBadge("Available", "success") : `${sdBadge("Unavailable now", "secondary")}<div class="small text-muted">${sdEsc(action.availability ? action.availability.reason : "")}</div>`}</td>
     <td>${action.dangerous ? `${sdBadge("Hold to confirm", "warning")}` : ""}<div class="small text-muted">${sdEsc(action.compatibility)}</div></td></tr>`).join("");
-  return `<div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Action</th><th>Category</th><th>Right now</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><thead><tr><th>Action</th><th>Category</th><th>Right now</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function sdRulesHtml() {
@@ -581,7 +594,7 @@ function sdRulesHtml() {
     <td><select class="form-select form-select-sm" data-rule-field="profile_id">${profiles.map((profile) => `<option value="${sdEsc(profile.id)}" ${profile.id === rule.profile_id ? "selected" : ""}>${sdEsc(profile.name)}</option>`).join("")}</select></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger" data-sd-action="rule-remove" data-index="${index}" aria-label="Remove rule"><i class="bi bi-x-lg"></i></button><input type="hidden" data-rule-field="id" value="${sdEsc(rule.id)}"></td></tr>`).join("");
   return `<p class="small text-muted">Optional. The first matching rule switches every connected deck. Example: when a <code>switch</code> game starts → “Switch”; when a game stops → “Default”.</p>
-    <div class="table-responsive"><table class="table table-sm align-middle" id="sdRulesTable"><thead><tr><th>On</th><th>When</th><th>System</th><th>Emulator</th><th>Profile</th><th></th></tr></thead>
+    <div class="table-responsive"><table class="table table-sm align-middle themed-table" id="sdRulesTable"><thead><tr><th>On</th><th>When</th><th>System</th><th>Emulator</th><th>Profile</th><th></th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" class="text-muted small">No rules — the startup profile stays active.</td></tr>'}</tbody></table></div>
     <div class="d-flex gap-2"><button type="button" class="btn btn-sm btn-outline-primary" data-sd-action="rule-add"><i class="bi bi-plus-lg me-1"></i>Add rule</button>
     <button type="button" class="btn btn-sm btn-primary" data-sd-action="rules-save"><i class="bi bi-save me-1"></i>Save rules</button></div>`;
@@ -1076,7 +1089,7 @@ function sdScriptsHtml() {
   return `<div class="alert alert-warning small"><i class="bi bi-shield-exclamation me-1"></i><strong>Administrative code execution.</strong> Scripts run on this machine as the Drone service with full rights. Prefer a built-in action when one exists. ${sdHelpButton("scripts", "What can a script do?")}</div>
     <div class="row g-3"><div class="col-xl-5"><section class="card h-100"><div class="card-body">
       <div class="d-flex align-items-center mb-2"><h2 class="h5 mb-0">Scripts</h2><button type="button" class="btn btn-sm btn-primary ms-auto" data-sd-action="script-new"><i class="bi bi-plus-lg me-1"></i>New script</button></div>
-      <div class="table-responsive"><table class="table table-sm align-middle mb-0"><tbody>${rows || '<tr><td class="text-muted small">No custom scripts yet.</td></tr>'}</tbody></table></div>
+      <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><tbody>${rows || '<tr><td class="text-muted small">No custom scripts yet.</td></tr>'}</tbody></table></div>
       <p class="small text-muted mt-2 mb-0">Assign a script to a key from the button editor (Action Type → Custom Script). One script can be assigned to many keys; a script cannot be deleted while assigned.</p>
     </div></section></div>
     <div class="col-xl-7"><section class="card h-100"><div class="card-body" id="sdScriptEditor"><div class="text-muted small">Select a script to edit, or create a new one.</div></div></section></div></div>`;
@@ -1146,7 +1159,7 @@ async function sdRunScript(scriptId) {
 // ------------------------------------------------------------ diagnostics
 function sdActivityHtml() {
   const s = sdState.status || {};
-  return `<div class="table-responsive"><table class="table table-sm mb-0"><tbody>
+  return `<div class="table-responsive"><table class="table table-sm themed-table mb-0"><tbody>
     ${sdField("Runtime", `${sdEsc(s.runtime || "stopped")}${s.runtime_pid ? ` (pid ${sdEsc(s.runtime_pid)})` : ""}`)}
     ${sdField("Launch state", sdEsc(s.launch_state || "IDLE"))}
     ${sdField("Last button press", s.last_button_press ? `key ${Number(s.last_button_press.key) + 1} <span class="text-muted small">${sdEsc(sdTime(s.last_button_press.at))}</span>` : "—")}

@@ -219,9 +219,11 @@ fake devices/runtimes/launchers — no hardware. Design reference:
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a
   stdlib equivalent.
-- **UI:** Bootstrap 5.3 dark theme; `table table-sm align-middle` in
-  `table-responsive`; always `escapeHtml` user data. Match the existing Drone
-  UI's branding/paging conventions. See `bff-ui-theme-functionality` skill.
+- **UI:** Bootstrap 5.3 dark theme (`drone.css` `--admin-*` tokens). This app
+  never sets `data-bs-theme="dark"`, so Bootstrap light defaults would otherwise
+  win. New markup must use `themed-table`, `themed-modal` + `btn-close-white`,
+  and `themed-accordion`; always `escapeHtml` user data. Nested dialogs (help
+  from an editor) need `sd-modal-nested`. See `bff-ui-theme-functionality`.
 - `drone_api.py` is being **actively decomposed** into the `app/` subpackages above
   (via the re-export shim). Land new code in the fitting subpackage, not the shim;
   when you touch a cohesive cluster still in `drone_api.py`, prefer extracting it

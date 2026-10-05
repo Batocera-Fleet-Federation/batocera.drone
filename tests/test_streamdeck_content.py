@@ -10,6 +10,7 @@ through a real Drone HTTP server.
 
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -554,6 +555,47 @@ class HandlerGateTests(Temp):
         self.assertIn("confirmed", handler.responses[-1][1]["error"])
 
 
+class IntegrationsUiThemeTests(unittest.TestCase):
+    """Static UAT for the dark-theme contract Stream Deck must follow."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "app/web/static/js/integrations.js").read_text(encoding="utf-8")
+        cls.css = (root / "app/web/static/css/drone.css").read_text(encoding="utf-8")
+        cls.skill = (root / ".claude/skills/bff-ui-theme-functionality/SKILL.md").read_text(encoding="utf-8")
+
+    def test_every_streamdeck_table_uses_themed_table(self):
+        classes = re.findall(r'<table class="([^"]*)"', self.js)
+        self.assertGreaterEqual(len(classes), 7)
+        for value in classes:
+            self.assertIn("themed-table", value, value)
+
+    def test_modals_are_themed_and_nested_help_stacks_above_editor(self):
+        self.assertIn("modal-content themed-modal", self.js)
+        self.assertIn("btn-close-white", self.js)
+        self.assertIn("sd-modal-nested", self.js)
+        self.assertIn("sd-modal-nested-backdrop", self.js)
+        self.assertIn(".sd-modal-nested { z-index: 1080; }", self.css)
+        self.assertIn(".modal-backdrop.sd-modal-nested-backdrop { z-index: 1070; }", self.css)
+
+    def test_help_accordions_are_themed(self):
+        self.assertIn("themed-accordion sd-help", self.js)
+        self.assertIn(".accordion-item", self.css)
+        self.assertIn(".accordion-button:not(.collapsed)", self.css)
+
+    def test_css_overrides_bootstrap_light_defaults_globally(self):
+        self.assertIn(".table,\n    .themed-table", self.css)
+        self.assertIn(".modal-content,\n    .themed-modal", self.css)
+        self.assertIn("background: rgba(21, 31, 50, 0.54)", self.css)
+
+    def test_ui_theme_skill_exists(self):
+        self.assertIn("themed-table", self.skill)
+        self.assertIn("themed-modal", self.skill)
+        self.assertIn("themed-accordion", self.skill)
+        self.assertIn("data-bs-theme", self.skill)
+
+
 # ------------------------------------------------------- real HTTP server
 class HttpRoutesTests(unittest.TestCase):
     """Every layer: session gate, api_routes dispatch, handlers, manager, disk."""
@@ -642,6 +684,16 @@ class HttpRoutesTests(unittest.TestCase):
             integrations_js = response.read().decode("utf-8")
         self.assertIn("async function renderIntegrationsPage()", integrations_js)
         self.assertIn("async function renderStreamDeckPage()", integrations_js)
+        self.assertIn("themed-table", integrations_js)
+        self.assertIn("themed-modal", integrations_js)
+        self.assertIn("themed-accordion", integrations_js)
+        self.assertIn("sd-modal-nested", integrations_js)
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/static/css/drone.css", timeout=5) as response:
+            css = response.read().decode("utf-8")
+        self.assertIn(".sd-modal-nested { z-index: 1080; }", css)
+        self.assertIn(".accordion-item", css)
+        self.assertIn(".modal-content", css)
 
     def test_integration_routes_end_to_end(self):
         status, cards = self.call("")

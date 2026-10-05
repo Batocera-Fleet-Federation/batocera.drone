@@ -99,7 +99,14 @@ before non-trivial work; keep it accurate in the same change.
 ## Gotchas
 
 - `device_id` is the serial when it is a safe identifier, else a stable hash —
-  per-device settings key on it.
+  per-device settings key on it. HID `get_serial_number()` is often a truncated
+  USB iSerial (Mini: 12 vs 14 chars); `serials_match` / `same_physical_device`
+  merge those into one Connected Devices row. Keep the runtime `id` as the
+  command key; display the longer USB serial.
+- Stream Deck UI follows `bff-ui-theme-functionality`: `themed-table`,
+  `themed-modal` + `btn-close-white`, `themed-accordion`. Help/confirm opened
+  from the button editor must use `sd-modal-nested` so it stacks above the
+  editor (Bootstrap otherwise paints both at z-index 1055).
 - `LibraryStreamDeckDevice.connected()` re-enumerates HID; the runtime only calls
   it on a USB-signature change or every 3 s.
 - Lifecycle ops share `_lifecycle_lock`; install/repair jobs hold it for minutes,
@@ -114,7 +121,8 @@ games, lifecycle, dependencies), `tests/test_streamdeck_runtime.py` (fake
 hardware runtime + real worker process against a fake `StreamDeck` package),
 `tests/test_streamdeck_content.py` (scripts, process runner, uploads, renderer,
 compiler, real `RomRepository`, handler gates, real HTTP server routes).
-Its HTTP UAT also fetches `/`, `drone.js`, and `integrations.js` and verifies the
-Admin tile, route, and both page renderers are delivered together. Release/update
-tests reject archives missing any Integrations UI/backend component and exercise
-upgrading a `dev` source deployment.
+Its HTTP UAT also fetches `/`, `drone.js`, `integrations.js`, and `drone.css` and
+verifies the Admin tile, route, both page renderers, and the dark-theme contract
+(`themed-table` / `themed-modal` / `themed-accordion` / nested help stacking).
+Release/update tests reject archives missing any Integrations UI/backend
+component and exercise upgrading a `dev` source deployment.
