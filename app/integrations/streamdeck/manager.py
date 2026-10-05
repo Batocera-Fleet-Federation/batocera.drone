@@ -36,7 +36,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..registry import Integration, IntegrationDescriptor
 from .actions import ActionContext, BatoceraControl, BuiltInActionRegistry, RetroArchControl, UnknownActionError
 from .compiler import RuntimeCompiler
-from .config import ConfigStore, image_references, safe_id, script_references, validate_game
+from .config import ConfigStore, DEFAULT_BRIGHTNESS, image_references, safe_id, script_references, validate_game
 from .dependencies import STREAMDECK_VERSION, DependencyError, DependencyManager
 from .devices import detect_usb_devices, preferred_serial, same_physical_device
 from .dispatcher import ButtonDispatcher
@@ -310,7 +310,7 @@ class StreamDeckIntegration(Integration):
             rows.append({**remembered, "connected": False, "runtime_state": "disconnected", "source": "remembered"})
         for row in rows:
             setting = self._settings_for(row, settings_by_id)
-            row["brightness"] = setting.get("brightness", 60)
+            row["brightness"] = setting.get("brightness", DEFAULT_BRIGHTNESS)
             row["startup_profile_id"] = setting.get("startup_profile_id", "")
         return rows
 
@@ -846,8 +846,16 @@ class StreamDeckIntegration(Integration):
         log_event("button-configured", profile_id=profile_id, key=key_index, action_type=button["action_type"],
                   action_id=button.get("action_id"), game_id=(button.get("game") or {}).get("id"),
                   script_id=button.get("script_id"), requested_by=requested_by)
-        applied = self.apply(requested_by) if self.config.load()["settings"]["auto_apply"] else None
+        applied = self.apply(requested_by)
         return {"button": button, "applied": applied}
+
+    def update_settings(self, payload: dict, requested_by: str = "") -> dict:
+        settings = self.config.set_settings(payload if isinstance(payload, dict) else {})
+        return {"settings": settings, "applied": self.apply(requested_by)}
+
+    def update_rules(self, rules: Any, requested_by: str = "") -> dict:
+        context_rules = self.config.set_rules(rules)
+        return {"context_rules": context_rules, "applied": self.apply(requested_by)}
 
     def set_device_settings(self, device_id: str, payload: dict, requested_by: str = "") -> dict:
         row = self.config.set_device_settings(device_id, payload if isinstance(payload, dict) else {})

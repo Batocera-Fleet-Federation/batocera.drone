@@ -27,6 +27,7 @@ from .paths import OwnershipError, StreamDeckPaths, atomic_write_json
 
 SCHEMA_VERSION = 1
 DEFAULT_PROFILE_ID = "default"
+DEFAULT_BRIGHTNESS = 100
 MAX_KEYS = 64
 MAX_PROFILES = 50
 MAX_RULES = 50
@@ -210,7 +211,8 @@ def validate_settings(payload: Any, current: Optional[dict] = None) -> dict:
     return {
         "confirm_dangerous_actions": bool(payload.get("confirm_dangerous_actions", base["confirm_dangerous_actions"])),
         "hold_duration_ms": number("hold_duration_ms", 500, 5000),
-        "auto_apply": bool(payload.get("auto_apply", base["auto_apply"])),
+        # Saved keys, settings, and rules always push to the device. Clients cannot turn this off.
+        "auto_apply": True,
         "exit_timeout_seconds": number("exit_timeout_seconds", 5, 120),
         "launch_confirm_timeout_seconds": number("launch_confirm_timeout_seconds", 5, 180),
         "script_timeout_seconds": number("script_timeout_seconds", 1, 300),
@@ -225,7 +227,7 @@ def default_config() -> dict:
         "settings": {
             "confirm_dangerous_actions": True,
             "hold_duration_ms": 1500,
-            "auto_apply": False,
+            "auto_apply": True,
             "exit_timeout_seconds": 20,
             "launch_confirm_timeout_seconds": 45,
             "script_timeout_seconds": 30,
@@ -321,7 +323,7 @@ def validate_device_settings(payload: Any, profile_ids: Iterable[str]) -> dict:
         raise ValueError("device settings must be an object")
     profile_ids = list(profile_ids)
     try:
-        brightness = int(payload.get("brightness", 60))
+        brightness = int(payload.get("brightness", DEFAULT_BRIGHTNESS))
     except (TypeError, ValueError) as error:
         raise ValueError("brightness must be an integer") from error
     startup = str(_first(payload, "startup_profile_id", "active_profile_id") or "")
@@ -481,7 +483,7 @@ class ConfigStore:
         def mutate(config: dict) -> dict:
             profile_ids = [profile["id"] for profile in config["profiles"]]
             row = next((item for item in config["devices"] if item["device_id"] == device_id), None)
-            merged = dict(row or {"device_id": device_id, "brightness": 60, "startup_profile_id": ""})
+            merged = dict(row or {"device_id": device_id, "brightness": DEFAULT_BRIGHTNESS, "startup_profile_id": ""})
             for name in ("brightness", "startup_profile_id"):
                 if name in payload:
                     merged[name] = payload[name]

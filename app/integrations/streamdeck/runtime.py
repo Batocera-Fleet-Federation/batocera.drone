@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .actions import ActionContext, BuiltInActionRegistry, UnknownActionError
+from .config import DEFAULT_BRIGHTNESS
 from .devices import DeviceProvider, StreamDeckDevice, usb_signature
 from .dispatcher import ButtonDispatcher
 from .game_runtime import GameRuntime
@@ -350,7 +351,7 @@ class StreamDeckRuntime:
         try:
             with slot.io_lock:
                 brightness = self._device_settings(slot.device_id).get("brightness")
-                slot.device.set_brightness(int(60 if brightness is None else brightness))
+                slot.device.set_brightness(int(DEFAULT_BRIGHTNESS if brightness is None else brightness))
                 if not slot.device.has_key_images:
                     return True
                 profile = self._profile(slot.active_profile_id)
@@ -590,7 +591,7 @@ class StreamDeckRuntime:
                     entry["capabilities"] = slot.device.get_capabilities()
                     with slot.io_lock:
                         brightness = self._device_settings(slot.device_id).get("brightness")
-                        slot.device.set_brightness(int(60 if brightness is None else brightness))
+                        slot.device.set_brightness(int(DEFAULT_BRIGHTNESS if brightness is None else brightness))
                     entry["communication"] = "ok"
                 except Exception as error:  # noqa: BLE001
                     entry["communication"] = f"failed: {error}"

@@ -109,7 +109,13 @@ before non-trivial work; keep it accurate in the same change.
 - Stream Deck UI follows `bff-ui-theme-functionality`: `themed-table`,
   `themed-modal` + `btn-close-white`, `themed-accordion`. Help/confirm opened
   from the button editor must use `sd-modal-nested` so it stacks above the
-  editor (Bootstrap otherwise paints both at z-index 1055).
+  editor (Bootstrap otherwise paints both at z-index 1055). Panel `?` controls
+  live on the heading and describe the whole panel; do not put extra `?` buttons
+  inside Overview/Buttons/Diagnostics panel bodies. Connected Devices is the
+  first Overview panel; Device Settings includes brightness (default 100%),
+  startup profile, hold safeguards, and timeouts. Saved keys, settings, and
+  rules always auto-apply (`auto_apply` is forced true). There is no Apply,
+  Save Settings, Built-In Actions, or Diagnostics Troubleshooting panel.
 - `LibraryStreamDeckDevice.connected()` re-enumerates HID; the runtime only calls
   it on a USB-signature change or every 3 s.
 - Lifecycle ops share `_lifecycle_lock`; install/repair jobs hold it for minutes,
@@ -125,7 +131,9 @@ hardware runtime + real worker process against a fake `StreamDeck` package),
 `tests/test_streamdeck_content.py` (scripts, process runner, uploads, renderer,
 compiler, real `RomRepository`, handler gates, real HTTP server routes).
 Its HTTP UAT also fetches `/`, `drone.js`, `integrations.js`, and `drone.css` and
-verifies the Admin tile, route, both page renderers, and the dark-theme contract
-(`themed-table` / `themed-modal` / `themed-accordion` / nested help stacking).
+verifies the Admin tile, route, both page renderers, the dark-theme contract
+(`themed-table` / `themed-modal` / `themed-accordion` / nested help stacking),
+and the Setup UI contract (auto-apply, heading help, no Apply/Save Settings/
+Built-In Actions/Troubleshooting panels).
 Release/update tests reject archives missing any Integrations UI/backend
 component and exercise upgrading a `dev` source deployment.

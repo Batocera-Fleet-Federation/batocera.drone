@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Stream Deck Setup: default brightness 100%, always auto-apply saved keys and
+  settings, merge Device Settings with safeguards, move Connected Devices to the
+  top of Overview, put panel help on headings, and drop the Apply, Save Settings,
+  Built-In Actions, and Diagnostics Troubleshooting controls. The Help tab is
+  shorter and no longer documents obvious slider/button how-tos.
+
 - Reference ROMs lists systems instead of individual games. A reference can only link a whole system, so the grid, filters, and pager now select systems. Searching a game name still finds the system that contains it.
   A paired machine that predates the systems inventory no longer degrades that page: this Drone folds the peer's ROM inventory into systems itself, so the genre and game-name filters keep working and a game row can never appear.
 

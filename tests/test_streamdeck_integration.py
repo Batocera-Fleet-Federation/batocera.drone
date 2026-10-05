@@ -12,7 +12,7 @@ from unittest import mock
 from app.device.game_activity import find_running_emulatorlauncher
 from app.integrations.registry import IntegrationDescriptor, IntegrationRegistry, build_integration_registry
 from app.integrations.streamdeck.actions import ActionContext, BatoceraControl, BuiltInActionRegistry, RetroArchControl
-from app.integrations.streamdeck.config import ConfigStore, default_config, normalize_config, validate_button, validate_game
+from app.integrations.streamdeck.config import ConfigStore, DEFAULT_BRIGHTNESS, default_config, normalize_config, validate_button, validate_game
 from app.integrations.streamdeck.dependencies import DependencyError, DependencyManager, interpreter_tag
 from app.integrations.streamdeck.emulationstation import EmulationStationApi, EmulationStationUnavailable
 from app.integrations.streamdeck.game_launcher import GameLauncher
@@ -203,6 +203,15 @@ class ConfigTests(TemporaryPaths):
         self.assertEqual(self.store.set_device_settings('serial', {'brightness': 999})['brightness'], 100)
         self.assertEqual(self.store.set_device_settings('serial', {'brightness': 0})['brightness'], 0)
         self.assertEqual(self.store.set_settings({'hold_duration_ms': 0})['hold_duration_ms'], 500)
+
+    def test_default_brightness_is_full_and_auto_apply_cannot_be_disabled(self):
+        self.assertEqual(default_config()['settings']['auto_apply'], True)
+        self.assertEqual(DEFAULT_BRIGHTNESS, 100)
+        self.assertEqual(self.store.set_device_settings('new-deck', {})['brightness'], 100)
+        self.assertTrue(self.store.load()['settings']['auto_apply'])
+        self.assertTrue(self.store.set_settings({'auto_apply': False})['auto_apply'])
+        config, _warnings = normalize_config({'settings': {'auto_apply': False}})
+        self.assertTrue(config['settings']['auto_apply'])
 
     def test_invalid_json_is_preserved_then_recovered_disabled(self):
         self.paths.ensure(self.paths.config_dir)
@@ -634,6 +643,23 @@ class LifecycleTests(TemporaryPaths):
         self.assertEqual([call.args[0] for call in send.call_args_list], ['reload', 'reload'])
         self.assertEqual(self.manager.config.load()['devices'][0]['brightness'], 25)
         self.assertTrue(self.paths.runtime_document.is_file())
+
+    def test_saving_buttons_settings_and_rules_always_applies(self):
+        self.manager.config.set_enabled(True)
+        self.manager.config.set_settings({'auto_apply': False})
+        self.assertTrue(self.manager.config.load()['settings']['auto_apply'])
+        with mock.patch.object(self.manager, 'runtime_info', return_value={'running': True, 'pid': 1}), \
+             mock.patch.object(self.manager, 'send_command', return_value={'status': 'ok'}) as send:
+            button = self.manager.set_button('default', 0, {'action_type': 'builtin', 'action_id': 'exit-game'})
+            settings = self.manager.update_settings({'hold_duration_ms': 2000})
+            rules = self.manager.update_rules([{'event': 'game-stop', 'profile_id': 'default'}])
+        self.assertTrue(button['applied']['applied'])
+        self.assertTrue(settings['settings']['auto_apply'])
+        self.assertEqual(settings['settings']['hold_duration_ms'], 2000)
+        self.assertTrue(settings['applied']['applied'])
+        self.assertEqual(rules['context_rules'][0]['event'], 'game-stop')
+        self.assertTrue(rules['applied']['applied'])
+        self.assertEqual([call.args[0] for call in send.call_args_list], ['reload', 'reload', 'reload'])
 
     def test_script_assigned_to_a_button_cannot_be_deleted(self):
         script = self.manager.scripts.create({'name': 'Lights', 'code': '#!/bin/sh\ntrue\n'})
