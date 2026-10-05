@@ -66,6 +66,9 @@ function sdTime(value) {
 function sdHelpButton(topic, label = "") {
   return `<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline sd-help-link" data-sd-action="help" data-topic="${sdEsc(topic)}" title="Help"><i class="bi bi-question-circle"></i>${label ? ` ${sdEsc(label)}` : ""}</button>`;
 }
+function sdPanelHeading(title, topic) {
+  return `<h2 class="h5">${sdEsc(title)} ${sdHelpButton(topic)}</h2>`;
+}
 function sdBadge(text, tone) {
   return `<span class="badge text-bg-${sdEsc(tone)}">${sdEsc(text)}</span>`;
 }
@@ -137,7 +140,7 @@ const SD_HELP = {
   detection: ["How are Stream Decks detected, and which models work?", `<p>Before tooling is installed, Drone lists Elgato USB devices (vendor <code>0fd9</code>) from the kernel. Once installed, the runtime asks the Stream Deck library for every attached deck and reads its real key count, layout, and key image size — nothing is hard-coded to one model. Every model the library supports with key screens works (Mini, Original, MK.2, XL, Neo, +); multiple decks can be attached and each has its own brightness and startup profile. Unplugging and re-plugging is detected automatically.</p>`],
   profiles: ["How do profiles work?", `<p>A profile is a page of key assignments. <strong>Default</strong> is created automatically and is what every deck shows on startup unless you choose a different startup profile for that device. Use <em>Profile Navigation</em> keys (Next, Previous, Go to) to switch pages, and optional <em>automatic rules</em> to switch when a game starts or stops (for example: system <code>switch</code> → "Switch" profile; game stopped → "Default"). Profile IDs never change when you rename a profile.</p>`],
   builtins: ["What are built-in actions, and why are they safer than scripts?", `<p>Built-in actions are reviewed Drone features identified by a stable ID (for example <code>exit-game</code>). Your profile stores only that ID; Drone resolves it to its own handler, checks whether it is available right now (for example Save State needs RetroArch with network commands enabled), logs it, and reports errors. No command text is stored or editable, so a profile can never be turned into arbitrary code.</p><p><strong>Custom scripts</strong> are the opposite: code you write that runs as the Drone service. Use built-ins whenever one exists.</p>`],
-  dangerous: ["How are accidental presses prevented?", `<p>Reboot, Shut Down, and Restart EmulationStation are marked dangerous. On the physical deck you must <strong>hold</strong> the key for the configured hold time (1.5 s by default); the key shows “HOLD” while counting and releasing early cancels. You can change the hold time or turn the safeguard off in Overview → Safeguards. Testing them from the browser always asks for confirmation.</p>`],
+  dangerous: ["How are accidental presses prevented?", `<p>Reboot, Shut Down, and Restart EmulationStation are marked dangerous. On the physical deck you must <strong>hold</strong> the key for the configured hold time (1.5 s by default); the key shows “HOLD” while counting and releasing early cancels. You can change the hold time or turn the safeguard off in Overview → Device Settings. Testing them from the browser always asks for confirmation.</p>`],
   "launch-game": ["What is Launch Game, and what happens if another game is running?", `<p><em>Launch Game</em> starts one specific game from your local library with a single press. When pressed:</p><ol><li>Batocera Drone checks for an active game.</li><li>If one is running, Drone exits it using the central <strong>Exit Current Game</strong> action.</li><li>Drone waits until that game has actually closed (it watches the emulator process; it does not just sleep).</li><li>Drone launches the newly selected game.</li></ol><p>If the old game does not close within the timeout (20 s by default), the new game is <strong>not</strong> launched, so two emulators never run at once. While a launch is in progress, further game presses are ignored and reported as “launch already in progress”.</p>`],
   "how-launched": ["How is a game launched?", `<p>Drone asks EmulationStation (its local API on this machine) to launch the ROM — exactly what happens when you pick the game in EmulationStation. That means the same emulator choice, controller configuration, shaders, per-game settings, and hooks. Drone never starts emulator binaries directly. EmulationStation must be running.</p>`],
   "assign-game": ["How do I assign a game, and how does search work?", `<p>Open a key, choose <em>Launch Game</em>, then type part of the title. Search uses Drone's local ROM index (fast even for large libraries); pick a system in the filter to browse just that system. Click <em>Select</em>. You never type ROM paths or emulator commands — Drone stores the game's library ID plus its system and ROM path as a fallback.</p>`],
@@ -148,22 +151,33 @@ const SD_HELP = {
   scripts: ["What can a custom script do?", `<p>A custom script is a file you write (for example <code>#!/bin/bash</code>) that runs <strong>as the Drone service on this machine, with full administrative rights</strong>. It can do anything that user can: change settings, delete files, or power off. Only trusted administrators should create scripts. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly (never through a shell command line built by Drone), get a clean environment plus <code>DRONE_STREAMDECK_*</code> variables (key, device, profile, active game), and are stopped after the timeout (30 s by default).</p>`],
   "scripts-vs-builtins": ["Built-in action vs custom script", `<p>Use a built-in action whenever one exists: it is validated, compatibility-checked, logged, and cannot be edited into something else. Scripts are for anything Drone does not provide yet. Launch Game is never implemented as a script.</p>`],
   testing: ["How do I test a button without running its action?", `<p>In the button editor, <strong>Test Selected Button</strong> flashes that key on the device (“TEST”) and proves communication — it never runs the action. <strong>Identify Buttons</strong> (Diagnostics) shows the number of every key for a few seconds. <strong>Test Action</strong> really runs the action after you confirm; testing a Launch Game button may close the game that is currently running.</p>`],
-  brightness: ["How do I change brightness?", `<p>Overview → Connected Devices → Brightness. The slider applies when you release it and is saved per device.</p>`],
-  apply: ["When do changes reach the device?", `<p>Saving a key stores it; <strong>Apply to Stream Deck</strong> validates the configuration, renders images at the device's key size, and updates the keys and their actions — no reboot needed. Turn on <em>Auto apply</em> to push after every saved key. The device is never updated on each keystroke while you edit.</p>`],
+  apply: ["When do changes reach the device?", `<p>Saving a key, device setting, or safeguard stores it and pushes it to the Stream Deck automatically — no reboot needed. The device is never updated on each keystroke while you edit a key; only <em>Save</em> in the button editor (or changing a setting) sends the update.</p>`],
   disable: ["Disable, repair, reinstall, and remove", `<ul><li><strong>Disable</strong> stops the runtime and releases the device. Profiles, images, and scripts are kept.</li><li><strong>Repair Installation</strong> verifies the libraries (reinstalling only if damaged), recovers a malformed configuration, restarts the runtime, and reconnects.</li><li><strong>Reinstall Tooling</strong> deletes and reinstalls only the integration's own libraries; your configuration is kept.</li><li><strong>Remove Tooling Only</strong> deletes the libraries, runtime state, and render cache, keeping configuration, scripts, images, and logs.</li><li><strong>Remove Tooling + Configuration</strong> deletes the whole <code>integrations/streamdeck/</code> folder. Nothing outside it is touched.</li></ul>`],
   "remove-what": ["What gets removed?", `<p><strong>Tooling only:</strong> <code>python/</code>, <code>lib/</code>, <code>rendered/</code>, <code>state/</code>. <strong>Tooling + configuration:</strong> the entire <code>integrations/streamdeck/</code> folder (profiles, scripts, uploaded images, logs too). Batocera, its Python, pip, setuptools, and every other Drone feature are never touched.</p>`],
   reset: ["How do I reset the configuration?", `<p>Use <em>Remove Tooling + Configuration</em> and enable again for a clean start, or delete individual profiles and keys. If the configuration file is ever unreadable, Drone keeps a copy as <code>streamdeck.json.broken-…</code> and starts from defaults automatically.</p>`],
   "trouble-disconnected": ["Troubleshooting: Stream Deck shows as disconnected", `<ol><li>Check the USB cable/port; try another port (avoid unpowered hubs).</li><li>Diagnostics → <strong>Test Connection</strong>. If USB shows the device but the runtime cannot open it, use <strong>Repair Installation</strong>.</li><li>Check the runtime log for “Could not open” or HID errors.</li></ol>`],
-  "trouble-blank": ["Troubleshooting: blank keys", `<ol><li>Click <strong>Apply to Stream Deck</strong>.</li><li>Use <strong>Identify Buttons</strong> to prove the device draws images.</li><li>Keys marked with a warning have a missing game, image, or script.</li><li>Check the runtime log for “could not be rendered”.</li></ol>`],
-  "trouble-nothing": ["Troubleshooting: a button does nothing", `<ol><li>Look at <em>Last action result</em> on the Overview tab after pressing it.</li><li>Built-ins show availability in the Built-In Actions table (for example Save State needs RetroArch network commands).</li><li>Dangerous actions must be held.</li><li>Make sure you applied the latest changes.</li></ol>`],
+  "trouble-blank": ["Troubleshooting: blank keys", `<ol><li>Save the key in the button editor so the layout is pushed to the device.</li><li>Use Diagnostics → <strong>Identify Buttons</strong> to prove the device draws images.</li><li>Keys marked with a warning have a missing game, image, or script.</li><li>Check the runtime log for “could not be rendered”.</li></ol>`],
+  "trouble-nothing": ["Troubleshooting: a button does nothing", `<ol><li>Look at <em>Last action result</em> on the Overview tab after pressing it.</li><li>Unavailable built-ins (for example Save State needs RetroArch network commands) report a reason instead of running.</li><li>Dangerous actions must be held.</li><li>Saved keys are applied automatically; re-save the key if the device still shows an old layout.</li></ol>`],
   "trouble-game": ["Troubleshooting: a game does not launch", `<ol><li>Make sure EmulationStation is running (the launch goes through it).</li><li>If the key says “Game not found”, use <em>Relink Game</em>.</li><li>If EmulationStation does not list the game, update its gamelists.</li><li>If the previous game did not exit in time, nothing new is launched — check the runtime log.</li></ol>`],
   logs: ["Where are logs and scripts stored?", `<p>Runtime log: <code>integrations/streamdeck/logs/runtime.log</code> (size-rotated). Install log: <code>logs/install.log</code>. Drone-side events (enable, tests) are also in Admin → Debug → System Logs (drone activity). Scripts: <code>integrations/streamdeck/scripts/</code>. All visible on the Diagnostics tab.</p>`],
   remote: ["Does Stream Deck configuration work remotely?", `<p><strong>No.</strong> It configures only the local Batocera machine running this Drone. Other Drones in your swarm cannot see or change it, and nothing here runs commands on another machine.</p>`],
   integrations: ["What are integrations?", `<p>Integrations are optional extensions that connect Batocera Drone with hardware or software on <strong>this machine</strong>. Each one is off until you enable it, keeps its files in its own folder under the Drone folder, and exposes the same things: status, enable/disable, configuration, diagnostics, and documentation. Removing one never affects Batocera or the rest of Drone. Stream Deck is the first integration.</p>`],
+  "panel-status": ["Status", `<p>Shows whether Stream Deck is enabled, whether tooling and the runtime are running, and whether a deck is connected. Selected device details, the active profile, the current game, and the last press, action, launch, and error are listed here.</p>`],
+  "panel-support": ["Stream Deck support", `<p>Enable installs two Python libraries into the Drone folder only and starts a background runtime that reconnects after reboots and re-plugging. Disable stops the runtime and releases the device while keeping profiles, images, and scripts. Repair verifies the libraries (reinstalling only if damaged). Reinstall Tooling deletes and reinstalls only the integration's own libraries. Remove Tooling Only deletes libraries, runtime state, and the render cache. Remove Tooling + Configuration deletes the whole <code>integrations/streamdeck/</code> folder. Nothing outside it is touched.</p>`],
+  "panel-tooling": ["Tooling / Runtime", `<p>Install method, HID transport, runtime start time, and the folders where this integration keeps its files, scripts, and logs. Libraries live only under the Drone folder; Batocera's Python is never modified.</p>`],
+  "panel-devices": ["Connected Devices", `<p>Every attached Elgato Stream Deck is listed with model, serial, firmware, key layout, and whether the runtime has it open. Plug one in and it is picked up automatically. Select a row to edit that device's brightness and startup profile. Multiple decks can be attached; each has its own settings. Unplugging and re-plugging is detected automatically.</p>`],
+  "panel-device-settings": ["Device Settings", `<p><strong>Brightness</strong> is per device (default 100%) and is saved when you release the slider. <strong>Startup profile</strong> is the page that device shows when it connects. <strong>Require a hold for dangerous actions</strong> and the hold time apply to Reboot, Shut Down, and Restart EmulationStation on the physical deck. The timeouts bound waiting for a running game to exit, waiting for a new game to start, and custom script execution. Every change here is saved and pushed to the device automatically.</p>`],
+  "panel-profiles": ["Profiles", `<p>A profile is a page of key assignments. <strong>Default</strong> is created automatically and is what every deck shows on startup unless you choose a different startup profile for that device. Add, rename, duplicate, or delete pages here. Profile IDs never change when you rename a profile.</p>`],
+  "panel-layout": ["Visual Button Layout", `<p>Click a key to edit its action and artwork. Keys show their current image, number, action, and warnings for missing games, images, or scripts. <em>Show as rendered</em> displays the exact images last sent to the device. Saving a key validates it, renders images at the device's key size, and updates the physical keys automatically.</p>`],
+  "panel-rules": ["Automatic profile switching", `<p>Optional. The first matching rule switches every connected deck when a game starts or stops, optionally filtered by system and emulator. Example: when a <code>switch</code> game starts → “Switch”; when a game stops → “Default”. Saving rules pushes them to the runtime automatically.</p>`],
+  "panel-scripts": ["Custom Scripts", `<p>A custom script is a file you write that runs as the Drone service on this machine, with full administrative rights. Prefer a built-in action whenever one exists. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly, and stopped after the timeout. Assign a script to a key from the button editor.</p>`],
+  "panel-tests": ["Device tests", `<p><strong>Test Connection</strong> enumerates and opens attached decks. <strong>Identify Buttons</strong> shows the number of every key for a few seconds. <strong>Test Selected Button</strong> flashes that key (“TEST”) and never runs its action. To run an action, use <em>Test Action</em> in the button editor.</p>`],
+  "panel-activity": ["Runtime activity", `<p>Live snapshot of the worker: whether it is running, the current launch state, the last button press, action result, game launch, runtime exit, and error. Use this to confirm a physical key press was received and what it did.</p>`],
+  "panel-logs": ["Logs", `<p>Runtime log: <code>integrations/streamdeck/logs/runtime.log</code> (size-rotated). Install log: <code>logs/install.log</code>. Runtime console captures the worker's stdout/stderr. Drone-side events (enable, tests) are also in Admin → Debug → System Logs.</p>`],
 };
 const SD_HELP_ORDER = ["what-is", "enable", "install", "modifies-batocera", "detection", "profiles", "builtins", "scripts-vs-builtins", "dangerous",
-  "launch-game", "how-launched", "assign-game", "missing-rom", "artwork", "images", "rendering", "scripts", "testing", "brightness",
-  "apply", "disable", "remove-what", "reset", "trouble-disconnected", "trouble-blank", "trouble-nothing", "trouble-game", "logs", "remote"];
+  "launch-game", "how-launched", "missing-rom", "artwork", "images", "rendering", "scripts", "testing",
+  "disable", "remove-what", "reset", "trouble-disconnected", "trouble-blank", "trouble-nothing", "trouble-game", "logs", "remote"];
 
 function sdHelpAccordion(topics, id) {
   return `<div class="accordion themed-accordion sd-help" id="${sdEsc(id)}">${topics.map((topic, index) => {
@@ -439,7 +453,6 @@ function sdLifecycleHtml() {
       ${s.enabled
         ? `<button type="button" class="btn btn-outline-warning" data-sd-action="disable" ${disabled}><i class="bi bi-pause-circle me-1"></i>Disable Stream Deck</button>`
         : `<button type="button" class="btn btn-success" data-sd-action="enable" ${disabled}><i class="bi bi-play-circle me-1"></i>Enable Stream Deck</button>`}
-      ${sdHelpButton("enable", "What happens when I enable this?")}
     </div>
     <hr>
     <div class="d-flex flex-wrap gap-2 align-items-center">
@@ -447,14 +460,13 @@ function sdLifecycleHtml() {
       <button type="button" class="btn btn-sm btn-outline-primary" data-sd-action="reinstall" ${disabled}><i class="bi bi-arrow-repeat me-1"></i>Reinstall Tooling</button>
       <button type="button" class="btn btn-sm btn-outline-danger" data-sd-action="remove-tooling" ${disabled}><i class="bi bi-trash me-1"></i>Remove Tooling Only</button>
       <button type="button" class="btn btn-sm btn-danger" data-sd-action="remove-all" ${disabled}><i class="bi bi-trash3 me-1"></i>Remove Tooling + Configuration</button>
-      ${sdHelpButton("remove-what", "What gets removed?")}
     </div>`;
 }
 
 function sdDeviceDetailsHtml() {
   const devices = sdDevices();
   if (!devices.length) {
-    return `<div class="text-muted small">No Stream Deck detected. Plug one in — it is picked up automatically (no restart needed). ${sdHelpButton("trouble-disconnected")}</div>`;
+    return `<div class="text-muted small">No Stream Deck detected. Plug one in — it is picked up automatically (no restart needed).</div>`;
   }
   const rows = devices.map((device) => {
     const state = device.source === "runtime" ? sdBadge("Connected", "success") : device.connected ? sdBadge("Detected (not open)", "info") : sdBadge("Disconnected", "secondary");
@@ -474,7 +486,7 @@ function sdDeviceSettingsHtml() {
   if (!device) return `<div class="text-muted small">Select or connect a device to change its settings.</div>`;
   const options = sdProfiles().map((profile) => `<option value="${sdEsc(profile.id)}" ${device.startup_profile_id === profile.id ? "selected" : ""}>${sdEsc(profile.name)}</option>`).join("");
   return `<div class="row g-3">
-    <div class="col-md-7"><label class="form-label" for="sdBrightness">Brightness <span id="sdBrightnessValue" class="badge text-bg-secondary">${sdEsc(device.brightness)}%</span> ${sdHelpButton("brightness")}</label>
+    <div class="col-md-7"><label class="form-label" for="sdBrightness">Brightness <span id="sdBrightnessValue" class="badge text-bg-secondary">${sdEsc(device.brightness)}%</span></label>
       <input type="range" class="form-range" min="0" max="100" step="5" id="sdBrightness" value="${sdEsc(device.brightness)}" data-sd-change="brightness" data-sd-input="brightness-label"></div>
     <div class="col-md-5"><label class="form-label" for="sdStartupProfile">Startup profile</label>
       <select class="form-select" id="sdStartupProfile" data-sd-change="startup-profile"><option value="">Default profile</option>${options}</select></div></div>`;
@@ -483,26 +495,24 @@ function sdDeviceSettingsHtml() {
 function sdSettingsHtml() {
   const settings = (sdState.status && sdState.status.settings) || {};
   return `<div class="row g-3">
-    <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="sdConfirmDangerous" ${settings.confirm_dangerous_actions ? "checked" : ""}>
-      <label class="form-check-label" for="sdConfirmDangerous">Require a hold for dangerous actions ${sdHelpButton("dangerous")}</label></div></div>
-    <div class="col-md-6"><label class="form-label small" for="sdHoldMs">Hold time (ms)</label><input type="number" class="form-control form-control-sm" id="sdHoldMs" min="500" max="5000" step="100" value="${sdEsc(settings.hold_duration_ms || 1500)}"></div>
-    <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="sdAutoApply" ${settings.auto_apply ? "checked" : ""}>
-      <label class="form-check-label" for="sdAutoApply">Auto apply saved keys to the device ${sdHelpButton("apply")}</label></div></div>
-    <div class="col-md-6"><label class="form-label small" for="sdExitTimeout">Wait for the running game to exit (seconds)</label><input type="number" class="form-control form-control-sm" id="sdExitTimeout" min="5" max="120" value="${sdEsc(settings.exit_timeout_seconds || 20)}"></div>
-    <div class="col-md-6"><label class="form-label small" for="sdLaunchTimeout">Wait for the new game to start (seconds)</label><input type="number" class="form-control form-control-sm" id="sdLaunchTimeout" min="5" max="180" value="${sdEsc(settings.launch_confirm_timeout_seconds || 45)}"></div>
-    <div class="col-md-6"><label class="form-label small" for="sdScriptTimeout">Custom script timeout (seconds)</label><input type="number" class="form-control form-control-sm" id="sdScriptTimeout" min="1" max="300" value="${sdEsc(settings.script_timeout_seconds || 30)}"></div>
-    <div class="col-12"><button type="button" class="btn btn-sm btn-primary" data-sd-action="save-settings"><i class="bi bi-save me-1"></i>Save settings</button></div></div>`;
+    <div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="sdConfirmDangerous" ${settings.confirm_dangerous_actions ? "checked" : ""} data-sd-change="settings">
+      <label class="form-check-label" for="sdConfirmDangerous">Require a hold for dangerous actions</label></div></div>
+    <div class="col-md-6"><label class="form-label small" for="sdHoldMs">Hold time (ms)</label><input type="number" class="form-control form-control-sm" id="sdHoldMs" min="500" max="5000" step="100" value="${sdEsc(settings.hold_duration_ms || 1500)}" data-sd-change="settings"></div>
+    <div class="col-md-6"><label class="form-label small" for="sdExitTimeout">Wait for the running game to exit (seconds)</label><input type="number" class="form-control form-control-sm" id="sdExitTimeout" min="5" max="120" value="${sdEsc(settings.exit_timeout_seconds || 20)}" data-sd-change="settings"></div>
+    <div class="col-md-6"><label class="form-label small" for="sdLaunchTimeout">Wait for the new game to start (seconds)</label><input type="number" class="form-control form-control-sm" id="sdLaunchTimeout" min="5" max="180" value="${sdEsc(settings.launch_confirm_timeout_seconds || 45)}" data-sd-change="settings"></div>
+    <div class="col-md-6"><label class="form-label small" for="sdScriptTimeout">Custom script timeout (seconds)</label><input type="number" class="form-control form-control-sm" id="sdScriptTimeout" min="1" max="300" value="${sdEsc(settings.script_timeout_seconds || 30)}" data-sd-change="settings"></div></div>`;
 }
 
 function sdOverviewHtml() {
   const s = sdState.status || {};
   const paths = s.paths || {};
   return `<div class="row g-3">
-    <div class="col-lg-7"><section class="card h-100"><div class="card-body"><h2 class="h5">Status</h2><div id="sdStatusPanel">${sdStatusPanelHtml()}</div></div></section></div>
-    <div class="col-lg-5"><section class="card mb-3"><div class="card-body"><h2 class="h5">Stream Deck support</h2>
+    <div class="col-12"><section class="card"><div class="card-body">${sdPanelHeading("Connected Devices", "panel-devices")}<div id="sdDeviceDetails">${sdDeviceDetailsHtml()}</div></div></section></div>
+    <div class="col-lg-7"><section class="card h-100"><div class="card-body">${sdPanelHeading("Status", "panel-status")}<div id="sdStatusPanel">${sdStatusPanelHtml()}</div></div></section></div>
+    <div class="col-lg-5"><section class="card mb-3"><div class="card-body">${sdPanelHeading("Stream Deck support", "panel-support")}
       <p class="small text-muted">Enabling installs two Python libraries into the Drone folder only and starts a background runtime that reconnects automatically after reboots and re-plugging.</p>
       ${sdLifecycleHtml()}</div></section>
-      <section class="card"><div class="card-body"><h2 class="h5">Tooling / Runtime</h2><div class="table-responsive"><table class="table table-sm themed-table mb-0"><tbody>
+      <section class="card"><div class="card-body">${sdPanelHeading("Tooling / Runtime", "panel-tooling")}<div class="table-responsive"><table class="table table-sm themed-table mb-0"><tbody>
         ${sdField("Install method", sdEsc(s.tooling_method || "—"))}
         ${sdField("HID transport", sdEsc(s.hid_transport || "—"))}
         ${sdField("Started", sdEsc(sdTime(s.runtime_started_at)))}
@@ -510,9 +520,8 @@ function sdOverviewHtml() {
         ${sdField("Scripts", `<code class="small">${sdEsc(paths.scripts || "")}</code>`)}
         ${sdField("Logs", `<code class="small">${sdEsc(paths.logs || "")}</code>`)}
       </tbody></table></div></div></section></div>
-    <div class="col-12"><section class="card"><div class="card-body"><h2 class="h5">Connected Devices ${sdHelpButton("detection")}</h2><div id="sdDeviceDetails">${sdDeviceDetailsHtml()}</div></div></section></div>
-    <div class="col-lg-6"><section class="card h-100"><div class="card-body"><h2 class="h5">Device Settings</h2>${sdDeviceSettingsHtml()}</div></section></div>
-    <div class="col-lg-6"><section class="card h-100"><div class="card-body"><h2 class="h5">Safeguards &amp; timing</h2>${sdSettingsHtml()}</div></section></div>
+    <div class="col-12"><section class="card"><div class="card-body">${sdPanelHeading("Device Settings", "panel-device-settings")}
+      ${sdDeviceSettingsHtml()}<hr class="my-3">${sdSettingsHtml()}</div></section></div>
   </div>`;
 }
 
@@ -523,7 +532,6 @@ function sdButtonsHtml() {
   const layout = sdLayout(device);
   const buttons = new Map(((profile && profile.buttons) || []).map((button) => [Number(button.key), button]));
   const pending = sdState.status && sdState.status.pending_apply;
-  const autoApply = sdState.status && sdState.status.settings && sdState.status.settings.auto_apply;
   const deviceOptions = sdDevices().map((row) => `<option value="${sdEsc(row.id)}" ${row.id === (device && device.id) ? "selected" : ""}>${sdEsc(row.model)} — ${sdEsc(row.serial || row.id)}</option>`).join("");
   const keys = [];
   for (let key = 0; key < layout.keyCount; key += 1) {
@@ -543,8 +551,9 @@ function sdButtonsHtml() {
   const profileOptions = sdProfiles().map((row) => `<option value="${sdEsc(row.id)}" ${profile && row.id === profile.id ? "selected" : ""}>${sdEsc(row.name)}${row.is_default ? " (default)" : ""}</option>`).join("");
   return `
     <section class="card mb-3"><div class="card-body">
+      ${sdPanelHeading("Profiles", "panel-profiles")}
       <div class="d-flex flex-wrap align-items-end gap-2">
-        <div class="sd-profile-select"><label class="form-label small mb-1" for="sdProfileSelect">Profile ${sdHelpButton("profiles")}</label>
+        <div class="sd-profile-select"><label class="form-label small mb-1" for="sdProfileSelect">Profile</label>
           <select class="form-select" id="sdProfileSelect" data-sd-change="select-profile">${profileOptions}</select></div>
         <button type="button" class="btn btn-outline-primary" data-sd-action="profile-add"><i class="bi bi-plus-lg me-1"></i>Add</button>
         <button type="button" class="btn btn-outline-secondary" data-sd-action="profile-rename"><i class="bi bi-pencil me-1"></i>Rename</button>
@@ -554,33 +563,19 @@ function sdButtonsHtml() {
       </div></div></section>
     <section class="card mb-3"><div class="card-body">
       <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
-        <h2 class="h5 mb-0">Visual Button Layout</h2>
+        <div class="mb-0">${sdPanelHeading("Visual Button Layout", "panel-layout")}</div>
         ${sdDevices().length > 1 ? `<select class="form-select form-select-sm w-auto" data-sd-change="select-device-layout" aria-label="Device">${deviceOptions}</select>` : ""}
         <div class="form-check form-switch ms-lg-3"><input class="form-check-input" type="checkbox" id="sdShowRendered" data-sd-change="show-rendered" ${sdState.showRendered ? "checked" : ""} ${device && device.source === "runtime" ? "" : "disabled"}>
-          <label class="form-check-label small" for="sdShowRendered">Show as rendered on the device ${sdHelpButton("rendering")}</label></div>
+          <label class="form-check-label small" for="sdShowRendered">Show as rendered on the device</label></div>
         <div class="ms-auto d-flex align-items-center gap-2">
           ${pending ? sdBadge("Unapplied changes", "warning") : sdBadge("Device up to date", "success")}
-          ${autoApply ? sdBadge("Auto apply on", "info") : ""}
-          <button type="button" class="btn btn-primary" data-sd-action="apply"><i class="bi bi-upload me-1"></i>Apply to Stream Deck</button>
         </div>
       </div>
       ${layout.known ? "" : `<div class="alert alert-secondary small py-2">No device layout is known yet; showing a ${layout.columns}-column preview. Connect and enable a Stream Deck to see its real layout.</div>`}
       <div class="sd-deck" style="--sd-columns:${Number(layout.columns)}">${keys.join("")}</div>
       <p class="small text-muted mt-2 mb-0">Click a key to edit it. Keys show their current artwork, number, action, and warnings for missing games, images, or scripts.</p>
     </div></section>
-    <div class="row g-3">
-      <div class="col-xl-7"><section class="card h-100"><div class="card-body"><h2 class="h5">Built-In Actions ${sdHelpButton("builtins")}</h2>${sdActionsTableHtml()}</div></section></div>
-      <div class="col-xl-5"><section class="card h-100"><div class="card-body"><h2 class="h5">Automatic profile switching ${sdHelpButton("profiles")}</h2>${sdRulesHtml()}</div></section></div>
-    </div>`;
-}
-
-function sdActionsTableHtml() {
-  const rows = sdState.actions.map((action) => `<tr>
-    <td><i class="bi ${SD_SYMBOL_ICONS[action.default_icon] || "bi-lightning"} me-1"></i>${sdEsc(action.display_name)}<div class="small text-muted font-monospace">${sdEsc(action.id)}</div></td>
-    <td>${sdEsc(action.category)}</td>
-    <td>${action.availability && action.availability.available ? sdBadge("Available", "success") : `${sdBadge("Unavailable now", "secondary")}<div class="small text-muted">${sdEsc(action.availability ? action.availability.reason : "")}</div>`}</td>
-    <td>${action.dangerous ? `${sdBadge("Hold to confirm", "warning")}` : ""}<div class="small text-muted">${sdEsc(action.compatibility)}</div></td></tr>`).join("");
-  return `<div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><thead><tr><th>Action</th><th>Category</th><th>Right now</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <section class="card"><div class="card-body">${sdPanelHeading("Automatic profile switching", "panel-rules")}${sdRulesHtml()}</div></section>`;
 }
 
 function sdRulesHtml() {
@@ -911,9 +906,31 @@ async function sdSaveEditor(clear = false) {
     const result = await sdPost(`/profiles/${encodeURIComponent(editor.profileId)}/buttons/${editor.key}`, payload);
     window.bootstrap.Modal.getOrCreateInstance(document.getElementById("sdEditorModal")).hide();
     sdState.editor = null;
-    if (result.applied) sdToast(result.applied.message || "Saved and applied.");
-    else sdToast(clear ? `Key ${editor.key + 1} cleared. Apply to update the device.` : `Key ${editor.key + 1} saved. Click “Apply to Stream Deck” to update the device.`);
+    if (result.applied && result.applied.message) sdToast(result.applied.message);
+    else sdToast(clear ? `Key ${editor.key + 1} cleared.` : `Key ${editor.key + 1} saved.`);
     await sdReloadConfig();
+  } catch (error) {
+    sdError(error);
+  }
+}
+
+async function sdSaveSettings() {
+  const confirmDangerous = document.getElementById("sdConfirmDangerous");
+  const holdMs = document.getElementById("sdHoldMs");
+  const exitTimeout = document.getElementById("sdExitTimeout");
+  const launchTimeout = document.getElementById("sdLaunchTimeout");
+  const scriptTimeout = document.getElementById("sdScriptTimeout");
+  if (!confirmDangerous || !holdMs || !exitTimeout || !launchTimeout || !scriptTimeout) return;
+  try {
+    const result = await sdPost("/settings", {
+      confirm_dangerous_actions: confirmDangerous.checked,
+      hold_duration_ms: Number(holdMs.value),
+      exit_timeout_seconds: Number(exitTimeout.value),
+      launch_confirm_timeout_seconds: Number(launchTimeout.value),
+      script_timeout_seconds: Number(scriptTimeout.value),
+    });
+    sdToast((result.applied && result.applied.message) || "Settings saved.");
+    if (sdState.status) sdState.status.settings = result.settings;
   } catch (error) {
     sdError(error);
   }
@@ -1086,9 +1103,9 @@ function sdScriptsHtml() {
       <button type="button" class="btn btn-sm btn-outline-secondary" data-sd-action="script-duplicate" data-id="${sdEsc(script.id)}"><i class="bi bi-copy"></i></button>
       <button type="button" class="btn btn-sm btn-outline-warning" data-sd-action="script-test" data-id="${sdEsc(script.id)}"><i class="bi bi-play"></i> Run/Test</button>
       <button type="button" class="btn btn-sm btn-outline-danger" data-sd-action="script-delete" data-id="${sdEsc(script.id)}"><i class="bi bi-trash"></i></button></td></tr>`).join("");
-  return `<div class="alert alert-warning small"><i class="bi bi-shield-exclamation me-1"></i><strong>Administrative code execution.</strong> Scripts run on this machine as the Drone service with full rights. Prefer a built-in action when one exists. ${sdHelpButton("scripts", "What can a script do?")}</div>
+  return `<div class="alert alert-warning small"><i class="bi bi-shield-exclamation me-1"></i><strong>Administrative code execution.</strong> Scripts run on this machine as the Drone service with full rights. Prefer a built-in action when one exists.</div>
     <div class="row g-3"><div class="col-xl-5"><section class="card h-100"><div class="card-body">
-      <div class="d-flex align-items-center mb-2"><h2 class="h5 mb-0">Scripts</h2><button type="button" class="btn btn-sm btn-primary ms-auto" data-sd-action="script-new"><i class="bi bi-plus-lg me-1"></i>New script</button></div>
+      <div class="d-flex align-items-center mb-2">${sdPanelHeading("Scripts", "panel-scripts")}<button type="button" class="btn btn-sm btn-primary ms-auto" data-sd-action="script-new"><i class="bi bi-plus-lg me-1"></i>New script</button></div>
       <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><tbody>${rows || '<tr><td class="text-muted small">No custom scripts yet.</td></tr>'}</tbody></table></div>
       <p class="small text-muted mt-2 mb-0">Assign a script to a key from the button editor (Action Type → Custom Script). One script can be assigned to many keys; a script cannot be deleted while assigned.</p>
     </div></section></div>
@@ -1190,7 +1207,7 @@ function sdDiagnosticsHtml() {
   const keyOptions = Array.from({ length: layout.keyCount }, (_, key) => `<option value="${key}">Key ${key + 1}</option>`).join("");
   const sources = [["runtime", "Runtime log"], ["install", "Install log"], ["console", "Runtime console"]];
   return `<div class="row g-3">
-    <div class="col-lg-6"><section class="card h-100"><div class="card-body"><h2 class="h5">Device tests ${sdHelpButton("testing")}</h2>
+    <div class="col-lg-6"><section class="card h-100"><div class="card-body">${sdPanelHeading("Device tests", "panel-tests")}
       <div class="d-flex flex-wrap gap-2 mb-3">
         <button type="button" class="btn btn-outline-primary" data-sd-action="test-connection"><i class="bi bi-usb-plug me-1"></i>Test Connection</button>
         <button type="button" class="btn btn-outline-primary" data-sd-action="identify"><i class="bi bi-123 me-1"></i>Identify Buttons</button></div>
@@ -1198,13 +1215,12 @@ function sdDiagnosticsHtml() {
         <button type="button" class="btn btn-outline-secondary" data-sd-action="test-key"><i class="bi bi-lightbulb me-1"></i>Test Selected Button</button></div>
       <p class="small text-muted">Test Selected Button flashes the key only — its action is never run. To run an action, use <em>Test Action</em> in the button editor.</p>
       <div id="sdConnectionResult">${sdConnectionHtml()}</div></div></section></div>
-    <div class="col-lg-6"><section class="card h-100"><div class="card-body"><h2 class="h5">Runtime activity</h2><div id="sdActivityPanel">${sdActivityHtml()}</div></div></section></div>
+    <div class="col-lg-6"><section class="card h-100"><div class="card-body">${sdPanelHeading("Runtime activity", "panel-activity")}<div id="sdActivityPanel">${sdActivityHtml()}</div></div></section></div>
     <div class="col-12"><section class="card"><div class="card-body">
-      <div class="d-flex flex-wrap align-items-center gap-2 mb-2"><h2 class="h5 mb-0">Logs ${sdHelpButton("logs")}</h2>
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-2"><div class="mb-0">${sdPanelHeading("Logs", "panel-logs")}</div>
         <select class="form-select form-select-sm w-auto ms-auto" data-sd-change="log-source">${sources.map(([value, label]) => `<option value="${value}" ${sdState.logSource === value ? "selected" : ""}>${label}</option>`).join("")}</select>
         <button type="button" class="btn btn-sm btn-outline-secondary" data-sd-action="log-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button></div>
       <pre class="sd-output sd-log" id="sdLogView">Loading…</pre></div></section></div>
-    <div class="col-12"><section class="card"><div class="card-body"><h2 class="h5">Troubleshooting</h2>${sdHelpAccordion(["trouble-disconnected", "trouble-blank", "trouble-nothing", "trouble-game"], "sdTrouble")}</div></section></div>
   </div>`;
 }
 
@@ -1225,7 +1241,7 @@ function sdHelpTabHtml() {
   return `<section class="card"><div class="card-body">
     <div class="d-flex flex-wrap align-items-center gap-2 mb-3"><h2 class="h5 mb-0">Stream Deck documentation</h2>
       <input type="search" class="form-control form-control-sm ms-auto sd-help-search" placeholder="Search help…" data-sd-input="help-search" aria-label="Search help"></div>
-    <div class="alert alert-info small"><strong>Quick start:</strong> plug in the deck → Overview → <em>Enable Stream Deck</em> → Buttons &amp; Profiles → click a key → choose an action and artwork → Save → <em>Apply to Stream Deck</em>.</div>
+    <div class="alert alert-info small"><strong>Quick start:</strong> plug in the deck → Overview → <em>Enable Stream Deck</em> → Buttons &amp; Profiles → click a key → choose an action and artwork → Save. Changes reach the device automatically.</div>
     ${sdHelpAccordion(SD_HELP_ORDER, "sdHelpDocs")}</div></section>`;
 }
 
@@ -1249,27 +1265,6 @@ async function sdOnAction(action, element) {
       return;
     case "remove-all":
       if (await sdConfirm("Remove tooling and all configuration?", `<p>This permanently deletes <code>${sdEsc((sdState.status && sdState.status.paths && sdState.status.paths.root) || "integrations/streamdeck")}</code>: libraries, profiles, scripts, uploaded images, and logs. Nothing outside that folder is touched.</p>`, "Remove everything")) await sdLifecycle("/remove", { include_configuration: true });
-      return;
-    case "save-settings":
-      try {
-        await sdPost("/settings", {
-          confirm_dangerous_actions: document.getElementById("sdConfirmDangerous").checked,
-          hold_duration_ms: Number(document.getElementById("sdHoldMs").value), auto_apply: document.getElementById("sdAutoApply").checked,
-          exit_timeout_seconds: Number(document.getElementById("sdExitTimeout").value),
-          launch_confirm_timeout_seconds: Number(document.getElementById("sdLaunchTimeout").value),
-          script_timeout_seconds: Number(document.getElementById("sdScriptTimeout").value),
-        });
-        sdToast("Settings saved. Apply to update the device.");
-        await sdReloadConfig();
-      } catch (error) { sdError(error); }
-      return;
-    case "apply":
-      try {
-        const result = await sdPost("/apply", {});
-        sdToast(result.message || "Applied.", result.applied ? "success" : "info");
-        if ((result.problems || []).length) sdToast(`${result.problems.length} key(s) need attention (missing game, image, or script).`, "warning");
-        await sdReloadConfig();
-      } catch (error) { sdError(error); }
       return;
     case "edit-key": sdOpenEditor(Number(element.dataset.key)); return;
     case "profile-add":
@@ -1310,7 +1305,11 @@ async function sdOnAction(action, element) {
       return;
     }
     case "rules-save":
-      try { await sdPost("/rules", { rules: sdCollectRules() }); sdToast("Rules saved. Apply to update the runtime."); await sdReloadConfig(); } catch (error) { sdError(error); }
+      try {
+        const result = await sdPost("/rules", { rules: sdCollectRules() });
+        sdToast((result.applied && result.applied.message) || "Rules saved.");
+        await sdReloadConfig();
+      } catch (error) { sdError(error); }
       return;
     case "game-select": {
       const game = sdState.editor && sdState.editor.results[Number(element.dataset.index)];
@@ -1326,7 +1325,7 @@ async function sdOnAction(action, element) {
     case "game-more": await sdRunGameSearch(true); return;
     case "editor-save": await sdSaveEditor(false); return;
     case "editor-clear":
-      if (await sdConfirm("Clear this key?", "<p>The key will have no action and a blank image after you apply.</p>", "Clear key", "warning")) await sdSaveEditor(true);
+      if (await sdConfirm("Clear this key?", "<p>The key will have no action and a blank image.</p>", "Clear key", "warning")) await sdSaveEditor(true);
       return;
     case "editor-test-key": await sdDeviceCommand("test-button", { key: sdState.editor.key }); return;
     case "editor-test-action": await sdTestAction(); return;
@@ -1386,6 +1385,9 @@ async function sdOnChange(kind, element) {
       } catch (error) { sdError(error); }
       return;
     }
+    case "settings":
+      await sdSaveSettings();
+      return;
     case "log-source": sdState.logSource = element.value; await sdLoadLog(); return;
     case "editor-type":
       editor.button.action_type = element.value;

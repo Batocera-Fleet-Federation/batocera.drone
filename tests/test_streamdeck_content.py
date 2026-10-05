@@ -567,7 +567,7 @@ class IntegrationsUiThemeTests(unittest.TestCase):
 
     def test_every_streamdeck_table_uses_themed_table(self):
         classes = re.findall(r'<table class="([^"]*)"', self.js)
-        self.assertGreaterEqual(len(classes), 7)
+        self.assertGreaterEqual(len(classes), 6)
         for value in classes:
             self.assertIn("themed-table", value, value)
 
@@ -594,6 +594,60 @@ class IntegrationsUiThemeTests(unittest.TestCase):
         self.assertIn("themed-modal", self.skill)
         self.assertIn("themed-accordion", self.skill)
         self.assertIn("data-bs-theme", self.skill)
+
+
+class StreamDeckUiOptimizationsTests(unittest.TestCase):
+    """Static UAT for Stream Deck Setup layout and auto-apply (#101)."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "app/web/static/js/integrations.js").read_text(encoding="utf-8")
+
+    def test_removed_controls_are_gone(self):
+        self.assertNotIn("Apply to Stream Deck", self.js)
+        self.assertNotIn("Save settings", self.js)
+        self.assertNotIn("sdAutoApply", self.js)
+        self.assertNotIn("Built-In Actions", self.js)
+        self.assertNotIn("Safeguards &amp; timing", self.js)
+        self.assertNotIn('sdPanelHeading("Troubleshooting"', self.js)
+        self.assertNotIn("How do I change brightness?", self.js)
+        self.assertNotIn('data-sd-action="save-settings"', self.js)
+        self.assertNotIn('data-sd-action="apply"', self.js)
+
+    def test_overview_lists_connected_devices_first_and_merges_device_settings(self):
+        overview = self.js.split("function sdOverviewHtml()")[1].split("function sdButtonsHtml()")[0]
+        self.assertLess(overview.find("Connected Devices"), overview.find("Status"))
+        self.assertLess(overview.find("Connected Devices"), overview.find("Stream Deck support"))
+        self.assertIn('sdPanelHeading("Device Settings", "panel-device-settings")', overview)
+        self.assertIn("sdSettingsHtml()", overview)
+        self.assertIn("sdDeviceSettingsHtml()", overview)
+
+    def test_panel_headings_carry_help_and_bodies_do_not(self):
+        self.assertIn("function sdPanelHeading", self.js)
+        for topic in ("panel-devices", "panel-status", "panel-support", "panel-tooling",
+                      "panel-device-settings", "panel-profiles", "panel-layout", "panel-rules",
+                      "panel-scripts", "panel-tests", "panel-activity", "panel-logs"):
+            self.assertIn(f'sdPanelHeading(', self.js)
+            self.assertIn(f'"{topic}"', self.js)
+        overview = self.js.split("function sdOverviewHtml()")[1].split("function sdButtonsHtml()")[0]
+        self.assertEqual(overview.count("sdHelpButton("), 0)
+        buttons = self.js.split("function sdButtonsHtml()")[1].split("function sdRulesHtml()")[0]
+        self.assertEqual(buttons.count("sdHelpButton("), 0)
+
+    def test_settings_and_keys_auto_save(self):
+        self.assertIn("async function sdSaveSettings()", self.js)
+        self.assertIn('data-sd-change="settings"', self.js)
+        self.assertIn("sdPost(\"/settings\"", self.js)
+
+    def test_help_tab_omits_obvious_how_tos(self):
+        order = re.search(r"const SD_HELP_ORDER = \[([^\]]+)\]", self.js, re.S).group(1)
+        self.assertNotIn('"brightness"', order)
+        self.assertNotIn('"apply"', order)
+        self.assertNotIn('"assign-game"', order)
+        self.assertIn('"what-is"', order)
+        self.assertIn('"launch-game"', order)
+        self.assertIn("Changes reach the device automatically", self.js)
 
 
 # ------------------------------------------------------- real HTTP server
@@ -688,6 +742,9 @@ class HttpRoutesTests(unittest.TestCase):
         self.assertIn("themed-modal", integrations_js)
         self.assertIn("themed-accordion", integrations_js)
         self.assertIn("sd-modal-nested", integrations_js)
+        self.assertIn('sdPanelHeading("Connected Devices", "panel-devices")', integrations_js)
+        self.assertNotIn("Apply to Stream Deck", integrations_js)
+        self.assertNotIn("Built-In Actions", integrations_js)
 
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/static/css/drone.css", timeout=5) as response:
             css = response.read().decode("utf-8")
@@ -705,6 +762,15 @@ class HttpRoutesTests(unittest.TestCase):
         status, payload = self.call("/streamdeck/status")
         self.assertEqual((status, payload["enabled"], payload["scope"]), (200, False, "local-only"))
         self.assertEqual(len(self.call("/streamdeck/actions")[1]["actions"]), 10)
+
+        status, settings = self.call("/streamdeck/settings", {"auto_apply": False, "hold_duration_ms": 1800})
+        self.assertEqual(status, 200, settings)
+        self.assertTrue(settings["settings"]["auto_apply"])
+        self.assertEqual(settings["settings"]["hold_duration_ms"], 1800)
+        self.assertIn("applied", settings)
+        status, device = self.call("/streamdeck/devices/HTTPTEST1/settings", {})
+        self.assertEqual(status, 200, device)
+        self.assertEqual(device["device"]["brightness"], 100)
 
         # Games come from the Drone's own library; assign one to a key and apply (saved while disabled).
         systems = self.call("/streamdeck/games/systems")[1]["systems"]
