@@ -9,6 +9,7 @@ through a real Drone HTTP server.
 """
 
 import json
+import shutil
 import os
 import re
 import struct
@@ -182,6 +183,62 @@ class ScriptTests(Temp):
         cancel = threading.Event()
         threading.Timer(0.3, cancel.set).start()
         self.assertEqual(self.store.run(script["id"], timeout=30, cancel_event=cancel)["status"], "cancelled")
+
+    def test_legacy_script_without_language_is_bash_and_stays_typed(self):
+        script_id = "d" * 32
+        path = self.paths.scripts_dir / f"{script_id}.sh"
+        self.paths.scripts_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\necho legacy\n")
+        (self.paths.scripts_dir / f"{script_id}.json").write_text(json.dumps({"name": "Old"}))
+        self.assertEqual(self.store.get(script_id)["language"], "bash")
+        self.assertEqual(self.store.list()[0]["language"], "bash")
+        self.assertIn("legacy", self.store.run(script_id)["stdout"])
+        updated = self.store.update(script_id, {"code": "#!/bin/bash\necho new\n"})
+        self.assertEqual(updated["language"], "bash")
+        self.assertTrue(path.is_file())
+        copy = self.store.duplicate(script_id)
+        self.assertEqual(copy["language"], "bash")
+        self.assertTrue((self.paths.scripts_dir / f"{copy['id']}.sh").is_file())
+
+    @unittest.skipUnless(shutil.which("python3"), "needs python3")
+    def test_python_script_crud_run_and_timeout(self):
+        created = self.store.create({"name": "Py", "language": "python3",
+                                     "code": "#!/usr/bin/env python3\nimport sys\nprint('py-ok'); sys.stderr.write('err')\n"})
+        self.assertEqual(created["language"], "python3")
+        py_file = self.paths.scripts_dir / f"{created['id']}.py"
+        self.assertTrue(py_file.is_file())
+        self.assertFalse((self.paths.scripts_dir / f"{created['id']}.sh").exists())
+        result = self.store.run(created["id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("py-ok", result["stdout"])
+        self.assertIn("err", result["stderr"])
+        copy = self.store.duplicate(created["id"])
+        self.assertEqual(copy["language"], "python3")
+        self.assertTrue((self.paths.scripts_dir / f"{copy['id']}.py").is_file())
+        self.assertEqual(self.store.list()[0]["language"], "python3")
+        slow = self.store.create({"name": "Slow", "language": "python3",
+                                  "code": "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"})
+        self.assertEqual(self.store.run(slow["id"], timeout=1)["status"], "timed-out")
+        loud = self.store.create({"name": "Loud", "language": "python3",
+                                  "code": "#!/usr/bin/env python3\nprint('x' * 500000)\n"})
+        out = self.store.run(loud["id"])
+        self.assertLessEqual(len(out["stdout"]), 70 * 1024)
+
+    def test_language_and_shebang_validation(self):
+        with self.assertRaisesRegex(ValueError, "language"):
+            self.store.create({"name": "x", "language": "ruby", "code": "#!/bin/bash\necho\n"})
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.store.create({"name": "x", "language": "python3", "code": "#!/bin/bash\necho\n"})
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.store.create({"name": "x", "language": "bash", "code": "#!/usr/bin/env python3\nprint(1)\n"})
+        with self.assertRaisesRegex(ValueError, "unsupported script interpreter"):
+            self.store.create({"name": "x", "language": "bash", "code": "#!/usr/bin/perl\n"})
+        with self.assertRaisesRegex(ValueError, "language"):
+            self.store.create({"name": "x", "code": "#!/usr/bin/perl\n"})
+        py = self.store.create({"name": "p", "code": "#!/usr/bin/env python3\nprint(1)\n"})
+        self.assertEqual(py["language"], "python3")
+        with self.assertRaises(ValueError):
+            self.store.update(py["id"], {"code": "#!/bin/bash\necho\n"})
 
     def test_missing_script_fails_without_running(self):
         result = self.store.run("c" * 32)
@@ -535,6 +592,11 @@ class HandlerGateTests(Temp):
         handler = self.handler(headers={"Origin": "http://drone.local:8080"}, body=body)
         handler._handle_admin_integrations_post(["streamdeck", "scripts"])
         self.assertEqual(handler.responses[-1][0], 201)
+        self.assertEqual(handler.responses[-1][1]["language"], "bash")
+        bad = self.handler(headers={"Origin": "http://drone.local:8080"},
+                           body=json.dumps({"name": "Bad", "language": "ruby", "code": "#!/bin/sh\n"}).encode())
+        bad._handle_admin_integrations_post(["streamdeck", "scripts"])
+        self.assertEqual(bad.responses[-1][0], 400)
         handler._handle_admin_integrations_get(["streamdeck", "scripts", "..%2F..%2Fetc%2Fpasswd"], {})
         self.assertEqual(handler.responses[-1][0], 400)
         handler._handle_admin_integrations_get(["streamdeck", "scripts", "f" * 32], {})
@@ -634,6 +696,14 @@ class StreamDeckUiOptimizationsTests(unittest.TestCase):
         self.assertEqual(overview.count("sdHelpButton("), 0)
         buttons = self.js.split("function sdButtonsHtml()")[1].split("function sdRulesHtml()")[0]
         self.assertEqual(buttons.count("sdHelpButton("), 0)
+
+    def test_script_editor_offers_bash_and_python_languages(self):
+        self.assertIn('id="sdScriptLanguage"', self.js)
+        self.assertIn('value="python3"', self.js)
+        self.assertIn("#!/usr/bin/env python3", self.js)
+        self.assertIn('case "script-language"', self.js)
+        self.assertIn("sdScriptCodeIsStarter", self.js)
+        self.assertIn("language: languageEl", self.js)
 
     def test_settings_and_keys_auto_save(self):
         self.assertIn("async function sdSaveSettings()", self.js)
