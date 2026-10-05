@@ -148,7 +148,7 @@ const SD_HELP = {
   artwork: ["How does game artwork get selected?", `<p>Only artwork already on this machine is used (nothing is downloaded). Automatic order: the game's main image, then its logo (marquee/wheel), then box art, then fan art; if none exist, a button with the game title is generated. You can choose a specific artwork type, a generated button, or upload your own image instead.</p>`],
   images: ["How do uploaded and generated images work?", `<p>Uploads accept PNG, JPEG, and WebP up to 5 MiB and 4096×4096. Drone checks the file type, extension, and actual image data, stores the original in <code>images/</code>, and never executes it. The runtime resizes it to your deck's real key size: <strong>Fill / Crop</strong> (default) covers the key and trims edges, <strong>Fit</strong> shows the whole image with a background border, <strong>Stretch</strong> ignores the aspect ratio. Generated images are drawn from text, an optional symbol, and colors — no upload needed. Resized results are cached in <code>rendered/</code>.</p>`],
   rendering: ["Why might the image look different on the physical key?", `<p>The browser preview approximates the key with web fonts and icons. The physical key is drawn by Pillow at the device's real resolution (for example 80×80 on a Mini) with the model's own rotation and color format, so fonts and icon shapes differ slightly and fine detail is lost on small keys. Turn on <em>Show as rendered</em> above the layout to see the exact images last sent to the device.</p>`],
-  scripts: ["What can a custom script do?", `<p>A custom script is a file you write (for example <code>#!/bin/bash</code>) that runs <strong>as the Drone service on this machine, with full administrative rights</strong>. It can do anything that user can: change settings, delete files, or power off. Only trusted administrators should create scripts. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly (never through a shell command line built by Drone), get a clean environment plus <code>DRONE_STREAMDECK_*</code> variables (key, device, profile, active game), and are stopped after the timeout (30 s by default).</p>`],
+  scripts: ["What can a custom script do?", `<p>A custom script is Bash (<code>#!/bin/bash</code>) or Python 3 (<code>#!/usr/bin/env python3</code>). It runs <strong>as the Drone service on this machine, with full administrative rights</strong>. It can do anything that user can: change settings, delete files, or power off. Only trusted administrators should create scripts. Scripts are stored in <code>integrations/streamdeck/scripts/</code> as <code>.sh</code> or <code>.py</code>, executed directly (never through a shell command line built by Drone), get a clean environment plus <code>DRONE_STREAMDECK_*</code> variables (key, device, profile, active game), and are stopped after the timeout (30 s by default).</p><p>Python 3 is the system <code>python3</code> already on the machine. Drone does not install extra Python packages for scripts, and the Stream Deck libraries' private environment is not used. Existing Bash scripts, including ones that start with <code>#!/bin/sh</code>, keep working.</p>`],
   "scripts-vs-builtins": ["Built-in action vs custom script", `<p>Use a built-in action whenever one exists: it is validated, compatibility-checked, logged, and cannot be edited into something else. Scripts are for anything Drone does not provide yet. Launch Game is never implemented as a script.</p>`],
   testing: ["How do I test a button without running its action?", `<p>In the button editor, <strong>Test Selected Button</strong> flashes that key on the device (“TEST”) and proves communication — it never runs the action. <strong>Identify Buttons</strong> (Diagnostics) shows the number of every key for a few seconds. <strong>Test Action</strong> really runs the action after you confirm; testing a Launch Game button may close the game that is currently running.</p>`],
   apply: ["When do changes reach the device?", `<p>Saving a key, device setting, or safeguard stores it and pushes it to the Stream Deck automatically — no reboot needed. The device is never updated on each keystroke while you edit a key; only <em>Save</em> in the button editor (or changing a setting) sends the update.</p>`],
@@ -170,7 +170,7 @@ const SD_HELP = {
   "panel-profiles": ["Profiles", `<p>A profile is a page of key assignments. <strong>Default</strong> is created automatically and is what every deck shows on startup unless you choose a different startup profile for that device. Add, rename, duplicate, or delete pages here. Profile IDs never change when you rename a profile.</p>`],
   "panel-layout": ["Visual Button Layout", `<p>Click a key to edit its action and artwork. Keys show their current image, number, action, and warnings for missing games, images, or scripts. <em>Show as rendered</em> displays the exact images last sent to the device. Saving a key validates it, renders images at the device's key size, and updates the physical keys automatically.</p>`],
   "panel-rules": ["Automatic profile switching", `<p>Optional. The first matching rule switches every connected deck when a game starts or stops, optionally filtered by system and emulator. Example: when a <code>switch</code> game starts → “Switch”; when a game stops → “Default”. Saving rules pushes them to the runtime automatically.</p>`],
-  "panel-scripts": ["Custom Scripts", `<p>A custom script is a file you write that runs as the Drone service on this machine, with full administrative rights. Prefer a built-in action whenever one exists. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly, and stopped after the timeout. Assign a script to a key from the button editor.</p>`],
+  "panel-scripts": ["Custom Scripts", `<p>A custom script is Bash or Python 3 that runs as the Drone service on this machine, with full administrative rights. Prefer a built-in action whenever one exists. Choose the language in the editor; the interpreter line must match (<code>#!/bin/bash</code> or legacy <code>#!/bin/sh</code> for Bash, <code>#!/usr/bin/env python3</code> for Python 3). Python 3 is the system interpreter. No extra packages are installed. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly, and stopped after the timeout. Assign a script to a key from the button editor.</p>`],
   "panel-tests": ["Device tests", `<p><strong>Test Connection</strong> enumerates and opens attached decks. <strong>Identify Buttons</strong> shows the number of every key for a few seconds. <strong>Test Selected Button</strong> flashes that key (“TEST”) and never runs its action. To run an action, use <em>Test Action</em> in the button editor.</p>`],
   "panel-activity": ["Runtime activity", `<p>Live snapshot of the worker: whether it is running, the current launch state, the last button press, action result, game launch, runtime exit, and error. Use this to confirm a physical key press was received and what it did.</p>`],
   "panel-logs": ["Logs", `<p>Runtime log: <code>integrations/streamdeck/logs/runtime.log</code> (size-rotated). Install log: <code>logs/install.log</code>. Runtime console captures the worker's stdout/stderr. Drone-side events (enable, tests) are also in Admin → Debug → System Logs.</p>`],
@@ -693,7 +693,7 @@ function sdEditorActionHtml() {
   }
   if (button.action_type === "game") return sdGamePickerHtml();
   if (button.action_type === "script") {
-    const options = sdState.scripts.map((script) => `<option value="${sdEsc(script.id)}" ${button.script_id === script.id ? "selected" : ""}>${sdEsc(script.name)}</option>`).join("");
+    const options = sdState.scripts.map((script) => `<option value="${sdEsc(script.id)}" ${button.script_id === script.id ? "selected" : ""}>${sdEsc(script.name)} (${sdEsc(sdScriptLanguageLabel(script.language))})</option>`).join("");
     return `<label class="form-label" for="sdEditorScript">Custom Script ${sdHelpButton("scripts", "What can this script do?")}</label>
       ${sdState.scripts.length ? `<select class="form-select" id="sdEditorScript" data-sd-change="editor-script"><option value="">Choose a script…</option>${options}</select>` : `<div class="alert alert-secondary small">No scripts yet. Create one on the <strong>Custom Scripts</strong> tab first.</div>`}
       <div class="alert alert-warning small mt-2 mb-0"><i class="bi bi-shield-exclamation me-1"></i>Scripts run as the Drone service on this machine with full rights.</div>`;
@@ -1094,9 +1094,39 @@ async function sdDeviceCommand(operation, body = {}) {
 }
 
 // ---------------------------------------------------------------- scripts
+const SD_SCRIPT_STARTERS = {
+  bash: "#!/bin/bash\n# Runs on this Batocera machine as the Drone service.\necho \"Hello from Stream Deck\"\n",
+  python3: "#!/usr/bin/env python3\n# Runs on this Batocera machine as the Drone service.\nprint(\"Hello from Stream Deck\")\n",
+};
+
+function sdScriptLanguageLabel(language) {
+  return language === "python3" ? "Python 3" : "Bash";
+}
+
+function sdNormalizeScriptCode(code) {
+  const text = String(code || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+function sdScriptStarter(language) {
+  return SD_SCRIPT_STARTERS[language] || SD_SCRIPT_STARTERS.bash;
+}
+
+function sdScriptCodeIsStarter(code) {
+  const normalized = sdNormalizeScriptCode(code);
+  return Object.keys(SD_SCRIPT_STARTERS).some((language) => sdNormalizeScriptCode(SD_SCRIPT_STARTERS[language]) === normalized);
+}
+
+function sdScriptShebangMatches(language, code) {
+  const line = String(code || "").split("\n")[0].trim();
+  if (language === "python3") return line === "#!/usr/bin/env python3";
+  return line === "#!/bin/bash" || line === "#!/bin/sh";
+}
+
 function sdScriptsHtml() {
   const rows = sdState.scripts.map((script) => `<tr class="${sdState.scriptEditor && sdState.scriptEditor.id === script.id ? "table-active" : ""}">
     <td><strong>${sdEsc(script.name)}</strong><div class="small text-muted">${sdEsc(script.description || "")}</div></td>
+    <td class="small">${sdEsc(sdScriptLanguageLabel(script.language))}</td>
     <td class="small text-muted">${sdEsc(sdTime(script.updated_at))}</td>
     <td class="text-end text-nowrap">
       <button type="button" class="btn btn-sm btn-outline-primary" data-sd-action="script-edit" data-id="${sdEsc(script.id)}"><i class="bi bi-pencil"></i> Edit</button>
@@ -1115,7 +1145,7 @@ function sdScriptsHtml() {
 async function sdEditScript(scriptId) {
   try {
     sdState.scriptEditor = scriptId ? await sdGet(`/scripts/${encodeURIComponent(scriptId)}`)
-      : { id: "", name: "New script", description: "", code: "#!/bin/bash\n# Runs on this Batocera machine as the Drone service.\necho \"Hello from Stream Deck\"\n", references: [] };
+      : { id: "", name: "New script", description: "", language: "bash", code: sdScriptStarter("bash"), references: [] };
     sdState.scriptRun = null;
     sdRenderTab();
   } catch (error) {
@@ -1128,11 +1158,19 @@ function sdRenderScriptEditor() {
   const script = sdState.scriptEditor;
   if (!target || !script) return;
   const refs = (script.references || []).map((ref) => `${sdEsc(ref.profile_name)} key ${Number(ref.key) + 1}`).join(", ");
+  const language = script.language === "python3" ? "python3" : "bash";
+  const mismatch = script.code && !sdScriptShebangMatches(language, script.code);
   target.innerHTML = `<div class="row g-2">
-      <div class="col-md-5"><label class="form-label small" for="sdScriptName">Name</label><input class="form-control" id="sdScriptName" maxlength="80" value="${sdEsc(script.name)}"></div>
-      <div class="col-md-7"><label class="form-label small" for="sdScriptDescription">Description</label><input class="form-control" id="sdScriptDescription" maxlength="300" value="${sdEsc(script.description)}"></div>
-      <div class="col-12"><label class="form-label small" for="sdScriptCode">Code <span class="text-muted">(must start with an interpreter line such as <code>#!/bin/bash</code>; max 64 KiB)</span></label>
-        <textarea class="form-control font-monospace sd-code" id="sdScriptCode" rows="14" spellcheck="false">${sdEsc(script.code)}</textarea></div></div>
+      <div class="col-md-4"><label class="form-label small" for="sdScriptName">Name</label><input class="form-control" id="sdScriptName" maxlength="80" value="${sdEsc(script.name)}"></div>
+      <div class="col-md-3"><label class="form-label small" for="sdScriptLanguage">Language</label>
+        <select class="form-select" id="sdScriptLanguage" data-sd-change="script-language">
+          <option value="bash" ${language === "bash" ? "selected" : ""}>Bash</option>
+          <option value="python3" ${language === "python3" ? "selected" : ""}>Python 3</option>
+        </select></div>
+      <div class="col-md-5"><label class="form-label small" for="sdScriptDescription">Description</label><input class="form-control" id="sdScriptDescription" maxlength="300" value="${sdEsc(script.description)}"></div>
+      <div class="col-12"><label class="form-label small" for="sdScriptCode">Code <span class="text-muted">(Bash: <code>#!/bin/bash</code>; Python 3: <code>#!/usr/bin/env python3</code>; max 64 KiB)</span></label>
+        <textarea class="form-control font-monospace sd-code" id="sdScriptCode" rows="14" spellcheck="false">${sdEsc(script.code)}</textarea>
+        ${mismatch ? `<div class="form-text text-warning">The interpreter line does not match ${sdEsc(sdScriptLanguageLabel(language))}. Saving will be rejected until the first line matches. Changing the language does not rewrite code you have already edited.</div>` : `<div class="form-text">Python 3 uses the system <code>python3</code>. Extra packages are not installed. Changing language replaces the example only while the code is still a starter.</div>`}</div></div>
     <div class="small text-muted mt-1">${refs ? `Assigned to: ${refs}` : "Not assigned to any key."} Available variables: <code>DRONE_STREAMDECK_KEY</code>, <code>_DEVICE_ID</code>, <code>_PROFILE_ID</code>, <code>_TRIGGER</code>, <code>_GAME_SYSTEM</code>, <code>_GAME_ROM</code>.</div>
     <div class="d-flex flex-wrap gap-2 mt-2">
       <button type="button" class="btn btn-primary" data-sd-action="script-save"><i class="bi bi-save me-1"></i>Save</button>
@@ -1144,9 +1182,11 @@ function sdRenderScriptEditor() {
 
 async function sdSaveScript() {
   const script = sdState.scriptEditor;
+  const languageEl = document.getElementById("sdScriptLanguage");
   const payload = {
     name: document.getElementById("sdScriptName").value, description: document.getElementById("sdScriptDescription").value,
     code: document.getElementById("sdScriptCode").value,
+    language: languageEl ? languageEl.value : (script.language || "bash"),
   };
   try {
     const saved = script.id ? await sdPost(`/scripts/${encodeURIComponent(script.id)}/update`, payload) : await sdPost("/scripts", payload);
@@ -1389,6 +1429,21 @@ async function sdOnChange(kind, element) {
       await sdSaveSettings();
       return;
     case "log-source": sdState.logSource = element.value; await sdLoadLog(); return;
+    case "script-language": {
+      const script = sdState.scriptEditor;
+      if (!script) return;
+      const name = document.getElementById("sdScriptName");
+      const description = document.getElementById("sdScriptDescription");
+      const code = document.getElementById("sdScriptCode");
+      if (name) script.name = name.value;
+      if (description) script.description = description.value;
+      const currentCode = code ? code.value : script.code;
+      const next = element.value === "python3" ? "python3" : "bash";
+      script.language = next;
+      script.code = !String(currentCode || "").trim() || sdScriptCodeIsStarter(currentCode) ? sdScriptStarter(next) : currentCode;
+      sdRenderTab();
+      return;
+    }
     case "editor-type":
       editor.button.action_type = element.value;
       if (element.value === "game") sdEnsureSystems();

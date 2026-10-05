@@ -89,6 +89,8 @@ before non-trivial work; keep it accurate in the same change.
 - Globally `pip install`, delete global pip/setuptools, or require
   `batocera-save-overlay`; don't import StreamDeck/Pillow in the Drone process.
 - Expose Stream Deck configuration to remote Drones / peer routes.
+- Let a custom script's `language` and shebang disagree, or run Python scripts with the
+  Stream Deck private venv (`.sh`=bash, `.py`=python3 on the system `python3`).
 - Implement built-ins or Launch Game as editable custom scripts, or save raw
   shell commands for either (`validate_button` rejects `command`/`cmd`/`shell`).
 - Bypass ES's launch path (no direct `emulatorlauncher`/emulator binaries).

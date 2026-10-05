@@ -1,15 +1,19 @@
 """Administrator-authored custom scripts -- the only editable executable action.
 
-Scripts live only in ``<integration>/scripts/<32-hex-id>.sh`` (+ ``.json``
-metadata). IDs are server-generated and re-validated on every access, so no
-request can name a path. Execution runs the saved file directly (its shebang
-picks the interpreter) through ``ProcessRunner`` with ``shell=False``, a clean
-environment (Drone's own environment -- which may hold tokens -- is not
-inherited), a timeout, and bounded output. Built-ins and Launch Game never use
-this module.
+Scripts live only in ``<integration>/scripts/<32-hex-id>.sh`` or ``.py``
+(+ ``.json`` metadata). IDs are server-generated and re-validated on every
+access, so no request can name a path. Bash is ``<id>.sh``; Python 3 is
+``<id>.py``. Metadata records ``language`` (``bash`` or ``python3``). A legacy
+``.sh`` whose metadata has no language is Bash.
+
+Execution runs the saved file directly (its shebang picks the interpreter)
+through ``ProcessRunner`` with ``shell=False``, a clean environment (Drone's
+own environment -- which may hold tokens -- is not inherited), a timeout, and
+bounded output. Python 3 is the Batocera system ``python3`` on that safe
+``PATH``; this feature does not install packages or use the Stream Deck
+tooling virtualenv. Built-ins and Launch Game never use this module.
 """
 
-import json
 import os
 import threading
 import time
@@ -23,8 +27,26 @@ from .process import ProcessRunner
 
 
 MAX_SCRIPT_BYTES = 64 * 1024
-DEFAULT_SCRIPT = "#!/bin/bash\n# Runs as the Drone service on this Batocera machine.\necho \"Hello from Stream Deck\"\n"
 _SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Primary shebang is the starter. Extra shebangs stay valid for that language
+# so existing Bash scripts that begin with #!/bin/sh keep running.
+_LANGUAGES = {
+    "bash": {
+        "extension": ".sh",
+        "shebangs": ("#!/bin/bash", "#!/bin/sh"),
+    },
+    "python3": {
+        "extension": ".py",
+        "shebangs": ("#!/usr/bin/env python3",),
+    },
+}
+DEFAULT_SCRIPT = "#!/bin/bash\n# Runs as the Drone service on this Batocera machine.\necho \"Hello from Stream Deck\"\n"
+DEFAULT_PYTHON_SCRIPT = (
+    "#!/usr/bin/env python3\n"
+    "# Runs as the Drone service on this Batocera machine.\n"
+    "print(\"Hello from Stream Deck\")\n"
+)
 
 
 class ScriptInUseError(ValueError):
@@ -33,16 +55,60 @@ class ScriptInUseError(ValueError):
         self.references = references
 
 
+def _shebang_line(code: str) -> str:
+    return code.split("\n", 1)[0].strip()
+
+
+def _language_for_shebang(line: str) -> Optional[str]:
+    for language, spec in _LANGUAGES.items():
+        if line in spec["shebangs"]:
+            return language
+    return None
+
+
 class ScriptStore:
     def __init__(self, paths: StreamDeckPaths, runner: Optional[ProcessRunner] = None) -> None:
         self.paths = paths
         self.runner = runner or ProcessRunner()
         self._lock = threading.Lock()
 
-    def _files(self, script_id: str) -> tuple:
+    def _meta_path(self, script_id: str) -> Path:
+        return self.paths.owned("scripts", f"{script_id}.json")
+
+    def _candidate_paths(self, script_id: str) -> Dict[str, Path]:
+        return {
+            language: self.paths.owned("scripts", f"{script_id}{spec['extension']}")
+            for language, spec in _LANGUAGES.items()
+        }
+
+    def _resolve(self, script_id: str, *, require_meta: bool):
+        """Return ``(id, path, meta_path, meta, language)`` or ``None`` when missing.
+
+        ``require_meta`` matches ``get`` (metadata and file both required).
+        ``run`` still executes a directly owned file whose metadata is absent.
+        A declared language only resolves that extension, so a script cannot be
+        executed under the other interpreter. With no language field, ``.sh``
+        is Bash and wins over a stray ``.py``.
+        """
         script_id = hex_id(script_id, "script id")
-        return (self.paths.owned("scripts", f"{script_id}.sh"),
-                self.paths.owned("scripts", f"{script_id}.json"))
+        meta_path = self._meta_path(script_id)
+        candidates = self._candidate_paths(script_id)
+        meta = read_json(meta_path, None)
+        if not isinstance(meta, dict):
+            if require_meta:
+                raise KeyError("script not found")
+            meta = {}
+        declared = meta.get("language") if isinstance(meta, dict) else None
+        if declared not in _LANGUAGES:
+            declared = None
+        search = [declared] if declared else list(_LANGUAGES)
+        for language in search:
+            path = candidates[language]
+            if path.is_file() and not path.is_symlink():
+                return script_id, path, meta_path, meta, declared or language
+        if require_meta:
+            raise KeyError("script not found")
+        return None
 
     @staticmethod
     def _validate_payload(payload: dict, current: Optional[dict] = None) -> dict:
@@ -57,25 +123,58 @@ class ScriptStore:
         if "\x00" in code:
             raise ValueError("script code must be text")
         if not code.startswith("#!"):
-            raise ValueError("script must start with an interpreter line, e.g. #!/bin/bash")
+            raise ValueError("script must start with an interpreter line, e.g. #!/bin/bash or #!/usr/bin/env python3")
         if len(code.encode("utf-8")) > MAX_SCRIPT_BYTES:
             raise ValueError("script is larger than 64 KiB")
         if not code.endswith("\n"):
             code += "\n"
+        shebang = _shebang_line(code)
+        inferred = _language_for_shebang(shebang)
+        if "language" in payload and payload.get("language") is not None:
+            language = payload.get("language")
+        elif current.get("language") in _LANGUAGES:
+            language = current.get("language")
+        else:
+            language = inferred
+        if not isinstance(language, str) or language not in _LANGUAGES:
+            raise ValueError("script language must be bash or python3")
+        if inferred != language:
+            expected = _LANGUAGES[language]["shebangs"][0]
+            if inferred is None:
+                raise ValueError(
+                    f"unsupported script interpreter for {language}; use {expected}"
+                )
+            raise ValueError(
+                f"script interpreter does not match language {language}; use {expected}"
+            )
         return {
             "name": name,
             "description": clean_text(payload.get("description", current.get("description", "")), 300),
             "code": code,
+            "language": language,
         }
 
     def _write(self, script_id: str, values: dict, created_at: Optional[str] = None) -> dict:
-        script_path, meta_path = self._files(script_id)
+        language = values["language"]
+        script_path = self._candidate_paths(script_id)[language]
+        meta_path = self._meta_path(script_id)
         self.paths.ensure(self.paths.scripts_dir)
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Write the new file before dropping the previous extension so a crash
+        # cannot leave the script with neither body.
         atomic_write_bytes(script_path, values["code"].encode("utf-8"), mode=0o700)
-        meta = {"id": script_id, "name": values["name"], "description": values["description"],
-                "created_at": created_at or now, "updated_at": now}
+        meta = {
+            "id": script_id,
+            "name": values["name"],
+            "description": values["description"],
+            "language": language,
+            "created_at": created_at or now,
+            "updated_at": now,
+        }
         atomic_write_json(meta_path, meta)
+        for other, path in self._candidate_paths(script_id).items():
+            if other != language and path.is_file() and not path.is_symlink():
+                path.unlink()
         return {**meta, "code": values["code"], "size": len(values["code"].encode("utf-8"))}
 
     def list(self) -> List[dict]:
@@ -94,14 +193,12 @@ class ScriptStore:
         return rows
 
     def get(self, script_id: str, *, include_code: bool = True) -> dict:
-        script_path, meta_path = self._files(script_id)
-        meta = read_json(meta_path, None)
-        if not isinstance(meta, dict) or not script_path.is_file() or script_path.is_symlink():
-            raise KeyError("script not found")
+        script_id, script_path, _meta_path, meta, language = self._resolve(script_id, require_meta=True)
         row = {
-            "id": hex_id(script_id),
+            "id": script_id,
             "name": clean_text(meta.get("name"), 80) or "Script",
             "description": clean_text(meta.get("description"), 300),
+            "language": language,
             "created_at": meta.get("created_at"),
             "updated_at": meta.get("updated_at"),
             "size": script_path.stat().st_size,
@@ -131,11 +228,14 @@ class ScriptStore:
         if references:
             raise ScriptInUseError(references)
         with self._lock:
-            script_path, meta_path = self._files(script_id)
-            if not script_path.exists() and not meta_path.exists():
+            script_id = hex_id(script_id, "script id")
+            meta_path = self._meta_path(script_id)
+            candidates = list(self._candidate_paths(script_id).values())
+            if not meta_path.exists() and not any(path.exists() for path in candidates):
                 raise KeyError("script not found")
-            for path in (script_path, meta_path):
-                path.unlink(missing_ok=True)
+            for path in (*candidates, meta_path):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
 
     def environment(self, extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
         env = {
@@ -151,11 +251,14 @@ class ScriptStore:
 
     def run(self, script_id: str, *, timeout: float = 30.0, context: Optional[Mapping[str, str]] = None,
             cancel_event: Optional[threading.Event] = None, requested_by: str = "") -> dict:
-        script_path, _meta_path = self._files(script_id)
-        if not script_path.is_file() or script_path.is_symlink():
+        try:
+            resolved = self._resolve(script_id, require_meta=False)
+        except KeyError:
+            resolved = None
+        if resolved is None:
             return {"status": "failed", "error": "Script not found. Assign another script to this button.",
                     "exit_code": None, "stdout": "", "stderr": "", "duration_seconds": 0}
-        meta = read_json(_meta_path, {}) or {}
+        script_id, script_path, _meta_path, meta, _language = resolved
         os.chmod(script_path, 0o700)
         result = self.runner.run(str(script_path), (), timeout=min(300.0, max(1.0, float(timeout))),
                                  cwd=self.paths.scripts_dir, env=self.environment(context),
@@ -168,7 +271,7 @@ class ScriptStore:
             status = "cancelled"
         else:
             status = "completed" if result.exit_code == 0 else "failed"
-        log_event("custom-script", script_id=hex_id(script_id), name=meta.get("name"), status=status,
+        log_event("custom-script", script_id=script_id, name=meta.get("name"), status=status,
                   exit_code=result.exit_code, duration=result.duration_seconds, requested_by=requested_by,
                   trigger=(context or {}).get("DRONE_STREAMDECK_TRIGGER"))
         payload = result.to_dict()
