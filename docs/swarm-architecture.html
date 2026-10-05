@@ -682,7 +682,7 @@
         <p class="panel-tag">03 &middot; Trust model</p>
         <h2>Pairing, once &mdash; then cert-pinned forever</h2>
       </div>
-      <p class="panel-note">No shared CA, no third party. A peer is trusted because, and only because, it's in <em>this</em> Drone's own paired-peer list.</p>
+      <p class="panel-note">No shared CA, no third party. A peer is trusted because, and only because, it's in <em>this</em> Drone's own paired-peer list. An approved pairing is gossiped to members that are already trusted, so the roster converges without a central directory.</p>
     </div>
 
     <div class="diagram-card">
@@ -733,7 +733,7 @@
         <text x="604" y="348" class="body-text">pinned value for that exact paired drone_id, every single request.</text>
       </svg>
     </div>
-    <p class="caption">Application authorization is exactly this list check &mdash; connectivity checks (every ~30s, cached locally) confirm a peer is <em>reachable</em>, never that it's <em>authorized</em>. The same mTLS identity backs ROM/BIOS/save/artwork transfers and the VPN peer endpoint alike.</p>
+    <p class="caption">Application authorization is exactly this list check &mdash; connectivity checks (every ~30s, cached locally) confirm a peer is <em>reachable</em>, never that it's <em>authorized</em>. After a pairing is approved, <code>transfer/swarm_membership.py</code> shares that approval with already-paired Drones (<code>POST /peer/membership</code>) so every member sees the new Drone and the new Drone sees every member. Discovery cannot insert a member, gossip cannot replace a pinned fingerprint, and a newer removal drops that Drone from every roster it reaches. The same mTLS identity backs ROM/BIOS/save/artwork transfers and the VPN peer endpoint alike.</p>
   </section>
 
   <!-- ================= SECTION 4: INSIDE A DRONE ================= -->

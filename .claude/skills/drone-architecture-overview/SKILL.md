@@ -54,7 +54,13 @@ Pairing exchanges each Drone's **self-signed** mTLS certificate and pins the
 peer's exact fingerprint — there is no shared CA and no third party granting
 authorization. The stored result (`transfer/local_network.py`'s
 `local_paired_peers`) is the *only* authority: a peer is trusted because it's in
-*this Drone's own* paired-peer list, nothing else. (A legacy "managed" mTLS mode
+*this Drone's own* paired-peer list, nothing else. An approved pairing is then
+shared with peers that Drone already trusts (`transfer/swarm_membership.py`,
+`POST /v1/api/peer/membership`) so every member learns the new Drone and the
+new Drone learns every member. That gossip is not a coordinator and not a
+directory: it rides the existing paired mTLS channel, keeps the pinned
+fingerprint, and ignores discovery. A newer removal tombstone drops the member
+everywhere it converges. (A legacy "managed" mTLS mode
 signed by the retired hub still exists in `DroneCertificateManager` for
 backward compatibility; new pairing is always self-signed + pinned.)
 

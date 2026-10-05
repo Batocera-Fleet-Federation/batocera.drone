@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Propagate an approved swarm pairing to every current member. A Drone invited through any member becomes visible on every roster, and a removal converges the same way. Discovery still does not grant access, and an already pinned certificate fingerprint is not replaced by gossip.
+
 - Stream Deck Setup: default brightness 100%, always auto-apply saved keys and
   settings, merge Device Settings with safeguards, move Connected Devices to the
   top of Overview, put panel help on headings, and drop the Apply, Save Settings,

@@ -1813,6 +1813,50 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("status", "peer", "drone_id", "name", "scheme", "api_port", "certificate_pem", "certificate_fingerprint"),
         ),
+        "SwarmMembershipCard": _object(
+            {
+                "name": _string(),
+                "hostname": _string(),
+                "reachable_url": _string(),
+                "advertised_reachable_url": _string(),
+                "scheme": _enum(["http", "https"]),
+                "api_port": _integer(),
+                "peer_mtls_port": _integer(),
+                "tailnet_ip": _string(),
+                "source_ip": _string(),
+                "pairing_source": _string(),
+                "certificate_fingerprint": _string(),
+                "certificate_pem": _string(description="Public certificate attested by an already-paired Drone"),
+            },
+            (),
+        ),
+        "SwarmMembershipRecord": _object(
+            {
+                "peer_id": _string(),
+                "op": _enum(["add", "remove"]),
+                "epoch": _integer(description="Lamport epoch; a newer removal beats an older add"),
+                "origin": _string(),
+                "card": _ref("SwarmMembershipCard"),
+            },
+            ("peer_id", "op", "epoch", "origin"),
+        ),
+        "SwarmMembershipRequest": _object(
+            {
+                "introducer_id": _string(description="Sending Drone id. Ignored when the client certificate identifies a paired peer."),
+                "hop": _integer(),
+                "clock": _integer(),
+                "records": _array(_ref("SwarmMembershipRecord")),
+            },
+            ("records",),
+        ),
+        "SwarmMembershipResponse": _object(
+            {
+                "status": _enum(["synced", "removed"]),
+                "clock": _integer(),
+                "records": _array(_ref("SwarmMembershipRecord")),
+            },
+            ("status", "clock", "records"),
+        ),
         "PeerInfoResponse": _object(
             {
                 "service": _string(),
@@ -2723,6 +2767,17 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     request_body=_json_request("PeerPairRequest"),
                     tags=["peer"],
                     security=[],
+                    error_codes=("400", "403", "409", "429", "500"),
+                )
+            },
+            "/peer/membership": {
+                "post": _operation(
+                    "Exchange approved swarm membership with an already-paired Drone",
+                    {"200": _json_response("SwarmMembershipResponse")},
+                    description="Requires the caller's pinned certificate. An approved member's roster is pinned and stored locally; discovery does not grant access. A removed member receives only its own tombstone.",
+                    request_body=_json_request("SwarmMembershipRequest"),
+                    tags=["peer"],
+                    security=peer_security,
                     error_codes=("400", "403", "409", "429", "500"),
                 )
             },

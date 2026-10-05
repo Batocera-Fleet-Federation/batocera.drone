@@ -69,6 +69,13 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   paired-peer entry**; local discovery wins when both agree on the same peer.
 - Forgetting a peer (`forget_peer`) is sticky — an explicitly forgotten tailnet peer
   stays forgotten until the user restores it, even if tailnet discovery keeps seeing it.
+- **Swarm membership** (`transfer/swarm_membership.py`): approving a pair records
+  that member and gossips the roster to already-paired peers
+  (`POST /v1/api/peer/membership`). A join through any current member fills every
+  roster. Callers must already be paired (mTLS fingerprint); discovery does not.
+  A newer removal beats an older add and is forwarded the same way. Gossip must
+  not replace a fingerprint already pinned for that drone id. An explicit re-pair
+  is a new approval and can rejoin; a stale add cannot.
 
 Peer metadata should be refreshed periodically and stored locally; never treat a
 cached address as proof of live connectivity — that's what connectivity checks are for.

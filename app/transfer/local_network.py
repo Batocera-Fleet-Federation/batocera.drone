@@ -312,7 +312,7 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     return stored
 
 
-def forget_peer(settings: Any, peer_id: str) -> bool:
+def forget_peer(settings: Any, peer_id: str, *, publish_membership: bool = True) -> bool:
     normalized = str(peer_id or "").strip()
     peers = _load_peer_map(settings, "local_paired_peers")
     previous = peers.pop(normalized, None)
@@ -330,6 +330,15 @@ def forget_peer(settings: Any, peer_id: str) -> bool:
     if normalized in discovered:
         discovered[normalized]["paired"] = False
         _save_peer_map(settings, "local_discovered_peers", discovered)
+    if removed and publish_membership:
+        # Imported lazily: swarm membership records the tombstone, and that
+        # module calls back into this one to project the paired-peer list.
+        try:
+            from . import swarm_membership
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            import swarm_membership  # type: ignore
+
+        swarm_membership.record_local_removal(settings, normalized, previous if isinstance(previous, dict) else {})
     return removed
 
 

@@ -622,6 +622,7 @@ try:
     from .web.server_tls import (
         _generate_self_signed_cert,
         _resolve_tls_material,
+        register_live_tls_servers,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -629,6 +630,7 @@ except ImportError:
     from web.server_tls import (  # type: ignore
         _generate_self_signed_cert,
         _resolve_tls_material,
+        register_live_tls_servers,
     )
 
 
@@ -2700,6 +2702,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     for tls_server in all_tls_servers:
         tls_server.all_tls_servers = all_tls_servers  # type: ignore[attr-defined]
         tls_server.is_peer_mtls_listener = False  # type: ignore[attr-defined]
+    register_live_tls_servers(all_tls_servers)
     if peer_mtls_server is not None:
         peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
 
