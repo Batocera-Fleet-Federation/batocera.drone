@@ -8,11 +8,15 @@ every ``/dev/input/event*`` device and writes the wall-clock epoch of the latest
 to drive idle automations (e.g. lowering the volume after a period of no input).
 
 The "deliberate" qualifier matters: many gamepads/arcade encoders (e.g. DragonRise
-USB joysticks) stream analog-axis (``EV_ABS``) jitter continuously even when nobody
+USB joysticks) stream analog-axis (``EV_ABS``) noise continuously even when nobody
 is touching them. Counting that noise as input means the device never looks idle, so
-this monitor parses each event and ignores axis jitter and sync events. It treats as
-input: any key/button event (``EV_KEY``), relative movement (``EV_REL``), and absolute
-axis movement that exceeds a per-axis deadzone derived from the device's reported range.
+this monitor parses each event and ignores sync events, in-deadzone jitter, and
+periodic full-range axis square waves (a resting DragonRise axis 5 has been seen
+flipping ``0 <-> 127`` about every 3s, which clears the deadzone). It treats as
+input: any key/button event (``EV_KEY``), relative movement (``EV_REL``), analog
+sweeps through three or more distinct values, and an absolute-axis change that is
+held (or isolated, not repeating on a regular cadence) past the pending-confirm
+window.
 
 Usage: ``python3 app/input_activity_monitor.py [output_file]``. The output file
 defaults to ``DRONE_INPUT_ACTIVITY_FILE`` or the control directory's
@@ -30,6 +34,7 @@ import select
 import struct
 import sys
 import time
+from collections import deque
 
 
 DEFAULT_OUTPUT = "/userdata/system/drone-app/control/last-input-activity"
@@ -55,6 +60,19 @@ EV_ABS = 0x03
 ABS_DEADZONE_FRACTION = 0.15
 ABS_DEADZONE_FLOOR = 4  # smallest meaningful change, for very small-range axes
 
+# Periodic two-value ABS oscillation (the DragonRise 0<->127 ~3s square wave) is
+# not a held stick: each level sits still for seconds, then snaps back. Count an
+# absolute axis as input only once it looks like real motion or a non-repeating
+# hold. Cadence bounds cover the observed ~3s wave without swallowing a stick
+# that is genuinely held longer than the idle automations' minute-scale timer.
+ABS_PERIODIC_MIN_INTERVAL = 0.4
+ABS_PERIODIC_MAX_INTERVAL = 10.0
+ABS_PERIODIC_MIN_INTERVALS = 3  # four edges of a square wave
+ABS_PERIODIC_INTERVAL_SLOP = 0.4  # relative deviation from the mean interval
+ABS_PENDING_CONFIRM_SECONDS = 10.0  # silence after a 2-value swing before counting it
+ABS_MOTION_DISTINCT_POLES = 3
+ABS_TRANSITION_HISTORY = 12
+
 # EVIOCGABS(code): _IOR('E', 0x40 + code, struct input_absinfo) -> 6 * __s32.
 _ABSINFO_FORMAT = "6i"
 _ABSINFO_SIZE = struct.calcsize(_ABSINFO_FORMAT)
@@ -74,6 +92,100 @@ def _axis_deadzone(fd: int, code: int) -> int:
         minimum, maximum, flat = 0, 255, 0
     axis_range = abs(maximum - minimum)
     return max(ABS_DEADZONE_FLOOR, int(axis_range * ABS_DEADZONE_FRACTION), int(flat))
+
+
+def _event_epoch(sec: int, usec: int, fallback: float) -> float:
+    """Kernel timeval if present, otherwise the caller's clock (tests use 0,0)."""
+    if sec or usec:
+        return float(sec) + float(usec) / 1_000_000.0
+    return fallback
+
+
+def _distinct_poles(values, deadzone: int):
+    """Collapse raw axis values that sit within one deadzone of each other."""
+    poles = []
+    for value in values:
+        if not any(abs(value - pole) <= deadzone for pole in poles):
+            poles.append(value)
+    return poles
+
+
+def _intervals_are_regular(intervals) -> bool:
+    if len(intervals) < ABS_PERIODIC_MIN_INTERVALS:
+        return False
+    mean = sum(intervals) / len(intervals)
+    if mean < ABS_PERIODIC_MIN_INTERVAL or mean > ABS_PERIODIC_MAX_INTERVAL:
+        return False
+    slop = mean * ABS_PERIODIC_INTERVAL_SLOP
+    return all(abs(interval - mean) <= slop for interval in intervals)
+
+
+def _new_axis_tracker() -> dict:
+    return {
+        "transitions": deque(maxlen=ABS_TRANSITION_HISTORY),
+        "periodic": False,
+        "last_time": None,
+        "rest_value": None,
+    }
+
+
+def _note_abs_transition(
+    tracker: dict, now: float, previous: int, value: int, deadzone: int
+) -> bool:
+    """Record a deadzone-clearing ABS change. True if it is clearly real motion.
+
+    Two-value swings stay pending until ``_confirm_pending_axes`` sees silence or
+    until enough regular intervals classify the axis as periodic noise. The rest
+    position is a pole (so 127 -> 180 -> 255 is three poles) but is not itself a
+    timed edge, so it cannot fabricate a zero-length interval.
+    """
+    if tracker.get("rest_value") is None:
+        tracker["rest_value"] = previous
+    transitions = tracker["transitions"]
+    transitions.append((now, value))
+    tracker["last_time"] = now
+    poles = _distinct_poles(
+        [tracker["rest_value"]] + [item[1] for item in transitions], deadzone
+    )
+    if len(poles) >= ABS_MOTION_DISTINCT_POLES:
+        tracker["periodic"] = False
+        return True
+    times = [item[0] for item in transitions]
+    intervals = [times[index] - times[index - 1] for index in range(1, len(times))]
+    recent = intervals[-ABS_PERIODIC_MIN_INTERVALS:]
+    if len(poles) <= 2 and _intervals_are_regular(recent):
+        tracker["periodic"] = True
+        return False
+    if tracker.get("periodic"):
+        if _intervals_are_regular(recent):
+            return False
+        tracker["periodic"] = False
+        return True
+    return False
+
+
+def _confirm_pending_axes(trackers: dict, now: float) -> bool:
+    """True when a non-periodic large ABS change has been held/isolated long enough."""
+    activity = False
+    for tracker in trackers.values():
+        if tracker.get("periodic"):
+            continue
+        last_time = tracker.get("last_time")
+        if last_time is None or not tracker["transitions"]:
+            continue
+        if now - last_time < ABS_PENDING_CONFIRM_SECONDS:
+            continue
+        tracker["rest_value"] = tracker["transitions"][-1][1]
+        tracker["transitions"].clear()
+        tracker["last_time"] = None
+        activity = True
+    return activity
+
+
+def _drop_fd_state(fd: int, *stores: dict) -> None:
+    for store in stores:
+        for key in [item for item in store if item[0] == fd]:
+            store.pop(key, None)
 
 
 def _open_devices() -> dict:
@@ -115,13 +227,25 @@ def _write_activity(output_path: str, epoch: float) -> None:
             pass
 
 
-def _read_deliberate_input(fd: int, abs_state: dict, deadzones: dict) -> bool:
+def _read_deliberate_input(
+    fd: int,
+    abs_state: dict,
+    deadzones: dict,
+    trackers=None,
+    now=None,
+) -> bool:
     """Read pending events from fd; return True if any was a deliberate user input.
 
     ``abs_state`` maps (fd, code) -> last seen absolute value so we can ignore the
-    continuous jitter that idle analog axes emit. Raises OSError (other than
-    EAGAIN/EWOULDBLOCK) if the device disappears so the caller can drop it.
+    continuous jitter that idle analog axes emit. ``trackers`` holds per-axis
+    transition history used to ignore periodic two-value square waves. Raises
+    OSError (other than EAGAIN/EWOULDBLOCK) if the device disappears so the
+    caller can drop it.
     """
+    if trackers is None:
+        trackers = {}
+    if now is None:
+        now = time.time()
     activity = False
     while True:
         try:
@@ -135,7 +259,7 @@ def _read_deliberate_input(fd: int, abs_state: dict, deadzones: dict) -> bool:
         count = len(data) // EVENT_SIZE
         for index in range(count):
             offset = index * EVENT_SIZE
-            _sec, _usec, ev_type, code, value = struct.unpack(
+            sec, usec, ev_type, code, value = struct.unpack(
                 EVENT_FORMAT, data[offset : offset + EVENT_SIZE]
             )
             if ev_type == EV_KEY:
@@ -154,7 +278,13 @@ def _read_deliberate_input(fd: int, abs_state: dict, deadzones: dict) -> bool:
                     deadzone = _axis_deadzone(fd, code)
                     deadzones[key] = deadzone
                 if abs(value - previous) > deadzone:
-                    activity = True
+                    tracker = trackers.get(key)
+                    if tracker is None:
+                        tracker = _new_axis_tracker()
+                        trackers[key] = tracker
+                    event_now = _event_epoch(sec, usec, now)
+                    if _note_abs_transition(tracker, event_now, previous, value, deadzone):
+                        activity = True
             # EV_SYN and everything else are ignored.
         if count < 64:
             return activity
@@ -178,6 +308,7 @@ def main() -> int:
     devices = _open_devices()
     abs_state: dict = {}
     deadzones: dict = {}
+    axis_trackers: dict = {}
     last_scan = time.time()
 
     while True:
@@ -186,6 +317,7 @@ def main() -> int:
             devices = _open_devices()
             abs_state.clear()
             deadzones.clear()
+            axis_trackers.clear()
             last_scan = time.time()
 
         if not devices:
@@ -201,13 +333,15 @@ def main() -> int:
             devices = _open_devices()
             abs_state.clear()
             deadzones.clear()
+            axis_trackers.clear()
             last_scan = time.time()
             continue
 
+        now = time.time()
         activity = False
         for fd in readable:
             try:
-                if _read_deliberate_input(fd, abs_state, deadzones):
+                if _read_deliberate_input(fd, abs_state, deadzones, axis_trackers, now=now):
                     activity = True
             except OSError:
                 # Device unplugged; drop it and rescan on the next loop.
@@ -216,9 +350,12 @@ def main() -> int:
                 except OSError:
                     pass
                 devices.pop(fd, None)
+                _drop_fd_state(fd, abs_state, deadzones, axis_trackers)
+
+        if _confirm_pending_axes(axis_trackers, now):
+            activity = True
 
         if activity:
-            now = time.time()
             if now - last_written >= WRITE_THROTTLE_SECONDS:
                 _write_activity(output_path, now)
                 last_written = now
