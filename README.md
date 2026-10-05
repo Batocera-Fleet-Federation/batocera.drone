@@ -196,6 +196,14 @@ DRONE_APP_PASSWORD="change-this-password"
 
 The installer and `run_web_now.sh` use these if they are already set. If they are not set, the scripts prompt you.
 
+Normal installs and service recovery download the published `drone-app.tar.gz` release, validate it in a staging directory, and overlay it only after the version and required web/API/integration files check out. A failed or incomplete release download leaves the existing install unchanged. Source/codeload archives require an explicit development option:
+
+```bash
+DRONE_APP_DEVELOPMENT=1 ./run_web_now.sh
+# or
+./run_web_now.sh --dev
+```
+
 ### Disable Admin Features
 
 To hide and block admin routes:

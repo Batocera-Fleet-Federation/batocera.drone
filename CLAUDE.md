@@ -111,13 +111,18 @@ input_activity_monitor) require updating those scripts in lockstep.
 **Deploy staging (important now that `app/` is ~87 modules):** the device path is safe —
 `service_bootstrap.sh` sets `DRONE_APP_ARCHIVE_URL=drone-app.tar.gz` and `run_web_now.sh` stages
 the **whole `app/` tree** from that archive (or from a `file://` `DRONE_APP_BASE_URL` via
-`copytree`). Both cover every module automatically — **no per-file list to maintain.** The
-**legacy individual-file fallback** in `run_web_now.sh` (the `else` branch when
-`DRONE_APP_BASE_URL` is unset) only downloads `drone_api.py` + `web/{api_routes,ui_routes,
-route_config}.py` and therefore **cannot stage the multi-module app** — it has been
-incomplete since the first extractions and is not used by the device. Don't rely on it; use
-the archive or `file://` path. `service_bootstrap.sh`'s `validate_local_app` file list +
-import check are a post-deploy sanity gate, not the staging mechanism.
+`copytree`) into a temporary directory, validates version + required payload files, then
+overlays onto the live tree. Both cover every module automatically — **no per-file list to
+maintain.** A failed or incomplete release download does not replace the installed build
+and does not fall back to GitHub codeload. Source/codeload installs require an explicit
+development option (`--dev` or `DRONE_APP_DEVELOPMENT=1`). The installer and service
+recovery always run with development mode off. The **legacy individual-file fallback** in
+`run_web_now.sh` (the `else` branch when `DRONE_APP_BASE_URL` is unset) only downloads
+`drone_api.py` + `web/{api_routes,ui_routes, route_config}.py` and therefore **cannot
+stage the multi-module app** — it has been incomplete since the first extractions and is
+not used by the device. Don't rely on it; use the archive or `file://` path.
+`service_bootstrap.sh`'s `validate_local_app` file list + import check are a post-deploy
+sanity gate, not the staging mechanism.
 The sanity gates deliberately name the separately loaded Integrations UI plus its
 backend registry/handler/manager; a release without any one of them is incomplete.
 Source/codeload deployments have `app/VERSION=dev`; the self-updater treats any

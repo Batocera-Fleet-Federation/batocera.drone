@@ -141,6 +141,10 @@ launch_drone() {
     return 1
   fi
   chmod 755 "$runner" 2>/dev/null || true
+  # Disaster recovery must install a published release. Source/codeload
+  # fallback is opt-in development mode only and is never used here.
+  export DRONE_APP_DEVELOPMENT=0
+  unset DRONE_APP_FALLBACK_ARCHIVE_URL
   export DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}"
   bash "$runner"
   exit_code="$?"
