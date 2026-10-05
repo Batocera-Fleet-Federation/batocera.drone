@@ -245,6 +245,13 @@ If the process start time predates a known deploy, or the version is older than
 (`batocera-services restart DRONE_SERVER`) picks up the latest staged release, but
 **never restart a remote Drone without explicit user approval.**
 
+If `app/VERSION` is `dev`, this device is running a source tree, not a published
+release. After v0.1.245 the updater converges `dev` to the latest semantic
+release; `run_web_now.sh` no longer installs source/codeload unless
+`DRONE_APP_DEVELOPMENT=1` or `--dev` was used. Check `startup.log` for
+"Ignoring source/codeload fallback" or "Rejected unversioned or development
+payload" if a recovery download failed.
+
 ## Case 2 — a Drone you can't SSH to directly (different network/NAT)
 
 The fleet is **outbound-only by design** (see the root `CLAUDE.md`): a Drone with

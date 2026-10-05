@@ -30,9 +30,11 @@ its OpenAPI paths in `web/openapi_spec.py`.
 The Integrations browser bundle is loaded separately from `drone.js`. Release,
 self-update, staging, and service-start validation therefore require the UI bundle,
 API handler, registry, and Stream Deck manager as one atomic payload. An archive
-missing any of them is rejected before overlay/launch. Development/codeload installs
-whose `app/VERSION` is `dev` are intentionally upgraded to the latest validated
-semantic release; they are not skipped by version comparison.
+missing any of them is rejected before overlay/launch. Source/codeload installs are
+opt-in (`--dev` / `DRONE_APP_DEVELOPMENT=1`); a failed published-release download
+never silently installs `VERSION=dev`. An existing `dev` tree is still upgraded to
+the latest validated semantic release by the self-updater; it is not skipped by
+version comparison.
 
 Card fields (`GET /v1/api/admin/integrations`): id, name, description, icon,
 configure_route, capabilities, documentation, installed, enabled, health
