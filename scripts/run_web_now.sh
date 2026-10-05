@@ -12,15 +12,52 @@ DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
 DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
 DRONE_APP_FALLBACK_ARCHIVE_URL="${DRONE_APP_FALLBACK_ARCHIVE_URL:-}"
 DRONE_APP_STAGE_ONLY="${DRONE_APP_STAGE_ONLY:-0}"
-DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main}}"
+DRONE_APP_DEVELOPMENT="${DRONE_APP_DEVELOPMENT:-0}"
+DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-}"
 
-if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
+usage() {
   echo "Usage:"
   echo "  DRONE_APP_BASE_URL=<raw-base-url> ./run_web_now.sh"
   echo "  ./run_web_now.sh <raw-base-url>"
+  echo "  ./run_web_now.sh --dev [<raw-base-url>]"
   echo "  or set all required file URLs directly"
-  exit 1
+  echo ""
+  echo "Normal installs use a published drone-app.tar.gz release. Source/codeload"
+  echo "archives require an explicit development option: --dev or DRONE_APP_DEVELOPMENT=1."
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --dev|--development)
+      DRONE_APP_DEVELOPMENT=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "Unknown option: $arg"
+      usage
+      exit 1
+      ;;
+    *)
+      if [[ -z "$DRONE_APP_BASE_URL" ]]; then
+        DRONE_APP_BASE_URL="$arg"
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
+  DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main"
 fi
+
+development_mode_enabled() {
+  case "${DRONE_APP_DEVELOPMENT:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 DOWNLOAD_TOOL=""
 if command -v curl >/dev/null 2>&1; then
@@ -39,7 +76,25 @@ fi
 
 WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/drone-app}"
 mkdir -p "$WORK_DIR"
-APP_DIR="$WORK_DIR/app"
+STAGE_DIR="$WORK_DIR/.incoming.$$"
+mkdir -p "$STAGE_DIR"
+
+cleanup_stage() {
+  if [[ -n "${STAGE_DIR:-}" && -d "$STAGE_DIR" ]]; then
+    rm -rf "$STAGE_DIR"
+  fi
+}
+trap cleanup_stage EXIT
+
+using_stage=0
+if [[ -n "$DRONE_APP_BASE_URL" ]]; then
+  using_stage=1
+  APP_ROOT="$STAGE_DIR"
+else
+  APP_ROOT="$WORK_DIR"
+fi
+
+APP_DIR="$APP_ROOT/app"
 APP_PATH="$APP_DIR/drone_api.py"
 MAIN_PATH="$APP_DIR/main.py"
 INIT_PATH="$APP_DIR/__init__.py"
@@ -53,10 +108,11 @@ INTEGRATIONS_HANDLER_PATH="$APP_DIR/web/handlers_integrations.py"
 INTEGRATIONS_INIT_PATH="$APP_DIR/integrations/__init__.py"
 INTEGRATIONS_REGISTRY_PATH="$APP_DIR/integrations/registry.py"
 STREAMDECK_MANAGER_PATH="$APP_DIR/integrations/streamdeck/manager.py"
-CONTENT_DIR="$WORK_DIR/content"
+CONTENT_DIR="$APP_ROOT/content"
 API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
 ROUTE_CONFIG_PATH="$APP_DIR/web/route_config.py"
+VERSION_PATH="$APP_DIR/VERSION"
 
 if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL%/}"
@@ -73,7 +129,7 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
     DRONE_APP_ARCHIVE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
   fi
 
-  if [[ -z "$DRONE_APP_FALLBACK_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
+  if development_mode_enabled && [[ -z "$DRONE_APP_FALLBACK_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
     raw_path="${DRONE_APP_BASE_URL#https://raw.githubusercontent.com/}"
     owner="${raw_path%%/*}"
     raw_path="${raw_path#*/}"
@@ -104,16 +160,19 @@ download_file() {
 
 download_archive_dirs() {
   local archive_url="$1"
-  local archive_path="$WORK_DIR/source.tar.gz"
+  local archive_path="$STAGE_DIR/source.tar.gz"
+  rm -rf "$STAGE_DIR/app" "$STAGE_DIR/content"
+  rm -f "$archive_path"
   if ! download_file "$archive_url" "$archive_path"; then
     echo "Failed to download archive from $archive_url"
+    rm -f "$archive_path"
     return 1
   fi
   if [ ! -f "$archive_path" ]; then
     echo "Archive download produced no file at $archive_path"
     return 1
   fi
-  python3 - "$archive_path" "$WORK_DIR" <<'PY'
+  python3 - "$archive_path" "$STAGE_DIR" <<'PY'
 import sys
 import tarfile
 import shutil
@@ -154,7 +213,7 @@ PY
 
 copy_local_dirs() {
   local base_path="${DRONE_APP_BASE_URL#file://}"
-  python3 - "$base_path" "$WORK_DIR" <<'PY'
+  python3 - "$base_path" "$STAGE_DIR" <<'PY'
 import shutil
 import sys
 from pathlib import Path
@@ -176,13 +235,128 @@ PY
 }
 
 download_any_archive() {
-  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_ARCHIVE_URL"; then
-    return 0
+  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]]; then
+    if download_archive_dirs "$DRONE_APP_ARCHIVE_URL"; then
+      return 0
+    fi
+    echo "Failed to download or extract the published Drone release from $DRONE_APP_ARCHIVE_URL"
   fi
-  if [[ -n "$DRONE_APP_FALLBACK_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_FALLBACK_ARCHIVE_URL"; then
-    return 0
+  if development_mode_enabled && [[ -n "$DRONE_APP_FALLBACK_ARCHIVE_URL" ]]; then
+    echo "Development mode enabled; trying source archive $DRONE_APP_FALLBACK_ARCHIVE_URL"
+    if download_archive_dirs "$DRONE_APP_FALLBACK_ARCHIVE_URL"; then
+      return 0
+    fi
+    echo "Failed to download development source archive from $DRONE_APP_FALLBACK_ARCHIVE_URL"
+  elif [[ -n "$DRONE_APP_FALLBACK_ARCHIVE_URL" ]]; then
+    echo "Ignoring source/codeload fallback because development mode is not enabled."
   fi
   return 1
+}
+
+overlay_staged_tree() {
+  python3 - "$STAGE_DIR" "$WORK_DIR" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+stage_dir = Path(sys.argv[1]).resolve()
+work_dir = Path(sys.argv[2]).resolve()
+for name in ("app", "content"):
+    source = stage_dir / name
+    target = work_dir / name
+    if not source.exists():
+        continue
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        if "__pycache__" in relative.parts or item.name.endswith(".pyc"):
+            continue
+        destination = target / relative
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(item, destination)
+PY
+}
+
+read_staged_version() {
+  if [[ ! -s "$VERSION_PATH" ]]; then
+    echo ""
+    return 0
+  fi
+  head -n 1 "$VERSION_PATH" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+validate_staged_payload() {
+  if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
+    echo "Downloaded Drone App is incomplete. Expected app/, app/web/static/, and content/ under the staging directory."
+    return 1
+  fi
+
+  local required_file
+  for required_file in \
+    "$MAIN_PATH" \
+    "$APP_PATH" \
+    "$VERSION_PATH" \
+    "$API_ROUTES_PATH" \
+    "$UI_ROUTES_PATH" \
+    "$ROUTE_CONFIG_PATH" \
+    "$TEMPLATE_PATH" \
+    "$CSS_PATH" \
+    "$JS_PATH" \
+    "$INTEGRATIONS_JS_PATH" \
+    "$INTEGRATIONS_HANDLER_PATH" \
+    "$INTEGRATIONS_INIT_PATH" \
+    "$INTEGRATIONS_REGISTRY_PATH" \
+    "$STREAMDECK_MANAGER_PATH" \
+    "$CONTENT_DIR/batocera-swarm-mascot.jpg" \
+    "$CONTENT_DIR/drone.png"; do
+    if [[ ! -s "$required_file" ]]; then
+      echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
+      return 1
+    fi
+  done
+
+  local version
+  version="$(read_staged_version)"
+  if [[ -z "$version" ]]; then
+    echo "Downloaded Drone App is unversioned. Missing or empty app/VERSION."
+    return 1
+  fi
+  if development_mode_enabled; then
+    :
+  elif ! printf '%s\n' "$version" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$'; then
+    echo "Rejected unversioned or development payload (VERSION=${version}). Published installs require a semantic release. Use --dev or DRONE_APP_DEVELOPMENT=1 for source archives."
+    return 1
+  fi
+
+  if ! PYTHONPATH="$APP_ROOT" python3 - <<'PY'
+import importlib
+
+required = {
+    "app.web.api_routes": "ApiRoutesMixin",
+    "app.web.ui_routes": "UiRoutesMixin",
+}
+
+for module_name, symbol in required.items():
+    module = importlib.import_module(module_name)
+    if not hasattr(module, symbol):
+        raise ImportError(f"{module_name} does not export {symbol}")
+
+importlib.import_module("app.drone_api")
+PY
+  then
+    echo "Downloaded Drone App failed import validation. Refusing to launch incomplete app bundle."
+    return 1
+  fi
+
+  INSTALLED_VERSION="$version"
+}
+
+abort_without_installing() {
+  echo "Refusing to change the installed Drone App. Existing files under $WORK_DIR were left unchanged."
+  echo "A published, versioned drone-app.tar.gz is required unless you pass --dev or set DRONE_APP_DEVELOPMENT=1."
+  exit 1
 }
 
 if [[ -n "$DRONE_APP_BASE_URL" ]]; then
@@ -191,9 +365,16 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   elif [[ "$DRONE_APP_BASE_URL" == file://* ]]; then
     copy_local_dirs
   else
-    echo "DRONE_APP_BASE_URL must be a GitHub raw URL, a file:// URL, or be paired with DRONE_APP_ARCHIVE_URL so app/ and content/ can be staged completely."
-    exit 1
+    echo "Failed to download a published Drone release. Source/codeload fallback is disabled unless development mode is enabled."
+    echo "DRONE_APP_BASE_URL must be a GitHub raw URL paired with a release archive, a file:// URL, or DRONE_APP_ARCHIVE_URL."
+    abort_without_installing
   fi
+  if ! validate_staged_payload; then
+    abort_without_installing
+  fi
+  overlay_staged_tree
+  rm -rf "$STAGE_DIR"
+  STAGE_DIR=""
 else
   mkdir -p "$APP_DIR"
   download_file "$DRONE_APP_URL" "$APP_PATH"
@@ -243,29 +424,30 @@ if [[ -z "$DRONE_APP_BASE_URL" && -n "$DRONE_APP_CONTENT_URL" && ! -f "$CONTENT_
   download_file "$DRONE_APP_CONTENT_URL/batocera-swarm-mascot.jpg" "$CONTENT_DIR/batocera-swarm-mascot.jpg"
 fi
 
-if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
-  echo "Downloaded Drone App is incomplete. Expected app/, app/static/, and content/ under $WORK_DIR."
-  exit 1
-fi
-
-for required_file in \
-  "$MAIN_PATH" \
-  "$APP_PATH" \
-  "$API_ROUTES_PATH" \
-  "$UI_ROUTES_PATH" \
-  "$ROUTE_CONFIG_PATH" \
-  "$INTEGRATIONS_JS_PATH" \
-  "$INTEGRATIONS_HANDLER_PATH" \
-  "$INTEGRATIONS_INIT_PATH" \
-  "$INTEGRATIONS_REGISTRY_PATH" \
-  "$STREAMDECK_MANAGER_PATH"; do
-  if [[ ! -s "$required_file" ]]; then
-    echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
+if [[ "$using_stage" != "1" ]]; then
+  if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
+    echo "Downloaded Drone App is incomplete. Expected app/, app/static/, and content/ under $WORK_DIR."
     exit 1
   fi
-done
 
-if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
+  for required_file in \
+    "$MAIN_PATH" \
+    "$APP_PATH" \
+    "$API_ROUTES_PATH" \
+    "$UI_ROUTES_PATH" \
+    "$ROUTE_CONFIG_PATH" \
+    "$INTEGRATIONS_JS_PATH" \
+    "$INTEGRATIONS_HANDLER_PATH" \
+    "$INTEGRATIONS_INIT_PATH" \
+    "$INTEGRATIONS_REGISTRY_PATH" \
+    "$STREAMDECK_MANAGER_PATH"; do
+    if [[ ! -s "$required_file" ]]; then
+      echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
+      exit 1
+    fi
+  done
+
+  if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
 import importlib
 
 required = {
@@ -280,12 +462,21 @@ for module_name, symbol in required.items():
 
 importlib.import_module("app.drone_api")
 PY
-then
-  echo "Downloaded Drone App failed import validation. Refusing to launch incomplete app bundle."
-  exit 1
+  then
+    echo "Downloaded Drone App failed import validation. Refusing to launch incomplete app bundle."
+    exit 1
+  fi
+  INSTALLED_VERSION="$(read_staged_version)"
 fi
 
+LIVE_VERSION_PATH="$WORK_DIR/app/VERSION"
+if [[ -z "${INSTALLED_VERSION:-}" && -s "$LIVE_VERSION_PATH" ]]; then
+  INSTALLED_VERSION="$(head -n 1 "$LIVE_VERSION_PATH" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+fi
+INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
+
 echo "Downloaded Drone App to $WORK_DIR"
+echo "Installed Drone App version ${INSTALLED_VERSION}"
 
 if [[ "$DRONE_APP_STAGE_ONLY" == "1" || "$DRONE_APP_STAGE_ONLY" == "true" || "$DRONE_APP_STAGE_ONLY" == "yes" ]]; then
   echo "Drone App staged successfully; launch skipped because DRONE_APP_STAGE_ONLY=${DRONE_APP_STAGE_ONLY}."

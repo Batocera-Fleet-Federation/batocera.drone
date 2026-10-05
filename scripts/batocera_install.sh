@@ -69,7 +69,7 @@ ensure_bundle() {
   runner="/tmp/drone-bootstrap-fetch.$$"
   if curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" "$RUN_WEB_NOW_URL"; then
     chmod 755 "$runner" 2>/dev/null || true
-    DRONE_APP_STAGE_ONLY=1 DRONE_APP_WORK_DIR="$WORK_DIR" DRONE_APP_ARCHIVE_URL="$ARCHIVE_URL" bash "$runner" >> "$STARTUP_LOG" 2>&1 || true
+    DRONE_APP_STAGE_ONLY=1 DRONE_APP_DEVELOPMENT=0 DRONE_APP_WORK_DIR="$WORK_DIR" DRONE_APP_ARCHIVE_URL="$ARCHIVE_URL" DRONE_APP_FALLBACK_ARCHIVE_URL= bash "$runner" >> "$STARTUP_LOG" 2>&1 || true
     rm -f "$runner"
   else
     rm -f "$runner"
@@ -102,8 +102,10 @@ SERVICEBLOCK
     chmod 755 "$RUNNER" 2>/dev/null || true
     "$SERVICE_FILE" stop >/dev/null 2>&1 || true
     DRONE_APP_STAGE_ONLY=1 \
+      DRONE_APP_DEVELOPMENT=0 \
       DRONE_APP_WORK_DIR="$WORK_DIR" \
       DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
+      DRONE_APP_FALLBACK_ARCHIVE_URL= \
       bash "$RUNNER"
     rm -f "$RUNNER"
     echo "✓ Updated Drone app bundle in $WORK_DIR"
@@ -173,7 +175,7 @@ else
     sleep 5
   done
 
-  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh | bash
+  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh | DRONE_APP_DEVELOPMENT=0 DRONE_APP_FALLBACK_ARCHIVE_URL= bash
 ) &
 
 SERVICEBLOCK

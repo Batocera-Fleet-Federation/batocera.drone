@@ -29,9 +29,12 @@ before non-trivial work; keep it accurate in the same change.
   `web/openapi_spec.py::_integration_paths`, tests, docs, and this skill.
 - Delivery is atomic: release/self-update/startup validation must require
   `integrations.js`, `handlers_integrations.py`, the registry, and the Stream Deck
-  manager together. A source tree with `VERSION=dev` must still converge through
-  the updater to the latest semantic release; otherwise a device can remain on an
-  older UI forever while appearing to run normally.
+  manager together. `run_web_now.sh` validates that payload in a staging directory
+  and only overlays a published semantic release in normal mode. Source/codeload
+  fallback requires `--dev` or `DRONE_APP_DEVELOPMENT=1`; installer and service
+  recovery never enable it. A source tree with `VERSION=dev` must still converge
+  through the updater to the latest semantic release; otherwise a device can remain
+  on an older UI forever while appearing to run normally.
 
 ## Stream Deck shape
 
