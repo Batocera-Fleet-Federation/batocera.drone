@@ -38,6 +38,54 @@ USB_MODEL_HINTS: Dict[int, Tuple[str, int, int]] = {
 KeyCallback = Callable[["StreamDeckDevice", int, bool], None]
 
 
+# HID get_serial_number() on Elgato decks is often a truncated USB iSerial
+# (Mini reports 12 chars over HID vs 14 on the USB descriptor). Require this
+# many matching leading characters before treating two serials as one device.
+_SERIAL_PREFIX_MIN = 8
+
+
+def normalize_serial(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def serials_match(left: Any, right: Any) -> bool:
+    """True when two serials name the same physical deck.
+
+    Exact match, or one is a prefix of the other (HID truncation vs USB
+    descriptor). Short strings are never treated as prefixes.
+    """
+    first, second = normalize_serial(left), normalize_serial(right)
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    shorter, longer = (first, second) if len(first) <= len(second) else (second, first)
+    return len(shorter) >= _SERIAL_PREFIX_MIN and longer.startswith(shorter)
+
+
+def preferred_serial(*values: Any) -> str:
+    """Longest non-empty serial — USB iSerial is preferred over a HID truncation."""
+    texts = [str(value or "").strip() for value in values if str(value or "").strip()]
+    return max(texts, key=len) if texts else ""
+
+
+def same_physical_device(left: dict, right: dict) -> bool:
+    """True when two device dicts (runtime, USB, or remembered) are one deck."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    left_id, right_id = str(left.get("id") or ""), str(right.get("id") or "")
+    if left_id and left_id == right_id:
+        return True
+    if serials_match(left_id, right_id):
+        return True
+    if serials_match(left.get("serial"), right.get("serial")):
+        return True
+    if serials_match(left_id, right.get("serial")) or serials_match(left.get("serial"), right_id):
+        return True
+    usb_path = left.get("usb_path")
+    return bool(usb_path) and usb_path == right.get("usb_path")
+
+
 def stable_device_id(serial: Any, model: Any, fallback: Any = "") -> str:
     """Serial when it is a safe identifier, otherwise a stable hash."""
     serial_text = str(serial or "").strip()
@@ -394,6 +442,10 @@ def detect_usb_devices(sys_root: Path = Path("/sys/bus/usb/devices")) -> List[di
     except OSError:
         return []
     for entry in entries:
+        # Interface nodes (e.g. 7-2:1.0) can inherit vendor/product files; skip
+        # them so one physical deck is not listed twice from sysfs.
+        if ":" in entry.name:
+            continue
         vendor = _read_sysfs(entry / "idVendor")
         if not vendor:
             continue

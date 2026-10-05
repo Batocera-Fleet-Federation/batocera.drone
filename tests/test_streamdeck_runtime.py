@@ -22,7 +22,8 @@ from unittest import mock
 
 from app.integrations.streamdeck.actions import BatoceraControl, BuiltInActionRegistry, RetroArchControl
 from app.integrations.streamdeck.devices import (
-    FakeDeviceProvider, FakeStreamDeckDevice, detect_usb_devices, stable_device_id, usb_signature,
+    FakeDeviceProvider, FakeStreamDeckDevice, detect_usb_devices, preferred_serial, same_physical_device,
+    serials_match, stable_device_id, usb_signature,
 )
 from app.integrations.streamdeck.game_runtime import GameRuntime
 from app.integrations.streamdeck.logs import set_log_sink
@@ -428,6 +429,11 @@ class UsbDetectionTests(unittest.TestCase):
                 (root / name / "idVendor").write_text(vendor + "\n")
                 (root / name / "idProduct").write_text(product + "\n")
                 (root / name / "serial").write_text(serial + "\n")
+            interface = root / "7-1:1.0"
+            interface.mkdir()
+            (interface / "idVendor").write_text("0fd9\n")
+            (interface / "idProduct").write_text("0063\n")
+            (interface / "serial").write_text("AL12345\n")
             devices = detect_usb_devices(root)
             self.assertEqual([row["usb_id"] for row in devices], ["0fd9:0fff", "0fd9:0063"])
             mini = devices[1]
@@ -441,6 +447,16 @@ class UsbDetectionTests(unittest.TestCase):
         unsafe = stable_device_id("../../etc", "Mini", "path")
         self.assertTrue(unsafe.startswith("deck-"))
         self.assertEqual(unsafe, stable_device_id("../../etc", "Mini", "path"))
+
+    def test_hid_truncated_serial_matches_usb_descriptor(self):
+        hid, usb = "A00DA6261KKZ", "A00DA6261KKZB0"
+        self.assertTrue(serials_match(hid, usb))
+        self.assertTrue(serials_match(usb.lower(), hid))
+        self.assertFalse(serials_match(hid, "B00DA6261KKZB0"))
+        self.assertFalse(serials_match("ABC", "ABCDEFGH"))
+        self.assertEqual(preferred_serial(hid, usb), usb)
+        self.assertTrue(same_physical_device(
+            {"id": hid, "serial": hid}, {"id": usb, "serial": usb, "usb_id": "0fd9:0063"}))
 
 
 FAKE_STREAMDECK_LIBRARY = {

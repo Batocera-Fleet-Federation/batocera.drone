@@ -38,7 +38,7 @@ from .actions import ActionContext, BatoceraControl, BuiltInActionRegistry, Retr
 from .compiler import RuntimeCompiler
 from .config import ConfigStore, image_references, safe_id, script_references, validate_game
 from .dependencies import STREAMDECK_VERSION, DependencyError, DependencyManager
-from .devices import detect_usb_devices
+from .devices import detect_usb_devices, preferred_serial, same_physical_device
 from .dispatcher import ButtonDispatcher
 from .emulationstation import EmulationStationApi
 from .game_launcher import GameLauncher
@@ -276,13 +276,13 @@ class StreamDeckIntegration(Integration):
         if not isinstance(known, dict):
             known = {}
         rows: List[dict] = []
-        seen = set()
         for device in worker.get("devices") or []:
             if not isinstance(device, dict) or not device.get("id"):
                 continue
+            if self._existing_device(rows, device) is not None:
+                continue
             entry = {**device, "connected": True, "source": "runtime", "runtime_state": "open"}
             rows.append(entry)
-            seen.add(device["id"])
             remembered = {key: device.get(key) for key in ("id", "model", "serial", "firmware", "key_count", "rows",
                                                            "columns", "key_image_size", "has_key_images")}
             if known.get(device["id"]) != remembered:
@@ -291,22 +291,51 @@ class StreamDeckIntegration(Integration):
                     atomic_write_json(known_path, known)
                 except OSError:
                     pass
-        serials = {row.get("serial") for row in rows if row.get("serial")}
         for device in self.usb_detector():
-            if device["id"] in seen or (device.get("serial") and device["serial"] in serials):
+            if not isinstance(device, dict) or not device.get("id"):
+                continue
+            existing = self._existing_device(rows, device)
+            if existing is not None:
+                self._merge_usb_into(existing, device)
                 continue
             remembered = known.get(device["id"]) or {}
             rows.append({**device, **{k: v for k, v in remembered.items() if v}, "connected": True,
                          "runtime_state": "not-open", "source": "usb"})
-            seen.add(device["id"])
         for device_id, remembered in known.items():
-            if device_id not in seen and isinstance(remembered, dict):
-                rows.append({**remembered, "connected": False, "runtime_state": "disconnected", "source": "remembered"})
+            if not isinstance(remembered, dict):
+                continue
+            candidate = {**remembered, "id": remembered.get("id") or device_id}
+            if self._existing_device(rows, candidate) is not None:
+                continue
+            rows.append({**remembered, "connected": False, "runtime_state": "disconnected", "source": "remembered"})
         for row in rows:
-            setting = settings_by_id.get(row.get("id"), {})
+            setting = self._settings_for(row, settings_by_id)
             row["brightness"] = setting.get("brightness", 60)
             row["startup_profile_id"] = setting.get("startup_profile_id", "")
         return rows
+
+    @staticmethod
+    def _existing_device(rows: List[dict], device: dict) -> Optional[dict]:
+        return next((row for row in rows if same_physical_device(row, device)), None)
+
+    @staticmethod
+    def _merge_usb_into(existing: dict, usb: dict) -> None:
+        """Fold USB detection onto an already-listed (usually runtime) deck."""
+        if usb.get("usb_id") and not existing.get("usb_id"):
+            existing["usb_id"] = usb["usb_id"]
+        if usb.get("usb_path") and not existing.get("usb_path"):
+            existing["usb_path"] = usb["usb_path"]
+        existing["serial"] = preferred_serial(existing.get("serial"), usb.get("serial"), existing.get("id"), usb.get("id"))
+
+    @staticmethod
+    def _settings_for(row: dict, settings_by_id: dict) -> dict:
+        for key in (row.get("id"), row.get("serial")):
+            if key and key in settings_by_id:
+                return settings_by_id[key]
+        for device_id, setting in settings_by_id.items():
+            if same_physical_device(row, {"id": device_id, "serial": device_id}):
+                return setting
+        return {}
 
     # --------------------------------------------------------------- lifecycle
     def install(self, progress: Optional[Callable[[str], None]] = None) -> dict:

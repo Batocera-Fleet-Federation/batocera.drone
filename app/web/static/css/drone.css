@@ -483,14 +483,25 @@
     .es-collections-toggle-btn.expanded i {
       transform: rotate(180deg);
     }
+    /* Bootstrap 5 tables default to a light body background. This app never
+       sets data-bs-theme="dark", so every .table must be themed globally —
+       same class of override as .card/.form-control above. .themed-table is
+       the explicit class new markup should still add. */
+    .table,
     .themed-table {
       --bs-table-bg: transparent;
       --bs-table-color: var(--admin-text);
       --bs-table-border-color: var(--admin-border);
       --bs-table-hover-bg: rgba(0, 194, 255, 0.10);
+      --bs-table-hover-color: var(--admin-text);
+      --bs-table-striped-bg: rgba(31, 42, 68, 0.45);
+      --bs-table-striped-color: var(--admin-text);
+      --bs-table-active-bg: rgba(0, 194, 255, 0.18);
+      --bs-table-active-color: var(--admin-text);
       color: var(--admin-text);
       margin-bottom: 0;
     }
+    .table thead th,
     .themed-table thead th {
       background: rgba(31, 42, 68, 0.94);
       color: var(--admin-text);
@@ -561,9 +572,14 @@
         white-space: normal;
       }
     }
+    .table tbody td,
     .themed-table tbody td {
       background: rgba(21, 31, 50, 0.54);
       border-color: var(--admin-border);
+      color: var(--admin-text);
+    }
+    .table-active > * {
+      --bs-table-bg-state: rgba(0, 194, 255, 0.18);
       color: var(--admin-text);
     }
     .local-assets-table,
@@ -1398,38 +1414,92 @@
       white-space: pre-wrap;
     }
 
-    /* Generic dark-themed modal -- use this for any new modal rather than
-       relying on bootstrap's stock white modal defaults. */
+    /* Generic dark-themed modal. Bootstrap's .modal-content is white; this
+       app's body text is light, so an unthemed modal is unreadable. Theme
+       every modal globally, and still put .themed-modal on .modal-content
+       in new markup. */
+    .modal-content,
     .themed-modal {
       color: var(--admin-text);
       background: rgba(15, 23, 42, 0.98);
       border: 1px solid var(--admin-border);
     }
+    .modal-header,
+    .modal-footer,
     .themed-modal .modal-header,
     .themed-modal .modal-footer {
       background: rgba(31, 42, 68, 0.94);
       border-color: var(--admin-border);
+      color: var(--admin-text);
     }
-    .themed-modal .modal-body { background: rgba(11, 16, 32, 0.92); }
-    .themed-modal .list-group-item {
+    .modal-title { color: var(--admin-text); }
+    .modal-body,
+    .themed-modal .modal-body { background: rgba(11, 16, 32, 0.92); color: var(--admin-text); }
+    .modal-content .btn-close {
+      filter: invert(1) grayscale(100%) brightness(200%);
+    }
+    .themed-modal .list-group-item,
+    .modal-content .list-group-item {
       background: transparent;
       color: var(--admin-text);
       border-color: var(--admin-border);
     }
     .themed-modal .list-group-item-action:hover,
-    .themed-modal .list-group-item-action:focus {
+    .themed-modal .list-group-item-action:focus,
+    .modal-content .list-group-item-action:hover,
+    .modal-content .list-group-item-action:focus {
       background: rgba(59, 130, 246, 0.16);
       color: var(--admin-text);
     }
     .themed-modal .form-control,
-    .themed-modal .form-select {
+    .themed-modal .form-select,
+    .modal-content .form-control,
+    .modal-content .form-select {
       background: rgba(11, 16, 32, 0.85);
       color: var(--admin-text);
       border-color: var(--admin-border);
     }
     .themed-modal .form-control:focus,
-    .themed-modal .form-select:focus {
+    .themed-modal .form-select:focus,
+    .modal-content .form-control:focus,
+    .modal-content .form-select:focus {
       background: rgba(11, 16, 32, 0.95);
+      color: var(--admin-text);
+    }
+
+    /* Bootstrap accordion is a light panel; theme it globally so help and
+       troubleshooting copy stays readable. .themed-accordion is the explicit
+       class new markup should still add. */
+    .accordion-item,
+    .themed-accordion .accordion-item {
+      background: rgba(21, 31, 50, 0.54);
+      color: var(--admin-text);
+      border-color: var(--admin-border);
+    }
+    .accordion-button,
+    .themed-accordion .accordion-button {
+      background: rgba(31, 42, 68, 0.94);
+      color: var(--admin-text);
+      box-shadow: none;
+    }
+    .accordion-button:not(.collapsed),
+    .themed-accordion .accordion-button:not(.collapsed) {
+      background: rgba(31, 42, 68, 0.94);
+      color: var(--admin-text);
+      box-shadow: none;
+    }
+    .accordion-button:focus,
+    .themed-accordion .accordion-button:focus {
+      box-shadow: 0 0 0 0.18rem rgba(0, 194, 255, 0.18);
+      border-color: var(--admin-sidebar-accent);
+    }
+    .accordion-button::after,
+    .themed-accordion .accordion-button::after {
+      filter: invert(1) grayscale(1);
+    }
+    .accordion-body,
+    .themed-accordion .accordion-body {
+      background: rgba(11, 16, 32, 0.92);
       color: var(--admin-text);
     }
 
@@ -2437,6 +2507,10 @@
     .sd-output { max-height: 16rem; overflow: auto; padding: 0.5rem; border-radius: 0.4rem; background: #05070c; color: #d1d5db; font-size: 0.78rem; white-space: pre-wrap; }
     .sd-log { max-height: 26rem; }
     .sd-help-search { max-width: 18rem; }
+    /* Nested help/confirm dialogs opened from the button editor must sit
+       above the already-open editor modal (Bootstrap 1055) and its backdrop. */
+    .sd-modal-nested { z-index: 1080; }
+    .modal-backdrop.sd-modal-nested-backdrop { z-index: 1070; }
     @media (max-width: 575.98px) {
       .sd-deck { gap: 0.4rem; padding: 0.5rem; }
       .sd-key-meta { display: none; }
