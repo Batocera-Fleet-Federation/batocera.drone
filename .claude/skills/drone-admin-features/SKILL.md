@@ -87,20 +87,22 @@ gateway's own session expired." See
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
 
-## Admin menu (5 tiles, some of them tabbed)
+## Admin menu (tiles, some of them tabbed)
 
-`renderAdminMenu()` (`drone.js`) renders exactly 5 tiles — **Debug, Artwork,
-Torrents, VPN, Email**. Debug and Artwork are each a tabbed panel bundling what used
+`renderAdminMenu()` (`drone.js`) includes **Debug, Artwork, Torrents, VPN, Email,
+Backups, Automation, Fixes, and Integrations**. Integrations is the common local-only
+home for optional hardware/software extensions; Stream Deck is its first card. See
+`drone-integrations-streamdeck` for the lifecycle, worker, action, game, script, image,
+and safe-removal invariants. Debug and Artwork are each a tabbed panel bundling what used
 to be separate tiles; the shared `renderAdminPanelTabs(active, tabs)` helper builds
 the tab bar for both (and for the Swarm page's Swarm/Transfers tabs — see below),
 prepended via string concatenation onto each underlying page's existing
 `content.innerHTML` template, so none of the underlying render functions needed
-restructuring. There is no "Integration" tile — pairing, tailnet, and fleet
-management live on the **Swarm** page, which is a top-level nav item (`#admin/swarm`,
-alongside Systems/Controls/Automation/Swarm/Admin in `index.html`'s sidebar), not
-one of these 5 admin tiles. See "The Swarm page" below. **Automation** is also not
-one of these tiles — it was moved out to its own top-level navbar link
-(`automationMenuBtn`, `#admin/automation`). The **notifications bell** (top-left,
+restructuring. Do not confuse the plural **Integrations** tile with the retired
+singular `#admin/integration` Overmind route: pairing, tailnet, and fleet management
+remain on the top-level **Swarm** page (`#admin/swarm`), while integrations always
+configure optional capabilities on this local machine. See "The Swarm page" below.
+The **notifications bell** (top-left,
 global) is not a tile either — see "Notifications bell" below.
 
 ### Debug (System Info / System Logs / Emulators tabs)

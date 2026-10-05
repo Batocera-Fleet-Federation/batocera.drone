@@ -393,6 +393,11 @@ class ApiRoutesMixin:
                 self._send_json(403, {"error": "admin disabled"})
                 return
 
+            # Admin -> Integrations (local-only optional extensions; see handlers_integrations).
+            if len(parts) >= 2 and parts[0] == "admin" and parts[1] == "integrations":
+                self._handle_admin_integrations_get(parts[2:], query_params)
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
                 lines_raw = query_params.get("lines", ["100"])[0]
                 try:
@@ -782,6 +787,10 @@ class ApiRoutesMixin:
 
             if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "integrations":
+                self._handle_admin_integrations_post(parts[2:])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "credentials" and parts[2] == "update":

@@ -268,6 +268,16 @@ treat absence as "use the default," not as an error).
   `_get_audio_volume`'s fallback chain (`batocera-settings-get` →
   `batocera-audio` → `amixer`) exists precisely so one broken tool doesn't
   take down volume reporting — don't "simplify" it down to a single tool.
+- **ES's loopback HTTP API (port 1234) is the supported way to launch a game.**
+  `POST /launch` (body = the ROM path ES knows) makes ES run its normal launch
+  path (`es_systems.cfg` command → `emulatorlauncher` with controller args,
+  per-game settings, shaders, hooks); `GET /runningGame` answers 200 + JSON with a
+  `path` while a game runs. A 404 from `/launch` means ES doesn't list that game.
+  The Stream Deck Launch Game action uses exactly this
+  (`app/integrations/streamdeck/emulationstation.py`) — don't run
+  `emulatorlauncher` or emulator binaries directly. Exiting a game is
+  `batocera-es-swissknife --emukill`; "has it exited" is the
+  `device/game_activity.py::find_running_emulatorlauncher` procfs scan.
 - **A setting simply absent from `es_settings.cfg` is normal, not an error.**
   ES (and this codebase) only writes a key once something changes it away from
   the default; every reader here must treat "key not found" as "use the

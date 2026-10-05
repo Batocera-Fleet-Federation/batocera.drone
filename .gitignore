@@ -20,6 +20,9 @@ env/
 
 # Local runtime data
 local-data/
+# Optional-integration data under the install root when running from a checkout
+# (e.g. integrations/streamdeck/); the code lives in app/integrations/.
+/integrations/
 downloads/
 rom_downloads/
 *.log

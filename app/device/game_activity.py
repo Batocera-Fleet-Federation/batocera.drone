@@ -171,8 +171,30 @@ def _game_event_spool_dir(settings: Any) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / GAME_EVENT_SPOOL_DIRNAME).resolve()
 
 
+_LAUNCHER_NAMES = {"emulatorlauncher", "emulatorlauncher.py", "batocera-launch"}
+
+
+def _is_emulatorlauncher_invocation(parts: List[str]) -> bool:
+    """True when the process *is* configgen's launcher (directly, as an interpreter
+    script, or ``python -m ...emulatorlauncher``) -- never because a ROM name or
+    some other argument merely contains the word."""
+    if not parts:
+        return False
+    if Path(parts[0]).name in _LAUNCHER_NAMES:
+        return True
+    if not Path(parts[0]).name.startswith("python"):
+        return False
+    for index in range(1, min(len(parts), 5)):
+        part = parts[index]
+        if part == "-m":
+            return index + 1 < len(parts) and parts[index + 1].rsplit(".", 1)[-1] == "emulatorlauncher"
+        if not part.startswith("-"):
+            return Path(part).name in _LAUNCHER_NAMES
+    return False
+
+
 def _parse_emulatorlauncher_args(parts: List[str], cmdline: str) -> Optional[dict]:
-    if not any("emulatorlauncher" in part.lower() for part in parts):
+    if not _is_emulatorlauncher_invocation(parts):
         return None
     system_name = ""
     rom_path = ""
