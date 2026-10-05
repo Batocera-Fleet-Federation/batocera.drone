@@ -89,7 +89,7 @@ below `<DRONE_INSTALL_DIR>/integrations/streamdeck/`:
 | `rendered/` | tooling | Device-sized PNG cache (content-addressed, max 600) |
 | `state/` | tooling | `runtime.json`, worker status, pid, locks, command spool, previews, dependency marker |
 | `config/streamdeck.json` | content | Profiles, buttons, device settings, rules, safeguards |
-| `scripts/` | content | `<32-hex>.sh` + `<32-hex>.json` metadata |
+| `scripts/` | content | `<32-hex>.sh` (Bash) or `<32-hex>.py` (Python 3) + `<32-hex>.json` metadata |
 | `images/` | content | Uploaded originals `<32-hex>.<ext>` + metadata |
 | `logs/` | content | `runtime.log` (rotating 1 MiB x 3), `install.log`, `runtime-console.log` |
 
@@ -325,8 +325,19 @@ job after an explicit browser confirmation that it may close the running game.
 The only editable executable action. `ScriptStore`:
 
 - IDs are server-generated 32-hex values, re-validated on every access; files are
-  always `scripts/<id>.sh` + `<id>.json` -- no request can name a path; symlinks
-  are refused.
+  always `scripts/<id>.sh` or `<id>.py` + `<id>.json` -- no request can name a
+  path; symlinks are refused.
+- Two languages, recorded as `language` in metadata and in every list/detail/
+  create/update/duplicate response: `bash` (`<id>.sh`, shebang `#!/bin/bash` or
+  legacy `#!/bin/sh`) and `python3` (`<id>.py`, shebang `#!/usr/bin/env python3`).
+  The language must match the shebang or the request is rejected (400). Unknown
+  language values are rejected. Legacy `.sh` scripts with no `language` field are
+  Bash and need no migration; editing or duplicating them keeps them Bash.
+- Python 3 is Batocera's system `python3` found on the safe `PATH`. No packages are
+  installed and the Stream Deck private `lib/`/venv is not used. If `python3` is
+  missing the run fails with a start error.
+- Editor: a Bash/Python 3 selector swaps the starter example only while the code is
+  still an unmodified starter; it never rewrites user code.
 - Code must start with `#!`, be text, and be <= 64 KiB.
 - Executed directly (the shebang chooses the interpreter) through `ProcessRunner`:
   `shell=False`, own process group, clean environment (`PATH`, `HOME`, `LANG`,
