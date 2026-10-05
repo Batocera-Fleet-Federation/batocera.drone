@@ -370,6 +370,15 @@ def _local_pair_peer(
             "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
         },
     )
+    try:
+        from . import swarm_membership
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        import swarm_membership  # type: ignore
+    swarm_membership.record_approved_member(settings, stored)
+    try:
+        swarm_membership.propagate_membership(settings)
+    except Exception as error:
+        print(f"Swarm membership propagation failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
     return stored
 
 

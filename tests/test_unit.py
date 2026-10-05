@@ -477,7 +477,8 @@ class SettingsTests(unittest.TestCase):
                         "",
                         tailnet_auto_pair=True,
                     )
-                sent = json.loads(opened.call_args[0][0].data.decode("utf-8"))
+                pair_call = next(call for call in opened.call_args_list if "/peer/pair" in call.args[0].full_url)
+                sent = json.loads(pair_call.args[0].data.decode("utf-8"))
                 self.assertEqual(sent["tailnet_ip"], "100.64.0.2")  # our side advertised
                 self.assertTrue(sent["tailnet_auto_pair"])
                 self.assertEqual(stored["tailnet_ip"], "100.64.0.9")  # their side recorded
@@ -7038,7 +7039,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
                     mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
                     mock.patch.object(handlers_peer._local_network, "pairing_code"), \
                     mock.patch.object(handlers_peer, "DroneCertificateManager", manager), \
-                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}):
+                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}), \
+                    mock.patch("app.transfer.swarm_membership.record_approved_member"):
                 handler._handle_peer_pair(payload)
         validate.assert_not_called()
         self.assertEqual(saved.call_args[0][1]["pairing_source"], "tailnet")
@@ -7076,7 +7078,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
                     mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
                     mock.patch.object(handlers_peer._local_network, "pairing_code"), \
                     mock.patch.object(handlers_peer, "DroneCertificateManager", manager), \
-                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}):
+                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}), \
+                    mock.patch("app.transfer.swarm_membership.record_approved_member"):
                 handler._handle_peer_pair(payload)
         # The initiator's self-reported peer_mtls_port (8544) is stored, distinct
         # from its api_port (8443) -- api_port is never repointed at it.

@@ -8,6 +8,7 @@ helpers + ``self.repository``/``self.settings``). See the ``drone-p2p-transfer-s
 
 import hashlib
 import json
+import os
 import socket
 import subprocess
 from datetime import datetime, timezone
@@ -132,6 +133,11 @@ class HandlersPeerMixin:
                 "source_ip": source_ip,
             },
         )
+        try:
+            from ..transfer import swarm_membership as _swarm_membership
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            import swarm_membership as _swarm_membership  # type: ignore
+        _swarm_membership.record_approved_member(self.settings, peer)
         load_peer_cert_everywhere(self.server, cert_path)
         _local_network.pairing_code(self.settings, rotate=True)
         own_certificate = DroneCertificateManager(self.settings).ensure_certificate()
@@ -155,6 +161,52 @@ class HandlersPeerMixin:
                 "certificate_fingerprint": str(own_certificate.get("fingerprint") or ""),
             },
         )
+
+    def _handle_peer_membership(self, payload: dict) -> None:
+        """Merge a paired Drone's membership view into this one.
+
+        The caller must already be a paired peer (mTLS fingerprint), or a
+        removed member presenting the certificate this Drone pinned for them.
+        Discovery announcements never reach this handler, and a caller who is
+        not a member cannot insert records.
+        """
+        try:
+            from ..transfer import swarm_membership as _swarm_membership
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            import swarm_membership as _swarm_membership  # type: ignore
+        caller = self._membership_caller_id(payload if isinstance(payload, dict) else {})
+        try:
+            result = _swarm_membership.handle_membership_request(self.settings, payload if isinstance(payload, dict) else {}, caller)
+        except _swarm_membership.MembershipRejected as error:
+            self._send_json(error.status, {"error": error.error})
+            return
+        self._send_json(200, result)
+
+    def _membership_caller_id(self, payload: dict) -> str:
+        paired = self._peer_requester_device_id() or ""
+        if paired:
+            return paired
+        try:
+            from ..transfer import swarm_membership as _swarm_membership
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            import swarm_membership as _swarm_membership  # type: ignore
+        fingerprint = self._presented_client_fingerprint()
+        if fingerprint:
+            removed = _swarm_membership.peer_id_for_removed_fingerprint(self.settings, fingerprint)
+            if removed:
+                return removed
+        if bool(self.settings.http_only) and os.environ.get("DRONE_LOCAL_ALLOW_INSECURE_HTTP", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return str(payload.get("introducer_id") or "").strip()
+        return ""
+
+    def _presented_client_fingerprint(self) -> str:
+        try:
+            der = self.connection.getpeercert(binary_form=True) if hasattr(self.connection, "getpeercert") else None
+        except Exception:
+            der = None
+        if not der:
+            return ""
+        return hashlib.sha256(der).hexdigest().lower()
 
     def _handle_peer_info(self) -> None:
         # Unauthenticated by design, like POST /peer/pair: this is the pairing

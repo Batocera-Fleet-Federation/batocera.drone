@@ -6,6 +6,7 @@ Pure runtime over ``peer_connectivity`` -- no drone_api dependencies.
 """
 
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from threading import Thread
@@ -83,5 +84,17 @@ def _start_local_network_workers(settings: Settings) -> None:
                     result["failure_reason"] = str(error)
                 checks.append(result)
             _local_network.save_peer_checks(settings, checks)
+            try:
+                from . import swarm_membership
+            except ImportError:  # pragma: no cover - direct script execution fallback
+                import swarm_membership  # type: ignore
+            try:
+                swarm_membership.propagate_membership(settings)
+            except Exception as error:
+                print(
+                    f"Swarm membership propagation failed: {error.__class__.__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     Thread(target=health_loop, name="drone-local-peer-health", daemon=True).start()

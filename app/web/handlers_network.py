@@ -374,7 +374,7 @@ class HandlersNetworkMixin:
             visible_peer = next((peer for peer in discovered_peers if not peer.get("fake_data")), None)
             paired_peers = _local_network.paired_peers(self.settings)
             if visible_peer and not any(not peer.get("fake_data") for peer in paired_peers):
-                _local_network.forget_peer(self.settings, "fake-local-peer-01")
+                _local_network.forget_peer(self.settings, "fake-local-peer-01", publish_membership=False)
                 _local_network.save_paired_peer(self.settings, {**visible_peer, "fake_data": True})
             hide_seeded_demo = visible_peer is not None
         paired = {str(peer.get("drone_id") or ""): peer for peer in _local_network.paired_peers(self.settings)}
@@ -859,7 +859,11 @@ class HandlersNetworkMixin:
         # Remove any source-side NFS authorization while the pairing record is
         # still available. This never touches exports owned outside Drone.
         _nfs_exports.revoke_peer(self.settings, peer_id)
-        removed = _local_network.forget_peer(self.settings, peer_id)
+        try:
+            from ..transfer import swarm_membership as _swarm_membership
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            import swarm_membership as _swarm_membership  # type: ignore
+        removed = _swarm_membership.publish_forget(self.settings, peer_id)
         _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
         self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})
 

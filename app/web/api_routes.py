@@ -734,6 +734,11 @@ class ApiRoutesMixin:
                 self._handle_peer_pair(payload)
                 return
 
+            if len(parts) == 2 and parts[0] == "peer" and parts[1] == "membership":
+                payload = self._read_json_body()
+                self._handle_peer_membership(payload)
+                return
+
             if len(parts) == 4 and parts[:3] == ["peer", "network-share", "nfs"]:
                 payload = self._read_json_body()
                 if parts[3] == "authorize":
