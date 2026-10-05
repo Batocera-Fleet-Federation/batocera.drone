@@ -48,6 +48,11 @@ TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
 STATIC_DIR="$APP_DIR/web/static"
 CSS_PATH="$STATIC_DIR/css/drone.css"
 JS_PATH="$STATIC_DIR/js/drone.js"
+INTEGRATIONS_JS_PATH="$STATIC_DIR/js/integrations.js"
+INTEGRATIONS_HANDLER_PATH="$APP_DIR/web/handlers_integrations.py"
+INTEGRATIONS_INIT_PATH="$APP_DIR/integrations/__init__.py"
+INTEGRATIONS_REGISTRY_PATH="$APP_DIR/integrations/registry.py"
+STREAMDECK_MANAGER_PATH="$APP_DIR/integrations/streamdeck/manager.py"
 CONTENT_DIR="$WORK_DIR/content"
 API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
@@ -248,7 +253,12 @@ for required_file in \
   "$APP_PATH" \
   "$API_ROUTES_PATH" \
   "$UI_ROUTES_PATH" \
-  "$ROUTE_CONFIG_PATH"; do
+  "$ROUTE_CONFIG_PATH" \
+  "$INTEGRATIONS_JS_PATH" \
+  "$INTEGRATIONS_HANDLER_PATH" \
+  "$INTEGRATIONS_INIT_PATH" \
+  "$INTEGRATIONS_REGISTRY_PATH" \
+  "$STREAMDECK_MANAGER_PATH"; do
   if [[ ! -s "$required_file" ]]; then
     echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
     exit 1

@@ -48,7 +48,12 @@ def _complete_drone_members(members=(), *, prefix=""):
         "app/VERSION": b"v1.0.0\n",
         "app/web/templates/index.html": b"html",
         "app/web/static/js/drone.js": b"js",
+        "app/web/static/js/integrations.js": b"integrations-js",
         "app/web/static/css/drone.css": b"css",
+        "app/web/handlers_integrations.py": b"handlers",
+        "app/integrations/__init__.py": b"init",
+        "app/integrations/registry.py": b"registry",
+        "app/integrations/streamdeck/manager.py": b"manager",
         "content/batocera-swarm-mascot.jpg": b"jpg",
         "content/drone.png": b"png",
     }
@@ -90,7 +95,7 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         result = self._run(archive)
         self.assertEqual(result["status"], "downloaded")
         self.assertTrue(result["restart_required"])
-        self.assertEqual(result["copied_files"], 10)
+        self.assertEqual(result["copied_files"], 15)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "app" / "pkg" / "mod.py").read_bytes(), b"p")
         self.assertEqual((self.work_dir / "content" / "theme.css").read_bytes(), b"c")
@@ -104,7 +109,7 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
             prefix="batocera.drone/",
         ))
         result = self._run(archive)
-        self.assertEqual(result["copied_files"], 9)
+        self.assertEqual(result["copied_files"], 14)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "content" / "x.css").read_bytes(), b"c")
 
@@ -150,6 +155,21 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         self.assertIn("app/web/templates/index.html", str(ctx.exception))
         self.assertIn("content/drone.png", str(ctx.exception))
         self.assertFalse((self.work_dir / "app").exists())
+
+    def test_rejects_archive_missing_integrations_ui_or_backend(self):
+        members = _complete_drone_members()
+        for missing in (
+            "app/web/static/js/integrations.js",
+            "app/web/handlers_integrations.py",
+            "app/integrations/__init__.py",
+            "app/integrations/registry.py",
+            "app/integrations/streamdeck/manager.py",
+        ):
+            archive = _targz([(name, body) for name, body in members if name != missing])
+            with self.subTest(missing=missing), self.assertRaises(ValueError) as ctx:
+                self._run(archive)
+            self.assertIn(missing, str(ctx.exception))
+            self.assertFalse((self.work_dir / "app").exists())
 
     def test_rejects_archive_whose_version_does_not_match_the_checked_release(self):
         archive = _targz(_complete_drone_members([("app/VERSION", b"v1.2.2\n")]))
@@ -738,6 +758,19 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
             result = self_update._run_drone_auto_update_check_once(self.settings)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["latest_version"], "v1.2.4")
+        download.assert_called_once_with(self.settings, release_version="v1.2.4")
+        restart.assert_called_once_with()
+
+    def test_dev_source_deployment_converges_to_latest_release(self):
+        self._set_version("dev")
+        with mock.patch.object(self_update, "_latest_drone_release_version", return_value="v1.2.4") as latest, \
+             mock.patch.object(self_update, "_download_latest_drone_app", return_value={"copied_files": 15}) as download, \
+             mock.patch.object(self_update, "_restart_drone_process_soon") as restart:
+            result = self_update._run_drone_auto_update_check_once(self.settings)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["current_version"], "dev")
+        self.assertEqual(result["latest_version"], "v1.2.4")
+        latest.assert_called_once_with()
         download.assert_called_once_with(self.settings, release_version="v1.2.4")
         restart.assert_called_once_with()
 

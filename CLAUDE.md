@@ -118,6 +118,11 @@ route_config}.py` and therefore **cannot stage the multi-module app** — it has
 incomplete since the first extractions and is not used by the device. Don't rely on it; use
 the archive or `file://` path. `service_bootstrap.sh`'s `validate_local_app` file list +
 import check are a post-deploy sanity gate, not the staging mechanism.
+The sanity gates deliberately name the separately loaded Integrations UI plus its
+backend registry/handler/manager; a release without any one of them is incomplete.
+Source/codeload deployments have `app/VERSION=dev`; the self-updater treats any
+non-semantic installed version as unordered and converges it to the latest validated
+release rather than permanently skipping updates.
 
 **SQLite cache:** `storage/rom_metadata_store.py` + `storage/saves_store.py` persist
 scanned asset metadata in the shared state DB (`storage/state_store.py`). Files are

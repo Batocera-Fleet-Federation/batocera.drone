@@ -27,6 +27,13 @@ without touching Batocera or other Drone features. To add one: implement
 in `web/handlers_integrations.py`, its page in `web/static/js/integrations.js`, and
 its OpenAPI paths in `web/openapi_spec.py`.
 
+The Integrations browser bundle is loaded separately from `drone.js`. Release,
+self-update, staging, and service-start validation therefore require the UI bundle,
+API handler, registry, and Stream Deck manager as one atomic payload. An archive
+missing any of them is rejected before overlay/launch. Development/codeload installs
+whose `app/VERSION` is `dev` are intentionally upgraded to the latest validated
+semantic release; they are not skipped by version comparison.
+
 Card fields (`GET /v1/api/admin/integrations`): id, name, description, icon,
 configure_route, capabilities, documentation, installed, enabled, health
 (`disabled|healthy|installing|waiting|degraded|error`), health_message, version,
@@ -433,7 +440,12 @@ distinct error is logged once.
   cancel, output, traversal), process runner, uploads, renderer (fill/fit/stretch,
   generated, artwork, per-device sizes, cache), compiler, the real
   `RomRepository`, handler security gates, and every route through a real Drone
-  HTTP server.
+  HTTP server. The HTTP UAT fetches the root page and both JavaScript bundles and
+  verifies that the Admin Integrations tile, router branch, integration list, and
+  Stream Deck renderer are shipped together.
+- `tests/test_self_update_extraction.py` / `tests/test_release_version.py` -- a
+  `dev` source deployment upgrades to the latest semantic release, and build/update
+  archives are rejected if any required Integrations UI/backend file is absent.
 
 No physical hardware is needed for any automated test.
 
