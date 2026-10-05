@@ -242,10 +242,17 @@ while a game is actually running; **wifi-recovery**
 (`/admin/automation/wifi-recovery`) checks the wireless connection every 60s and
 power-cycles it (`batocera-wifi disable` then `enable`) when it's down. The two
 idle automations poll `last-input-activity` (written by the privileged
-input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
-`app/device/automation.py`. Reached via `automationMenuBtn` in `index.html`
-(`#admin/automation`) — it used to be an admin tile, but moved out to the
-top-level navbar alongside Systems/Controls/Swarm/Admin.
+input-activity monitor, `app/input_activity_monitor.py`) every
+`AUTOMATION_POLL_SECONDS`. That monitor treats only *deliberate* input as
+activity: `EV_KEY`, non-zero `EV_REL`, analog sweeps through three or more
+distinct values, and an absolute-axis change that is held or isolated rather
+than repeating. It ignores in-deadzone analog jitter **and** a periodic
+two-value ABS square wave (a resting DragonRise axis 5 flipping `0 <-> 127`
+about every 3s is the live case that used to rewrite the file forever so idle
+never started). Backend: `app/device/automation.py`. Reached via
+`automationMenuBtn` in `index.html` (`#admin/automation`) — it used to be an
+admin tile, but moved out to the top-level navbar alongside
+Systems/Controls/Swarm/Admin.
 
 ## Notifications bell (top-left, global — not an admin tile)
 

@@ -63,6 +63,13 @@ is used by every subsystem, not just one. Expect lines like:
   `Idle-game-exit automation exited the running game after <s>s idle` /
   `Idle-game-exit automation could not exit the game: <reason>`,
   `Automation poller thread started: poll_seconds=<n>` (`device/automation.py`).
+  If those idle automations never fire, check
+  `/userdata/system/drone-app/control/last-input-activity` (or
+  `$DRONE_INPUT_ACTIVITY_FILE`): a rewrite every few seconds with nobody
+  touching a pad is the monitor counting noise as input. After the periodic-
+  axis filter, a DragonRise-style `0 <-> 127` square wave must **not** update
+  that file; `evtest` on the noisy `/dev/input/event*` axis is the ground
+  truth for whether the hardware is still twitching.
 - Pairing/tailnet lines from `transfer/local_network.py` and `device/tailnet_service.py`.
 - HTTP access lines for every `/v1/api/admin/*` and `/v1/api/peer/*` request.
 
