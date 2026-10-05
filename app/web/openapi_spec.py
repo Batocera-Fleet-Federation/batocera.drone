@@ -165,6 +165,7 @@ def _errors(*codes: str) -> Dict[str, Schema]:
         "403": "Forbidden",
         "404": "Not found",
         "409": "Conflict",
+        "415": "Unsupported media type",
         "429": "Rate limited",
         "500": "Internal server error",
         "502": "Upstream error",
@@ -1886,6 +1887,39 @@ def _schemas() -> Dict[str, Schema]:
         "EmulatorConfigFile": _object({"name": _string(), "root_name": _string(), "relative_path": _string(), "size": _integer(), "modified_at": _string(fmt="date-time"), "fingerprint": _string(), "error": _string()}),
         "EmulatorsResponse": _object({"type": _enum(["emulator_configs"]), "configs": _array(_ref("EmulatorConfigFile")), "count": _integer(), "max_configs": _integer(), "incremental": _boolean()}, description="Detected emulator config files exposed to the admin UI and paired peers."),
         "EmulatorFileResponse": _object({"root_name": _string(), "relative_path": _string(), "path": _string(), "size": _integer(), "truncated": _boolean(), "content": _string(), "fingerprint": _string()}, description="One emulator config file content."),
+        "IntegrationCard": _object({"id": _string(), "name": _string(), "description": _string(), "icon": _string(), "configure_route": _string(), "capabilities": _array(_string()), "documentation": _string(), "installed": _boolean(), "enabled": _boolean(), "health": _enum(["disabled", "healthy", "installing", "waiting", "degraded", "error"]), "health_message": _string(), "version": _string(), "metrics": _array(_object({"label": _string(), "value": freeform}))}, ("id", "name", "installed", "enabled", "health"), description="One optional integration's card on Admin -> Integrations."),
+        "IntegrationsResponse": _object({"integrations": _array(_ref("IntegrationCard")), "scope": _enum(["local-only"])}, ("integrations", "scope"), description="Optional integrations for this local machine (never another Drone)."),
+        "StreamDeckJob": _object({"id": _string(), "kind": _string(), "status": _enum(["running", "completed", "failed", "cancelled"]), "message": _string(), "steps": _array(_string()), "result": freeform, "error": _string(), "cancellable": _boolean(), "started_at": _string(fmt="date-time"), "finished_at": _string(fmt="date-time", nullable=True)}, ("id", "kind", "status"), description="Background job (install/repair progress, script test, Test Action / Test Game Launch)."),
+        "StreamDeckLifecycleRequest": _object({"reinstall": _boolean("Repair only: reinstall integration-owned tooling"), "include_configuration": _boolean("Remove only: also delete profiles, scripts, images, and logs")}, description="Lifecycle options."),
+        "StreamDeckLifecycleResponse": _object({"status": _string(), "message": _string(), "job": _ref("StreamDeckJob"), "removed": _array(_string()), "kept": _array(_string()), "configuration_removed": _boolean()}, ("status",), description="Lifecycle result; enable/repair return a job to poll."),
+        "StreamDeckDevice": _object({"id": _string(), "model": _string(), "serial": _string(), "firmware": _string(), "key_count": _integer(), "rows": _integer(), "columns": _integer(), "key_image_size": _array(_integer()), "has_key_images": _boolean(), "connected": _boolean(), "runtime_state": _string(), "source": _enum(["runtime", "usb", "remembered"]), "active_profile_id": _string(), "brightness": _integer(), "startup_profile_id": _string(), "usb_id": _string()}, ("id", "model"), description="A Stream Deck described through the device abstraction (never library objects)."),
+        "StreamDeckStatusResponse": _object({"id": _string(), "enabled": _boolean(), "installed": _boolean(), "health": _string(), "health_message": _string(), "tooling": _enum(["installed", "missing", "error"]), "runtime": _enum(["running", "stopped", "error"]), "device": _enum(["connected", "disconnected"]), "connected_device_count": _integer(), "devices": _array(_ref("StreamDeckDevice")), "versions": freeform, "active_game": freeform, "job": freeform, "last_action": freeform, "last_action_result": freeform, "last_game_launch": freeform, "last_button_press": freeform, "last_device_connection": freeform, "last_error": _string(), "pending_apply": _boolean(), "settings": freeform, "paths": freeform, "scope": _enum(["local-only"])}, ("enabled", "installed", "health", "runtime"), description="Stream Deck integration status panel."),
+        "StreamDeckDevicesResponse": _object({"devices": _array(_ref("StreamDeckDevice"))}, ("devices",)),
+        "StreamDeckButton": _object({"key": _integer(minimum=0), "action_type": _enum(["none", "builtin", "game", "script", "profile"]), "label": _string(), "action_id": _string("Built-in action ID (builtin)"), "game": _object({"id": _string(), "name": _string(), "system": _string(), "rom_path": _string("ROM path relative to the system directory")}, description="Launch Game library reference (never a command)"), "script_id": _string(), "operation": _enum(["next", "previous", "go-to"]), "profile_id": _string(), "image": _object({"type": _enum(["default", "game-artwork", "generated", "uploaded", "blank"]), "fit": _enum(["fill", "fit", "stretch"]), "background": _string(), "text_color": _string(), "text": _string(), "secondary_text": _string(), "text_size": _enum(["small", "medium", "large"]), "align": _enum(["top", "middle", "bottom"]), "symbol": _string(), "image_id": _string(), "artwork_field": _string()})}, description="One key assignment. Buttons store stable references only."),
+        "StreamDeckButtonResponse": _object({"button": _ref("StreamDeckButton"), "applied": freeform}, ("button",)),
+        "StreamDeckProfilesResponse": _object({"profiles": _array(_object({"id": _string(), "name": _string(), "is_default": _boolean(), "buttons": _array(_ref("StreamDeckButton"))})), "default_profile_id": _string(), "context_rules": _array(freeform), "settings": freeform, "devices": _array(freeform), "warnings": _array(_string())}, ("profiles", "default_profile_id")),
+        "StreamDeckProfileRequest": _object({"name": _string(), "duplicate_from": _string(), "default": _boolean()}),
+        "StreamDeckProfileResponse": _object({"id": _string(), "name": _string(), "buttons": _array(_ref("StreamDeckButton")), "deleted": _string(), "navigation_buttons_cleared": _integer(), "rules_removed": _integer()}),
+        "StreamDeckActionsResponse": _object({"actions": _array(_object({"id": _string(), "display_name": _string(), "description": _string(), "category": _string(), "default_icon": _string(), "default_label": _string(), "dangerous": _boolean(), "confirmation_required": _boolean(), "compatibility": _string(), "availability": _object({"available": _boolean(), "reason": _string()})})), "categories": _array(_string())}, ("actions",), description="Typed built-in action registry with availability for the current context."),
+        "StreamDeckGame": _object({"id": _string(), "name": _string(), "system": _string(), "rom_path": _string(), "rom_file": _string(), "favorite": _boolean(), "has_artwork": _boolean(), "installed": _boolean()}),
+        "StreamDeckGamesResponse": _object({"items": _array(_ref("StreamDeckGame")), "total": _integer(nullable=True), "limit": _integer(), "offset": _integer(), "has_more": _boolean(), "mode": _string()}, ("items",)),
+        "StreamDeckSystemsResponse": _object({"systems": _array(_object({"name": _string(), "rom_count": _integer(nullable=True)}))}, ("systems",)),
+        "StreamDeckScriptRequest": _object({"name": _string(), "description": _string(), "code": _string("Must start with #! (interpreter line); max 64 KiB")}),
+        "StreamDeckScript": _object({"id": _string(), "name": _string(), "description": _string(), "code": _string(), "size": _integer(), "created_at": _string(), "updated_at": _string(), "references": _array(freeform)}, ("id", "name")),
+        "StreamDeckScriptsResponse": _object({"scripts": _array(_ref("StreamDeckScript"))}, ("scripts",)),
+        "StreamDeckTestActionRequest": _object({"action_type": _enum(["builtin", "game", "script"]), "action_id": _string(), "game": freeform, "script_id": _string(), "confirmed": _boolean("Required for dangerous built-ins and Launch Game")}, ("action_type",)),
+        "StreamDeckApplyResponse": _object({"status": _enum(["applied", "saved"]), "applied": _boolean(), "message": _string(), "problems": _array(freeform), "devices": freeform}, ("status",)),
+        "StreamDeckSettingsRequest": _object({"confirm_dangerous_actions": _boolean(), "hold_duration_ms": _integer(minimum=500, maximum=5000), "auto_apply": _boolean(), "exit_timeout_seconds": _integer(), "launch_confirm_timeout_seconds": _integer(), "script_timeout_seconds": _integer()}),
+        "StreamDeckSettingsResponse": _object({"settings": _ref("StreamDeckSettingsRequest")}, ("settings",)),
+        "StreamDeckRulesRequest": _object({"rules": _array(_object({"id": _string(), "enabled": _boolean(), "event": _enum(["game-start", "game-stop"]), "system": _string(), "emulator": _string(), "profile_id": _string()}))}, ("rules",)),
+        "StreamDeckRulesResponse": _object({"context_rules": _array(freeform)}, ("context_rules",)),
+        "StreamDeckDeviceSettingsRequest": _object({"brightness": _integer(minimum=0, maximum=100), "startup_profile_id": _string()}),
+        "StreamDeckDeviceSettingsResponse": _object({"device": freeform, "applied": freeform}, ("device",)),
+        "StreamDeckDiagnosticRequest": _object({"key": _integer(minimum=0)}),
+        "StreamDeckDiagnosticResponse": _object({"status": _string(), "error": _string(), "devices": freeform, "usb": freeform, "via": _string(), "key": _integer(), "action_executed": _boolean()}, ("status",)),
+        "StreamDeckImageUploadRequest": _object({"image": _string(fmt="binary")}, description="One PNG, JPEG, or WebP file (max 5 MiB, max 4096x4096)."),
+        "StreamDeckImageUploadResponse": _object({"id": _string(), "type": _string(), "content_type": _string(), "width": _integer(), "height": _integer(), "size": _integer(), "url": _string()}, ("id",)),
+        "StreamDeckLogResponse": _object({"source": _enum(["runtime", "install", "console"]), "path": _string(), "lines": _array(_string())}, ("source", "lines")),
     }
 
 
@@ -2372,6 +2406,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 ),
             },
             "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, tags=["admin", "downloads"])},
+            **_integration_paths(),
             "/admin/downloads/{job_id}/cancel": {
                 "post": _operation("Cancel a download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
@@ -2834,6 +2869,63 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
         },
     }
 
+
+
+def _integration_paths() -> Dict[str, Schema]:
+    """Admin -> Integrations. Every route configures only this local machine."""
+    sd = "/admin/integrations/streamdeck"
+    tags = ["admin", "integrations", "streamdeck"]
+    errors = ("400", "401", "403", "404", "409", "415", "429", "500")
+
+    def get(summary: str, schema: str, **kwargs: Any) -> Schema:
+        return {"get": _operation(summary, {"200": _json_response(schema)}, tags=tags, **kwargs)}
+
+    def post(summary: str, schema: str, request: Optional[str] = None, code: str = "200", **kwargs: Any) -> Schema:
+        return {"post": _operation(summary, {code: _json_response(schema)}, tags=tags, error_codes=errors,
+                                   request_body=_json_request(request, required=False) if request else None, **kwargs)}
+
+    image = {"200": _media_response("Image bytes", ["image/png", "image/jpeg", "image/webp", "image/gif"])}
+    return {
+        "/admin/integrations": {"get": _operation("List optional local integrations", {"200": _json_response("IntegrationsResponse")}, tags=["admin", "integrations"])},
+        f"{sd}/status": get("Stream Deck status: tooling, runtime, devices, last actions", "StreamDeckStatusResponse"),
+        f"{sd}/devices": get("Connected, USB-detected, and remembered Stream Decks", "StreamDeckDevicesResponse"),
+        f"{sd}/profiles": {**get("Profiles with resolved buttons and preview specs", "StreamDeckProfilesResponse"),
+                           **post("Create (or duplicate) a profile", "StreamDeckProfileResponse", "StreamDeckProfileRequest", code="201")},
+        f"{sd}/profiles/{{profile_id}}/update": post("Rename a profile or make it the default", "StreamDeckProfileResponse", "StreamDeckProfileRequest", parameters=[_path_param("profile_id")]),
+        f"{sd}/profiles/{{profile_id}}/duplicate": post("Duplicate a profile", "StreamDeckProfileResponse", "StreamDeckProfileRequest", code="201", parameters=[_path_param("profile_id")]),
+        f"{sd}/profiles/{{profile_id}}/delete": post("Delete a non-default profile", "StreamDeckProfileResponse", parameters=[_path_param("profile_id")]),
+        f"{sd}/profiles/{{profile_id}}/buttons/{{key}}": post("Assign a key (built-in, Launch Game, script, profile navigation, or none)", "StreamDeckButtonResponse", "StreamDeckButton", parameters=[_path_param("profile_id"), _path_param("key")]),
+        f"{sd}/actions": get("Typed built-in actions and their availability", "StreamDeckActionsResponse"),
+        f"{sd}/actions/test": post("Run one action now as a background job (explicit admin test)", "StreamDeckJob", "StreamDeckTestActionRequest", code="202"),
+        f"{sd}/games": get("Search the local game library (or browse one system)", "StreamDeckGamesResponse", parameters=[_query_param("q", _string()), _query_param("system", _string()), _query_param("limit", _integer(default=30)), _query_param("offset", _integer(default=0))]),
+        f"{sd}/games/systems": get("Systems for the game picker filter", "StreamDeckSystemsResponse"),
+        f"{sd}/games/artwork": {"get": _operation("Local artwork for a game (for previews)", image, tags=tags, parameters=[_query_param("system", _string()), _query_param("rom_path", _string()), _query_param("field", _string())])},
+        f"{sd}/games/test-launch": post("Test Game Launch (exits the running game first)", "StreamDeckJob", "StreamDeckTestActionRequest", code="202"),
+        f"{sd}/scripts": {**get("List custom scripts", "StreamDeckScriptsResponse"),
+                          **post("Create a custom script", "StreamDeckScript", "StreamDeckScriptRequest", code="201")},
+        f"{sd}/scripts/{{script_id}}": get("Get a custom script with its code and button references", "StreamDeckScript", parameters=[_path_param("script_id")]),
+        f"{sd}/scripts/{{script_id}}/update": post("Edit a custom script", "StreamDeckScript", "StreamDeckScriptRequest", parameters=[_path_param("script_id")]),
+        f"{sd}/scripts/{{script_id}}/duplicate": post("Duplicate a custom script", "StreamDeckScript", code="201", parameters=[_path_param("script_id")]),
+        f"{sd}/scripts/{{script_id}}/delete": post("Delete an unassigned custom script", "StreamDeckLifecycleResponse", parameters=[_path_param("script_id")]),
+        f"{sd}/scripts/{{script_id}}/test": post("Run/Test a script as a background job", "StreamDeckJob", code="202", parameters=[_path_param("script_id")]),
+        f"{sd}/jobs/{{job_id}}": get("Poll a background job", "StreamDeckJob", parameters=[_path_param("job_id")]),
+        f"{sd}/jobs/{{job_id}}/cancel": post("Cancel a running script test", "StreamDeckJob", parameters=[_path_param("job_id")]),
+        f"{sd}/images/upload": {"post": _operation("Upload a button image", {"201": _json_response("StreamDeckImageUploadResponse")}, request_body=_multipart_request("StreamDeckImageUploadRequest"), tags=tags, error_codes=errors)},
+        f"{sd}/images/{{image_id}}": {"get": _operation("Uploaded button image (original)", image, tags=tags, parameters=[_path_param("image_id")])},
+        f"{sd}/preview/{{device_id}}/{{key}}": {"get": _operation("Key image exactly as last rendered for the device", image, tags=tags, parameters=[_path_param("device_id"), _path_param("key")])},
+        f"{sd}/logs": get("Tail the runtime/install logs", "StreamDeckLogResponse", parameters=[_query_param("source", _enum(["runtime", "install", "console"])), _query_param("lines", _integer(default=200))]),
+        f"{sd}/enable": post("Enable: install isolated tooling if needed and start the runtime", "StreamDeckLifecycleResponse", code="202"),
+        f"{sd}/disable": post("Disable: stop the runtime, keep configuration", "StreamDeckLifecycleResponse"),
+        f"{sd}/repair": post("Repair, or reinstall integration-owned tooling", "StreamDeckLifecycleResponse", "StreamDeckLifecycleRequest", code="202"),
+        f"{sd}/remove": post("Remove tooling only, or tooling + configuration", "StreamDeckLifecycleResponse", "StreamDeckLifecycleRequest"),
+        f"{sd}/apply": post("Validate, render, and push the configuration to the device", "StreamDeckApplyResponse"),
+        f"{sd}/settings": post("Update safeguards, auto-apply, and timeouts", "StreamDeckSettingsResponse", "StreamDeckSettingsRequest"),
+        f"{sd}/rules": post("Replace contextual profile-switching rules", "StreamDeckRulesResponse", "StreamDeckRulesRequest"),
+        f"{sd}/test-connection": post("Enumerate, open, and safely talk to connected decks", "StreamDeckDiagnosticResponse"),
+        f"{sd}/devices/{{device_id}}/settings": post("Brightness and startup profile for one device", "StreamDeckDeviceSettingsResponse", "StreamDeckDeviceSettingsRequest", parameters=[_path_param("device_id")]),
+        f"{sd}/devices/{{device_id}}/identify": post("Show key numbers on the device, then restore", "StreamDeckDiagnosticResponse", parameters=[_path_param("device_id")]),
+        f"{sd}/devices/{{device_id}}/test-button": post("Flash one key without running its action", "StreamDeckDiagnosticResponse", "StreamDeckDiagnosticRequest", parameters=[_path_param("device_id")]),
+    }
 
 def _artwork_search_params() -> Iterable[Schema]:
     return [

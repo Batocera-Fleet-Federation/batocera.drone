@@ -6285,6 +6285,14 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integrations')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-puzzle me-2"></i>Integrations</h5>
+            <p class="card-text">Optional extensions for this machine's own hardware and software, starting with Elgato Stream Deck controls and one-press game launching.</p>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -14142,6 +14150,9 @@ async function router(retryDepth = 0) {
     if (hash !== "#admin/music") {
       stopMusicBulkScrapeAutoRefresh();
     }
+    if (!hash.startsWith("#admin/integrations/streamdeck") && typeof stopStreamDeckAutoRefresh === "function") {
+      stopStreamDeckAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
@@ -14305,12 +14316,24 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderReferenceRomsPage(decodeURIComponent(hash.split("/")[2] || ""));
+    } else if (hash === "#admin/integrations") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderIntegrationsPage();
+    } else if (hash === "#admin/integrations/streamdeck") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderStreamDeckPage();
     } else if (
-      hash.startsWith("#admin/integration")
+      (hash.startsWith("#admin/integration") && !hash.startsWith("#admin/integrations"))
       || ["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"].includes(hash)
     ) {
-      // Integration (and its Overmind panels) is retired; the Swarm page owns
-      // pairing, peers, and the tailnet now.
+      // Singular legacy integration routes belonged to retired Overmind.
+      // The plural Integrations area is the local optional-extension home.
       if (!adminEnabled) {
         setHash("");
         return;

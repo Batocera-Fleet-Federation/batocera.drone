@@ -21,6 +21,7 @@ exposes a public inbound API.
 python -m pytest tests/               # unittest-style tests run under pytest
 python -m pytest tests/test_unit.py -k <expr>
 python -m pytest tests/test_transport.py    # transport/networking (transport selector, LAN/tailnet)
+python -m pytest tests/test_streamdeck_*.py # Integrations + Stream Deck (fake hardware; no device needed)
 python app/main.py                    # run the drone locally
 ```
 
@@ -65,6 +66,10 @@ working. Layout:
   (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), download_errors
   (`DownloadCancelled`), transfer_files, local_network, network_identity,
   drone_network, drone_tls (`DroneCertificateManager`)
+- `integrations/` — the small static registry for optional local extensions. Stream
+  Deck owns isolated tooling/worker, devices, profiles, typed actions, game launching,
+  scripts, images, and diagnostics under `<install root>/integrations/streamdeck/`;
+  see `drone-integrations-streamdeck`.
 - `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
   bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
   **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/
@@ -180,6 +185,31 @@ is neither on the same LAN/tailnet nor port-forwarded, it is simply unreachable.
 **Cross-network P2P** needs either a shared Tailscale tailnet (recommended, zero
 router config) or the peer port-forwarded for the direct-WAN fallback.
 
+## Integrations (`app/integrations/`) — optional local extensions
+
+Admin -> Integrations lists every integration registered in
+`integrations/registry.py::build_integration_registry` (static and reviewed — no
+plugin loader). Each one owns its lifecycle/status/config/diagnostics/help, keeps
+its files under `<install root>/integrations/<id>/`, configures **only this
+machine** (never `/peer/*`, never proxied), and must be removable without touching
+Batocera or other Drone features. Routes: `/v1/api/admin/integrations/...` in
+`web/handlers_integrations.py` (real session cookie — loopback pre-auth is not
+enough — plus `admin_enabled`, JSON/multipart bodies, same-origin `Origin`); page:
+`web/static/js/integrations.js`.
+
+**Stream Deck** is the first. Its third-party deps (`streamdeck==0.10.0`, Pillow)
+are installed into the integration's private `lib/` (venv/bundled pip, `--target`,
+never global pip/setuptools, no `batocera-save-overlay`) and imported **only** by a
+supervised child worker (`python3 -m app.integrations.streamdeck.worker`) — the
+Drone process stays stdlib-only. Built-ins are stable IDs in a typed registry
+(never stored commands); Launch Game is a structured library reference that exits
+the running game via the central `exit-game` handler, waits for the process to
+actually exit, then launches through EmulationStation's loopback API (`POST
+:1234/launch`), one transition at a time; custom scripts are the only editable
+executable action (ID-confined files, `ProcessRunner`, no `shell=True`). Tests use
+fake devices/runtimes/launchers — no hardware. Design reference:
+`docs/integrations-streamdeck.md`; skill: `drone-integrations-streamdeck`.
+
 ## Conventions
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a
@@ -204,5 +234,7 @@ directly), `drone-batocera-emulationstation` (what's Drone-owned vs.
 Batocera/EmulationStation-owned state — es_settings.cfg/es_systems.cfg keys,
 the stop/write/overlay-save/start EmulationStation restart pattern, the
 privileged-worker request/result file dance, and how to find ground truth in
-the upstream batocera-emulationstation source), `bff-ui-theme-functionality`.
+the upstream batocera-emulationstation source), `bff-ui-theme-functionality`,
+`drone-integrations-streamdeck` (the shared optional-integration boundary and Stream
+Deck local-only lifecycle/action/game/security invariants).
 Consult the matching skill before non-trivial work.
