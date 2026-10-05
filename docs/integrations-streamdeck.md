@@ -167,6 +167,19 @@ capabilities dict. `LibraryStreamDeckDevice` adapts python-elgato-streamdeck
 `FakeStreamDeckDevice`/`FakeDeviceProvider` simulate model, geometry, images,
 brightness, presses, unplug/replug for tests.
 
+HID `get_serial_number()` is often a truncated USB iSerial (Stream Deck Mini:
+12 characters over HID vs 14 on the USB descriptor). `devices.serials_match` /
+`same_physical_device` treat a prefix match of 8+ characters as one physical
+deck, so Connected Devices does not list the runtime row and the USB row
+together. The runtime `id` stays the command key; the longer USB serial is
+shown. Sysfs interface nodes (`7-2:1.0`) are skipped. Per-device settings
+resolve across those serial aliases.
+
+The Stream Deck admin UI uses the shared dark-theme contract in
+`bff-ui-theme-functionality`: `themed-table`, `themed-modal` + `btn-close-white`,
+`themed-accordion`. Help opened from the button editor is stacked with
+`sd-modal-nested` so it is not hidden behind the editor.
+
 Nothing is hard-coded to the Mini: layout and key image size come from the device.
 Multiple decks are attached independently, each with its own brightness and
 startup profile; decks without key screens (Pedal) attach without images.
@@ -440,9 +453,9 @@ distinct error is logged once.
   cancel, output, traversal), process runner, uploads, renderer (fill/fit/stretch,
   generated, artwork, per-device sizes, cache), compiler, the real
   `RomRepository`, handler security gates, and every route through a real Drone
-  HTTP server. The HTTP UAT fetches the root page and both JavaScript bundles and
-  verifies that the Admin Integrations tile, router branch, integration list, and
-  Stream Deck renderer are shipped together.
+  HTTP server. Static + HTTP UAT cover the dark-theme contract (tables, modals,
+  accordions, nested help stacking) as well as the Admin tile, router branch,
+  integration list, and Stream Deck renderer shipped together.
 - `tests/test_self_update_extraction.py` / `tests/test_release_version.py` -- a
   `dev` source deployment upgrades to the latest semantic release, and build/update
   archives are rejected if any required Integrations UI/backend file is absent.

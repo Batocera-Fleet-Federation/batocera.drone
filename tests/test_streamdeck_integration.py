@@ -595,6 +595,35 @@ class LifecycleTests(TemporaryPaths):
         self.assertEqual((result['status'], result['via'], len(result['usb'])), ('ok', 'usb', 1))
         self.assertEqual(self.manager.devices()[0]['runtime_state'], 'not-open')
 
+    def test_hid_truncated_serial_is_merged_with_usb_detection(self):
+        hid, usb = 'A00DA6261KKZ', 'A00DA6261KKZB0'
+        self.manager.usb_detector = lambda: [{
+            'id': usb, 'model': 'Stream Deck Mini', 'serial': usb, 'usb_id': '0fd9:0063',
+            'usb_path': '7-2', 'rows': 2, 'columns': 3, 'key_count': 6, 'known_model': True,
+        }]
+        self.manager.config.set_device_settings(usb, {'brightness': 40})
+        rows = self.manager.devices(worker={'devices': [{
+            'id': hid, 'model': 'Stream Deck Mini', 'serial': hid, 'firmware': '3.03.002',
+            'key_count': 6, 'rows': 2, 'columns': 3, 'key_image_size': [80, 80],
+        }]})
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row['id'], row['source'], row['runtime_state']), (hid, 'runtime', 'open'))
+        self.assertEqual((row['serial'], row['usb_id'], row['brightness']), (usb, '0fd9:0063', 40))
+
+    def test_remembered_truncated_serial_does_not_duplicate_live_usb_device(self):
+        hid, usb = 'A00DA6261KKZ', 'A00DA6261KKZB0'
+        atomic_write_json(self.paths.state_dir / 'known-devices.json', {
+            hid: {'id': hid, 'model': 'Stream Deck Mini', 'serial': hid, 'key_count': 6, 'rows': 2, 'columns': 3},
+        })
+        self.manager.usb_detector = lambda: [{
+            'id': usb, 'model': 'Stream Deck Mini', 'serial': usb, 'usb_id': '0fd9:0063',
+            'usb_path': '7-2', 'rows': 2, 'columns': 3, 'key_count': 6, 'known_model': True,
+        }]
+        rows = self.manager.devices(worker={})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['id'], rows[0]['source'], rows[0]['serial']), (usb, 'usb', usb))
+
     def test_apply_and_brightness_reach_a_running_runtime_without_restart(self):
         self.manager.config.set_enabled(True)
         with mock.patch.object(self.manager, 'runtime_info', return_value={'running': True, 'pid': 1}), \
