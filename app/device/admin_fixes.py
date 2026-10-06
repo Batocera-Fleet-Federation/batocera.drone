@@ -17,9 +17,12 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 LINDBERGH_INPUT_GUARD_ID = "lindbergh-input-device-guard"
 SWITCH_GUI_WORKAROUND_ID = "switch-gui-autoload"
+CRASH_NOTIFIER_ID = "game-crash-notifier"
+CRASH_NOTIFIER_HOOK_FILENAME = "drone-game-crash-notifier.py"
 HOOK_FILENAME = "drone-lindbergh-input-device-guard.py"
 ASSET_ROOT = Path(__file__).resolve().parent / "fix_assets"
 ASSET_PATH = ASSET_ROOT / "lindbergh_input_guard.py"
+CRASH_NOTIFIER_ASSET = ASSET_ROOT / "game_crash_notifier.py"
 SWITCH_LAUNCHER_ASSET = ASSET_ROOT / "switch_gui_launcher.py"
 SWITCH_WRAPPER_ASSET = ASSET_ROOT / "switch_gui_autoload.sh"
 SWITCH_GENERATOR_MARKER_START = "# >>> drone switch-gui-autoload fix"
@@ -44,6 +47,24 @@ FIX_CATALOG = (
             "Does not modify Batocera's read-only system image or emulator files",
         ],
         "caution": "While a Lindbergh game is running, a selected multi-port adapter is unavailable. It is restored when the game exits.",
+    },
+    {
+        "id": CRASH_NOTIFIER_ID,
+        "name": "Game crash notifier",
+        "summary": "Shows an EmulationStation message when a game crashes on startup instead of silently returning to the menu.",
+        "applies_to": "All systems and emulators",
+        "details": [
+            "At every gameStart this hook starts a small detached watcher tied to the emulatorlauncher process. When the launcher exits, the watcher reads only the part of es_launch_stderr.log written during that session and looks for crash text such as a stack-smashing abort, segmentation fault, core dump, illegal instruction, a launcher traceback, or a game file that could not be loaded.",
+            "A short session alone is never treated as a crash. It only counts when the kernel log also shows a fault, such as a segfault or out-of-memory kill, during the same window, so quitting a game right away does not raise an alert.",
+            "When a crash is detected, the watcher waits for EmulationStation to answer on its loopback API and posts a toast naming the game, the system and the likely cause. If many controllers are connected and the failure looks like memory corruption, the message suggests unplugging a USB adapter.",
+        ],
+        "changes": [
+            f"Installs /userdata/system/scripts/{CRASH_NOTIFIER_HOOK_FILENAME}",
+            "Stores configuration in /userdata/system/game-crash-notifier/config.json",
+            "Writes activity to /userdata/system/logs/game-crash-notifier.log",
+            "Only reads Batocera's launch log and kernel log; does not modify emulators or Batocera's system image",
+        ],
+        "caution": "Detection relies on the wording of emulator error output, so an unusual or silent crash may not be reported. The toast is brief and only appears if EmulationStation is back on screen.",
     },
     {
         "id": SWITCH_GUI_WORKAROUND_ID,
@@ -73,6 +94,9 @@ def _paths(settings: Settings) -> Dict[str, Path]:
         "hook": system_root / "scripts" / HOOK_FILENAME,
         "config": system_root / "input-device-guard" / "config.json",
         "log": system_root / "logs" / "input-device-guard.log",
+        "crash_hook": system_root / "scripts" / CRASH_NOTIFIER_HOOK_FILENAME,
+        "crash_config": system_root / "game-crash-notifier" / "config.json",
+        "crash_log": system_root / "logs" / "game-crash-notifier.log",
         "switch_config": system_root / "switch-gui-workaround" / "config.json",
         "switch_backup": system_root / "backups" / "hotfixes" / "drone-switch-gui-workaround",
         "switch_generator": system_root / "rgs" / "generators" / "yuzu" / "yuzuMainlineGenerator.py",
@@ -110,16 +134,19 @@ def _fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str, Any]:
     paths = _paths(settings)
     if metadata["id"] == SWITCH_GUI_WORKAROUND_ID:
         return _switch_fix_status(settings, metadata)
-    installed = paths["hook"].is_file()
-    managed = installed and _sha256(paths["hook"]) == _sha256(ASSET_PATH)
+    hook_key, asset, log_key = "hook", ASSET_PATH, "log"
+    if metadata["id"] == CRASH_NOTIFIER_ID:
+        hook_key, asset, log_key = "crash_hook", CRASH_NOTIFIER_ASSET, "crash_log"
+    installed = paths[hook_key].is_file()
+    managed = installed and _sha256(paths[hook_key]) == _sha256(asset)
     payload = dict(metadata)
     payload.update(
         {
             "enabled": installed,
             "managed": managed,
             "status": "enabled" if managed else ("modified" if installed else "disabled"),
-            "installed_path": str(paths["hook"]),
-            "log_path": str(paths["log"]),
+            "installed_path": str(paths[hook_key]),
+            "log_path": str(paths[log_key]),
         }
     )
     return payload
@@ -254,6 +281,21 @@ def _enable_lindbergh_input_guard(settings: Settings) -> None:
     }
     _atomic_write(paths["config"], (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o644)
     _atomic_write(paths["hook"], source, 0o755)
+
+
+def _enable_crash_notifier(settings: Settings) -> None:
+    paths = _paths(settings)
+    config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+    _atomic_write(paths["crash_config"], (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o644)
+    _atomic_write(paths["crash_hook"], CRASH_NOTIFIER_ASSET.read_bytes(), 0o755)
+
+
+def _disable_crash_notifier(settings: Settings) -> None:
+    # A running watcher finishes harmlessly: it only reads logs and posts a toast.
+    try:
+        _paths(settings)["crash_hook"].unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _disable_lindbergh_input_guard(settings: Settings) -> None:
@@ -442,6 +484,11 @@ def set_fix_enabled(
             _enable_lindbergh_input_guard(settings)
         else:
             _disable_lindbergh_input_guard(settings)
+    elif fix_id == CRASH_NOTIFIER_ID:
+        if enabled:
+            _enable_crash_notifier(settings)
+        else:
+            _disable_crash_notifier(settings)
     elif fix_id == SWITCH_GUI_WORKAROUND_ID:
         if enabled:
             _enable_switch_gui_workaround(settings, scope, selected_games)

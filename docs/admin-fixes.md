@@ -12,6 +12,16 @@ It acts only on `lindbergh` launches. When `/sys/class/input/js*` exceeds eight 
 
 Configuration and the rotating activity log are stored under `/userdata/system/input-device-guard` and `/userdata/system/logs/input-device-guard.log`. Disabling the fix restores any active adapter before removing the Drone-owned hook.
 
+## Game crash notifier
+
+Batocera returns silently to EmulationStation when an emulator dies at launch. This fix installs `/userdata/system/scripts/drone-game-crash-notifier.py`, which starts a detached watcher at every `gameStart` (any system) tied to the `emulatorlauncher` process. When the launcher exits, the watcher reads only the part of `es_launch_stderr.log` written during that session and scores it:
+
+- a crash signature (stack-smashing abort, segmentation fault, core dump, abort, illegal instruction, bus error, launcher traceback, or "Failed to load content") is enough on its own;
+- a short session (under 15 seconds) only counts when `dmesg` also shows a segfault or out-of-memory kill in the same window, so quitting a game quickly is never flagged;
+- the launcher's own `ERROR` log level is ignored, because it logs all emulator stderr that way even on a clean exit.
+
+On a crash it waits for EmulationStation's loopback API and posts a toast (`POST 127.0.0.1:1234/notify`) naming the game, system and likely cause. When more than eight joystick nodes are connected and the failure looks like memory corruption, the message also suggests unplugging a USB adapter. Configuration is `/userdata/system/game-crash-notifier/config.json` and activity is logged to `/userdata/system/logs/game-crash-notifier.log`. Disabling the fix just removes the hook. Detection depends on emulator error wording, and the toast is brief.
+
 ## Switch GUI-autoload workaround
 
 Some Eden and Citron revisions start command-line autoboot before their asynchronous game-list worker has finished rebuilding the content provider used for updates and DLC. The managed workaround generalizes the proven Smash-only GUI load path to:

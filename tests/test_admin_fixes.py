@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.device import admin_fixes
-from app.device.fix_assets import lindbergh_input_guard, switch_gui_launcher
+from app.device.fix_assets import game_crash_notifier, lindbergh_input_guard, switch_gui_launcher
 from app.drone_api import Settings
 from app.web import handlers_system
 
@@ -70,6 +70,24 @@ class AdminFixManagerTests(unittest.TestCase):
             self.assertTrue(hook.stat().st_mode & 0o100)
 
             disabled = admin_fixes.set_fix_enabled(settings, admin_fixes.LINDBERGH_INPUT_GUARD_ID, False)
+            self.assertFalse(disabled["enabled"])
+            self.assertFalse(hook.exists())
+
+    def test_crash_notifier_enable_and_disable_are_reversible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = build_settings(Path(tmp))
+            hook = Path(tmp) / "system" / "scripts" / admin_fixes.CRASH_NOTIFIER_HOOK_FILENAME
+            self.assertEqual(admin_fixes.get_fix(settings, admin_fixes.CRASH_NOTIFIER_ID)["status"], "disabled")
+            enabled = admin_fixes.set_fix_enabled(settings, admin_fixes.CRASH_NOTIFIER_ID, True)
+            self.assertTrue(enabled["enabled"])
+            self.assertTrue(enabled["managed"])
+            self.assertTrue(hook.is_file())
+            self.assertTrue(hook.stat().st_mode & 0o100)
+            self.assertTrue((Path(tmp) / "system" / "game-crash-notifier" / "config.json").is_file())
+            # The Lindbergh guard stays independent of this fix.
+            self.assertFalse(admin_fixes.get_fix(settings, admin_fixes.LINDBERGH_INPUT_GUARD_ID)["enabled"])
+
+            disabled = admin_fixes.set_fix_enabled(settings, admin_fixes.CRASH_NOTIFIER_ID, False)
             self.assertFalse(disabled["enabled"])
             self.assertFalse(hook.exists())
 
@@ -203,6 +221,65 @@ class InstalledFixAssetTests(unittest.TestCase):
         selected = lindbergh_input_guard.select_groups_to_detach(groups, 4, config)
         self.assertEqual([group["usb_id"] for group in selected], ["1-2"])
 
+    def test_crash_signature_is_detected_but_launcher_error_level_is_not(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        crashed = game_crash_notifier.assess_launch("...\n*** stack smashing detected ***: terminated\n", 40, "", config)
+        self.assertTrue(crashed["crashed"])
+        # The launcher logs all emulator stderr as ERROR on every exit.
+        clean = game_crash_notifier.assess_launch("2026 ERROR (emulatorlauncher.py:604):runCommand [INFO] fine", 600, "", config)
+        self.assertFalse(clean["crashed"])
+
+    def test_short_session_needs_kernel_evidence(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        self.assertFalse(game_crash_notifier.assess_launch("", 3, "", config)["crashed"])
+        killed = game_crash_notifier.assess_launch("", 3, "Out of memory: Killed process 5", config)
+        self.assertTrue(killed["crashed"])
+        self.assertFalse(game_crash_notifier.assess_launch("", 300, "Out of memory: Killed process 5", config)["crashed"])
+
+    def test_kernel_evidence_respects_the_session_window(self) -> None:
+        dmesg = "[   10.0] retroarch[1]: segfault at 0\n[  500.0] retroarch[2]: segfault at 0\n"
+        self.assertIn("retroarch[2]", game_crash_notifier.kernel_evidence(dmesg, 495.0, 505.0))
+        self.assertEqual(game_crash_notifier.kernel_evidence(dmesg, 100.0, 200.0), "")
+
+    def test_message_names_game_and_hints_at_controllers_only_for_memory_faults(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
+        message = game_crash_notifier.build_message("snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 10, config)
+        self.assertIn("Super Mario World (snes) crashed", message)
+        self.assertIn("10 controllers", message)
+        few = game_crash_notifier.build_message("snes", "x.zip", verdict, 4, config)
+        self.assertNotIn("controllers", few)
+        missing = game_crash_notifier.assess_launch("Failed to load content", 5, "", config)
+        self.assertNotIn("controllers", game_crash_notifier.build_message("snes", "x.zip", missing, 12, config))
+
+    def test_log_reader_handles_truncated_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stderr.log"
+            path.write_text("old\nnew crash\n", encoding="utf-8")
+            self.assertEqual(game_crash_notifier.read_new_text(path, 4), "new crash\n")
+            self.assertEqual(game_crash_notifier.read_new_text(path, 9999), "old\nnew crash\n")
+
+    def test_watch_sends_toast_only_for_crashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "stderr.log"
+            log_path.write_text("fine\n*** stack smashing detected ***\n", encoding="utf-8")
+            state = {"pid": 1, "start_time": None, "system": "snes", "rom": "Game.zip",
+                     "started": 0, "start_uptime": None, "stderr_offset": 0}
+            with mock.patch.object(game_crash_notifier, "LAUNCH_STDERR", log_path), \
+                 mock.patch.object(game_crash_notifier, "LOG_PATH", Path(tmp) / "notifier.log"), \
+                 mock.patch.object(game_crash_notifier, "launcher_is_alive", return_value=False), \
+                 mock.patch.object(game_crash_notifier, "read_dmesg", return_value=""), \
+                 mock.patch.object(game_crash_notifier, "joystick_count", return_value=2), \
+                 mock.patch.object(game_crash_notifier, "send_notification", return_value=True) as notify:
+                game_crash_notifier.watch(state)
+                notify.assert_called_once()
+                self.assertIn("Game (snes) crashed", notify.call_args[0][0])
+                log_path.write_text("all good\n", encoding="utf-8")
+                notify.reset_mock()
+                with mock.patch.object(game_crash_notifier.time, "time", return_value=10_000):
+                    game_crash_notifier.watch(state)
+                notify.assert_not_called()
+
     def test_switch_launcher_uses_gui_only_for_selected_games(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -272,6 +349,7 @@ class AdminFixHandlerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual({fix["id"] for fix in payload["fixes"]}, {
                 admin_fixes.LINDBERGH_INPUT_GUARD_ID,
+                admin_fixes.CRASH_NOTIFIER_ID,
                 admin_fixes.SWITCH_GUI_WORKAROUND_ID,
             })
 
