@@ -24,6 +24,10 @@ SCRIPT_PATH = Path(__file__).resolve()
 USERDATA_ROOT = SCRIPT_PATH.parent.parent.parent
 CONFIG_PATH = USERDATA_ROOT / "system" / "game-crash-notifier" / "config.json"
 LOG_PATH = USERDATA_ROOT / "system" / "logs" / "game-crash-notifier.log"
+HISTORY_PATH = USERDATA_ROOT / "system" / "game-crash-notifier" / "history.jsonl"
+HISTORY_LIMIT = 50
+BATOCERA_VERSION_PATH = Path(os.environ.get("DRONE_CRASH_NOTIFIER_VERSION_FILE", "/usr/share/batocera/batocera.version"))
+MEMINFO_PATH = Path("/proc/meminfo")
 LAUNCH_STDERR = USERDATA_ROOT / "system" / "logs" / "es_launch_stderr.log"
 SYS_INPUT_ROOT = Path(os.environ.get("DRONE_CRASH_NOTIFIER_SYS_INPUT", "/sys/class/input"))
 NOTIFY_URL = os.environ.get("DRONE_CRASH_NOTIFIER_URL", "http://127.0.0.1:1234/notify")
@@ -170,6 +174,82 @@ def joystick_count():
         return 0
 
 
+def log_excerpt(text, pattern, max_lines=60, max_chars=8000):
+    """Return the lines around the first crash signature (or the log tail)."""
+    lines = text.splitlines()
+    start = max(0, len(lines) - max_lines)
+    if pattern:
+        for index, line in enumerate(lines):
+            if re.search(pattern, line, re.IGNORECASE):
+                start = max(0, index - 15)
+                break
+    excerpt = "\n".join(lines[start:start + max_lines])
+    return excerpt[-max_chars:]
+
+
+def memory_available_mb():
+    try:
+        for line in MEMINFO_PATH.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def batocera_version():
+    try:
+        return BATOCERA_VERSION_PATH.read_text(encoding="utf-8").strip().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+
+
+def write_history(record):
+    """Append one crash record, keeping only the newest HISTORY_LIMIT entries."""
+    try:
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if HISTORY_PATH.exists():
+            lines = [line for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines.append(json.dumps(record, sort_keys=True))
+        HISTORY_PATH.write_text("\n".join(lines[-HISTORY_LIMIT:]) + "\n", encoding="utf-8")
+    except OSError as error:
+        log(f"could not write crash history: {error}")
+
+
+def build_record(state, verdict, duration, log_text, evidence, messages, joysticks, device_names):
+    rom = str(state.get("rom") or "")
+    rom_size = None
+    try:
+        rom_size = Path(rom).stat().st_size if rom else None
+    except OSError:
+        pass
+    return {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "epoch": int(time.time()),
+        "game": Path(rom).stem if rom else "",
+        "rom_path": rom,
+        "rom_exists": rom_size is not None,
+        "rom_size_bytes": rom_size,
+        "system": state.get("system", ""),
+        "emulator": state.get("emulator", ""),
+        "core": state.get("core", ""),
+        "duration_seconds": round(duration),
+        "reason": verdict["reason"],
+        "action": verdict["action"],
+        "signature": verdict["signature"],
+        "short_session": bool(verdict["short"]),
+        "kernel_evidence": evidence,
+        "joystick_count": joysticks,
+        "joysticks": device_names,
+        "memory_available_mb": memory_available_mb(),
+        "batocera_version": batocera_version(),
+        "hostname": socket.gethostname(),
+        "toasts": messages,
+        "log_excerpt": log_excerpt(log_text, verdict["signature"] if verdict["signature"] not in ("kernel", "launcher-traceback") else ""),
+    }
+
+
 def assess_launch(log_text, duration, dmesg_evidence, config):
     """Decide whether a session that just ended was a crash.
 
@@ -194,7 +274,7 @@ def build_messages(system, rom, verdict, joysticks, device_names, config, hostna
     action = verdict["action"]
     if joysticks > config["joystick_hint_threshold"] and MEMORY_CORRUPTION.search(verdict["signature"] + " " + verdict["reason"]):
         action = f"{joysticks} controllers connected ({', '.join(device_names)}). {UNPLUG_ACTION}"
-    return [first, f"{action} Details: Admin > Debug > System Logs on {hostname}."]
+    return [first, f"{action} Details: Admin > Debug > Game Crashes on {hostname}."]
 
 
 def post_toast(message):
@@ -247,6 +327,8 @@ def on_game_start(argv, launcher_pid):
             "start_time": proc_start_time(launcher_pid),
             "system": argv[1] if len(argv) > 1 else "",
             "rom": argv[4] if len(argv) > 4 else "",
+            "emulator": argv[2] if len(argv) > 2 else "",
+            "core": argv[3] if len(argv) > 3 else "",
             "started": time.time(),
             "start_uptime": uptime_seconds(),
             "stderr_offset": offset,
@@ -265,9 +347,10 @@ def watch(state):
     if not verdict["crashed"]:
         log(f"{state['system']}: clean exit after {duration:.0f}s")
         return
-    messages = build_messages(
-        state["system"], state["rom"], verdict, joystick_count(), joystick_names(), config, socket.gethostname()
-    )
+    joysticks, names = joystick_count(), joystick_names()
+    messages = build_messages(state["system"], state["rom"], verdict, joysticks, names, config, socket.gethostname())
+    # Persist the evidence before the toast wait so a killed watcher cannot lose it.
+    write_history(build_record(state, verdict, duration, log_text, evidence, messages, joysticks, names))
     delivered = send_notifications(messages)
     log(f"{state['system']}: crash after {duration:.0f}s ({verdict['signature']}); {delivered}/{len(messages)} toasts delivered: {' | '.join(messages)}")
 

@@ -1395,6 +1395,39 @@ def _schemas() -> Dict[str, Schema]:
             ("id", "name", "summary", "enabled", "status"),
             description="An opt-in, reversible Batocera compatibility workaround and its live installation state.",
         ),
+        "CrashHistoryEntry": _object(
+            {
+                "time": _string(),
+                "epoch": _integer(nullable=True),
+                "game": _string(),
+                "rom_path": _string(),
+                "rom_exists": _boolean(nullable=True),
+                "rom_size_bytes": _integer(nullable=True),
+                "system": _string(),
+                "emulator": _string(),
+                "core": _string(),
+                "duration_seconds": _integer(nullable=True),
+                "reason": _string(),
+                "action": _string(),
+                "signature": _string(),
+                "short_session": _boolean(),
+                "kernel_evidence": _string(),
+                "joystick_count": _integer(nullable=True),
+                "joysticks": _array(_string()),
+                "memory_available_mb": _integer(nullable=True),
+                "batocera_version": _string(),
+                "hostname": _string(),
+                "toasts": _array(_string()),
+                "log_excerpt": _string(),
+            },
+            ("time", "game", "system", "reason", "action"),
+            description="One game launch that ended in a detected crash, with the evidence the Game crash notifier collected.",
+        ),
+        "CrashHistoryResponse": _object(
+            {"crashes": _array(_ref("CrashHistoryEntry")), "total": _integer(), "fix_enabled": _boolean()},
+            ("crashes", "total", "fix_enabled"),
+        ),
+        "CrashHistoryClearResponse": _object({"cleared": _integer()}, ("cleared",)),
         "AdminFixListResponse": _object({"fixes": _array(_ref("AdminFix"))}, ("fixes",)),
         "AdminFixUpdateRequest": _object(
             {
@@ -2621,6 +2654,8 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation/idle-volume": {"post": _operation("Update idle-volume automation", {"200": _json_response("IdleVolumeResponse")}, request_body=_json_request("IdleVolumeUpdateRequest"), tags=["admin"])},
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
             "/admin/automation/wifi-recovery": {"post": _operation("Update Wi-Fi recovery automation", {"200": _json_response("WifiRecoveryResponse")}, request_body=_json_request("WifiRecoveryUpdateRequest"), tags=["admin"])},
+            "/admin/crash-history": {"get": _operation("List recent game crashes detected by the Game crash notifier fix", {"200": _json_response("CrashHistoryResponse")}, tags=["admin", "fixes"])},
+            "/admin/crash-history/clear": {"post": _operation("Delete the stored game crash history", {"200": _json_response("CrashHistoryClearResponse")}, tags=["admin", "fixes"], error_codes=("401", "403", "429", "500"))},
             "/admin/fixes": {"get": _operation("List opt-in compatibility fixes and their live installation state", {"200": _json_response("AdminFixListResponse")}, tags=["admin", "fixes"])},
             "/admin/fixes/{fix_id}": {
                 "post": _operation(

@@ -20,6 +20,7 @@ try:
     from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
     from ..device import notifications as _notifications
+    from ..device import crash_history as _crash_history
     from ..device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed
     from ..device.game_activity import (
         load_gameplay_history as _load_gameplay_history,
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
     from device import notifications as _notifications  # type: ignore
+    from device import crash_history as _crash_history  # type: ignore
     from device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed  # type: ignore
     from device.game_activity import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
@@ -159,6 +161,17 @@ class HandlersDiagnosticsMixin:
             })
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
+
+    def _handle_admin_crash_history(self) -> None:
+        self._send_json(200, _crash_history.list_crashes(self.settings))
+
+    def _handle_admin_crash_history_clear(self) -> None:
+        try:
+            removed = _crash_history.clear_crashes(self.settings)
+        except OSError as error:
+            self._send_json(500, {"error": f"Unable to clear crash history: {error}"})
+            return
+        self._send_json(200, {"cleared": removed})
 
     def _handle_admin_gameplay_logs(self) -> None:
         try:

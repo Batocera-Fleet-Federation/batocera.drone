@@ -267,7 +267,7 @@ class InstalledFixAssetTests(unittest.TestCase):
         self.assertIn("10 controllers connected", second)
         self.assertIn("GameCube Adapter (x4)", second)
         self.assertIn("unplugging", second)
-        self.assertIn("Admin > Debug > System Logs on batocera", second)
+        self.assertIn("Admin > Debug > Game Crashes on batocera", second)
 
     def test_actions_are_cause_specific_and_skip_controller_hint_for_other_causes(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}

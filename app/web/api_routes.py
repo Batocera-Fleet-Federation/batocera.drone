@@ -411,6 +411,10 @@ class ApiRoutesMixin:
                 self._handle_admin_gameplay_logs()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "crash-history":
+                self._handle_admin_crash_history()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "system-info":
                 include_speed = str(query_params.get("speed", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
                 self._handle_admin_system_info(include_speed=include_speed)
@@ -906,6 +910,10 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-volume":
                 payload = self._read_json_body()
                 self._handle_admin_automation_idle_volume(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "crash-history" and parts[2] == "clear":
+                self._handle_admin_crash_history_clear()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "fixes":

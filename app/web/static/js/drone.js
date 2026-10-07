@@ -6189,6 +6189,7 @@ function renderDebugTabBar(active) {
     ["system-info", "System Info", "bi-pc-display", "#admin/system-info"],
     ["logs", "System Logs", "bi-journal-text", "#admin/logs/es_launch_stdout?lines=200"],
     ["emulators", "Emulators", "bi-file-earmark-code", "#admin/emulators"],
+    ["crashes", "Game Crashes", "bi-exclamation-triangle", "#admin/crashes"],
   ]);
 }
 
@@ -6359,6 +6360,103 @@ function renderAdminFixCard(fix) {
       </section>
     </div>
   `;
+}
+
+let gameCrashRows = [];
+
+function gameCrashDetailRow(label, value) {
+  if (value === null || value === undefined || value === "") return "";
+  return `<div class="col-sm-6 col-lg-4 mb-2"><div class="small text-muted">${escapeHtml(label)}</div><div class="text-break">${escapeHtml(String(value))}</div></div>`;
+}
+
+function renderGameCrashDetails(crash, index) {
+  const romState = crash.rom_exists === false
+    ? "File not found"
+    : (crash.rom_size_bytes !== null ? formatBytes(crash.rom_size_bytes) : "");
+  const controllers = crash.joystick_count !== null
+    ? `${crash.joystick_count}${crash.joysticks.length ? ` (${crash.joysticks.join(", ")})` : ""}`
+    : "";
+  const emulator = [crash.emulator, crash.core].filter(Boolean).join(" / ");
+  return `
+    <div class="p-3">
+      ${crash.action ? `<div class="alert alert-info py-2"><i class="bi bi-lightbulb me-1"></i><strong>What to try:</strong> ${escapeHtml(crash.action)}</div>` : ""}
+      <div class="row">
+        ${gameCrashDetailRow("ROM file", crash.rom_path)}
+        ${gameCrashDetailRow("ROM size / state", romState)}
+        ${gameCrashDetailRow("Emulator / core", emulator)}
+        ${gameCrashDetailRow("Detected as", crash.signature)}
+        ${gameCrashDetailRow("Session length", `${crash.duration_seconds ?? "?"}s${crash.short_session ? " (very short)" : ""}`)}
+        ${gameCrashDetailRow("Controllers connected", controllers)}
+        ${gameCrashDetailRow("Free memory", crash.memory_available_mb !== null ? `${crash.memory_available_mb} MB` : "")}
+        ${gameCrashDetailRow("Batocera version", crash.batocera_version)}
+      </div>
+      ${crash.kernel_evidence ? `<div class="small text-muted mt-1">Kernel log</div><pre class="mono bg-dark text-light p-2 mb-2" style="white-space: pre-wrap;">${escapeHtml(crash.kernel_evidence)}</pre>` : ""}
+      <div class="small text-muted">Launch log around the failure</div>
+      <pre class="mono bg-dark text-light p-3 mb-2" style="max-height: 320px; overflow-y: auto; white-space: pre-wrap;">${escapeHtml(crash.log_excerpt || "No log text was captured for this crash.")}</pre>
+      <button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('#admin/logs/es_launch_stderr?lines=500')"><i class="bi bi-journal-text me-1"></i>Open full launch log</button>
+    </div>`;
+}
+
+function toggleGameCrashDetails(index) {
+  const row = document.getElementById(`gameCrashDetails-${index}`);
+  if (row) row.classList.toggle("d-none");
+}
+
+async function renderGameCrashesPage() {
+  titleNode.textContent = "Game Crashes";
+  subtitleNode.textContent = "Games that crashed while launching on this Drone";
+  clearSystemTheme();
+  setLoading(true, "Loading crash history...");
+  try {
+    const payload = await api("/admin/crash-history");
+    gameCrashRows = Array.isArray(payload.crashes) ? payload.crashes : [];
+    const notice = payload.fix_enabled
+      ? ""
+      : `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i>The Game crash notifier fix is off, so new crashes are not being recorded. <a href="#admin/fixes" onclick="setHash('#admin/fixes'); return false;">Turn it on in Admin &rarr; Fixes</a>.</div>`;
+    const rows = gameCrashRows.map((crash, index) => `
+      <tr>
+        <td class="text-nowrap">${escapeHtml(crash.epoch ? new Date(crash.epoch * 1000).toLocaleString() : crash.time)}</td>
+        <td class="text-break">${escapeHtml(crash.game || "Unknown game")}</td>
+        <td>${escapeHtml(crash.system)}</td>
+        <td class="text-break">${escapeHtml(crash.reason)}</td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-primary" type="button" onclick="toggleGameCrashDetails(${index})"><i class="bi bi-chevron-expand me-1"></i>Details</button></td>
+      </tr>
+      <tr id="gameCrashDetails-${index}" class="d-none"><td colspan="5" class="p-0">${renderGameCrashDetails(crash, index)}</td></tr>`).join("");
+    content.innerHTML = `
+      ${renderDebugTabBar("crashes")}
+      ${notice}
+      <div class="card log-card">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <span>Recent crashes <span class="badge">${gameCrashRows.length}</span></span>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-primary" type="button" onclick="renderGameCrashesPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+            <button class="btn btn-sm btn-outline-danger" type="button" onclick="clearGameCrashHistory()" ${gameCrashRows.length ? "" : "disabled"}><i class="bi bi-trash me-1"></i>Clear history</button>
+          </div>
+        </div>
+        ${gameCrashRows.length ? `
+        <div class="table-responsive">
+          <table class="table table-sm align-middle themed-table mb-0">
+            <thead><tr><th>When</th><th>Game</th><th>System</th><th>What happened</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>` : `<div class="card-body text-muted">No crashes recorded.</div>`}
+      </div>`;
+  } catch (err) {
+    content.innerHTML = `<div class="alert alert-danger">Failed to load crash history: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function clearGameCrashHistory() {
+  if (!window.confirm("Delete all recorded game crashes on this Drone?")) return;
+  try {
+    const result = await apiPost("/admin/crash-history/clear", {});
+    showToast(`Cleared ${result.cleared} recorded crash${result.cleared === 1 ? "" : "es"}.`, "success");
+  } catch (error) {
+    showToast(`Could not clear crash history: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
+  }
+  await renderGameCrashesPage();
 }
 
 async function renderAdminFixesPage() {
@@ -14220,6 +14318,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderAdminPage();
+    } else if (hash === "#admin/crashes") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderGameCrashesPage();
     } else if (hash === "#admin/emulators") {
       if (!adminEnabled) {
         setHash("");
