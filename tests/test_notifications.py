@@ -36,7 +36,7 @@ class RecordEventTests(unittest.TestCase):
             self.assertIsNone(result)
 
     def test_event_types_tuple_has_sixteen_entries_matching_the_labels_map(self) -> None:
-        self.assertEqual(len(notifications.EVENT_TYPES), 16)
+        self.assertEqual(len(notifications.EVENT_TYPES), 17)
         self.assertEqual(set(notifications.EVENT_TYPES), set(notifications.EVENT_TYPE_LABELS.keys()))
 
 

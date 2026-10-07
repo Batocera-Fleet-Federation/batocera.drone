@@ -58,6 +58,7 @@ try:
     from ..storage import audit_store as _audit_store
     from ..storage import mail_queue_store as _mail_store
     from . import notifications as _notifications
+    from . import crash_history as _crash_history
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import audit_store as _audit_store  # type: ignore
     from storage import mail_queue_store as _mail_store  # type: ignore
     from device import notifications as _notifications  # type: ignore
+    from device import crash_history as _crash_history  # type: ignore
 
 SMTP_STATE_NAMESPACE = "smtp_manager.json"
 SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECONDS", "15"))
@@ -565,6 +567,10 @@ def queue_mail(
 def _compose_digest(items: list, settings: Settings) -> tuple:
     drone_label = _drone_label(settings)
     subject = f"Batocera Drone [{drone_label}]: {len(items)} new notification{'s' if len(items) != 1 else ''}"
+    crashes = [item for item in items if item["event_type"] == "game_crash"]
+    if crashes:
+        extra = len(items) - 1
+        subject = f"Batocera Drone [{drone_label}]: {crashes[0]['title']}" + (f" (+{extra} more)" if extra else "")
     lines = [f"Drone: {drone_label}", "", f"{len(items)} new item(s) since the last digest:", ""]
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
@@ -576,7 +582,11 @@ def _compose_digest(items: list, settings: Settings) -> tuple:
         # drone_updated item's message can carry embedded newlines (the
         # release notes commit list), and only indenting the first line
         # would leave the rest looking like a new top-level digest entry.
-        for message_line in str(item.get("message") or "").splitlines():
+        message_text = str(item.get("message") or "")
+        if item["event_type"] == "game_crash" and isinstance(item.get("details"), dict):
+            # A crash email carries everything the Game Crashes page shows.
+            message_text = _crash_history.format_crash_report(item["details"])
+        for message_line in message_text.splitlines():
             lines.append(f"    {message_line}")
     return subject, "\n".join(lines)
 
@@ -997,11 +1007,14 @@ def send_digest_if_needed(settings: Settings) -> dict:
                 return {"status": "skipped", "reason": "smtp not enabled or not configured"}
             if _mail_store.has_pending_kind(settings, "digest"):
                 return {"status": "skipped", "reason": "a digest is already queued"}
-            if not _digest_interval_elapsed(state):
-                return {"status": "skipped", "reason": "digest interval has not elapsed"}
             enabled_types = [event_type for event_type, on in state["notify"].items() if on]
             if not enabled_types:
                 return {"status": "skipped", "reason": "no notification types enabled"}
+            if not _digest_interval_elapsed(state):
+                # Urgent types (a game crash) go out now instead of waiting.
+                urgent_types = [t for t in enabled_types if t in _notifications.URGENT_EVENT_TYPES]
+                if not urgent_types or not _audit_store.list_unsent_events(settings, urgent_types, limit=1):
+                    return {"status": "skipped", "reason": "digest interval has not elapsed"}
             items = _audit_store.list_unsent_events(settings, enabled_types, limit=AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST)
             prune_result = _audit_store.prune_old_events(settings)
             if not items:
@@ -1035,6 +1048,11 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
     """
     while True:
         time.sleep(DIGEST_POLLER_TICK_SECONDS)
+        try:
+            # The crash hook runs outside the Drone; pull its history into the inbox.
+            _crash_history.ingest_new_crashes(settings)
+        except Exception as error:
+            print(f"Game crash ingest failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
         if _load_state(settings).get("source_peer_id"):
             relay_notifications_to_source(settings)
             relay_mail_jobs_to_source(settings)

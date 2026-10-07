@@ -8706,6 +8706,7 @@ const SMTP_EVENT_TYPES = [
   ["torrent_move_resuming", "Moving downloaded torrent files resumed after interruption"],
   ["torrent_move_failed", "Moving downloaded torrent files failed"],
   ["torrent_move_finished", "Moving downloaded torrent files finished"],
+  ["game_crash", "Game crashed (full debug details)"],
 ];
 
 function renderSmtpRevokedNotice(payload) {

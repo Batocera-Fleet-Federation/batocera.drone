@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 _LOG = logging.getLogger(__name__)
 
-# The 16 event types the SMTP notifications page exposes a toggle for. Order
+# The 17 event types the SMTP notifications page exposes a toggle for. Order
 # here is the order they render in on that page.
 EVENT_TYPES = (
     "vpn_connected",
@@ -43,7 +43,12 @@ EVENT_TYPES = (
     "torrent_move_resuming",
     "torrent_move_failed",
     "torrent_move_finished",
+    "game_crash",
 )
+
+# Types that should not wait out the digest interval: a crash email is only
+# useful if it arrives while the player can still remember what happened.
+URGENT_EVENT_TYPES = ("game_crash",)
 
 EVENT_TYPE_LABELS = {
     "vpn_connected": "VPN connected",
@@ -62,6 +67,7 @@ EVENT_TYPE_LABELS = {
     "torrent_move_resuming": "Moving downloaded torrent files resumed after interruption",
     "torrent_move_failed": "Moving downloaded torrent files failed",
     "torrent_move_finished": "Moving downloaded torrent files finished",
+    "game_crash": "Game crashed (full debug details)",
 }
 
 

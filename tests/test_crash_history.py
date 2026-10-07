@@ -137,3 +137,93 @@ class CrashHistoryWiringTests(unittest.TestCase):
         self.assertIn("/admin/crash-history", spec["paths"])
         self.assertIn("/admin/crash-history/clear", spec["paths"])
         self.assertIn("CrashHistoryEntry", spec["components"]["schemas"])
+
+
+class CrashEmailTests(unittest.TestCase):
+    RECORD = {
+        "time": "2026-10-07T06:39:34-0500", "epoch": 2_000_000_000, "game": "Super Mario World", "system": "snes",
+        "reason": "the emulator aborted with a memory-corruption error", "action": "Try unplugging USB controllers.",
+        "rom_path": "/userdata/roms/snes/Super Mario World.zip", "rom_exists": True, "rom_size_bytes": 337766,
+        "emulator": "libretro", "core": "snes9x", "signature": "stack smashing detected", "duration_seconds": 17,
+        "joystick_count": 10, "joysticks": ["GameCube Adapter (x4)"], "memory_available_mb": 25938,
+        "batocera_version": "43.1", "hostname": "BATOCERA", "log_excerpt": "line a\n*** stack smashing detected ***",
+        "kernel_evidence": "retroarch[1]: segfault at 0",
+    }
+
+    def _smtp_settings(self, tmp):
+        from app.device import smtp_manager
+        settings = build_settings(Path(tmp))
+        smtp_manager.update_settings(settings, {
+            "host": "smtp.example.com", "port": 587, "use_starttls": True, "use_ssl": False,
+            "username": "me@example.com", "password": "pw", "from_address": "d@example.com",
+            "recipient_email": "o@example.com",
+        })
+        return smtp_manager, settings
+
+    def test_report_contains_everything_the_debug_page_shows(self) -> None:
+        report = crash_history.format_crash_report({**self.RECORD, "device_id": "drone-1"})
+        for expected in ("BATOCERA (drone-1)", "Super Mario World", "snes", "memory-corruption", "Try unplugging",
+                         "/userdata/roms/snes/Super Mario World.zip", "337,766 bytes", "libretro / snes9x",
+                         "stack smashing detected", "17s", "10 (GameCube Adapter (x4))", "25938 MB", "43.1",
+                         "segfault at 0", "Launch log around the failure"):
+            self.assertIn(expected, report)
+
+    def test_first_pass_skips_old_history_but_keeps_a_just_happened_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = build_settings(Path(tmp))
+            now = 2_000_000_000
+            write_history(Path(tmp), [
+                {**self.RECORD, "epoch": now - 10_000, "game": "Old"},
+                {**self.RECORD, "epoch": now - 5, "game": "Fresh"},
+            ])
+            self.assertEqual(crash_history.ingest_new_crashes(settings, now=now), 1)
+            self.assertEqual(crash_history.ingest_new_crashes(settings, now=now), 0)
+            from app.storage import audit_store
+            events = audit_store.list_unsent_events(settings, ["game_crash"], limit=10)
+            self.assertEqual([event["title"] for event in events], ["Fresh (snes) crashed"])
+            self.assertEqual(events[0]["details"]["device_id"], settings.device_id)
+
+    def test_later_crashes_are_recorded_once_each(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = build_settings(Path(tmp))
+            now = 2_000_000_000
+            write_history(Path(tmp), [])
+            self.assertEqual(crash_history.ingest_new_crashes(settings, now=now), 0)
+            write_history(Path(tmp), [{**self.RECORD, "epoch": now + 1}])
+            self.assertEqual(crash_history.ingest_new_crashes(settings, now=now + 2), 1)
+            write_history(Path(tmp), [{**self.RECORD, "epoch": now + 1}, {**self.RECORD, "epoch": now + 9, "game": "Two"}])
+            self.assertEqual(crash_history.ingest_new_crashes(settings, now=now + 10), 1)
+
+    def test_crash_email_is_queued_immediately_with_full_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            smtp_manager, settings = self._smtp_settings(tmp)
+            # An older digest was just attempted, so the interval has NOT elapsed.
+            smtp_manager._notifications.record_event(settings, "torrent_completed", "Earlier")
+            smtp_manager._save_state(settings, last_digest_attempt_at=smtp_manager._now_iso())
+            self.assertEqual(smtp_manager.send_digest_if_needed(settings)["status"], "skipped")
+            write_history(Path(tmp), [])
+            crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"])
+            write_history(Path(tmp), [self.RECORD])
+            crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"] + 1)
+            result = smtp_manager.send_digest_if_needed(settings)
+            self.assertEqual(result["status"], "queued")
+            job = smtp_manager._mail_store.pending(settings)[0]
+            self.assertIn("Super Mario World (snes) crashed", job["subject"])
+            self.assertIn("(+1 more)", job["subject"])
+            self.assertIn("stack smashing detected", job["body"])
+            self.assertIn("GameCube Adapter (x4)", job["body"])
+            self.assertIn("Drone:", job["body"])
+
+    def test_toggle_off_keeps_the_event_in_the_inbox_but_sends_no_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            smtp_manager, settings = self._smtp_settings(tmp)
+            self.assertTrue(smtp_manager._load_state(settings)["notify"]["game_crash"])
+            smtp_manager.update_notification_toggles(settings, {"game_crash": False})
+            write_history(Path(tmp), [])
+            crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"])
+            write_history(Path(tmp), [self.RECORD])
+            crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"] + 1)
+            self.assertEqual(smtp_manager.send_digest_if_needed(settings)["status"], "skipped")
+            self.assertEqual(smtp_manager._mail_store.pending(settings), [])
+            from app.storage import audit_store
+            self.assertEqual(len(audit_store.list_unsent_events(settings, ["game_crash"], limit=5)), 1)
