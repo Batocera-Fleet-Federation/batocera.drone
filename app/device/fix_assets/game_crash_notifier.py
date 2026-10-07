@@ -11,6 +11,7 @@ EmulationStation's loopback API if the game appears to have crashed.
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -29,16 +30,18 @@ NOTIFY_URL = os.environ.get("DRONE_CRASH_NOTIFIER_URL", "http://127.0.0.1:1234/n
 
 # The launcher logs the emulator's whole stderr as ERROR even on a clean exit,
 # so only genuine crash text is matched, never the log level.
+UNPLUG_ACTION = "Try unplugging USB controllers or adapters, then relaunch."
 CRASH_SIGNATURES = (
-    (r"stack smashing detected", "the emulator aborted with a memory-corruption error"),
-    (r"segmentation fault|SIGSEGV", "the emulator hit a segmentation fault"),
-    (r"core dumped", "the emulator crashed and dumped core"),
-    (r"\bAborted\b|SIGABRT", "the emulator aborted unexpectedly"),
-    (r"illegal instruction|SIGILL", "the emulator hit an illegal CPU instruction"),
-    (r"bus error|SIGBUS", "the emulator hit a bus error"),
-    (r"Traceback \(most recent call last\)", "the Batocera launcher raised an error"),
-    (r"Failed to load content|Failed to open content", "the game file could not be loaded"),
+    (r"stack smashing detected", "the emulator aborted with a memory-corruption error", UNPLUG_ACTION),
+    (r"segmentation fault|SIGSEGV", "the emulator hit a segmentation fault", UNPLUG_ACTION),
+    (r"core dumped", "the emulator crashed and dumped core", UNPLUG_ACTION),
+    (r"\bAborted\b|SIGABRT", "the emulator aborted unexpectedly", UNPLUG_ACTION),
+    (r"illegal instruction|SIGILL", "the emulator hit an illegal CPU instruction", "Try a different core or emulator for this system."),
+    (r"bus error|SIGBUS", "the emulator hit a bus error", "Check the ROM file for corruption, then relaunch."),
+    (r"Failed to load content|Failed to open content", "the game file could not be loaded", "Check the ROM file and any required BIOS."),
 )
+LAUNCHER_ACTION = "Check this system's emulator and core settings."
+KERNEL_ACTION = "Close other apps or try a lighter core, then relaunch."
 KERNEL_SIGNATURES = re.compile(r"segfault|general protection|out of memory|killed process|invoked oom-killer", re.IGNORECASE)
 MEMORY_CORRUPTION = re.compile(r"stack smashing|segmentation fault|SIGSEGV|core dumped|SIGABRT|\bAborted\b", re.IGNORECASE)
 
@@ -103,10 +106,25 @@ def read_new_text(path, offset):
         return ""
 
 
+def launcher_traceback(text):
+    """True for a Python traceback raised by the launcher or a generator.
+
+    Batocera helpers such as hotkeygen print a harmless traceback at the start
+    of ordinary launches, so only blocks that touch launcher code count.
+    """
+    for block in text.split("Traceback (most recent call last):")[1:]:
+        frames = block.split("\n\n", 1)[0]
+        if re.search(r"emulatorlauncher|configgen|generators", frames):
+            return True
+    return False
+
+
 def match_signature(text):
-    for pattern, reason in CRASH_SIGNATURES:
+    for pattern, reason, action in CRASH_SIGNATURES:
         if re.search(pattern, text, re.IGNORECASE):
-            return pattern, reason
+            return pattern, reason, action
+    if launcher_traceback(text):
+        return "launcher-traceback", "the Batocera launcher raised an error", LAUNCHER_ACTION
     return None
 
 
@@ -129,6 +147,22 @@ def read_dmesg():
         return ""
 
 
+def joystick_names():
+    """Return one 'Name (xN)' label per distinct connected joystick name."""
+    counts = {}
+    try:
+        for js_path in sorted(SYS_INPUT_ROOT.glob("js*")):
+            try:
+                name = (js_path / "device" / "name").read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                name = ""
+            name = re.sub(r"\s+", " ", name) or js_path.name
+            counts[name] = counts.get(name, 0) + 1
+    except OSError:
+        return []
+    return [f"{name} (x{count})" if count > 1 else name for name, count in counts.items()]
+
+
 def joystick_count():
     try:
         return len(list(SYS_INPUT_ROOT.glob("js*")))
@@ -146,36 +180,46 @@ def assess_launch(log_text, duration, dmesg_evidence, config):
     signature = match_signature(log_text)
     short = duration is not None and duration < config["short_session_seconds"]
     if signature:
-        return {"crashed": True, "reason": signature[1], "signature": signature[0], "short": short}
+        return {"crashed": True, "reason": signature[1], "signature": signature[0], "action": signature[2], "short": short}
     if short and dmesg_evidence:
-        return {"crashed": True, "reason": "the emulator was killed by the system", "signature": "kernel", "short": True}
-    return {"crashed": False, "reason": "", "signature": "", "short": short}
+        return {"crashed": True, "reason": "the emulator was killed by the system", "signature": "kernel", "action": KERNEL_ACTION, "short": True}
+    return {"crashed": False, "reason": "", "signature": "", "action": "", "short": short}
 
 
-def build_message(system, rom, verdict, joysticks, config):
+def build_messages(system, rom, verdict, joysticks, device_names, config, hostname):
+    """Return the toasts to show in order: what happened, then what to do."""
     game = Path(str(rom)).stem if rom else "The game"
-    # Keep the message glanceable: EmulationStation toasts disappear quickly.
-    message = f"{game} ({system}) crashed: {verdict['reason']}."
+    # Keep each message glanceable: EmulationStation toasts disappear quickly.
+    first = f"{game} ({system}) crashed: {verdict['reason']}."
+    action = verdict["action"]
     if joysticks > config["joystick_hint_threshold"] and MEMORY_CORRUPTION.search(verdict["signature"] + " " + verdict["reason"]):
-        message += f" {joysticks} controllers are connected; try unplugging a USB adapter."
-    return message
+        action = f"{joysticks} controllers connected ({', '.join(device_names)}). {UNPLUG_ACTION}"
+    return [first, f"{action} Details: Admin > Debug > System Logs on {hostname}."]
 
 
-def send_notification(message, wait_seconds=30):
-    """Post a toast once EmulationStation is back; return True when accepted."""
+def post_toast(message):
+    try:
+        request = urllib.request.Request(NOTIFY_URL, data=message.encode("utf-8"), method="POST")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def send_notifications(messages, wait_seconds=30, gap_seconds=6):
+    """Post toasts in order once EmulationStation is back; return how many were accepted."""
     deadline = time.time() + wait_seconds
     time.sleep(2)
-    while True:
-        try:
-            request = urllib.request.Request(NOTIFY_URL, data=message.encode("utf-8"), method="POST")
-            with urllib.request.urlopen(request, timeout=3) as response:
-                if 200 <= response.status < 300:
-                    return True
-        except (urllib.error.URLError, OSError, ValueError):
-            pass
+    while not post_toast(messages[0]):
         if time.time() >= deadline:
-            return False
+            return 0
         time.sleep(2)
+    delivered = 1
+    for message in messages[1:]:
+        # Let the previous toast finish so the second one is not swallowed.
+        time.sleep(gap_seconds)
+        delivered += 1 if post_toast(message) else 0
+    return delivered
 
 
 def spawn_watcher(state):
@@ -221,9 +265,11 @@ def watch(state):
     if not verdict["crashed"]:
         log(f"{state['system']}: clean exit after {duration:.0f}s")
         return
-    message = build_message(state["system"], state["rom"], verdict, joystick_count(), config)
-    delivered = send_notification(message)
-    log(f"{state['system']}: crash after {duration:.0f}s ({verdict['signature']}); toast {'sent' if delivered else 'NOT delivered'}: {message}")
+    messages = build_messages(
+        state["system"], state["rom"], verdict, joystick_count(), joystick_names(), config, socket.gethostname()
+    )
+    delivered = send_notifications(messages)
+    log(f"{state['system']}: crash after {duration:.0f}s ({verdict['signature']}); {delivered}/{len(messages)} toasts delivered: {' | '.join(messages)}")
 
 
 def main(argv):

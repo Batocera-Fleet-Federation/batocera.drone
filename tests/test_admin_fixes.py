@@ -229,6 +229,22 @@ class InstalledFixAssetTests(unittest.TestCase):
         clean = game_crash_notifier.assess_launch("2026 ERROR (emulatorlauncher.py:604):runCommand [INFO] fine", 600, "", config)
         self.assertFalse(clean["crashed"])
 
+    def test_hotkeygen_traceback_is_not_a_crash_but_launcher_traceback_is(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        noise = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/bin/hotkeygen", line 564, in <module>\n'
+            "    do_new_context(new_context_name)\n"
+            "ProcessLookupError: [Errno 3] No such process\n"
+        )
+        self.assertFalse(game_crash_notifier.assess_launch(noise + "[INFO] ok\n", 600, "", config)["crashed"])
+        real = (
+            "Traceback (most recent call last):\n"
+            '  File "/usr/lib/python3/site-packages/configgen/emulatorlauncher.py", line 700, in <module>\n'
+            "KeyError: 'core'\n"
+        )
+        self.assertTrue(game_crash_notifier.assess_launch(noise + real, 600, "", config)["crashed"])
+
     def test_short_session_needs_kernel_evidence(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         self.assertFalse(game_crash_notifier.assess_launch("", 3, "", config)["crashed"])
@@ -241,16 +257,51 @@ class InstalledFixAssetTests(unittest.TestCase):
         self.assertIn("retroarch[2]", game_crash_notifier.kernel_evidence(dmesg, 495.0, 505.0))
         self.assertEqual(game_crash_notifier.kernel_evidence(dmesg, 100.0, 200.0), "")
 
-    def test_message_names_game_and_hints_at_controllers_only_for_memory_faults(self) -> None:
+    def test_messages_name_game_give_an_action_and_point_to_the_logs(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
-        message = game_crash_notifier.build_message("snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 10, config)
-        self.assertIn("Super Mario World (snes) crashed", message)
-        self.assertIn("10 controllers", message)
-        few = game_crash_notifier.build_message("snes", "x.zip", verdict, 4, config)
-        self.assertNotIn("controllers", few)
+        names = ["Nintendo GameCube Adapter (x4)", "Sinden Lightgun (x2)"]
+        first, second = game_crash_notifier.build_messages(
+            "snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 10, names, config, "batocera")
+        self.assertIn("Super Mario World (snes) crashed", first)
+        self.assertIn("10 controllers connected", second)
+        self.assertIn("GameCube Adapter (x4)", second)
+        self.assertIn("unplugging", second)
+        self.assertIn("Admin > Debug > System Logs on batocera", second)
+
+    def test_actions_are_cause_specific_and_skip_controller_hint_for_other_causes(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         missing = game_crash_notifier.assess_launch("Failed to load content", 5, "", config)
-        self.assertNotIn("controllers", game_crash_notifier.build_message("snes", "x.zip", missing, 12, config))
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", missing, 12, ["Pad"], config, "box")
+        self.assertIn("ROM file and any required BIOS", action)
+        self.assertNotIn("controllers", action)
+        few = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", few, 4, ["Pad"], config, "box")
+        self.assertNotIn("controllers connected", action)
+        oom = game_crash_notifier.assess_launch("", 3, "Out of memory: Killed process 5", config)
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", oom, 4, [], config, "box")
+        self.assertIn("lighter core", action)
+
+    def test_joystick_names_are_grouped_with_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, name in enumerate(["Pad  A", "Pad  A", "Gun"]):
+                device = Path(tmp) / f"js{index}" / "device"
+                device.mkdir(parents=True)
+                (device / "name").write_text(name + "\n", encoding="utf-8")
+            with mock.patch.object(game_crash_notifier, "SYS_INPUT_ROOT", Path(tmp)):
+                self.assertEqual(game_crash_notifier.joystick_names(), ["Pad A (x2)", "Gun"])
+
+    def test_notifications_send_in_order_and_stop_when_es_never_answers(self) -> None:
+        sent = []
+        with mock.patch.object(game_crash_notifier.time, "sleep"), \
+             mock.patch.object(game_crash_notifier, "post_toast", side_effect=lambda m: sent.append(m) or True):
+            self.assertEqual(game_crash_notifier.send_notifications(["one", "two"]), 2)
+        self.assertEqual(sent, ["one", "two"])
+        clock = iter(range(0, 1000, 20))
+        with mock.patch.object(game_crash_notifier.time, "sleep"), \
+             mock.patch.object(game_crash_notifier.time, "time", side_effect=lambda: next(clock)), \
+             mock.patch.object(game_crash_notifier, "post_toast", return_value=False):
+            self.assertEqual(game_crash_notifier.send_notifications(["one", "two"]), 0)
 
     def test_log_reader_handles_truncated_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,10 +321,10 @@ class InstalledFixAssetTests(unittest.TestCase):
                  mock.patch.object(game_crash_notifier, "launcher_is_alive", return_value=False), \
                  mock.patch.object(game_crash_notifier, "read_dmesg", return_value=""), \
                  mock.patch.object(game_crash_notifier, "joystick_count", return_value=2), \
-                 mock.patch.object(game_crash_notifier, "send_notification", return_value=True) as notify:
+                 mock.patch.object(game_crash_notifier, "send_notifications", return_value=2) as notify:
                 game_crash_notifier.watch(state)
                 notify.assert_called_once()
-                self.assertIn("Game (snes) crashed", notify.call_args[0][0])
+                self.assertIn("Game (snes) crashed", notify.call_args[0][0][0])
                 log_path.write_text("all good\n", encoding="utf-8")
                 notify.reset_mock()
                 with mock.patch.object(game_crash_notifier.time, "time", return_value=10_000):
