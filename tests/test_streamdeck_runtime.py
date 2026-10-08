@@ -230,6 +230,41 @@ class DeviceDiscoveryTests(RuntimeHarness):
         self.assertTrue(any("event=device-reconnect" in line for line in self.logs))
         self.assertEqual(device.open_count, 2)
 
+    def test_steady_usb_signal_skips_host_wide_enumeration(self):
+        # hid_enumerate probes every USB device and makes some gamepads blip, so
+        # an unchanged sysfs signature must not trigger it every few seconds.
+        device = self.deck()
+        self.runtime.usb_probe = lambda: "1-1:0fd9:0063:FAKE0001"
+        self.runtime.reconcile(force=True)
+        self.assertEqual(len(self.runtime.slots), 1)
+        enumerations = self.provider.enumerations
+        connected_checks = []
+        device.connected = lambda: connected_checks.append(1) or True
+        for _ in range(60):
+            self.clock.advance(3)
+            self.runtime.reconcile()
+        self.assertEqual(self.provider.enumerations, enumerations)
+        self.assertEqual(connected_checks, [])
+        self.clock.advance(300)
+        self.runtime.reconcile()
+        self.assertEqual(self.provider.enumerations, enumerations + 1)
+
+    def test_usb_signature_change_still_detects_unplug_and_replug(self):
+        device = self.deck()
+        signature = {"value": "1-1:0fd9:0063:FAKE0001"}
+        self.runtime.usb_probe = lambda: signature["value"]
+        self.runtime.reconcile(force=True)
+        device.unplug()
+        signature["value"] = ""
+        self.clock.advance(1)
+        self.runtime.reconcile()
+        self.assertEqual(self.runtime.slots, {})
+        device.plug_in()
+        signature["value"] = "1-1:0fd9:0063:FAKE0001"
+        self.clock.advance(1)
+        self.runtime.reconcile()
+        self.assertEqual(len(self.runtime.slots), 1)
+
     def test_write_failure_detaches_device_for_reattach(self):
         device = self.deck()
         self.reconcile()

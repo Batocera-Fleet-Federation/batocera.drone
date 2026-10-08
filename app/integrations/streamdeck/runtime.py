@@ -33,6 +33,10 @@ RECONCILE_SECONDS = 3.0
 USB_PROBE_SECONDS = 1.0
 MAX_STATUS_ERRORS = 10
 FULL_ENUMERATE_SECONDS = 30.0
+# hid_enumerate (libhidapi-libusb) probes every USB device on the host and makes
+# some generic gamepads (e.g. DragonRise) emit an axis blip each call, so with a
+# working sysfs hotplug signal it is only a rare safety net.
+SAFETY_ENUMERATE_SECONDS = 300.0
 ATTACH_RETRY_SECONDS = 10.0
 CONTEXT_POLL_SECONDS = 2.0
 HEARTBEAT_SECONDS = 60.0
@@ -101,6 +105,7 @@ class StreamDeckRuntime:
         self._status_lock = threading.Lock()
         self._next_reconcile = 0.0
         self._next_full_enumerate = 0.0
+        self._next_safety_enumerate = 0.0
         self._next_context_poll = 0.0
         self._last_usb_signature: Optional[str] = None
         self._next_usb_probe = 0.0
@@ -234,19 +239,25 @@ class StreamDeckRuntime:
             self._next_usb_probe = now + USB_PROBE_SECONDS
             signature = self.usb_probe()
         changed = signature is not None and signature != self._last_usb_signature
-        # ``connected()`` re-enumerates HID devices in the library, so only ask
-        # when USB changed or every few seconds (write errors detach at once).
-        if force or changed or now >= self._next_connected_check:
+        # ``connected()`` re-enumerates HID devices in the library (a host-wide
+        # USB probe), so with a sysfs signal only ask when USB changed; without
+        # one, poll every few seconds (write errors detach at once either way).
+        have_signal = signature is not None
+        if force or changed or (not have_signal and now >= self._next_connected_check):
             self._next_connected_check = now + RECONCILE_SECONDS
             for transport_id, slot in slots:
                 if not slot.device.connected():
                     self.detach(transport_id, reason="disconnected")
-        due = force or changed or now >= self._next_full_enumerate or (signature is None and now >= self._next_reconcile)
+        if have_signal and not self._attach_failures:
+            due = force or changed or now >= self._next_safety_enumerate
+        else:
+            due = force or changed or now >= self._next_full_enumerate or (not have_signal and now >= self._next_reconcile)
         if not due:
             return
         self._last_usb_signature = signature
         self._next_reconcile = now + RECONCILE_SECONDS
         self._next_full_enumerate = now + FULL_ENUMERATE_SECONDS
+        self._next_safety_enumerate = now + SAFETY_ENUMERATE_SECONDS
         try:
             devices = self.provider.enumerate()
         except Exception as error:  # noqa: BLE001 - e.g. HID backend missing
