@@ -9,6 +9,7 @@ test_music_metadata_manager.py -- these just verify the handler layer.
 """
 
 import io
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -1366,3 +1367,32 @@ class MusicBulkScrapeRetryHandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MusicArtworkTransientDbFailureHandlerTests(unittest.TestCase):
+    """Issue #114: a transient state-DB open failure during the artwork route
+    must answer 503 with a log line, not an unhandled 500."""
+
+    _ENTRY_KEY = "0123456789abcdef01234567"
+
+    def test_db_open_failure_returns_503_and_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            failure = sqlite3.OperationalError("unable to open database file")
+            with mock.patch.object(music_store, "get_music_metadata", side_effect=failure), \
+                    mock.patch.object(handlers_music, "_drone_log") as drone_log:
+                handler._handle_music_artwork(self._ENTRY_KEY, "art")
+
+            self.assertEqual(handler.json_response[0], 503)
+            self.assertIsNone(handler.response_status)
+            drone_log.assert_called_once()
+            self.assertIn("unable to open database file", drone_log.call_args[0][0])
+
+    def test_non_database_errors_still_propagate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(music_store, "get_music_metadata", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    handler._handle_music_artwork(self._ENTRY_KEY, "art")

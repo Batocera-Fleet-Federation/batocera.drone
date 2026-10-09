@@ -1236,3 +1236,38 @@ class MovieBulkScrapeRetryHandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MovieArtworkSidecarFallbackHandlerTests(unittest.TestCase):
+    """Issue #114: a movie with no metadata row still serves art that sits
+    beside it on disk (scraper sidecars or Plex names), read at request time."""
+
+    def test_serves_sidecar_poster_when_movie_has_no_metadata_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            # Art arrives after the last sync, so no metadata row exists yet.
+            sidecar = root / "movies" / "images" / "Vacation-tmdb-poster.jpg"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_bytes(b"sidecar-poster")
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            self.assertIsNone(movies_store.get_movie_metadata(settings.movies_root, entry_key))
+
+            handler = _handler(settings)
+            handler._handle_movie_artwork(entry_key, "poster")
+
+            self.assertEqual(handler.response_status, 200)
+            self.assertEqual(handler.wfile.getvalue(), b"sidecar-poster")
+
+    def test_missing_backdrop_with_no_local_art_still_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_movie_artwork(entry_key, "backdrop")

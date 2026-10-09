@@ -185,6 +185,27 @@ from a pasted string — that would wrongly concatenate unrelated digits from
 a slug or query string) is the escape hatch for a title TMDb's own search
 ranks outside the default `limit=10` results.
 
+## Reorganized libraries: orphan re-keying and local art (issue #114)
+
+`entry_key` is a hash of the relative path, so moving or renaming a file (or
+its show folder) orphans its `movies_metadata_entries` row. `sync_movies_cache`
+runs `storage/metadata_rekey.py::rekey_orphan_metadata` after the
+created/updated/deleted pass: an orphan's old `fingerprint` + `file_size` (from
+`deleted_movies_cache_entries`) is matched to a live entry, and the row moves
+**only** on a unique match, to an entry with no metadata row yet, claimed by
+exactly one orphan. Multi-copy and no-match cases are left alone. The sync
+result reports `metadata_orphaned` / `metadata_rekeyed` / `metadata_unmatched`
+so the leftover count is visible. It is idempotent and changes no schema.
+
+Local art recovery (`_recover_plex_artwork` -> `_local_artwork_for_entry`)
+checks Plex names first, then scraper sidecars `images/<stem>-tmdb-poster.jpg`
+and `-tmdb-backdrop.jpg` beside the video. A sidecar matches by exact stem,
+else by normalized stem (lowercase, punctuation-insensitive), and only when
+that normalized stem is unique among sibling videos in the folder, so sibling
+episodes never share art. `_handle_movie_artwork` falls back to
+`find_local_artwork` when there's no metadata row or its stored file is gone,
+so art that lands after the last sync still serves.
+
 ## Genres
 
 Come only from scraped data (`extra_json.genres`), no normalized table.
