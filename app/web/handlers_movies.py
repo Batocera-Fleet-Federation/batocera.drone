@@ -351,15 +351,21 @@ class HandlersMoviesMixin:
             raise FileNotFoundError()
         metadata = _movies_store.get_movie_metadata(self.settings.movies_root, entry_key)
         relative_path = (metadata or {}).get(column)
-        if not relative_path:
-            raise FileNotFoundError()
-        try:
-            target = _movies_store.resolve_media_relative_path(
-                self.settings.movies_root, relative_path, self.settings.shows_root
+        target: Optional[Path] = None
+        if relative_path:
+            try:
+                target = _movies_store.resolve_media_relative_path(
+                    self.settings.movies_root, relative_path, self.settings.shows_root
+                )
+            except FileNotFoundError:
+                target = None
+        if target is None or not target.is_file():
+            # No metadata row (or its file went missing): fall back to art that
+            # sits next to the movie on disk -- Plex names or scraper sidecars.
+            target = _movies_store.find_local_artwork(
+                self.settings.movies_root, entry_key, self.settings.shows_root, field
             )
-        except FileNotFoundError:
-            raise FileNotFoundError()
-        if not target.is_file():
+        if target is None or not target.is_file():
             raise FileNotFoundError()
         # Same helper ROM artwork uses (handlers_peer.py): server-side
         # in-memory cache (keyed by mtime, so a re-scrape overwriting this
