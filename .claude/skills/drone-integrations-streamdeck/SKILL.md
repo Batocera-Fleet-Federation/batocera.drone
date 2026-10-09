@@ -118,8 +118,23 @@ before non-trivial work; keep it accurate in the same change.
   startup profile, hold safeguards, and timeouts. Saved keys, settings, and
   rules always auto-apply (`auto_apply` is forced true). There is no Apply,
   Save Settings, Built-In Actions, or Diagnostics Troubleshooting panel.
-- `LibraryStreamDeckDevice.connected()` re-enumerates HID; the runtime only calls
-  it on a USB-signature change or every 3 s.
+- **Never poll `hid_enumerate` on a timer.** `LibraryStreamDeckDevice.connected()` and
+  `DeviceProvider.enumerate()` run `hid_enumerate` through `libhidapi-libusb`, which
+  probes *every* USB device on the host. On a machine with generic DragonRise
+  gamepads/arcade encoders this made each pad blip axis 5 every ~3 s (the old
+  `RECONCILE_SECONDS` poll): all controllers lit up in EmulationStation one after
+  another (4>3>2>1), joystick ES indicators looked "randomly pressed", and it broke
+  other Drone/ES behaviour while the integration was installed. Uninstalling the
+  integration or unplugging the deck stopped it; v0.1.256 fixed it. The runtime now
+  calls `connected()` / `enumerate()` only on a sysfs USB-signature change, while an
+  attach is retrying, or every `SAFETY_ENUMERATE_SECONDS` (300 s); only when sysfs
+  is unavailable does it fall back to the old 3 s / 30 s cadence. Detect hotplug from
+  `usb_signature()`, and keep detach on write errors. Any new periodic USB/HID probe
+  must be sysfs-based (cheap, no device I/O). Regression tests:
+  `test_steady_usb_signal_skips_host_wide_enumeration` in `tests/test_streamdeck_runtime.py`.
+  To check for this class of problem on a real box, read the pads' `/dev/input/event*`
+  for ~30 s with nobody touching them (see `drone-live-debugging`) and look for a
+  regular periodic ABS event.
 - Lifecycle ops share `_lifecycle_lock`; install/repair jobs hold it for minutes,
   so short ops fail fast while a job runs but wait out a supervisor pass.
 - Uploads need installed tooling (the Pillow decode is the final validation).

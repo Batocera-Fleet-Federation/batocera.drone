@@ -224,7 +224,11 @@ the running game via the central `exit-game` handler, waits for the process to
 actually exit, then launches through EmulationStation's loopback API (`POST
 :1234/launch`), one transition at a time; custom scripts are the only editable
 executable action (ID-confined files, `ProcessRunner`, no `shell=True`). Tests use
-fake devices/runtimes/launchers — no hardware. Design reference:
+fake devices/runtimes/launchers — no hardware. **Never poll `hid_enumerate` (or the
+library's `connected()`) on a timer:** it probes every USB device on the host and made
+generic DragonRise gamepads blip every ~3 s (ES controller lights cycling, other features
+misbehaving) until v0.1.256 — hotplug detection is sysfs-signature based; see the
+skill's Gotchas. Design reference:
 `docs/integrations-streamdeck.md`; skill: `drone-integrations-streamdeck`.
 
 ## Conventions
