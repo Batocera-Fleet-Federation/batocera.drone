@@ -38,10 +38,12 @@ from typing import Optional
 try:
     from .state_store import database_path as _state_database_path
     from .state_store import open_database as _open_state_database
+    from .metadata_rekey import rekey_orphan_metadata as _rekey_orphan_metadata
     from ..common import fingerprint as _fp
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import open_database as _open_state_database  # type: ignore
+    from storage.metadata_rekey import rekey_orphan_metadata as _rekey_orphan_metadata  # type: ignore
     from common import fingerprint as _fp  # type: ignore
 
 
@@ -248,6 +250,12 @@ def sync_music_cache(music_root: Path) -> dict:
             connection.execute("DELETE FROM music_cache_entries WHERE entry_key = ?", (key,))
             _queue_change(connection, key, "delete")
             deleted += 1
+        rekey = _rekey_orphan_metadata(
+            connection,
+            cache_table="music_cache_entries",
+            deleted_table="deleted_music_cache_entries",
+            metadata_table="music_metadata_entries",
+        )
         connection.commit()
     return {
         "created": created,
@@ -255,6 +263,9 @@ def sync_music_cache(music_root: Path) -> dict:
         "deleted": deleted,
         "total": len(scanned),
         "thumbprint": music_inventory_thumbprint(scanned),
+        "metadata_orphaned": rekey["orphaned"],
+        "metadata_rekeyed": rekey["rekeyed"],
+        "metadata_unmatched": rekey["unmatched"],
     }
 
 

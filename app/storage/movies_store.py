@@ -37,10 +37,12 @@ from typing import Optional
 try:
     from .state_store import database_path as _state_database_path
     from .state_store import open_database as _open_state_database
+    from .metadata_rekey import rekey_orphan_metadata as _rekey_orphan_metadata
     from ..common import fingerprint as _fp
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import open_database as _open_state_database  # type: ignore
+    from storage.metadata_rekey import rekey_orphan_metadata as _rekey_orphan_metadata  # type: ignore
     from common import fingerprint as _fp  # type: ignore
 
 
@@ -57,6 +59,12 @@ _VIDEO_SUFFIXES = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv",
     ".mpg", ".mpeg", ".m2ts", ".ts", ".3gp",
 }
+
+# Scraper sidecar art, written beside each video as
+# ``images/<stem>-tmdb-poster.jpg`` / ``images/<stem>-tmdb-backdrop.jpg``.
+_SIDECAR_DIRNAME = "images"
+_SIDECAR_SUFFIX = ".jpg"
+_SIDECAR_MARKERS = {"poster": "-tmdb-poster", "backdrop": "-tmdb-backdrop"}
 
 
 def default_movies_root() -> Path:
@@ -239,6 +247,13 @@ def sync_movies_cache(movies_root: Path, shows_root: Optional[Path] = None) -> d
             connection.execute("DELETE FROM movies_cache_entries WHERE entry_key = ?", (key,))
             _queue_change(connection, key, "delete")
             deleted += 1
+        # Re-key before recovering art so recovered rows land on live entries.
+        rekey = _rekey_orphan_metadata(
+            connection,
+            cache_table="movies_cache_entries",
+            deleted_table="deleted_movies_cache_entries",
+            metadata_table="movies_metadata_entries",
+        )
         _recover_plex_artwork(connection, movies_root, shows_root, scanned)
         connection.commit()
     return {
@@ -247,6 +262,9 @@ def sync_movies_cache(movies_root: Path, shows_root: Optional[Path] = None) -> d
         "deleted": deleted,
         "total": len(scanned),
         "thumbprint": movies_inventory_thumbprint(scanned),
+        "metadata_orphaned": rekey["orphaned"],
+        "metadata_rekeyed": rekey["rekeyed"],
+        "metadata_unmatched": rekey["unmatched"],
     }
 
 
@@ -276,13 +294,14 @@ def _plex_image_names(*stems: str) -> tuple[str, ...]:
 
 
 def _plex_artwork_for_entry(
-    entry: MovieEntry,
+    file_path: str,
+    absolute_path: str,
     movies_root: Path,
     shows_root: Optional[Path],
     asset_cache: dict[Path, dict[str, Path]],
-) -> tuple[Optional[str], Optional[str]]:
-    video = Path(entry.absolute_path).resolve()
-    is_show = entry.file_path.lower().startswith(f"{SHOWS_PATH_PREFIX.lower()}/")
+) -> tuple[Optional[Path], Optional[Path]]:
+    video = Path(absolute_path).resolve()
+    is_show = file_path.lower().startswith(f"{SHOWS_PATH_PREFIX.lower()}/")
     if is_show and shows_root is not None:
         physical_show_root = Path(shows_root).resolve()
         try:
@@ -322,10 +341,100 @@ def _plex_artwork_for_entry(
         else:
             poster = _first_local_asset(video.parent, _plex_image_names("poster", "folder", "cover", "movie", "default"), asset_cache)
             backdrop = _first_local_asset(video.parent, _plex_image_names("fanart", "background", "backdrop", "art"), asset_cache)
-    return (
-        media_relative_path(movies_root, poster, shows_root) if poster else None,
-        media_relative_path(movies_root, backdrop, shows_root) if backdrop else None,
+    return poster, backdrop
+
+
+def _normalize_stem(stem: str) -> str:
+    """Case- and punctuation-insensitive form of a filename stem for sidecar matching."""
+    return " ".join(re.findall(r"[a-z0-9]+", stem.lower()))
+
+
+def _sibling_video_counts(directory: Path, lookup: "_ArtworkLookup") -> dict[str, int]:
+    """How many video files directly in ``directory`` share each normalized stem."""
+    cached = lookup.videos.get(directory)
+    if cached is None:
+        cached = {}
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.suffix.lower() not in _VIDEO_SUFFIXES or not child.is_file():
+                continue
+            normalized = _normalize_stem(child.stem)
+            cached[normalized] = cached.get(normalized, 0) + 1
+        lookup.videos[directory] = cached
+    return cached
+
+
+def _sidecar_index(images_dir: Path, lookup: "_ArtworkLookup") -> dict[str, dict[str, Path]]:
+    """``{field: {sidecar_stem: path}}`` for one ``images/`` folder, cached per sync."""
+    cached = lookup.sidecars.get(images_dir)
+    if cached is None:
+        cached = {field: {} for field in _SIDECAR_MARKERS}
+        try:
+            children = list(images_dir.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if not child.is_file() or not child.name.lower().endswith(_SIDECAR_SUFFIX):
+                continue
+            base = child.name[: -len(_SIDECAR_SUFFIX)]
+            for field, marker in _SIDECAR_MARKERS.items():
+                if base.lower().endswith(marker):
+                    cached[field][base[: -len(marker)]] = child
+        lookup.sidecars[images_dir] = cached
+    return cached
+
+
+def _sidecar_artwork_for_video(video: Path, lookup: "_ArtworkLookup") -> dict[str, Path]:
+    """Find scraper sidecars (``images/<stem>-tmdb-poster.jpg`` and friends) for one video.
+
+    A sidecar is matched to the video by its exact stem when one exists, else
+    by normalized stem -- but only when this video is the sole video in its
+    folder with that normalized stem. Sibling episodes that collide after
+    normalization (``Show 01`` vs ``Show-01``) therefore never share art.
+    """
+    normalized = _normalize_stem(video.stem)
+    if not normalized or _sibling_video_counts(video.parent, lookup).get(normalized, 0) != 1:
+        return {}
+    index = _sidecar_index(video.parent / _SIDECAR_DIRNAME, lookup)
+    found: dict[str, Path] = {}
+    for field, stems in index.items():
+        if video.stem in stems:
+            found[field] = stems[video.stem]
+            continue
+        matches = [stem for stem in stems if _normalize_stem(stem) == normalized]
+        if len(matches) == 1:
+            found[field] = stems[matches[0]]
+    return found
+
+
+def _local_artwork_for_entry(
+    file_path: str,
+    absolute_path: str,
+    movies_root: Path,
+    shows_root: Optional[Path],
+    lookup: "_ArtworkLookup",
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Plex-local art first, then scraper sidecars for whichever field Plex left empty."""
+    poster, backdrop = _plex_artwork_for_entry(
+        file_path, absolute_path, movies_root, shows_root, lookup.assets
     )
+    if poster is None or backdrop is None:
+        sidecar = _sidecar_artwork_for_video(Path(absolute_path).resolve(), lookup)
+        poster = poster or sidecar.get("poster")
+        backdrop = backdrop or sidecar.get("backdrop")
+    return poster, backdrop
+
+
+class _ArtworkLookup:
+    """Directory listings reused across one sync so a library scan lists each folder once."""
+
+    def __init__(self) -> None:
+        self.assets: dict[Path, dict[str, Path]] = {}
+        self.sidecars: dict[Path, dict[str, dict[str, Path]]] = {}
+        self.videos: dict[Path, dict[str, int]] = {}
 
 
 def _recover_plex_artwork(
@@ -334,11 +443,15 @@ def _recover_plex_artwork(
     shows_root: Optional[Path],
     entries: list[MovieEntry],
 ) -> None:
-    """Attach Plex-local artwork written by SWARM/Plex to catalog entries."""
+    """Attach local artwork (Plex names or scraper sidecars) written next to catalog entries."""
     scraped_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    asset_cache: dict[Path, dict[str, Path]] = {}
+    lookup = _ArtworkLookup()
     for entry in entries:
-        poster, backdrop = _plex_artwork_for_entry(entry, movies_root, shows_root, asset_cache)
+        found_poster, found_backdrop = _local_artwork_for_entry(
+            entry.file_path, entry.absolute_path, movies_root, shows_root, lookup
+        )
+        poster = media_relative_path(movies_root, found_poster, shows_root) if found_poster else None
+        backdrop = media_relative_path(movies_root, found_backdrop, shows_root) if found_backdrop else None
         if not poster and not backdrop:
             continue
         row = connection.execute(
@@ -358,6 +471,30 @@ def _recover_plex_artwork(
                 "VALUES (?, 'local', '', '', ?, ?, ?, '{}')",
                 (entry.entry_key, poster, backdrop, scraped_at),
             )
+
+
+def find_local_artwork(
+    movies_root: Path,
+    entry_key: str,
+    shows_root: Optional[Path],
+    field: str,
+) -> Optional[Path]:
+    """Local poster/backdrop file for one movie, for when it has no metadata row.
+
+    Serves Plex-local art and scraper sidecars straight from disk so a movie
+    that was never recovered into ``movies_metadata_entries`` still shows its art.
+    """
+    with _open(movies_root) as connection:
+        row = connection.execute(
+            "SELECT file_path, absolute_path FROM movies_cache_entries WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+    if not row:
+        return None
+    poster, backdrop = _local_artwork_for_entry(
+        row[0] or "", row[1] or "", Path(movies_root), shows_root, _ArtworkLookup()
+    )
+    return {"poster": poster, "backdrop": backdrop}.get(field)
 
 
 def _upsert(connection: sqlite3.Connection, entry: MovieEntry) -> None:

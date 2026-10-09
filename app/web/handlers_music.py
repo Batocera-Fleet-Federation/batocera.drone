@@ -19,11 +19,13 @@ the MusicBrainz/Cover Art Archive client.)
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
 try:
     from ..common import http_range as _http_range
+    from ..common.logging_setup import _drone_log
     from ..common.multipart import boundary_from_content_type as _boundary_from_content_type
     from ..common.multipart import parse_multipart_files as _parse_multipart_files
     from ..storage import music_store as _music_store
@@ -32,6 +34,7 @@ try:
     from ..music.musicbrainz_client import MusicBrainzUnavailableError as _MusicBrainzUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common import http_range as _http_range  # type: ignore
+    from common.logging_setup import _drone_log  # type: ignore
     from common.multipart import boundary_from_content_type as _boundary_from_content_type  # type: ignore
     from common.multipart import parse_multipart_files as _parse_multipart_files  # type: ignore
     from storage import music_store as _music_store  # type: ignore
@@ -351,11 +354,29 @@ class HandlersMusicMixin:
         obviously the artist photo" folder-naming convention to trust the
         way there is for album/track cover art, and an artist photo falling
         back to itself would be a no-op anyway."""
+        try:
+            target = self._resolve_music_artwork_target(entry_key, field)
+        except sqlite3.OperationalError as error:
+            # Transient state-DB failure (e.g. "unable to open database file"
+            # while a sync holds the file). Tell the client to retry instead of
+            # surfacing an unhandled 500 for every image on the page.
+            _drone_log(f"Music artwork unavailable: entry={entry_key} field={field}: {error}")
+            self._send_json(503, {"error": "music database temporarily unavailable"}, extra_headers={"Retry-After": "5"})
+            return
+        if target is None:
+            raise FileNotFoundError()
+        # Same helper ROM/movie artwork use (handlers_peer.py): server-side
+        # in-memory cache (keyed by mtime) plus a browser-facing
+        # Cache-Control: public, max-age=3600.
+        self._stream_cached_image(target)
+
+    def _resolve_music_artwork_target(self, entry_key: str, field: str) -> Optional[Path]:
+        """Pick the file to serve for one music artwork request, or ``None``."""
         column = _ARTWORK_FIELD_COLUMNS.get(str(field or ""))
         if not column:
-            raise FileNotFoundError()
+            return None
         if not _ENTRY_KEY_RE.match(str(entry_key or "")):
-            raise FileNotFoundError()
+            return None
         metadata = _music_store.get_music_metadata(self.settings.music_root, entry_key)
         relative_path = (metadata or {}).get(column)
         music_root = Path(self.settings.music_root).resolve()
@@ -364,20 +385,23 @@ class HandlersMusicMixin:
             candidate = (music_root / relative_path).resolve()
             if candidate != music_root and music_root in candidate.parents and candidate.is_file():
                 target = candidate
-        if target is None and field == "art":
-            target = self._find_album_sibling_art(entry_key)
+        track = None
         if target is None and field == "art":
             track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
-            if track and track.get("absolute_path"):
-                target = _music_store.find_local_cover_image(Path(track["absolute_path"]), music_root)
+        if target is None and field == "art" and track and track.get("absolute_path"):
+            # The scraper writes art beside the track as images/album-cover.<ext>.
+            # After an album folder moves, the stored path above is stale but this
+            # canonical file moved with the track, so check it before anything else.
+            canonical = Path(track["absolute_path"]).parent / "images" / f"album-cover{_music_metadata.MUSIC_ART_EXTENSION}"
+            if canonical.is_file():
+                target = canonical.resolve()
+        if target is None and field == "art":
+            target = self._find_album_sibling_art(entry_key)
+        if target is None and field == "art" and track and track.get("absolute_path"):
+            target = _music_store.find_local_cover_image(Path(track["absolute_path"]), music_root)
         if target is None and field == "art":
             target = self._find_artist_photo(entry_key)
-        if target is None:
-            raise FileNotFoundError()
-        # Same helper ROM/movie artwork use (handlers_peer.py): server-side
-        # in-memory cache (keyed by mtime) plus a browser-facing
-        # Cache-Control: public, max-age=3600.
-        self._stream_cached_image(target)
+        return target
 
     # -------------------------------------------------------------- delete
 
