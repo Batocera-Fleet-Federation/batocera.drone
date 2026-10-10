@@ -321,6 +321,17 @@ reached via this tab bar instead of a separate navbar item now).
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
   Backend: `handlers_network.py`.
+- **Bulk download confirmation (issue #121)** — every bulk download (the page-level
+  **Download All**, and the per-system buttons on a ROM list) goes through
+  `chooseBulkDownloadScope` in `drone.js`. It posts the same
+  `POST /admin/local-network/sync-bulk` body with `dry_run: true` to count games,
+  artwork, bytes, and skips, then shows a modal whose primary button names the count
+  and size. A per-system click passes the active search (`localPeerAssetContext.query`)
+  as `q`; "Entire <system>" is offered only as a second choice. The dry run uses
+  `_PlanningDownloadManager` (`handlers_network.py`) so its numbers come from the real
+  enqueue rules. Known side effect: a ROM/artwork preview can still run the once-per-system
+  writable repair (`_ensure_system_writable_once`). Tests:
+  `tests/test_issue_121_bulk_scope_uat.py`.
 
 ### Network-share peer ROM+BIOS referencing (the "Reference ROMs" button)
 

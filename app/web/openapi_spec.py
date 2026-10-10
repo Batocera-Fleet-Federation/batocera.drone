@@ -1806,12 +1806,13 @@ def _schemas() -> Dict[str, Schema]:
                 "include_artwork": _boolean(default=True),
                 "include_roms": _boolean(default=True),
                 "overwrite_files": _boolean(default=False),
+                "dry_run": _boolean(default=False),
             },
             ("peer_id", "asset_type"),
         ),
         "LocalBulkSyncResponse": _object(
-            {"status": _enum(["queued"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "queued_assets": _integer(), "queued_artwork": _integer(), "queued_job_ids": _array(_string()), "queued_jobs": _array(_ref("DownloadJob")), "skipped_existing": _integer(), "total_available": _integer()},
-            ("status", "asset_type", "systems", "queued_assets", "queued_artwork", "queued_job_ids", "queued_jobs", "skipped_existing", "total_available"),
+            {"status": _enum(["queued", "preview"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "query": _string(), "queued_assets": _integer(), "queued_artwork": _integer(), "queued_bytes": _integer(), "queued_job_ids": _array(_string()), "queued_jobs": _array(_ref("DownloadJob")), "skipped_existing": _integer(), "total_available": _integer()},
+            ("status", "asset_type", "systems", "queued_assets", "queued_artwork", "queued_bytes", "skipped_existing", "total_available"),
         ),
         "PeerPairRequest": _object(
             {

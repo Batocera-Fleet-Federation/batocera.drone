@@ -12256,6 +12256,133 @@ async function copyLocalPeerAsset(index) {
   if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
 }
 
+// Bulk-download request body. Every bulk entry point builds its body here so the
+// confirmation preview and the queued request always describe the same scope.
+function localBulkBody({ peerId, type, systems = [], system = "", q = "" }) {
+  const includeRoms = type !== "roms" || localAssetIncludeRoms();
+  return {
+    peer_id: peerId,
+    asset_type: type,
+    systems,
+    system,
+    q,
+    include_artwork: localAssetIncludeArtwork(),
+    include_roms: includeRoms,
+    overwrite_files: localAssetOverwriteFiles(),
+  };
+}
+
+function localBulkNoun(body) {
+  if (body.asset_type === "roms") return body.include_roms ? "games" : "artwork files";
+  return { artwork: "artwork files", bios: "BIOS files", saves: "save files", movies: "videos", config_backups: "config backups" }[body.asset_type] || "files";
+}
+
+function localBulkIncludesText(body) {
+  if (body.asset_type !== "roms") return localBulkNoun(body);
+  const parts = [];
+  if (body.include_roms) parts.push("ROMs");
+  if (body.include_artwork) parts.push("artwork");
+  return parts.join(" and ") || "nothing";
+}
+
+// Count shown in the modal: ROMs when they are included, otherwise the artwork files.
+function localBulkPreviewCount(preview, body) {
+  if (body.asset_type === "roms" && !body.include_roms) return Number(preview.queued_artwork) || 0;
+  return Number(preview.queued_assets) || 0;
+}
+
+// Asks the user to confirm a bulk download and shows exactly what it will queue.
+// Each choice is { describe(count, noun), note?, body }; the first choice is the
+// default. Counts come from a dry run of the same request. Resolves to the chosen
+// request body, or null when the user cancels.
+function chooseBulkDownloadScope(choices) {
+  return new Promise(resolve => {
+    const modalId = "localBulkConfirmModal";
+    document.getElementById(modalId)?.remove();
+    const modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = `
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content themed-modal">
+          <div class="modal-header">
+            <h5 class="modal-title">Confirm download from this Drone</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="localBulkConfirmBody"><div class="text-muted">Counting what would be downloaded…</div></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-success" id="localBulkConfirmBtn" disabled>Counting…</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    modal.addEventListener("hidden.bs.modal", () => { finish(null); modal.remove(); });
+    if (bsModal) bsModal.show(); else { modal.classList.add("show"); modal.style.display = "block"; }
+    const hide = () => { if (bsModal) bsModal.hide(); else { modal.classList.remove("show"); modal.style.display = "none"; finish(null); modal.remove(); } };
+    modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => button.addEventListener("click", hide));
+
+    Promise.all(choices.map(choice => apiPost("/admin/local-network/sync-bulk", { ...choice.body, dry_run: true })
+      .then(preview => ({ preview }), error => ({ error }))))
+      .then(results => {
+        if (settled) return;
+        const body = document.getElementById("localBulkConfirmBody");
+        const confirmBtn = document.getElementById("localBulkConfirmBtn");
+        body.innerHTML = choices.map((choice, index) => {
+          const { preview, error } = results[index];
+          const noun = localBulkNoun(choice.body);
+          if (error) {
+            return `<div class="form-check mb-3"><input class="form-check-input" type="radio" disabled><label class="form-check-label text-danger">Could not count this selection: ${escapeHtml(error.message || "unknown error")}</label></div>`;
+          }
+          const count = localBulkPreviewCount(preview, choice.body);
+          const bytes = Number(preview.queued_bytes) || 0;
+          const skipped = Number(preview.skipped_existing) || 0;
+          const details = count
+            ? `${count} ${escapeHtml(noun)}${bytes ? ` · ${formatBytes(bytes)}` : ""}`
+            : "Nothing to download";
+          return `<div class="form-check mb-3">
+            <input class="form-check-input" type="radio" name="localBulkScope" id="localBulkScope${index}" value="${index}"${index === 0 ? " checked" : ""}${count ? "" : " disabled"}>
+            <label class="form-check-label" for="localBulkScope${index}">
+              <div>${escapeHtml(choice.describe(count, noun))}</div>
+              <div class="small text-muted">${details}${skipped ? ` · ${skipped} already on this machine will be skipped` : ""}</div>
+              ${choice.note ? `<div class="small text-warning">${escapeHtml(choice.note)}</div>` : ""}
+            </label>
+          </div>`;
+        }).join("") + `<div class="small text-muted">Includes: ${escapeHtml(localBulkIncludesText(choices[0].body))}</div>`;
+
+        const updateConfirm = () => {
+          const selected = Number(body.querySelector('input[name="localBulkScope"]:checked')?.value);
+          const result = results[selected];
+          const count = result && result.preview ? localBulkPreviewCount(result.preview, choices[selected].body) : 0;
+          if (!result || !result.preview || !count) {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = "Nothing to download";
+            return;
+          }
+          const bytes = Number(result.preview.queued_bytes) || 0;
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = `Download ${count} ${localBulkNoun(choices[selected].body)}${bytes ? ` (${formatBytes(bytes)})` : ""}`;
+        };
+        body.querySelectorAll('input[name="localBulkScope"]').forEach(input => input.addEventListener("change", updateConfirm));
+        confirmBtn.addEventListener("click", () => {
+          const selected = Number(body.querySelector('input[name="localBulkScope"]:checked')?.value);
+          finish(choices[selected].body);
+          hide();
+        });
+        updateConfirm();
+      });
+  });
+}
+
 async function copyAllLocalAssets() {
   const peerId = document.getElementById("localAssetPeer").value;
   const type = document.getElementById("localAssetType").value;
@@ -12268,10 +12395,13 @@ async function copyAllLocalAssets() {
     showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
     return;
   }
-  const scopeNoun = !includeRoms ? "artwork for ROMs already here" : type;
-  const scope = systems.length ? `all ${scopeNoun} for ${systems.join(", ")}` : (q ? `all ${scopeNoun} matching “${q}”` : `every ${scopeNoun}`);
-  if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), include_roms: includeRoms, overwrite_files: localAssetOverwriteFiles() });
+  const body = await chooseBulkDownloadScope([{
+    describe: (count, noun) => systems.length
+      ? `All ${count} ${noun} in ${systems.join(", ")}`
+      : (q ? `The ${count} ${noun} matching your search “${q}”` : `Every ${noun} on this Drone`),
+    body: localBulkBody({ peerId, type, systems, q }),
+  }]);
+  if (body) await queueLocalBulkCopy(body);
 }
 
 async function copyAllRomsForSystem(encodedSystem) {
@@ -12283,9 +12413,23 @@ async function copyAllRomsForSystem(encodedSystem) {
     showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
     return;
   }
-  const what = includeRoms ? `all ROMs for ${system}` : `artwork for ${system} ROMs already on this Drone`;
-  if (!window.confirm(`Queue ${what} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), include_roms: includeRoms, overwrite_files: localAssetOverwriteFiles() });
+  // The search behind the visible list scopes this download. The whole system is
+  // queued only when the user explicitly picks it in the confirmation.
+  const q = localPeerAssetContext.query || "";
+  const choices = [];
+  if (q) {
+    choices.push({
+      describe: (count, noun) => `The ${count} ${noun} matching your search “${q}” in ${system}`,
+      body: localBulkBody({ peerId, type: "roms", system, q }),
+    });
+  }
+  choices.push({
+    describe: (count, noun) => q ? `Entire ${system} system: all ${count} ${noun}` : `All ${count} ${noun} in ${system}`,
+    note: q ? "Includes games outside your search results." : "",
+    body: localBulkBody({ peerId, type: "roms", system }),
+  });
+  const body = await chooseBulkDownloadScope(choices);
+  if (body) await queueLocalBulkCopy(body);
 }
 
 async function queueLocalBulkCopy(body) {
