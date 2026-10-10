@@ -9,42 +9,169 @@ test_issue_114_library_reorg_uat.py.
 """
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 import app.storage.movies_store as movies_store
 import app.storage.music_store as music_store
-from app.storage.metadata_rekey import plan_rekeys
+from app.storage.metadata_rekey import OrphanClaim, RekeyPlan, plan_rekeys, rekey_orphan_metadata
+
+
+def _claim(fingerprint, size=10, provider="tmdb", provider_id="1", title="Title", scraped_at="2026-01-01T00:00:00"):
+    return OrphanClaim(fingerprint, size, provider, provider_id, title, scraped_at)
 
 
 class PlanRekeysTest(unittest.TestCase):
     def test_unique_identity_match_moves_the_orphan(self):
-        plan = plan_rekeys({"old": ("fp1", 10)}, [("new", "fp1", 10)], occupied=set())
-        self.assertEqual(plan, {"old": "new"})
+        plan = plan_rekeys({"old": _claim("fp1")}, [("new", "fp1", 10)], occupied=set())
+        self.assertEqual(plan.moves, {"old": "new"})
+        self.assertEqual(plan.superseded, [])
 
     def test_multiple_live_candidates_are_ambiguous_and_left_alone(self):
         live = [("copy-a", "fp1", 10), ("copy-b", "fp1", 10)]
-        self.assertEqual(plan_rekeys({"old": ("fp1", 10)}, live, occupied=set()), {})
+        plan = plan_rekeys({"old": _claim("fp1")}, live, occupied=set())
+        self.assertEqual(plan, RekeyPlan(moves={}, superseded=[]))
 
     def test_no_candidate_leaves_the_orphan_alone(self):
-        self.assertEqual(plan_rekeys({"old": ("fp1", 10)}, [("new", "fp2", 10)], occupied=set()), {})
+        self.assertEqual(plan_rekeys({"old": _claim("fp1")}, [("new", "fp2", 10)], occupied=set()).moves, {})
 
     def test_size_must_match_as_well_as_fingerprint(self):
-        self.assertEqual(plan_rekeys({"old": ("fp1", 10)}, [("new", "fp1", 11)], occupied=set()), {})
+        self.assertEqual(plan_rekeys({"old": _claim("fp1")}, [("new", "fp1", 11)], occupied=set()).moves, {})
 
-    def test_target_that_already_has_metadata_is_not_overwritten(self):
-        self.assertEqual(
-            plan_rekeys({"old": ("fp1", 10)}, [("new", "fp1", 10)], occupied={"new"}),
-            {},
-        )
+    def test_target_that_already_has_a_real_row_is_not_overwritten(self):
+        plan = plan_rekeys({"old": _claim("fp1")}, [("new", "fp1", 10)], occupied={"new"})
+        self.assertEqual(plan, RekeyPlan(moves={}, superseded=[]))
 
-    def test_two_orphans_claiming_one_target_are_both_skipped(self):
-        orphans = {"old-a": ("fp1", 10), "old-b": ("fp1", 10)}
-        self.assertEqual(plan_rekeys(orphans, [("new", "fp1", 10)], occupied=set()), {})
+    def test_collision_moves_one_winner_and_supersedes_the_rest(self):
+        orphans = {
+            "old-tmdb": _claim("fp1", provider="tmdb", scraped_at="2026-03-01T00:00:00"),
+            "old-tv": _claim("fp1", provider="tmdb_tv", scraped_at="2026-01-01T00:00:00"),
+        }
+        plan = plan_rekeys(orphans, [("new", "fp1", 10)], occupied=set())
+        # tmdb_tv wins even though the tmdb row is more recent.
+        self.assertEqual(plan.moves, {"old-tv": "new"})
+        self.assertEqual(plan.superseded, ["old-tmdb"])
+
+    def test_collision_falls_back_to_most_recent_scrape(self):
+        orphans = {
+            "older": _claim("fp1", provider="tmdb", scraped_at="2025-01-01T00:00:00"),
+            "newer": _claim("fp1", provider="tmdb", scraped_at="2026-01-01T00:00:00"),
+        }
+        plan = plan_rekeys(orphans, [("new", "fp1", 10)], occupied=set())
+        self.assertEqual(plan.moves, {"newer": "new"})
+        self.assertEqual(plan.superseded, ["older"])
+
+    def test_collision_never_shares_the_target(self):
+        orphans = {f"old-{i}": _claim("fp1", scraped_at=f"2026-01-0{i}T00:00:00") for i in range(3)}
+        plan = plan_rekeys(orphans, [("new", "fp1", 10)], occupied=set())
+        self.assertEqual(list(plan.moves.values()), ["new"])
+        self.assertEqual(len(plan.superseded), 2)
+
+    def test_real_orphan_beats_a_placeholder_orphan_on_collision(self):
+        orphans = {
+            "placeholder": _claim("fp1", provider="local", provider_id="", title="", scraped_at="2026-06-01T00:00:00"),
+            "real": _claim("fp1", provider="tmdb", scraped_at="2025-01-01T00:00:00"),
+        }
+        plan = plan_rekeys(orphans, [("new", "fp1", 10)], occupied=set())
+        self.assertEqual(plan.moves, {"real": "new"})
+        self.assertEqual(plan.superseded, ["placeholder"])
 
     def test_orphan_without_a_fingerprint_is_never_matched(self):
-        self.assertEqual(plan_rekeys({"old": ("", 10)}, [("new", "", 10)], occupied=set()), {})
+        self.assertEqual(plan_rekeys({"old": _claim("")}, [("new", "", 10)], occupied=set()).moves, {})
+
+
+class RekeyTableTest(unittest.TestCase):
+    """Runs ``rekey_orphan_metadata`` against minimal tables to cover the
+    placeholder-target and superseded-duplicate cases directly."""
+
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.executescript(
+            """
+            CREATE TABLE live (entry_key TEXT PRIMARY KEY, fingerprint TEXT, file_size INTEGER);
+            CREATE TABLE deleted (entry_key TEXT PRIMARY KEY, fingerprint TEXT, file_size INTEGER);
+            CREATE TABLE meta (entry_key TEXT PRIMARY KEY, provider TEXT NOT NULL, provider_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '', scraped_at TEXT NOT NULL, extra_json TEXT NOT NULL DEFAULT '{}');
+            """
+        )
+
+    def tearDown(self):
+        self.connection.close()
+
+    def _rekey(self):
+        return rekey_orphan_metadata(
+            self.connection, cache_table="live", deleted_table="deleted", metadata_table="meta"
+        )
+
+    def _meta(self, key, provider, provider_id="1", title="T", scraped_at="2026-01-01T00:00:00"):
+        self.connection.execute("INSERT INTO meta (entry_key, provider, provider_id, title, scraped_at) VALUES (?, ?, ?, ?, ?)",
+                                (key, provider, provider_id, title, scraped_at))
+
+    def _archive(self, key, fingerprint="fp1", size=10):
+        self.connection.execute("INSERT INTO deleted VALUES (?, ?, ?)", (key, fingerprint, size))
+
+    def _live(self, key, fingerprint="fp1", size=10):
+        self.connection.execute("INSERT INTO live VALUES (?, ?, ?)", (key, fingerprint, size))
+
+    def _meta_keys(self):
+        return {row[0]: (row[1], row[2]) for row in self.connection.execute("SELECT entry_key, provider, title FROM meta")}
+
+    def test_placeholder_on_the_target_is_replaced_by_the_real_orphan(self):
+        self._archive("old")
+        self._meta("old", "tmdb", title="Real Title")
+        self._live("new")
+        self._meta("new", "local", provider_id="", title="")
+
+        result = self._rekey()
+
+        self.assertEqual(result, {"orphaned": 1, "rekeyed": 1, "superseded": 0, "unmatched": 0})
+        self.assertEqual(self._meta_keys(), {"new": ("tmdb", "Real Title")})
+
+    def test_real_row_on_the_target_is_never_replaced(self):
+        self._archive("old")
+        self._meta("old", "tmdb", title="Orphan Title")
+        self._live("new")
+        self._meta("new", "tmdb", title="Live Title")
+
+        result = self._rekey()
+
+        self.assertEqual(result, {"orphaned": 1, "rekeyed": 0, "superseded": 0, "unmatched": 1})
+        self.assertEqual(self._meta_keys(), {"old": ("tmdb", "Orphan Title"), "new": ("tmdb", "Live Title")})
+
+    def test_local_row_with_a_title_counts_as_real(self):
+        self._archive("old")
+        self._meta("old", "tmdb")
+        self._live("new")
+        self._meta("new", "local", provider_id="", title="Has Title")
+
+        self.assertEqual(self._rekey()["rekeyed"], 0)
+
+    def test_duplicate_tmdb_rows_collapse_to_one_moved_row(self):
+        self._archive("old-tmdb")
+        self._archive("old-tv")
+        self._meta("old-tmdb", "tmdb", scraped_at="2026-03-01T00:00:00")
+        self._meta("old-tv", "tmdb_tv", provider_id="1-s1e1", scraped_at="2026-01-01T00:00:00")
+        self._live("new")
+
+        result = self._rekey()
+
+        self.assertEqual(result, {"orphaned": 2, "rekeyed": 1, "superseded": 1, "unmatched": 0})
+        self.assertEqual(self._meta_keys(), {"new": ("tmdb_tv", "T")})
+
+    def test_rekey_is_idempotent_after_superseding(self):
+        self._archive("old-a")
+        self._archive("old-b")
+        self._meta("old-a", "tmdb", scraped_at="2026-02-01T00:00:00")
+        self._meta("old-b", "tmdb", scraped_at="2026-01-01T00:00:00")
+        self._live("new")
+        self._rekey()
+
+        second = self._rekey()
+
+        self.assertEqual(second, {"orphaned": 0, "rekeyed": 0, "superseded": 0, "unmatched": 0})
+        self.assertEqual(self._meta_keys(), {"new": ("tmdb", "T")})
 
 
 class _TempLibraryMixin:

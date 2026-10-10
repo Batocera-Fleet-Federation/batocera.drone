@@ -265,6 +265,7 @@ def sync_music_cache(music_root: Path) -> dict:
         "thumbprint": music_inventory_thumbprint(scanned),
         "metadata_orphaned": rekey["orphaned"],
         "metadata_rekeyed": rekey["rekeyed"],
+        "metadata_superseded": rekey["superseded"],
         "metadata_unmatched": rekey["unmatched"],
     }
 

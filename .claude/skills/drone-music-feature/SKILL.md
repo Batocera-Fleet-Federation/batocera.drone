@@ -329,8 +329,10 @@ Real changes made after initial launch, not reflected in the sections above:
 - **Orphan re-keying and transient DB errors (issue #114).** Like movies,
   `sync_music_cache` runs `rekey_orphan_metadata` (`storage/metadata_rekey.py`)
   so a track moved by renaming or reorganizing keeps its scraped row when its
-  old fingerprint + size matches exactly one live track. A moved album's stored
-  `art_relative_path` goes stale, so `_resolve_music_artwork_target` checks the
+  old fingerprint + size matches exactly one live track. Duplicate orphans
+  claiming one track collapse to one winner (issue #117; the rest are
+  superseded), and a `local` placeholder row on the target is replaced. A
+  moved album's stored `art_relative_path` goes stale, so `_resolve_music_artwork_target` checks the
   track's own `images/album-cover.jpg` (where the scraper writes it) before the
   sibling and local-cover fallbacks. A transient `sqlite3.OperationalError`
   from the state DB during an artwork request answers **503** with

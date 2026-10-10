@@ -264,6 +264,7 @@ def sync_movies_cache(movies_root: Path, shows_root: Optional[Path] = None) -> d
         "thumbprint": movies_inventory_thumbprint(scanned),
         "metadata_orphaned": rekey["orphaned"],
         "metadata_rekeyed": rekey["rekeyed"],
+        "metadata_superseded": rekey["superseded"],
         "metadata_unmatched": rekey["unmatched"],
     }
 
