@@ -234,6 +234,16 @@ namespace-provenance analysis above (who overwrote the input, when, with what) a
 reconstruct the failure-time state from the writers' log lines rather than
 re-checking the code again.
 
+### "A game crashed but Admin → Debug → Game Crashes is empty"
+
+Check, in order: (1) `GET /v1/api/admin/crash-history` (log in with the default `batocera`/`linux` first) —
+`fix_enabled: false` means the Game crash notifier hook was never installed, so nothing is ever recorded
+(`/userdata/system/scripts/drone-game-crash-notifier.py` absent); (2) a hook installed from an older Drone
+shows status `modified` and keeps the old detection until the fix is toggled off/on; (3) read the session's
+slice of `/userdata/system/logs/es_launch_stdout.log` — a crash that prints nothing still ends with
+`Emulator terminated by signal (...)` or `Exiting configgen with status N` (N≠0), which the hook scores
+(see `docs/admin-fixes.md`). Stderr alone is not enough evidence.
+
 ### Process/version sanity check
 
 Before trusting anything else, confirm you're actually looking at a live, current

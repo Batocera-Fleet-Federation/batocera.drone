@@ -244,6 +244,11 @@ class InstalledFixAssetTests(unittest.TestCase):
             "KeyError: 'core'\n"
         )
         self.assertTrue(game_crash_notifier.assess_launch(noise + real, 600, "", config)["crashed"])
+        # The launcher logs its own line straight after the hotkeygen exception
+        # on every exit; that line must not make the helper's traceback count.
+        followed = noise + "2026-10-10 22:25:22,994 ERROR (emulatorlauncher.py:601):runCommand FFB: haptic 0\n"
+        self.assertFalse(game_crash_notifier.assess_launch(followed, 600, "", config)["crashed"])
+        self.assertFalse(game_crash_notifier.launcher_traceback(self.HOTD_STDERR))
 
     def test_short_session_needs_kernel_evidence(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
@@ -318,6 +323,7 @@ class InstalledFixAssetTests(unittest.TestCase):
                      "started": 0, "start_uptime": None, "stderr_offset": 0}
             with mock.patch.object(game_crash_notifier, "LAUNCH_STDERR", log_path), \
                  mock.patch.object(game_crash_notifier, "LOG_PATH", Path(tmp) / "notifier.log"), \
+                 mock.patch.object(game_crash_notifier, "HISTORY_PATH", Path(tmp) / "history.jsonl"), \
                  mock.patch.object(game_crash_notifier, "launcher_is_alive", return_value=False), \
                  mock.patch.object(game_crash_notifier, "read_dmesg", return_value=""), \
                  mock.patch.object(game_crash_notifier, "joystick_count", return_value=2), \
@@ -330,6 +336,102 @@ class InstalledFixAssetTests(unittest.TestCase):
                 with mock.patch.object(game_crash_notifier.time, "time", return_value=10_000):
                     game_crash_notifier.watch(state)
                 notify.assert_not_called()
+
+    # Trimmed from the es_launch_stdout.log batocera-r5 wrote when House of the
+    # Dead 4 (lindbergh) died a second after starting: no crash text anywhere,
+    # only the launcher's exit status.
+    HOTD_LAUNCHER_LOG = (
+        "[0000.000] INFO> Starting $ ./hod4M.elf\n"
+        "2026-10-10 22:25:22,994 DEBUG (hotkeygen.py:50):set_hotkeygen_context hotkeygen: resetting to default context\n"
+        "2026-10-10 22:25:24,249 DEBUG (emulatorlauncher.py:691):launch Exiting configgen with status 9\n"
+    )
+    HOTD_STDERR = (
+        "evmapy: no process found\n"
+        "Traceback (most recent call last):\n"
+        '  File "/usr/bin/hotkeygen", line 564, in <module>\n'
+        "ProcessLookupError: [Errno 3] No such process\n"
+        "ERROR: ld.so: object '/usr/bin/lindbergh/lindbergh.so' from LD_PRELOAD cannot be preloaded: ignored.\n"
+    )
+
+    def test_silent_early_exit_with_error_status_is_a_crash(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        verdict = game_crash_notifier.assess_launch(self.HOTD_STDERR, 6, "", config, self.HOTD_LAUNCHER_LOG)
+        self.assertTrue(verdict["crashed"])
+        self.assertEqual(verdict["signature"], "exit-status-9")
+        self.assertIn("status 9", verdict["reason"])
+        # Without the launcher log the same session is indistinguishable from a quit.
+        self.assertFalse(game_crash_notifier.assess_launch(self.HOTD_STDERR, 6, "", config)["crashed"])
+
+    def test_error_status_after_a_long_session_or_clean_status_is_not_a_crash(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        self.assertFalse(game_crash_notifier.assess_launch("", 900, "", config, self.HOTD_LAUNCHER_LOG)["crashed"])
+        clean = "launch Exiting configgen with status 0\n"
+        self.assertFalse(game_crash_notifier.assess_launch("", 3, "", config, clean)["crashed"])
+
+    def test_signal_logged_by_the_launcher_marks_only_faults_as_crashes(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        segv = "Emulator terminated by signal (Segmentation fault: 11)\nlaunch Exiting configgen with status 0\n"
+        verdict = game_crash_notifier.assess_launch("", 1800, "", config, segv)
+        self.assertTrue(verdict["crashed"])
+        self.assertEqual(verdict["signature"], "signal-SIGSEGV")
+        # Batocera ends games with SIGTERM/SIGKILL; those must stay quiet.
+        for notice in ("Terminated: 15", "Killed: 9", "Hangup: 1"):
+            text = f"Emulator terminated by signal ({notice})\nlaunch Exiting configgen with status 0\n"
+            self.assertFalse(game_crash_notifier.assess_launch("", 3, "", config, text)["crashed"])
+
+    def test_launcher_outcome_uses_the_last_launch_in_the_log(self) -> None:
+        text = "Exiting configgen with status 9\nExiting configgen with status 0\n"
+        self.assertEqual(game_crash_notifier.launcher_outcome(text), (None, 0))
+        self.assertEqual(game_crash_notifier.launcher_outcome(""), (None, None))
+
+    def test_launcher_log_reader_keeps_the_end_of_a_long_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stdout.log"
+            path.write_text("old\n" + "x" * 100 + "\nExiting configgen with status 9\n", encoding="utf-8")
+            tail = game_crash_notifier.read_new_tail(path, 4, limit=40)
+            self.assertIn("Exiting configgen with status 9", tail)
+            self.assertNotIn("old", tail)
+
+    def test_watch_records_a_silent_crash_that_the_game_crashes_page_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stderr_path, stdout_path = root / "stderr.log", root / "stdout.log"
+            stderr_path.write_text("previous launch\n" + self.HOTD_STDERR, encoding="utf-8")
+            stdout_path.write_text("previous launch\nExiting configgen with status 0\n" + self.HOTD_LAUNCHER_LOG, encoding="utf-8")
+            skip_err, skip_out = len("previous launch\n"), len("previous launch\nExiting configgen with status 0\n")
+            state = {"pid": 1, "start_time": None, "system": "lindbergh", "rom": "/userdata/roms/lindbergh/hotd4a/elf/hotd4a.game",
+                     "started": 1000, "start_uptime": None, "stderr_offset": skip_err, "stdout_offset": skip_out}
+            history = root / "system" / "game-crash-notifier" / "history.jsonl"
+            with mock.patch.object(game_crash_notifier, "LAUNCH_STDERR", stderr_path), \
+                 mock.patch.object(game_crash_notifier, "LAUNCH_STDOUT", stdout_path), \
+                 mock.patch.object(game_crash_notifier, "HISTORY_PATH", history), \
+                 mock.patch.object(game_crash_notifier, "LOG_PATH", root / "notifier.log"), \
+                 mock.patch.object(game_crash_notifier, "launcher_is_alive", return_value=False), \
+                 mock.patch.object(game_crash_notifier.time, "time", return_value=1006), \
+                 mock.patch.object(game_crash_notifier, "read_dmesg", return_value=""), \
+                 mock.patch.object(game_crash_notifier, "joystick_count", return_value=2), \
+                 mock.patch.object(game_crash_notifier, "send_notifications", return_value=2) as notify:
+                game_crash_notifier.watch(state)
+            notify.assert_called_once()
+            self.assertIn("hotd4a (lindbergh) crashed", notify.call_args[0][0][0])
+            from app.device import crash_history
+            listed = crash_history.list_crashes(build_settings(root))["crashes"]
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["signature"], "exit-status-9")
+            self.assertIn("Exiting configgen with status 9", listed[0]["log_excerpt"])
+            self.assertNotIn("previous launch", listed[0]["log_excerpt"])
+
+    def test_game_start_records_both_log_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "stderr.log").write_text("12345", encoding="utf-8")
+            with mock.patch.object(game_crash_notifier, "LAUNCH_STDERR", root / "stderr.log"), \
+                 mock.patch.object(game_crash_notifier, "LAUNCH_STDOUT", root / "missing.log"), \
+                 mock.patch.object(game_crash_notifier, "proc_start_time", return_value="1"), \
+                 mock.patch.object(game_crash_notifier, "spawn_watcher") as spawn:
+                game_crash_notifier.on_game_start(["gameStart", "snes", "libretro", "snes9x", "a.zip"], 42)
+            state = spawn.call_args[0][0]
+            self.assertEqual((state["stderr_offset"], state["stdout_offset"]), (5, 0))
 
     def test_switch_launcher_uses_gui_only_for_selected_games(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
