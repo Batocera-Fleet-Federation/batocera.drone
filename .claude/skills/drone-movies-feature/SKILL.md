@@ -185,17 +185,24 @@ from a pasted string — that would wrongly concatenate unrelated digits from
 a slug or query string) is the escape hatch for a title TMDb's own search
 ranks outside the default `limit=10` results.
 
-## Reorganized libraries: orphan re-keying and local art (issue #114)
+## Reorganized libraries: orphan re-keying and local art (issues #114, #117)
 
 `entry_key` is a hash of the relative path, so moving or renaming a file (or
 its show folder) orphans its `movies_metadata_entries` row. `sync_movies_cache`
 runs `storage/metadata_rekey.py::rekey_orphan_metadata` after the
 created/updated/deleted pass: an orphan's old `fingerprint` + `file_size` (from
 `deleted_movies_cache_entries`) is matched to a live entry, and the row moves
-**only** on a unique match, to an entry with no metadata row yet, claimed by
-exactly one orphan. Multi-copy and no-match cases are left alone. The sync
-result reports `metadata_orphaned` / `metadata_rekeyed` / `metadata_unmatched`
-so the leftover count is visible. It is idempotent and changes no schema.
+**only** on a unique identity match (one live entry with that fingerprint +
+size). Several orphans may claim the same live entry (duplicate `tmdb` /
+`tmdb_tv` scrapes of one file, issue #117): one winner moves, chosen by real
+row over `local` placeholder, then `tmdb_tv` over `tmdb`, then most recent
+`scraped_at`, and the losing duplicates are **superseded** (their metadata
+row is deleted). A `local` placeholder row (empty title and provider id,
+written by artwork recovery) on the target is not occupancy and is replaced; a
+real row on the target blocks the move. No-match and multi-live-candidate
+cases are left alone. The sync result reports `metadata_orphaned` /
+`metadata_rekeyed` / `metadata_superseded` / `metadata_unmatched` so the
+leftover count is visible. It is idempotent and changes no schema.
 
 Local art recovery (`_recover_plex_artwork` -> `_local_artwork_for_entry`)
 checks Plex names first, then scraper sidecars `images/<stem>-tmdb-poster.jpg`
