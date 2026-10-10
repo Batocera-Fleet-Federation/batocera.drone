@@ -118,6 +118,52 @@ def _get_download_manager():
     return _impl()
 
 
+def _job_total_bytes(job: dict) -> int:
+    """Expected byte size of a queued or planned job (0 when unknown)."""
+    try:
+        return int(job.get("total_bytes") or job.get("file_size") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+class _PlanningDownloadManager:
+    """Stands in for DownloadManager during a bulk dry run.
+
+    Each enqueue_* call returns a planned job describing what would be queued,
+    without creating a download, so the preview reuses the real skip rules."""
+
+    _FILE_TYPES = {
+        "enqueue_rom": "ROM",
+        "enqueue_artwork": "ARTWORK",
+        "enqueue_bios": "BIOS",
+        "enqueue_save": "SAVE",
+        "enqueue_movie": "MOVIE",
+        "enqueue_config_backup": "CONFIG_BACKUP",
+    }
+
+    def __init__(self, manager) -> None:
+        self._manager = manager
+
+    def find_pending_rom(self, *args, **kwargs):
+        return self._manager.find_pending_rom(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        file_type = self._FILE_TYPES.get(name)
+        if file_type is None:
+            raise AttributeError(name)
+
+        def plan(*args, **kwargs) -> dict:
+            return {
+                "job_id": "",
+                "file_type": file_type,
+                "status": "planned",
+                "percentage": 0,
+                "total_bytes": kwargs.get("expected_size") or 0,
+            }
+
+        return plan
+
+
 class HandlersNetworkMixin:
     def _handle_admin_network_mode(self) -> None:
         mode = _network_mode(self.settings)
@@ -1397,6 +1443,7 @@ class HandlersNetworkMixin:
         include_roms = bool(payload.get("include_roms", not artwork_only))
         overwrite_files = bool(payload.get("overwrite_files")) if "overwrite_files" in payload else None
         overwrite_artwork = bool(payload.get("overwrite_artwork", True))
+        dry_run = bool(payload.get("dry_run", False))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -1406,9 +1453,13 @@ class HandlersNetworkMixin:
             self._send_json(503, {"error": "download manager unavailable"})
             return
         config = {"network_mode": "local_network"}
+        # A dry run walks the same inventory through the same enqueue rules, so
+        # its counts and sizes match what a real queue would create.
+        enqueue_manager = _PlanningDownloadManager(manager) if dry_run else manager
         page_size = 500
         queued_assets = 0
         queued_artwork = 0
+        queued_bytes = 0
         queued_job_ids: List[str] = []
         queued_jobs: List[dict] = []
         skipped_existing = 0
@@ -1419,7 +1470,7 @@ class HandlersNetworkMixin:
         def walk_scope(scope_system: str) -> None:
             """Page through one scope (a single system, or the whole library when
             scope_system is empty) and enqueue each item."""
-            nonlocal queued_assets, queued_artwork, skipped_existing, total
+            nonlocal queued_assets, queued_artwork, queued_bytes, skipped_existing, total
             offset = 0
             scope_total = None
             while True:
@@ -1440,7 +1491,7 @@ class HandlersNetworkMixin:
                     if not isinstance(entry, dict):
                         continue
                     jobs = self._enqueue_local_asset(
-                        manager,
+                        enqueue_manager,
                         config,
                         peer,
                         asset_type,
@@ -1457,6 +1508,7 @@ class HandlersNetworkMixin:
                     asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
                     queued_assets += len(asset_jobs)
                     queued_artwork += len(jobs) - len(asset_jobs)
+                    queued_bytes += sum(_job_total_bytes(job) for job in jobs)
                     queued_job_ids.extend(
                         str(job.get("job_id") or job.get("id") or "")
                         for job in asset_jobs
@@ -1506,6 +1558,21 @@ class HandlersNetworkMixin:
         else:
             # bios/saves/artwork inventories aren't per-system scanned the same way.
             walk_scope(system)
+        if dry_run:
+            # Preview only: nothing was enqueued, so no job list is returned.
+            self._send_json(200, {
+                "status": "preview",
+                "asset_type": asset_type,
+                "system": system or None,
+                "systems": systems,
+                "query": query,
+                "queued_assets": queued_assets,
+                "queued_artwork": queued_artwork,
+                "queued_bytes": queued_bytes,
+                "skipped_existing": skipped_existing,
+                "total_available": total,
+            })
+            return
         self._send_json(202, {
             "status": "queued",
             "asset_type": asset_type,
@@ -1513,6 +1580,7 @@ class HandlersNetworkMixin:
             "systems": systems,
             "queued_assets": queued_assets,
             "queued_artwork": queued_artwork,
+            "queued_bytes": queued_bytes,
             "queued_job_ids": queued_job_ids,
             "queued_jobs": queued_jobs,
             "skipped_existing": skipped_existing,
