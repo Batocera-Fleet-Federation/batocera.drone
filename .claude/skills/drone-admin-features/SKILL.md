@@ -295,6 +295,13 @@ navbar link, `transfersMenuBtn`) lives under the **Transfers** tab
 (`renderTransfersPage()` → `#admin/transfers`, still its own route/page, just
 reached via this tab bar instead of a separate navbar item now).
 
+Gotcha: the Transfers live refresh (`startTransfersAutoRefresh`, 3s poll of
+`/admin/downloads` + `/admin/uploads`) must start *before* awaiting
+`renderIntegrationTransfersPanel`, because that panel awaits the peer overview probe
+(`loadSwarmOverview`). Starting it after the await freezes the queue at its first
+snapshot, so queued/downloading rows stop appearing. Pinned by
+`tests/test_issue_126_transfers_loading_uat.py`.
+
 - **Fleet overview** — a card grid (`renderSwarmDroneCard`) of this machine plus
   every paired peer, built from `GET /admin/swarm/overview`
   (`handlers_network.py:_handle_admin_swarm_overview`): each peer is probed live, in

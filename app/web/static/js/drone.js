@@ -10875,8 +10875,12 @@ async function renderTransfersPage() {
         <button class="btn btn-outline-primary" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div id="integrationTransfersPanel"></div>`;
-    await renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
+    // Start the live queue refresh before awaiting the panel: the panel waits
+    // on the peer probe, and a slow probe must not leave the queue frozen at
+    // its first snapshot (queued and downloading rows then never appear).
+    const panelReady = renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
     startTransfersAutoRefresh();
+    await panelReady;
   } catch (err) {
     showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Transfers could not be loaded.</div>';
