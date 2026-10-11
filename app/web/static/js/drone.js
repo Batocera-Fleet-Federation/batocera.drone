@@ -10865,7 +10865,9 @@ async function renderTransfersPage() {
   clearSystemTheme();
   titleNode.textContent = "Transfers";
   subtitleNode.textContent = "Request and monitor drone-to-drone asset transfers";
-  setLoading(true, "Loading transfers...");
+  // No loading toast here: it stayed up until the peer probe behind the
+  // request panel finished, and it lingered on the Swarm page we navigate to.
+  // The panels show their own inline "Loading..." placeholders instead.
   try {
     content.innerHTML = `
       ${renderSwarmTabBar("transfers")}
@@ -10878,8 +10880,6 @@ async function renderTransfersPage() {
   } catch (err) {
     showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Transfers could not be loaded.</div>';
-  } finally {
-    setLoading(false);
   }
 }
 
