@@ -850,5 +850,149 @@ class OutboundMailRelayTests(unittest.TestCase):
             self.assertEqual(result["item_count"], 1)
 
 
+class DigestAssetSummaryTests(unittest.TestCase):
+    """Issue #136: crashes wait for the interval, and asset transfers are summarized."""
+
+    def _record(self, settings, event_type, title="Asset", **details):
+        smtp_manager._notifications.record_event(settings, event_type, title, "file", details=details or None)
+
+    def _configured(self, tmp):
+        settings = _build_settings(Path(tmp))
+        smtp_manager.update_settings(settings, _VALID_SETTINGS)
+        return settings
+
+    def test_game_crash_waits_for_the_digest_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._configured(tmp)
+            smtp_manager._save_state(settings, last_digest_attempt_at=smtp_manager._now_iso())
+            self._record(settings, "game_crash", "Mario crashed")
+            with mock.patch.object(smtp_manager, "send_mail") as send_mail:
+                result = smtp_manager.send_digest_if_needed(settings)
+            send_mail.assert_not_called()
+            self.assertEqual(result["reason"], "digest interval has not elapsed")
+            self.assertEqual(smtp_manager._mail_store.pending(settings), [])
+
+    def test_summarizes_assets_per_system_with_total_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._configured(tmp)
+            self._record(settings, "asset_downloaded", system="snes", size_bytes=1_048_576, asset_type="rom")
+            self._record(settings, "asset_downloaded", system="snes", size_bytes=2_097_152, asset_type="rom")
+            self._record(settings, "asset_downloaded", system="nes", size_bytes=500, asset_type="rom")
+            # Rows recorded before system and size were tracked.
+            self._record(settings, "asset_downloaded", asset_type="rom")
+            self._record(settings, "asset_uploaded", system="snes", size_bytes=1_048_576, asset_type="rom")
+            result = smtp_manager.send_digest_if_needed(settings)
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["item_count"], 5)
+            job = smtp_manager._mail_store.pending(settings)[0]
+            self.assertIn("5 new notifications", job["subject"])
+            body = job["body"]
+            self.assertIn("Downloaded: 4 assets, 3.0 MB (1 without a recorded size)", body)
+            self.assertIn("    snes: 2 assets, 3.0 MB", body)
+            self.assertIn("    nes: 1 asset, 500 B", body)
+            self.assertIn("    unknown system: 1 asset", body)
+            self.assertIn("Uploaded: 1 asset, 1.0 MB", body)
+            self.assertIn("    snes: 1 asset, 1.0 MB", body)
+            # Assets never appear as one line each.
+            self.assertNotIn("pulled from a peer", body)
+            self.assertNotIn("served to a peer", body)
+
+    def test_asset_backlog_is_not_capped_and_every_summarized_row_is_marked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._configured(tmp)
+            for _ in range(600):
+                self._record(settings, "asset_downloaded", system="snes", size_bytes=10, asset_type="rom")
+            for index in range(201):
+                self._record(settings, "torrent_completed", f"Torrent {index}")
+            result = smtp_manager.send_digest_if_needed(settings)
+            self.assertEqual(result["status"], "queued")
+            # 600 asset rows are all counted; the other types list at most 200 per digest.
+            self.assertEqual(result["item_count"], 800)
+            job = smtp_manager._mail_store.pending(settings)[0]
+            self.assertEqual(len(job["metadata"]["audit_event_ids"]), 800)
+            self.assertIn("Downloaded: 600 assets, 5.9 KB", job["body"])
+            with mock.patch.object(smtp_manager, "send_mail") as worker_send:
+                smtp_manager.process_outbound_mail_queue(settings)
+            worker_send.assert_called_once()
+            still_unsent = smtp_manager._audit_store.list_unsent_events(
+                settings, smtp_manager._notifications.EVENT_TYPES, limit=None
+            )
+            self.assertEqual([row["event_type"] for row in still_unsent], ["torrent_completed"])
+            self.assertEqual(len(still_unsent), 1)
+
+    def test_disabled_asset_type_is_left_out_of_the_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._configured(tmp)
+            smtp_manager.update_notification_toggles(settings, {"asset_downloaded": False})
+            self._record(settings, "asset_downloaded", system="snes", size_bytes=10)
+            self._record(settings, "torrent_completed", "Torrent")
+            result = smtp_manager.send_digest_if_needed(settings)
+            self.assertEqual(result["item_count"], 1)
+            self.assertNotIn("Downloaded:", smtp_manager._mail_store.pending(settings)[0]["body"])
+
+
+class SatelliteRelayCadenceTests(unittest.TestCase):
+    class _Stop(Exception):
+        pass
+
+    def _satellite(self, tmp):
+        settings = _build_settings(Path(tmp))
+        smtp_manager.import_from_peer(
+            settings, _VALID_SETTINGS, source_peer_id="smtp-owner", source_peer_name="Owner"
+        )
+        return settings
+
+    def _accept_all(self, _peer, _endpoint, payload, _settings, **_kwargs):
+        return {"accepted_event_ids": [event["source_event_id"] for event in payload["events"]]}, "https://owner"
+
+    def test_backlog_drains_within_one_relay_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._satellite(tmp)
+            for _ in range(450):
+                smtp_manager._notifications.record_event(settings, "asset_downloaded", "Asset", "x")
+            peer = {"drone_id": "smtp-owner", "name": "Owner"}
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_post_json_for_peer", side_effect=self._accept_all) as post, \
+                    mock.patch.object(smtp_manager, "relay_mail_jobs_to_source"):
+                smtp_manager._run_relay_pass(settings)
+            # 200 + 200 + 50: the short batch ends the pass.
+            self.assertEqual(post.call_count, 3)
+            self.assertEqual(
+                smtp_manager._audit_store.list_unsent_events(settings, smtp_manager._notifications.EVENT_TYPES, limit=None),
+                [],
+            )
+            self.assertIsNotNone(smtp_manager._load_state(settings)["last_relay_attempt_at"])
+
+    def test_poller_relays_once_per_digest_interval_not_every_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._satellite(tmp)
+            ticks = []
+
+            def sleep(_seconds):
+                ticks.append(1)
+                if len(ticks) == 3:
+                    raise self._Stop()
+
+            with mock.patch.object(smtp_manager.time, "sleep", side_effect=sleep), \
+                    mock.patch.object(smtp_manager, "relay_notifications_to_source", return_value={"status": "skipped"}) as relay, \
+                    mock.patch.object(smtp_manager, "relay_mail_jobs_to_source", return_value={"status": "skipped"}) as mail_relay, \
+                    mock.patch.object(smtp_manager._crash_history, "ingest_new_crashes", return_value=0), \
+                    mock.patch.object(smtp_manager._usb_enumeration, "check_usb_enumeration_throttled", return_value=None):
+                with self.assertRaises(self._Stop):
+                    smtp_manager.run_audit_email_digest_poller(settings)
+            # Three ticks inside one interval: the first relays, the rest wait.
+            self.assertEqual(len(ticks), 3)
+            self.assertEqual(relay.call_count, 1)
+            self.assertEqual(mail_relay.call_count, 1)
+
+    def test_interval_helper_uses_the_first_recorded_anchor(self) -> None:
+        recent = smtp_manager._now_iso()
+        state = {"digest_interval_seconds": 300, "last_relay_attempt_at": recent}
+        self.assertFalse(smtp_manager._interval_elapsed(state, "last_relay_attempt_at"))
+        self.assertTrue(smtp_manager._interval_elapsed({"digest_interval_seconds": 300}, "last_relay_attempt_at"))
+        state["last_relay_attempt_at"] = "2000-01-01T00:00:00+00:00"
+        self.assertTrue(smtp_manager._interval_elapsed(state, "last_relay_attempt_at"))
+
+
 if __name__ == "__main__":
     unittest.main()

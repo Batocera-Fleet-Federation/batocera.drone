@@ -205,7 +205,7 @@ the frontend):
 | `automation_updated` | `web/handlers_system.py`'s 3 automation POST handlers | Right after each `_save_automation_config()` call. |
 | `asset_uploaded` | `web/handlers_peer.py`'s `_stream_file()` | Right after `tracker.finish(upload_id, "completed")` — the one choke point shared by all 5 peer-serving asset types (rom/bios/movie/save/artwork all funnel through `_stream_file`). Note this call site has `self.settings`; `transfer/upload_tracker.py`'s `UploadTracker` class deliberately does **not** — it's a standalone singleton with no settings/repository dependency by design (see its own module docstring), so the hook lives in the caller, not inside `UploadTracker.finish()`. |
 | `asset_downloaded` | `transfer/download_manager.py`'s `_run_job()` `finally:` block | On `terminal_activity.get("status") == "completed"`, **without** the pre-existing `asset_type == "rom"` restriction that a different, older action (`_kick_asset_metadata_sync_after_download`) is gated on right next to it — bios/saves/movies/artwork downloads must fire this too. |
-| `game_crash` | `device/crash_history.py`'s `ingest_new_crashes()`, called every tick of `run_audit_email_digest_poller` | One event per entry the Game crash notifier hook (`device/fix_assets/game_crash_notifier.py`, a separate process) appended to `history.jsonl`, tracked by an epoch cursor in `app_state` (`crash_history_cursor.json`; first pass skips history older than 60s). It is in `notifications.URGENT_EVENT_TYPES`, so `send_digest_if_needed()` sends it without waiting out the digest interval, and `_compose_digest` renders its full `format_crash_report()` text from `details`. |
+| `game_crash` | `device/crash_history.py`'s `ingest_new_crashes()`, called every tick of `run_audit_email_digest_poller` | One event per entry the Game crash notifier hook (`device/fix_assets/game_crash_notifier.py`, a separate process) appended to `history.jsonl`, tracked by an epoch cursor in `app_state` (`crash_history_cursor.json`; first pass skips history older than 60s). It waits for the digest interval like every other type (there is no urgent bypass; issue #136 removed it because a crash row that skipped the interval kept every digest firing). `_compose_digest` renders its full `format_crash_report()` text from `details`. |
 | `usb_enumeration_failed` | `device/usb_enumeration.py`'s `check_usb_enumeration_throttled()`, called every tick of `run_audit_email_digest_poller` (runs the real check at most every 5 min) | Parses `dmesg` for `usb usbN-portM: unable to enumerate USB device` (a **root** port the kernel gave up on; hub ports `N-M-portK` are ignored). Quiet when a `057e:0337` Wii U/GameCube adapter has a sysfs node (it enumerated elsewhere), otherwise one event per root port per boot (dedup state `usb_enumeration_notified.json`, keyed by `boot_id`). Strictly read-only — no USB sysfs writes, rescans or `udevadm` (issue #133: the kernel already power-cycles the port, and the fix is a different port or a powered hub). |
 | `torrent_completed` | `transfer/torrent_manager.py`'s `_apply_aria2_status_locked()` | Inside the two `if not entry.get("completed_at"):` blocks (there are two because aria2 can report completion via either its `"active"`+fully-downloaded branch or its own `"complete"` status) — **not** on the bare `entry["status"] = "complete"` assignment, which re-fires on every poll tick while a torrent stays complete/seeding. |
 
@@ -238,14 +238,14 @@ stored via `update_digest_interval()`, clamped defensively on every read by
 matters before the first save). Because the value can change while the
 thread is mid-sleep, `run_audit_email_digest_poller()` does **not** do a
 plain `time.sleep(interval)` like every other poller here — it wakes on a
-short fixed tick (`DIGEST_POLLER_TICK_SECONDS`, 30s, not user-facing) and
+short fixed tick (`DIGEST_POLLER_TICK_SECONDS`, 5s, not user-facing) and
 only calls `send_digest_if_needed()` once the **current** stored interval
 (re-read fresh from state every tick) has elapsed since the last check. This
 is still the same `Thread(daemon=True)` + `time.sleep` + module-level
 `_STARTED` guard shape as everything else — just ticking on a shorter,
 fixed cadence and comparing elapsed time against a value that can move,
 instead of sleeping for a fixed duration — so a change saved in the admin UI
-takes effect within ~30s instead of waiting out whatever (possibly
+takes effect within ~5s instead of waiting out whatever (possibly
 much longer, up to 24h) interval was previously in effect. Don't reach for
 a real scheduler library or a per-setting timer/thread to solve this; this
 tick-and-compare shape is the intended pattern for any *future*
@@ -255,14 +255,31 @@ user-configurable interval too.
 for a manual/test trigger) is a no-op unless `smtp_enabled` **and**
 `has_config` **and** at least one notification type is enabled **and**
 `audit_store.list_unsent_events()` (filtered to the enabled types) returns
-something. On success: composes one plain-text digest email (`_compose_digest`,
-one line per item with its timestamp/label/title/message), sends it,
-`audit_store.mark_events_emailed()` the included rows, updates
+something. Every type, crashes included, waits for the digest interval
+(`_digest_interval_elapsed`, anchored on `last_digest_attempt_at`). On success:
+composes one plain-text digest email (`_compose_digest`). Non-asset rows are
+listed one line per item (timestamp/label/title/message), capped at 200 per
+digest. Asset rows (`asset_downloaded`/`asset_uploaded`, `notifications.ASSET_EVENT_TYPES`)
+are **not** listed: `_asset_summary_lines` writes totals per type, broken down
+by `details.system` (`unknown system` for rows recorded before system was
+tracked), with bytes from `details.size_bytes` and a per-source breakdown for
+downloads. Asset rows are read without a cap so the totals cover the whole
+backlog. The digest job's `audit_event_ids` holds every included row, and
+`audit_store.mark_events_emailed()` marks them in batches of 500 (SQLite's
+bound-parameter limit on the device is 32,766). Then it updates
 `last_digest_sent_at`. On failure: records `last_digest_error`, leaves the
 rows unsent so the **next** poll tick retries them — never mark rows emailed
 before `send_mail()` has actually succeeded. Like `vpn_manager.check_and_
 self_heal`/`check_sharing_revocation`, this function **never raises** —
 wrapped in its own outer try/except, intended to run unattended forever.
+
+**Satellite relay cadence (issue #136).** A satellite (`source_peer_id` set)
+does not run the digest. Its poller relays on the same interval, tracked by
+`last_relay_attempt_at` (local-only, read through `_interval_elapsed`), not on
+every tick. `_run_relay_pass()` posts `relay_notifications_to_source()` batches
+back to back while batches come back full (`AUDIT_EMAIL_RELAY_MAX_BATCHES_PER_PASS`
+caps one pass at 50 batches), then relays mail jobs once. Test email from a
+satellite therefore reaches the owner within one interval, not seconds.
 
 ## Sending mail: stdlib `smtplib` only
 
@@ -448,6 +465,8 @@ Do not:
   dismiss, clear-all),
 - gate `notifications.record_event()` itself on a notification-type toggle —
   only the digest poller's query may filter by it,
+- add an urgent or immediate-send path that skips the digest interval (issue #136:
+  every type waits for the interval, so a flood of one type cannot multiply digests),
 - add a background thread for this or any future periodic feature via
   anything other than the existing `Thread(daemon=True)` +
   `time.sleep(interval)` + module-level `_STARTED` guard-flag shape,

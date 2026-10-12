@@ -1112,6 +1112,11 @@ class HandlersPeerMixin:
                     "asset_uploaded",
                     "Asset uploaded",
                     str((upload_meta or {}).get("relative_path") or path.name),
+                    details={
+                        "asset_type": (upload_meta or {}).get("asset_type"),
+                        "system": (upload_meta or {}).get("system"),
+                        "size_bytes": file_size,
+                    },
                 )
         except Exception as error:
             if upload_id:

@@ -233,33 +233,53 @@ def insert_relayed_event(
     }
 
 
-def list_unsent_events(settings: Any, event_types: Iterable[str], limit: int = 200) -> list[dict]:
-    """Audit rows not yet included in a digest, restricted to the given (enabled) types."""
+def list_unsent_events(settings: Any, event_types: Iterable[str], limit: Optional[int] = 200) -> list[dict]:
+    """Audit rows not yet included in a digest, restricted to the given (enabled) types.
+
+    ``limit=None`` returns every unsent row of those types. Only the asset
+    summary uses it: a transfer backlog can be thousands of rows, and the
+    digest aggregates them rather than listing them one by one.
+    """
     types = [str(t).strip() for t in event_types if str(t or "").strip()]
     if not types:
         return []
     placeholders = ",".join("?" for _ in types)
+    limit_clause = ""
+    params: list[Any] = [*types]
+    if limit is not None:
+        limit_clause = " LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
     with _open(settings.userdata_root) as connection:
         rows = connection.execute(
             f"SELECT id, event_type, title, message, details, created_at, emailed_at FROM audit_log "
             f"WHERE emailed_at IS NULL AND event_type IN ({placeholders}) "
-            f"ORDER BY id ASC LIMIT ?",
-            (*types, max(1, min(int(limit), 1000))),
+            f"ORDER BY id ASC{limit_clause}",
+            params,
         ).fetchall()
     return [_row_to_audit_dict(row) for row in rows]
+
+
+# SQLite's default bound-parameter limit on the device build is 32,766. Keep
+# each UPDATE far below it, since a digest can cover thousands of asset rows.
+MARK_EMAILED_BATCH_SIZE = 500
 
 
 def mark_events_emailed(settings: Any, ids: Iterable[int]) -> int:
     id_list = [int(i) for i in ids]
     if not id_list:
         return 0
-    placeholders = ",".join("?" for _ in id_list)
+    marked = 0
+    emailed_at = _now()
     with _open(settings.userdata_root) as connection:
-        cursor = connection.execute(
-            f"UPDATE audit_log SET emailed_at = ? WHERE id IN ({placeholders}) AND emailed_at IS NULL",
-            (_now(), *id_list),
-        )
-        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        for start in range(0, len(id_list), MARK_EMAILED_BATCH_SIZE):
+            batch = id_list[start:start + MARK_EMAILED_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            cursor = connection.execute(
+                f"UPDATE audit_log SET emailed_at = ? WHERE id IN ({placeholders}) AND emailed_at IS NULL",
+                (emailed_at, *batch),
+            )
+            marked += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+    return marked
 
 
 def list_notifications_page(

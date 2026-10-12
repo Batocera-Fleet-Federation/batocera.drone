@@ -1896,6 +1896,10 @@ class SettingsTests(unittest.TestCase):
             record_event.assert_called_once()
             self.assertEqual(record_event.call_args.args[1], "asset_downloaded")
             self.assertEqual(record_event.call_args.args[3], "Game.zip")
+            # The digest summarizes by system and size, so both must be recorded.
+            details = record_event.call_args.kwargs["details"]
+            self.assertEqual(details["system"], "snes")
+            self.assertEqual(details["size_bytes"], 123)
 
     def test_download_manager_refreshes_paired_peer_route_before_running_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -47,9 +47,9 @@ EVENT_TYPES = (
     "usb_enumeration_failed",
 )
 
-# Types that should not wait out the digest interval: a crash email is only
-# useful if it arrives while the player can still remember what happened.
-URGENT_EVENT_TYPES = ("game_crash",)
+# Transfer events a digest summarizes (counts and sizes per system) instead of
+# listing one line per asset. Every other type is listed line by line.
+ASSET_EVENT_TYPES = ("asset_downloaded", "asset_uploaded")
 
 EVENT_TYPE_LABELS = {
     "vpn_connected": "VPN connected",

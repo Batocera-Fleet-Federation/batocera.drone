@@ -1164,6 +1164,8 @@ class DownloadManager:
                 if _local_network.is_local_mode(self.settings):
                     _local_network.record_activity(self.settings, terminal_activity)
                 if terminal_activity.get("status") == "completed":
+                    # Artwork jobs have no total_bytes, so the bytes actually written are the size.
+                    size_bytes = terminal_activity.get("downloaded_bytes") or terminal_activity.get("total_bytes")
                     _notifications.record_event(
                         self.settings,
                         "asset_downloaded",
@@ -1172,6 +1174,8 @@ class DownloadManager:
                         details={
                             "asset_type": terminal_activity.get("asset_type"),
                             "source_drone_id": terminal_activity.get("source_drone_id"),
+                            "system": terminal_activity.get("system"),
+                            "size_bytes": int(size_bytes) if size_bytes else None,
                         },
                     )
                 if asset_type == "rom" and terminal_activity.get("status") == "completed":
