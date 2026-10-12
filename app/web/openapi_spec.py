@@ -738,10 +738,12 @@ def _schemas() -> Dict[str, Schema]:
                 "downloads": _array(_ref("DownloadJob")),
                 "active": _array(_ref("DownloadJob")),
                 "queued": _array(_ref("DownloadJob")),
+                "queued_total": _integer(description="Full queued count; `queued` may be capped by ?queued_limit"),
+                "queued_truncated": _boolean(description="True when `queued` was capped by ?queued_limit"),
                 "recent": _array(_ref("DownloadJob")),
                 "paused": _boolean(),
             },
-            description="Download queue snapshot.",
+            description="Download queue snapshot. `downloads` is omitted with ?compact=1.",
         ),
         "DownloadActionResponse": _object(
             {"status": _string(), "job": _ref("DownloadJob"), "job_id": _string(), "message": _string(), "downloads": _array(_ref("DownloadJob"))},
@@ -1615,6 +1617,8 @@ def _schemas() -> Dict[str, Schema]:
                 "error": _string(nullable=True),
                 "summary_error": _string(description="Inventory-summary error when the peer health check succeeded; the peer remains online", nullable=True),
                 "latency_ms": _integer(nullable=True),
+                "offline_reason": _string(description="Set to `tailnet_not_connected` when an unreachable peer has a tailnet address and this Drone is not enrolled in the tailnet"),
+                "offline_hint": _string(description="Human-readable explanation accompanying offline_reason"),
                 "summary": freeform,
             },
             ("drone_id", "name", "is_self", "online", "paired"),
@@ -1811,7 +1815,7 @@ def _schemas() -> Dict[str, Schema]:
             ("peer_id", "asset_type"),
         ),
         "LocalBulkSyncResponse": _object(
-            {"status": _enum(["queued", "preview"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "query": _string(), "queued_assets": _integer(), "queued_artwork": _integer(), "queued_bytes": _integer(), "queued_job_ids": _array(_string()), "queued_jobs": _array(_ref("DownloadJob")), "skipped_existing": _integer(), "total_available": _integer()},
+            {"status": _enum(["queued", "preview"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "query": _string(), "queued_assets": _integer(), "queued_artwork": _integer(), "queued_bytes": _integer(), "queued_job_ids": _array(_string()), "queued_jobs": _array(_ref("DownloadJob")), "skipped_existing": _integer(), "total_available": _integer(), "truncated": _boolean(description="True when the per-request job cap was reached; run the sync again for the remainder"), "max_jobs": _integer(description="Per-request job cap (DRONE_SYNC_BULK_MAX_JOBS)")},
             ("status", "asset_type", "systems", "queued_assets", "queued_artwork", "queued_bytes", "skipped_existing", "total_available"),
         ),
         "PeerPairRequest": _object(
@@ -2483,7 +2487,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     error_codes=("400", "401", "403", "429", "500", "503"),
                 ),
             },
-            "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, tags=["admin", "downloads"])},
+            "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, parameters=[_query_param("compact", _boolean(), "Omit the duplicate `downloads` list"), _query_param("queued_limit", _integer(), "Return at most this many queued rows (queued_total keeps the full count)")], tags=["admin", "downloads"])},
             **_integration_paths(),
             "/admin/downloads/{job_id}/cancel": {
                 "post": _operation("Cancel a download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))

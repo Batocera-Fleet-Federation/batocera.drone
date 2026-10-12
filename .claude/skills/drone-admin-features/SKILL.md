@@ -302,6 +302,15 @@ Gotcha: the Transfers live refresh (`startTransfersAutoRefresh`, 3s poll of
 snapshot, so queued/downloading rows stop appearing. Pinned by
 `tests/test_issue_126_transfers_loading_uat.py`.
 
+The Transfers poll asks for `GET /admin/downloads?compact=1&queued_limit=500`
+(`TRANSFERS_POLL_PATH`): `compact` drops the duplicate `downloads` list and
+`queued_limit` caps the `queued` rows (`queued_total`/`queued_truncated` and the
+ETA still cover the whole queue). The bare endpoint keeps the legacy full shape.
+Bulk enqueues wrap their work in `DownloadManager.batch_persistence()` (one state
+write instead of one per job — otherwise O(N²) under the lock), and one
+`sync-bulk` request stops at `DRONE_SYNC_BULK_MAX_JOBS` (2000) jobs and returns
+`truncated: true`. Pinned by `tests/test_issue_139_swarm_tailnet_uat.py`.
+
 - **Fleet overview** — a card grid (`renderSwarmDroneCard`) of this machine plus
   every paired peer, built from `GET /admin/swarm/overview`
   (`handlers_network.py:_handle_admin_swarm_overview`): each peer is probed live, in
@@ -310,6 +319,17 @@ snapshot, so queued/downloading rows stop appearing. Pinned by
   page load, not a periodic-cache read. Each online peer with a known LAN or
   tailnet address has a **Reference ROMs**/**Stop Referencing** toggle (see
   "Network-share peer ROM referencing" below).
+  The **self card never walks the ROM tree**: `_swarm_self_summary` reads only
+  the SQLite cache (`RomRepository.list_cached_systems`, which serves the last
+  committed `asset_systems` counts even while `scan_in_progress` is set, plus
+  `read_cached_asset_counts` `COUNT(*)`s). Don't swap it back to
+  `_collect_peer_inventory("summary")` — `list_systems()` falls back to a
+  filesystem walk during a scan (30 s+ on a big library) and stalls the page.
+  The browser's first-paint call (`?probe=0`) has a 20 s client timeout, and
+  `api()` times out at 60 s by default (`{ timeoutMs: 0 }` disables it).
+  An unreachable peer that has a tailnet address while *this* Drone is not
+  enrolled gets `offline_reason: "tailnet_not_connected"` + `offline_hint`
+  (`_swarm_offline_reason`) so the card says why instead of a plain Offline.
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
@@ -322,6 +342,16 @@ snapshot, so queued/downloading rows stop appearing. Pinned by
   `DRONE_TAILSCALE_OAUTH_CLIENT_SECRET` (a Tailscale OAuth client, ideally
   scoped to just `devices:core:write` and tagged to this fleet); silent no-op
   without them configured, same as before this existed.
+  **Enrollment retries:** `maybe_bootstrap_tailnet` runs once at startup, and
+  `peer_workers`' `drone-tailnet-bootstrap-retry` thread re-runs
+  `bootstrap_tailnet_from_swarm` every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
+  (default 300, floor 60) while tailscale is installed but the Drone isn't
+  enrolled, so it joins as soon as a paired peer is both sharing and enrolled.
+  A Drone that should seed the others (an always-on one) must have **Share
+  with paired peers** turned on — it is off by default and a peer answering 404
+  on `/peer/tailnet/config` is "not sharing". Hands-free key minting from the
+  OAuth client is deliberately *not* done (it would put a long-lived secret on
+  every Drone); peer-shared keys are the supported path.
 - **Pairing card** — the rotating local pairing code
   (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing.
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)

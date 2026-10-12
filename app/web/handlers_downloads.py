@@ -5,6 +5,8 @@ resume/clear the download queue, cancel/retry a job, and purge/clear the asset-m
 cache. Composed onto ``RomRequestHandler``.
 """
 
+from typing import Optional
+
 try:
     from ..common.runtime_state import _ROM_METADATA_WAKE
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
@@ -35,12 +37,27 @@ def _get_download_manager():
 
 
 class HandlersDownloadsMixin:
-    def _handle_admin_downloads(self) -> None:
+    def _handle_admin_downloads(self, query_params: Optional[dict] = None) -> None:
+        """Queue snapshot. ``?compact=1`` omits the duplicate ``downloads`` list and
+        ``?queued_limit=N`` caps the returned queued rows (``queued_total`` keeps the
+        full count) -- the Transfers panel polls this every few seconds, and a
+        multi-thousand-job queue is otherwise megabytes per poll."""
+        query_params = query_params or {}
+        compact = str((query_params.get("compact") or [""])[0]).strip().lower() in {"1", "true", "yes"}
+        try:
+            queued_limit = int((query_params.get("queued_limit") or [""])[0])
+        except (TypeError, ValueError):
+            queued_limit = None
+        if queued_limit is not None and queued_limit < 0:
+            queued_limit = None
         manager = _get_download_manager()
         if manager is None:
-            self._send_json(200, {"target_drone_id": self.settings.device_id, "downloads": [], "active": [], "queued": [], "recent": []})
+            payload = {"target_drone_id": self.settings.device_id, "active": [], "queued": [], "queued_total": 0, "recent": []}
+            if not compact:
+                payload["downloads"] = []
+            self._send_json(200, payload)
             return
-        self._send_json(200, manager.snapshot())
+        self._send_json(200, manager.snapshot(compact=compact, queued_limit=queued_limit))
 
     def _handle_admin_asset_cache(self) -> None:
         self._send_json(200, _rom_metadata_cache_status(self.settings))
