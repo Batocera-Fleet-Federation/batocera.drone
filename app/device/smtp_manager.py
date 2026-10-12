@@ -59,6 +59,7 @@ try:
     from ..storage import mail_queue_store as _mail_store
     from . import notifications as _notifications
     from . import crash_history as _crash_history
+    from . import usb_enumeration as _usb_enumeration
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import mail_queue_store as _mail_store  # type: ignore
     from device import notifications as _notifications  # type: ignore
     from device import crash_history as _crash_history  # type: ignore
+    from device import usb_enumeration as _usb_enumeration  # type: ignore
 
 SMTP_STATE_NAMESPACE = "smtp_manager.json"
 SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECONDS", "15"))
@@ -1053,6 +1055,11 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
             _crash_history.ingest_new_crashes(settings)
         except Exception as error:
             print(f"Game crash ingest failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        try:
+            # Kernel-level USB enumeration failures happen before the Drone starts; surface them.
+            _usb_enumeration.check_usb_enumeration_throttled(settings)
+        except Exception as error:
+            print(f"USB enumeration check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
         if _load_state(settings).get("source_peer_id"):
             relay_notifications_to_source(settings)
             relay_mail_jobs_to_source(settings)

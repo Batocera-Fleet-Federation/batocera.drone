@@ -35,8 +35,8 @@ class RecordEventTests(unittest.TestCase):
                 result = notifications.record_event(settings, "torrent_completed", "Done")
             self.assertIsNone(result)
 
-    def test_event_types_tuple_has_sixteen_entries_matching_the_labels_map(self) -> None:
-        self.assertEqual(len(notifications.EVENT_TYPES), 17)
+    def test_event_types_tuple_has_eighteen_entries_matching_the_labels_map(self) -> None:
+        self.assertEqual(len(notifications.EVENT_TYPES), 18)
         self.assertEqual(set(notifications.EVENT_TYPES), set(notifications.EVENT_TYPE_LABELS.keys()))
 
 
