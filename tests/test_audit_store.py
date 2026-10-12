@@ -242,5 +242,36 @@ class SchemaTests(unittest.TestCase):
             self.assertIn("idx_notifications_audit_log_id", notification_indexes)
 
 
+class BulkDigestRowsTests(unittest.TestCase):
+    """Issue #136: a transfer backlog can be thousands of rows."""
+
+    def _insert_many(self, settings, event_type: str, count: int) -> None:
+        with audit_store._open(settings.userdata_root) as connection:
+            connection.executemany(
+                "INSERT INTO audit_log (event_type, title, message, details, created_at, emailed_at) "
+                "VALUES (?, 'Asset', '', NULL, '2026-01-01T00:00:00+00:00', NULL)",
+                [(event_type,)] * count,
+            )
+
+    def test_unlimited_listing_returns_every_unsent_row_of_the_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._insert_many(settings, "asset_downloaded", 250)
+            self._insert_many(settings, "torrent_completed", 3)
+            self.assertEqual(len(audit_store.list_unsent_events(settings, ["asset_downloaded"], limit=None)), 250)
+            self.assertEqual(len(audit_store.list_unsent_events(settings, ["asset_downloaded"])), 200)
+
+    def test_mark_events_emailed_handles_more_ids_than_one_statement_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._insert_many(settings, "asset_downloaded", 1200)
+            ids = [row["id"] for row in audit_store.list_unsent_events(settings, ["asset_downloaded"], limit=None)]
+            self.assertEqual(len(ids), 1200)
+            self.assertEqual(audit_store.mark_events_emailed(settings, ids), 1200)
+            self.assertEqual(audit_store.list_unsent_events(settings, ["asset_downloaded"], limit=None), [])
+            # Re-marking already-emailed rows changes nothing.
+            self.assertEqual(audit_store.mark_events_emailed(settings, ids), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

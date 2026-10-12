@@ -194,7 +194,7 @@ class CrashEmailTests(unittest.TestCase):
             write_history(Path(tmp), [{**self.RECORD, "epoch": now + 1}, {**self.RECORD, "epoch": now + 9, "game": "Two"}])
             self.assertEqual(crash_history.ingest_new_crashes(settings, now=now + 10), 1)
 
-    def test_crash_email_is_queued_immediately_with_full_details(self) -> None:
+    def test_crash_email_waits_for_the_digest_interval_then_carries_full_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             smtp_manager, settings = self._smtp_settings(tmp)
             # An older digest was just attempted, so the interval has NOT elapsed.
@@ -205,6 +205,10 @@ class CrashEmailTests(unittest.TestCase):
             crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"])
             write_history(Path(tmp), [self.RECORD])
             crash_history.ingest_new_crashes(settings, now=self.RECORD["epoch"] + 1)
+            # A crash does not bypass the interval, even though it is unsent.
+            self.assertEqual(smtp_manager.send_digest_if_needed(settings)["status"], "skipped")
+            self.assertEqual(smtp_manager._mail_store.pending(settings), [])
+            smtp_manager._save_state(settings, last_digest_attempt_at="2000-01-01T00:00:00+00:00")
             result = smtp_manager.send_digest_if_needed(settings)
             self.assertEqual(result["status"], "queued")
             job = smtp_manager._mail_store.pending(settings)[0]

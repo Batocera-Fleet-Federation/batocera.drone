@@ -92,6 +92,8 @@ DIGEST_INTERVAL_MAX_SECONDS = 86400
 DIGEST_POLLER_TICK_SECONDS = 5.0
 AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST = 200
 AUDIT_EMAIL_RELAY_MAX_ITEMS = 200
+# Caps one interval's relay drain at 10,000 events; the rest waits for the next interval.
+AUDIT_EMAIL_RELAY_MAX_BATCHES_PER_PASS = 50
 OUTBOUND_MAIL_RELAY_MAX_ITEMS = 20
 OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
@@ -156,6 +158,8 @@ def _load_state(settings: Settings) -> dict:
         "last_digest_sent_at": stored.get("last_digest_sent_at"),
         "last_digest_attempt_at": stored.get("last_digest_attempt_at"),
         "last_digest_error": str(stored.get("last_digest_error") or ""),
+        # Satellite relay cadence -- local only, same interval as the owner's digest.
+        "last_relay_attempt_at": stored.get("last_relay_attempt_at"),
     }
 
 
@@ -566,14 +570,93 @@ def queue_mail(
     return {"status": "queued", "job_id": job["id"], "queued_at": job["created_at"]}
 
 
-def _compose_digest(items: list, settings: Settings) -> tuple:
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def _asset_details(row: dict) -> dict:
+    return row["details"] if isinstance(row.get("details"), dict) else {}
+
+
+def _asset_size(row: dict) -> Optional[int]:
+    # Rows recorded before sizes were tracked have no size_bytes.
+    try:
+        size = _asset_details(row).get("size_bytes")
+        return int(size) if size is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _asset_count_text(rows: list) -> str:
+    count = len(rows)
+    text = f"{count:,} asset{'s' if count != 1 else ''}"
+    sizes = [size for size in (_asset_size(row) for row in rows) if size is not None]
+    if sizes:
+        text += f", {_format_bytes(sum(sizes))}"
+        if len(sizes) < count:
+            text += f" ({count - len(sizes):,} without a recorded size)"
+    return text
+
+
+def _asset_system(row: dict) -> str:
+    # Rows recorded before the system was tracked fall into one group.
+    return str(_asset_details(row).get("system") or "").strip() or "unknown system"
+
+
+def _asset_source(row: dict) -> str:
+    details = _asset_details(row)
+    return str(details.get("source_drone_name") or details.get("source_drone_id") or "").strip() or "unknown source"
+
+
+def _group_assets(rows: list, key_for_row) -> dict:
+    groups: dict = {}
+    for row in rows:
+        groups.setdefault(key_for_row(row), []).append(row)
+    return groups
+
+
+def _asset_summary_lines(rows: list) -> list:
+    """Totals per transfer type, broken down by system (and by source for downloads).
+
+    One summary replaces a line per asset: a bulk transfer can be thousands of
+    rows, and listing each one made the digest grow faster than it could send.
+    Largest groups come first.
+    """
+    lines = []
+    headings = (("asset_downloaded", "Downloaded"), ("asset_uploaded", "Uploaded"))
+    for event_type, heading in headings:
+        typed = [row for row in rows if row["event_type"] == event_type]
+        if not typed:
+            continue
+        lines.append(f"{heading}: {_asset_count_text(typed)}")
+        by_system = _group_assets(typed, _asset_system)
+        for system in sorted(by_system, key=lambda name: (-len(by_system[name]), name)):
+            lines.append(f"    {system}: {_asset_count_text(by_system[system])}")
+        if event_type == "asset_downloaded":
+            by_source = _group_assets(typed, _asset_source)
+            for source in sorted(by_source, key=lambda name: (-len(by_source[name]), name)):
+                lines.append(f"    from {source}: {_asset_count_text(by_source[source])}")
+        lines.append("")
+    return lines
+
+
+def _compose_digest(items: list, settings: Settings, asset_rows: Optional[list] = None) -> tuple:
+    asset_rows = asset_rows or []
+    total = len(items) + len(asset_rows)
     drone_label = _drone_label(settings)
-    subject = f"Batocera Drone [{drone_label}]: {len(items)} new notification{'s' if len(items) != 1 else ''}"
+    subject = f"Batocera Drone [{drone_label}]: {total} new notification{'s' if total != 1 else ''}"
     crashes = [item for item in items if item["event_type"] == "game_crash"]
     if crashes:
-        extra = len(items) - 1
+        extra = total - 1
         subject = f"Batocera Drone [{drone_label}]: {crashes[0]['title']}" + (f" (+{extra} more)" if extra else "")
-    lines = [f"Drone: {drone_label}", "", f"{len(items)} new item(s) since the last digest:", ""]
+    lines = [f"Drone: {drone_label}", "", f"{total} new item(s) since the last digest:", ""]
+    if asset_rows:
+        lines.extend(_asset_summary_lines(asset_rows))
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
         details = item.get("details") if isinstance(item.get("details"), dict) else {}
@@ -601,7 +684,12 @@ def _digest_interval_elapsed(state: dict) -> bool:
     lifetime. It also prevents overlapping callers from sending the same
     audit rows more than once inside the configured interval.
     """
-    anchor = state.get("last_digest_attempt_at") or state.get("last_digest_sent_at")
+    return _interval_elapsed(state, "last_digest_attempt_at", "last_digest_sent_at")
+
+
+def _interval_elapsed(state: dict, *anchor_keys: str) -> bool:
+    """True when the first recorded anchor is at least one digest interval old."""
+    anchor = next((state.get(key) for key in anchor_keys if state.get(key)), None)
     if not anchor:
         return True
     try:
@@ -1012,16 +1100,18 @@ def send_digest_if_needed(settings: Settings) -> dict:
             enabled_types = [event_type for event_type, on in state["notify"].items() if on]
             if not enabled_types:
                 return {"status": "skipped", "reason": "no notification types enabled"}
+            # Every type, crashes included, waits for the configured interval.
             if not _digest_interval_elapsed(state):
-                # Urgent types (a game crash) go out now instead of waiting.
-                urgent_types = [t for t in enabled_types if t in _notifications.URGENT_EVENT_TYPES]
-                if not urgent_types or not _audit_store.list_unsent_events(settings, urgent_types, limit=1):
-                    return {"status": "skipped", "reason": "digest interval has not elapsed"}
-            items = _audit_store.list_unsent_events(settings, enabled_types, limit=AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST)
+                return {"status": "skipped", "reason": "digest interval has not elapsed"}
+            asset_types = [t for t in enabled_types if t in _notifications.ASSET_EVENT_TYPES]
+            other_types = [t for t in enabled_types if t not in _notifications.ASSET_EVENT_TYPES]
+            # Assets are summarized over every unsent row; other types list at most one digest's worth.
+            asset_rows = _audit_store.list_unsent_events(settings, asset_types, limit=None)
+            items = _audit_store.list_unsent_events(settings, other_types, limit=AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST)
             prune_result = _audit_store.prune_old_events(settings)
-            if not items:
+            if not items and not asset_rows:
                 return {"status": "skipped", "reason": "nothing new", **prune_result}
-            subject, body = _compose_digest(items, settings)
+            subject, body = _compose_digest(items, settings, asset_rows)
             attempt_at = _now_iso()
             _save_state(settings, last_digest_attempt_at=attempt_at)
             job = _mail_store.enqueue(
@@ -1029,9 +1119,10 @@ def send_digest_if_needed(settings: Settings) -> dict:
                 kind="digest",
                 subject=subject,
                 body=body,
-                metadata={"audit_event_ids": [item["id"] for item in items]},
+                metadata={"audit_event_ids": [item["id"] for item in [*items, *asset_rows]]},
             )
-            return {"status": "queued", "job_id": job["id"], "item_count": len(items), **prune_result}
+            item_count = len(items) + len(asset_rows)
+            return {"status": "queued", "job_id": job["id"], "item_count": item_count, **prune_result}
         except Exception as error:
             print(f"Audit email digest check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
             return {"status": "error", "error": str(error)}
@@ -1060,9 +1151,29 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
             _usb_enumeration.check_usb_enumeration_throttled(settings)
         except Exception as error:
             print(f"USB enumeration check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
-        if _load_state(settings).get("source_peer_id"):
-            relay_notifications_to_source(settings)
-            relay_mail_jobs_to_source(settings)
+        state = _load_state(settings)
+        if state.get("source_peer_id"):
+            if _interval_elapsed(state, "last_relay_attempt_at"):
+                _run_relay_pass(settings)
         else:
             send_digest_if_needed(settings)
             process_outbound_mail_queue(settings)
+
+
+def _run_relay_pass(settings: Settings) -> None:
+    """Relay this satellite's backlog to the owner, once per digest interval.
+
+    A full batch means more rows are waiting, so the pass keeps posting until a
+    batch comes back short, the owner rejects rows, or the pass cap is hit.
+    Whatever is left waits for the next interval.
+    """
+    _save_state(settings, last_relay_attempt_at=_now_iso())
+    for _ in range(AUDIT_EMAIL_RELAY_MAX_BATCHES_PER_PASS):
+        result = relay_notifications_to_source(settings)
+        if (
+            result.get("status") != "relayed"
+            or result.get("pending_count")
+            or result.get("item_count", 0) < AUDIT_EMAIL_RELAY_MAX_ITEMS
+        ):
+            break
+    relay_mail_jobs_to_source(settings)
