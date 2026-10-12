@@ -502,8 +502,12 @@ No physical hardware is needed for any automated test.
 7. Custom Scripts: create, save, Run/Test (stdout shown), assign to key 4, upload a
    PNG/JPEG/WebP for it, verify the key image and that the press runs it.
 8. Hold Reboot for less than the hold time (cancelled), then hold fully.
-9. Unplug and replug the deck: Disconnected -> Connected, keys restored. Reboot
-   Batocera: runtime restarts, keys and profile restored, buttons work.
+9. Unplug the deck and reload the page: Status shows Disconnected, the Visual
+   Button Layout shows "No Stream Deck connected" (no grid), Device Settings and
+   Identify / Test Selected Button are hidden, and the unplugged deck is listed
+   under Connected Devices as "Not connected". Profiles stay editable. Replug:
+   Connected, keys restored. Reboot Batocera: runtime restarts, keys and profile
+   restored, buttons work.
 10. Disable (runtime stops, keys cleared), Enable (configuration returns).
 11. Remove Tooling Only (python/, lib/, rendered/, state/ gone; config/scripts/
     images/logs kept), Enable (tooling reinstalls, configuration returns).

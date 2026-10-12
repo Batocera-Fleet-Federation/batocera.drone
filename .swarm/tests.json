@@ -15,6 +15,39 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_142_streamdeck_disconnected_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-142-streamdeck-disconnected-uat",
+      "name": "Issue #142 Stream Deck disconnected layout and controls acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/integrations/streamdeck/manager.py",
+          "app/web/static/js/integrations.js",
+          "tests/adversarial/test_issue_142_streamdeck_disconnected_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_69_torrent_lifecycle.py"
       ],
       "disruptive": false,

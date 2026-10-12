@@ -85,18 +85,26 @@ function sdCurrentProfile() {
 function sdDevices() {
   return (sdState.status && sdState.status.devices) || [];
 }
+// Only decks that are actually attached. Remembered decks (known-devices.json)
+// are config history: they stay in Connected Devices but never drive the layout,
+// Device Settings, or device tests.
+function sdConnectedDevices() {
+  return sdDevices().filter((row) => row.connected === true || row.source === "runtime");
+}
 function sdSelectedDevice() {
-  const devices = sdDevices();
-  return devices.find((row) => row.id === sdState.selectedDeviceId) || devices.find((row) => row.source === "runtime") || devices[0] || null;
+  const devices = sdConnectedDevices();
+  return devices.find((row) => row.id === sdState.selectedDeviceId) || devices.find((row) => row.source === "runtime")
+    || devices.find((row) => row.connected === true) || null;
 }
 function sdLayout(device) {
-  const rows = Number(device && device.rows) || 0;
-  const columns = Number(device && device.columns) || 0;
-  if (rows > 0 && columns > 0) return { rows, columns, keyCount: Number(device.key_count) || rows * columns, known: true };
+  if (!device) return { rows: 0, columns: 0, keyCount: 0, known: false, connected: false };
+  const rows = Number(device.rows) || 0;
+  const columns = Number(device.columns) || 0;
+  if (rows > 0 && columns > 0) return { rows, columns, keyCount: Number(device.key_count) || rows * columns, known: true, connected: true };
   const profile = sdCurrentProfile();
   const maxKey = Math.max(-1, ...((profile && profile.buttons) || []).map((button) => Number(button.key)));
   const keyCount = Math.max(6, maxKey + 1);
-  return { rows: Math.ceil(keyCount / 3), columns: 3, keyCount, known: false };
+  return { rows: Math.ceil(keyCount / 3), columns: 3, keyCount, known: false, connected: true };
 }
 
 // ------------------------------------------------------------ key previews
@@ -165,10 +173,10 @@ const SD_HELP = {
   "panel-status": ["Status", `<p>Shows whether Stream Deck is enabled, whether tooling and the runtime are running, and whether a deck is connected. Selected device details, the active profile, the current game, and the last press, action, launch, and error are listed here.</p>`],
   "panel-support": ["Stream Deck support", `<p>Enable installs two Python libraries into the Drone folder only and starts a background runtime that reconnects after reboots and re-plugging. Disable stops the runtime and releases the device while keeping profiles, images, and scripts. Repair verifies the libraries (reinstalling only if damaged). Reinstall Tooling deletes and reinstalls only the integration's own libraries. Remove Tooling Only deletes libraries, runtime state, and the render cache. Remove Tooling + Configuration deletes the whole <code>integrations/streamdeck/</code> folder. Nothing outside it is touched.</p>`],
   "panel-tooling": ["Tooling / Runtime", `<p>Install method, HID transport, runtime start time, and the folders where this integration keeps its files, scripts, and logs. Libraries live only under the Drone folder; Batocera's Python is never modified.</p>`],
-  "panel-devices": ["Connected Devices", `<p>Every attached Elgato Stream Deck is listed with model, serial, firmware, key layout, and whether the runtime has it open. Plug one in and it is picked up automatically. Select a row to edit that device's brightness and startup profile. Multiple decks can be attached; each has its own settings. Unplugging and re-plugging is detected automatically.</p>`],
+  "panel-devices": ["Connected Devices", `<p>Every attached Elgato Stream Deck is listed with model, serial, firmware, key layout, and whether the runtime has it open. Plug one in and it is picked up automatically. Select a row to edit that device's brightness and startup profile. Multiple decks can be attached; each has its own settings. Unplugging and re-plugging is detected automatically. A deck you have used before but that is unplugged stays listed as <em>Not connected</em>; its layout and device settings are hidden until it is attached again.</p>`],
   "panel-device-settings": ["Device Settings", `<p><strong>Brightness</strong> is per device (default 100%) and is saved when you release the slider. <strong>Startup profile</strong> is the page that device shows when it connects. <strong>Require a hold for dangerous actions</strong> and the hold time apply to Reboot, Shut Down, and Restart EmulationStation on the physical deck. The timeouts bound waiting for a running game to exit, waiting for a new game to start, and custom script execution. Every change here is saved and pushed to the device automatically.</p>`],
   "panel-profiles": ["Profiles", `<p>A profile is a page of key assignments. <strong>Default</strong> is created automatically and is what every deck shows on startup unless you choose a different startup profile for that device. Add, rename, duplicate, or delete pages here. Profile IDs never change when you rename a profile.</p>`],
-  "panel-layout": ["Visual Button Layout", `<p>Click a key to edit its action and artwork. Keys show their current image, number, action, and warnings for missing games, images, or scripts. <em>Show as rendered</em> displays the exact images last sent to the device. Saving a key validates it, renders images at the device's key size, and updates the physical keys automatically.</p>`],
+  "panel-layout": ["Visual Button Layout", `<p>Click a key to edit its action and artwork. Keys show their current image, number, action, and warnings for missing games, images, or scripts. <em>Show as rendered</em> displays the exact images last sent to the device. Saving a key validates it, renders images at the device's key size, and updates the physical keys automatically. With no Stream Deck connected, this shows an empty state instead of a layout.</p>`],
   "panel-rules": ["Automatic profile switching", `<p>Optional. The first matching rule switches every connected deck when a game starts or stops, optionally filtered by system and emulator. Example: when a <code>switch</code> game starts → “Switch”; when a game stops → “Default”. Saving rules pushes them to the runtime automatically.</p>`],
   "panel-scripts": ["Custom Scripts", `<p>A custom script is Bash or Python 3 that runs as the Drone service on this machine, with full administrative rights. Prefer a built-in action whenever one exists. Choose the language in the editor; the interpreter line must match (<code>#!/bin/bash</code> or legacy <code>#!/bin/sh</code> for Bash, <code>#!/usr/bin/env python3</code> for Python 3). Python 3 is the system interpreter. No extra packages are installed. Scripts are stored in <code>integrations/streamdeck/scripts/</code>, executed directly, and stopped after the timeout. Assign a script to a key from the button editor.</p>`],
   "panel-tests": ["Device tests", `<p><strong>Test Connection</strong> enumerates and opens attached decks. <strong>Identify Buttons</strong> shows the number of every key for a few seconds. <strong>Test Selected Button</strong> flashes that key (“TEST”) and never runs its action. To run an action, use <em>Test Action</em> in the button editor.</p>`],
@@ -468,11 +476,13 @@ function sdDeviceDetailsHtml() {
   if (!devices.length) {
     return `<div class="text-muted small">No Stream Deck detected. Plug one in — it is picked up automatically (no restart needed).</div>`;
   }
+  const selected = sdSelectedDevice();
   const rows = devices.map((device) => {
-    const state = device.source === "runtime" ? sdBadge("Connected", "success") : device.connected ? sdBadge("Detected (not open)", "info") : sdBadge("Disconnected", "secondary");
+    const connected = device.source === "runtime" || device.connected === true;
+    const state = device.source === "runtime" ? sdBadge("Connected", "success") : device.connected ? sdBadge("Detected (not open)", "info") : sdBadge("Not connected", "secondary");
     const size = Array.isArray(device.key_image_size) ? device.key_image_size.join("×") : "—";
-    return `<tr class="${device.id === sdState.selectedDeviceId ? "table-active" : ""}">
-      <td><input class="form-check-input" type="radio" name="sdDevice" value="${sdEsc(device.id)}" ${device.id === sdState.selectedDeviceId ? "checked" : ""} data-sd-change="select-device" aria-label="Select device"></td>
+    return `<tr class="${selected && device.id === selected.id ? "table-active" : ""}">
+      <td><input class="form-check-input" type="radio" name="sdDevice" value="${sdEsc(device.id)}" ${selected && device.id === selected.id ? "checked" : ""} ${connected ? "" : "disabled"} data-sd-change="select-device" aria-label="Select device"></td>
       <td>${sdEsc(device.model)}${device.usb_id ? `<div class="small text-muted">USB ${sdEsc(device.usb_id)}</div>` : ""}</td>
       <td class="font-monospace small">${sdEsc(device.serial || device.id)}</td><td>${sdEsc(device.firmware || "—")}</td>
       <td>${device.key_count ? `${sdEsc(device.key_count)} (${sdEsc(device.rows)}×${sdEsc(device.columns)})` : "—"}</td>
@@ -483,7 +493,7 @@ function sdDeviceDetailsHtml() {
 
 function sdDeviceSettingsHtml() {
   const device = sdSelectedDevice();
-  if (!device) return `<div class="text-muted small">Select or connect a device to change its settings.</div>`;
+  if (!device) return `<div class="text-muted small">No Stream Deck connected. Connect one to change its brightness and startup profile.</div>`;
   const options = sdProfiles().map((profile) => `<option value="${sdEsc(profile.id)}" ${device.startup_profile_id === profile.id ? "selected" : ""}>${sdEsc(profile.name)}</option>`).join("");
   return `<div class="row g-3">
     <div class="col-md-7"><label class="form-label" for="sdBrightness">Brightness <span id="sdBrightnessValue" class="badge text-bg-secondary">${sdEsc(device.brightness)}%</span></label>
@@ -532,7 +542,7 @@ function sdButtonsHtml() {
   const layout = sdLayout(device);
   const buttons = new Map(((profile && profile.buttons) || []).map((button) => [Number(button.key), button]));
   const pending = sdState.status && sdState.status.pending_apply;
-  const deviceOptions = sdDevices().map((row) => `<option value="${sdEsc(row.id)}" ${row.id === (device && device.id) ? "selected" : ""}>${sdEsc(row.model)} — ${sdEsc(row.serial || row.id)}</option>`).join("");
+  const deviceOptions = sdConnectedDevices().map((row) => `<option value="${sdEsc(row.id)}" ${row.id === (device && device.id) ? "selected" : ""}>${sdEsc(row.model)} — ${sdEsc(row.serial || row.id)}</option>`).join("");
   const keys = [];
   for (let key = 0; key < layout.keyCount; key += 1) {
     const button = buttons.get(key);
@@ -564,16 +574,17 @@ function sdButtonsHtml() {
     <section class="card mb-3"><div class="card-body">
       <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
         <div class="mb-0">${sdPanelHeading("Visual Button Layout", "panel-layout")}</div>
-        ${sdDevices().length > 1 ? `<select class="form-select form-select-sm w-auto" data-sd-change="select-device-layout" aria-label="Device">${deviceOptions}</select>` : ""}
-        <div class="form-check form-switch ms-lg-3"><input class="form-check-input" type="checkbox" id="sdShowRendered" data-sd-change="show-rendered" ${sdState.showRendered ? "checked" : ""} ${device && device.source === "runtime" ? "" : "disabled"}>
-          <label class="form-check-label small" for="sdShowRendered">Show as rendered on the device</label></div>
+        ${sdConnectedDevices().length > 1 ? `<select class="form-select form-select-sm w-auto" data-sd-change="select-device-layout" aria-label="Device">${deviceOptions}</select>` : ""}
+        ${device ? `<div class="form-check form-switch ms-lg-3"><input class="form-check-input" type="checkbox" id="sdShowRendered" data-sd-change="show-rendered" ${sdState.showRendered ? "checked" : ""} ${device.source === "runtime" ? "" : "disabled"}>
+          <label class="form-check-label small" for="sdShowRendered">Show as rendered on the device</label></div>` : ""}
         <div class="ms-auto d-flex align-items-center gap-2">
           ${pending ? sdBadge("Unapplied changes", "warning") : sdBadge("Device up to date", "success")}
         </div>
       </div>
+      ${!layout.connected ? `<div class="sd-empty text-center text-muted py-4"><i class="bi bi-usb-plug fs-2 d-block mb-2"></i><div class="fw-semibold">No Stream Deck connected</div><div class="small">Plug one in and enable Stream Deck support. Button layout and device settings appear once a deck is open.</div></div>` : `
       ${layout.known ? "" : `<div class="alert alert-secondary small py-2">No device layout is known yet; showing a ${layout.columns}-column preview. Connect and enable a Stream Deck to see its real layout.</div>`}
       <div class="sd-deck" style="--sd-columns:${Number(layout.columns)}">${keys.join("")}</div>
-      <p class="small text-muted mt-2 mb-0">Click a key to edit it. Keys show their current artwork, number, action, and warnings for missing games, images, or scripts.</p>
+      <p class="small text-muted mt-2 mb-0">Click a key to edit it. Keys show their current artwork, number, action, and warnings for missing games, images, or scripts.</p>`}
     </div></section>
     <section class="card"><div class="card-body">${sdPanelHeading("Automatic profile switching", "panel-rules")}${sdRulesHtml()}</div></section>`;
 }
@@ -1250,10 +1261,10 @@ function sdDiagnosticsHtml() {
     <div class="col-lg-6"><section class="card h-100"><div class="card-body">${sdPanelHeading("Device tests", "panel-tests")}
       <div class="d-flex flex-wrap gap-2 mb-3">
         <button type="button" class="btn btn-outline-primary" data-sd-action="test-connection"><i class="bi bi-usb-plug me-1"></i>Test Connection</button>
-        <button type="button" class="btn btn-outline-primary" data-sd-action="identify"><i class="bi bi-123 me-1"></i>Identify Buttons</button></div>
-      <div class="input-group mb-3"><select class="form-select" id="sdTestKey" aria-label="Key">${keyOptions}</select>
+        ${device ? `<button type="button" class="btn btn-outline-primary" data-sd-action="identify"><i class="bi bi-123 me-1"></i>Identify Buttons</button>` : ""}</div>
+      ${device ? `<div class="input-group mb-3"><select class="form-select" id="sdTestKey" aria-label="Key">${keyOptions}</select>
         <button type="button" class="btn btn-outline-secondary" data-sd-action="test-key"><i class="bi bi-lightbulb me-1"></i>Test Selected Button</button></div>
-      <p class="small text-muted">Test Selected Button flashes the key only — its action is never run. To run an action, use <em>Test Action</em> in the button editor.</p>
+      <p class="small text-muted">Test Selected Button flashes the key only — its action is never run. To run an action, use <em>Test Action</em> in the button editor.</p>` : `<p class="small text-muted">No Stream Deck connected. Identify and Test Selected Button appear once a deck is open.</p>`}
       <div id="sdConnectionResult">${sdConnectionHtml()}</div></div></section></div>
     <div class="col-lg-6"><section class="card h-100"><div class="card-body">${sdPanelHeading("Runtime activity", "panel-activity")}<div id="sdActivityPanel">${sdActivityHtml()}</div></div></section></div>
     <div class="col-12"><section class="card"><div class="card-body">
