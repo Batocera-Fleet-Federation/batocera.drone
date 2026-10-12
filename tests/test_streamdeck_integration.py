@@ -477,6 +477,17 @@ class LifecycleTests(TemporaryPaths):
         self.manager = StreamDeckIntegration(SimpleNamespace(roms_root=self.root / 'roms'), repository,
                                              paths=self.paths, usb_detector=lambda: [])
 
+    def test_remembered_only_deck_is_not_connected_and_has_no_layout(self):
+        # Unplugged Mini: its layout is remembered, but nothing is attached (#142).
+        atomic_write_json(self.paths.state_dir / 'known-devices.json', {
+            'AL1': {'id': 'AL1', 'model': 'Stream Deck Mini', 'serial': 'AL1', 'key_count': 6, 'rows': 2, 'columns': 3},
+        })
+        status = self.manager.get_status()
+        self.assertEqual(status['connected_device_count'], 0)
+        self.assertFalse(status['layout_available'])
+        self.assertEqual(status['device'], 'disconnected')
+        self.assertEqual([(row['source'], row['connected']) for row in status['devices']], [('remembered', False)])
+
     def test_disabled_status_and_compiled_profile(self):
         self.assertFalse(self.manager.get_status()['enabled'])
         self.assertEqual(self.manager.card_status()['health'], 'disabled')

@@ -721,6 +721,45 @@ class StreamDeckUiOptimizationsTests(unittest.TestCase):
 
 
 # ------------------------------------------------------- real HTTP server
+class DisconnectedLayoutContractTests(unittest.TestCase):
+    """A remembered (unplugged) deck must never drive the layout or device controls (#142)."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "app/web/static/js/integrations.js").read_text(encoding="utf-8")
+
+    def test_layout_never_falls_back_to_the_first_listed_device(self):
+        self.assertNotIn("devices[0]", self.js)
+        selector = self.js.split("function sdSelectedDevice()")[1].split("function sdLayout(")[0]
+        self.assertIn("sdConnectedDevices()", selector)
+        self.assertNotIn("sdDevices()", selector)
+
+    def test_connected_accessor_excludes_remembered_rows(self):
+        accessor = self.js.split("function sdConnectedDevices()")[1].split("function sdSelectedDevice()")[0]
+        self.assertIn('row.connected === true', accessor)
+        self.assertIn('row.source === "runtime"', accessor)
+
+    def test_no_device_has_no_placeholder_grid(self):
+        layout = self.js.split("function sdLayout(device)")[1].split("// ------------------------------------------------------------ key previews")[0]
+        self.assertIn("if (!device) return { rows: 0, columns: 0, keyCount: 0, known: false, connected: false };", layout)
+        buttons = self.js.split("function sdButtonsHtml()")[1].split("function sdRulesHtml()")[0]
+        self.assertIn("!layout.connected", buttons)
+        self.assertIn("No Stream Deck connected", buttons)
+
+    def test_device_only_controls_require_an_open_device(self):
+        diagnostics = self.js.split("function sdDiagnosticsHtml()")[1].split("function sdLoadLog")[0]
+        self.assertIn('${device ? `<button type="button" class="btn btn-outline-primary" data-sd-action="identify">', diagnostics)
+        self.assertIn('${device ? `<div class="input-group mb-3"><select class="form-select" id="sdTestKey"', diagnostics)
+        settings = self.js.split("function sdDeviceSettingsHtml()")[1].split("function sdSettingsHtml()")[0]
+        self.assertIn("No Stream Deck connected", settings)
+
+    def test_remembered_decks_are_listed_as_not_connected_and_not_selectable(self):
+        details = self.js.split("function sdDeviceDetailsHtml()")[1].split("function sdDeviceSettingsHtml()")[0]
+        self.assertIn('sdBadge("Not connected", "secondary")', details)
+        self.assertIn('${connected ? "" : "disabled"}', details)
+
+
 class HttpRoutesTests(unittest.TestCase):
     """Every layer: session gate, api_routes dispatch, handlers, manager, disk."""
 

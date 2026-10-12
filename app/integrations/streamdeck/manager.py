@@ -228,6 +228,8 @@ class StreamDeckIntegration(Integration):
             "runtime_started_at": worker.get("started_at"),
             "device": "connected" if connected else "disconnected",
             "connected_device_count": len(connected),
+            # A remembered (unplugged) deck never counts: the layout needs an open device.
+            "layout_available": any(device.get("rows") and device.get("columns") for device in connected),
             "devices": devices,
             "default_profile_id": config["default_profile_id"],
             "active_profiles": {device["id"]: device.get("active_profile_id") for device in connected},
