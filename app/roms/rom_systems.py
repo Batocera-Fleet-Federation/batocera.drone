@@ -87,6 +87,16 @@ class RomSystemsSearchMixin:
         """List only systems whose metadata belongs in this Drone's cache."""
         return self.list_system_names(include_network_references=False)
 
+    def list_cached_systems(self) -> List[dict]:
+        """System counts from the SQLite cache only -- never walks the filesystem.
+
+        Serves the last committed counts even while a scan is running, so a
+        status page (the Swarm self card) never waits on a directory walk of
+        the whole library. Empty until the first full scan has finished.
+        """
+        cached = _read_sqlite_asset_systems(self.roms_root.parent, allow_scan_in_progress=True) or []
+        return [row for row in cached if self.should_include_system(str(row.get("name") or ""))]
+
     def list_systems(self) -> List[dict]:
         cached_systems = _read_sqlite_asset_systems(self.roms_root.parent)
         if cached_systems:

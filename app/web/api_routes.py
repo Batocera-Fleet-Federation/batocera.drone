@@ -425,7 +425,7 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "downloads":
-                self._handle_admin_downloads()
+                self._handle_admin_downloads(query_params)
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "uploads":

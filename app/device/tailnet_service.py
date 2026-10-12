@@ -820,7 +820,9 @@ def bootstrap_tailnet_from_swarm(settings: Settings) -> bool:
 
 def maybe_bootstrap_tailnet(settings: Settings) -> None:
     """Best-effort, called once from ``create_server()`` startup, mirroring
-    ``smtp_manager.maybe_bootstrap_smtp()``. Never raises."""
+    ``smtp_manager.maybe_bootstrap_smtp()``. Never raises. A Drone that is
+    still not enrolled afterwards is retried by ``peer_workers``' bootstrap
+    retry thread (``DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS``, default 300)."""
     try:
         if not tailnet_status().get("enrolled"):
             bootstrap_tailnet_from_swarm(settings)
