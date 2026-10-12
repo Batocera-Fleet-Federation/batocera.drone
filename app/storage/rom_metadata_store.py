@@ -1147,8 +1147,13 @@ def _read_sqlite_rom_metadata_cache(settings: Any) -> dict:
         return cache
 
 
-def _read_sqlite_asset_systems(userdata_root: Path) -> Optional[list[dict]]:
-    """Read cached system counts without materializing every cached ROM row."""
+def _read_sqlite_asset_systems(userdata_root: Path, allow_scan_in_progress: bool = False) -> Optional[list[dict]]:
+    """Read cached system counts without materializing every cached ROM row.
+
+    A scan in progress normally hides the counts (they may be mid-rewrite and
+    callers fall back to a filesystem walk). ``allow_scan_in_progress`` serves
+    the last committed counts instead, for callers that must stay fast.
+    """
     try:
         db_path = _state_database_path(Path(userdata_root))
         with _open_state_database(db_path) as connection:
@@ -1159,7 +1164,9 @@ def _read_sqlite_asset_systems(userdata_root: Path) -> Optional[list[dict]]:
                     "SELECT key, value FROM cache_state WHERE key IN ('last_full_scan_at', 'scan_in_progress')"
                 )
             }
-            if not state.get("last_full_scan_at") or state.get("scan_in_progress"):
+            if not state.get("last_full_scan_at"):
+                return None
+            if state.get("scan_in_progress") and not allow_scan_in_progress:
                 return None
             rows = [
                 {"name": name, "rom_count": _int(rom_count)}
@@ -1169,6 +1176,24 @@ def _read_sqlite_asset_systems(userdata_root: Path) -> Optional[list[dict]]:
             return rows or None
     except Exception:
         return None
+
+
+def read_cached_asset_counts(userdata_root: Path) -> dict:
+    """Row counts of the cached ROM/BIOS/artwork entries, via ``COUNT(*)`` only.
+
+    Unlike loading the whole cache, this stays cheap on a big library and is
+    safe to call while a scan is running. Returns zeros if the DB is unreadable.
+    """
+    counts = {"roms": 0, "bios": 0, "artwork": 0}
+    try:
+        db_path = _state_database_path(Path(userdata_root))
+        with _open_state_database(db_path) as connection:
+            _ensure_schema(connection)
+            for key, table in (("roms", "rom_cache_entries"), ("bios", "bios_cache_entries"), ("artwork", "artwork_cache_entries")):
+                counts[key] = _int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    except Exception:
+        pass
+    return counts
 
 
 def _read_rom_rows(connection: sqlite3.Connection) -> dict:

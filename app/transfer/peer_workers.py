@@ -13,13 +13,13 @@ from threading import Thread
 
 try:
     from ..common.settings import Settings
-    from ..device.tailnet_service import ensure_tailnet_networking, tailnet_status, _repair_tailnet_data_path
+    from ..device.tailnet_service import ensure_tailnet_networking, bootstrap_tailnet_from_swarm, tailnet_status, _repair_tailnet_data_path
     from . import local_network as _local_network
     from .drone_tls import DroneCertificateManager
     from .peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
-    from device.tailnet_service import ensure_tailnet_networking, tailnet_status, _repair_tailnet_data_path  # type: ignore
+    from device.tailnet_service import ensure_tailnet_networking, bootstrap_tailnet_from_swarm, tailnet_status, _repair_tailnet_data_path  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address  # type: ignore
@@ -38,6 +38,28 @@ def _start_local_network_workers(settings: Settings) -> None:
                 _repair_tailnet_data_path()
 
     Thread(target=tailnet_watchdog, name="drone-tailnet-watchdog", daemon=True).start()
+
+    def tailnet_bootstrap_retry() -> None:
+        # The startup bootstrap runs once, and a paired peer that shares its
+        # auth key may only come online (or start sharing) later. Keep retrying
+        # while this Drone is installed but not enrolled so it joins the tailnet
+        # with no operator action. A separate thread keeps peer timeouts from
+        # delaying the watchdog's data-path repair.
+        interval = max(60, int(os.environ.get("DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS", "300")))
+        while True:
+            time.sleep(interval)
+            try:
+                status = tailnet_status()
+                if status.get("installed") and not status.get("enrolled"):
+                    bootstrap_tailnet_from_swarm(settings)
+            except Exception as error:
+                print(
+                    f"Tailnet bootstrap retry failed: {error.__class__.__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    Thread(target=tailnet_bootstrap_retry, name="drone-tailnet-bootstrap-retry", daemon=True).start()
 
     def fingerprint() -> str:
         return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")

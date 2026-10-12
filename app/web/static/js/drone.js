@@ -419,10 +419,26 @@ async function _handleApiUnauthorized(res, retry) {
   }
   throw new Error("Authentication required");
 }
-async function api(url) {
-  const res = await fetch(_apiRequestUrl(url), { credentials: "include" });
+// Default ceiling for GETs. Without one, a wedged Drone leaves a page spinning
+// until the browser's own (minutes-long) network timeout. Callers that really
+// need longer pass { timeoutMs }.
+const API_DEFAULT_TIMEOUT_MS = 60000;
+async function api(url, { timeoutMs = API_DEFAULT_TIMEOUT_MS } = {}) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(_apiRequestUrl(url), { credentials: "include", ...(controller ? { signal: controller.signal } : {}) });
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error(`This Drone did not answer within ${Math.round(timeoutMs / 1000)} seconds. It may be busy; try again shortly.`);
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (res.status === 401) {
-    return _handleApiUnauthorized(res, () => api(url));
+    return _handleApiUnauthorized(res, () => api(url, { timeoutMs }));
   }
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
@@ -479,7 +495,9 @@ async function loadSwarmOverview(force = false, { probe = true } = {}) {
   if (!probe) {
     // Never cached: its whole purpose is to paint instantly, and it is
     // immediately superseded by the per-peer probes.
-    return await api("/admin/swarm/overview?probe=0");
+    // Stored state only, so it should answer at once; fail fast with a clear
+    // message instead of leaving the page spinning on a busy Drone.
+    return await api("/admin/swarm/overview?probe=0", { timeoutMs: 20000 });
   }
   if (!force && swarmOverviewCache && now - swarmOverviewCachedAt < SWARM_DATA_CACHE_TTL_MS) {
     return swarmOverviewCache;
@@ -1602,6 +1620,10 @@ async function confirmApplyConfigBackup(backupId) {
   }
 }
 
+// The poll runs every few seconds; with thousands of queued jobs the full
+// snapshot (queue listed twice) is megabytes, so ask for the compact shape and
+// only the next rows to run -- queued_total still carries the real count.
+const TRANSFERS_POLL_PATH = "/admin/downloads?compact=1&queued_limit=500";
 function startTransfersAutoRefresh() {
   // Live-update only the Transfers data while a copy is in progress -- never
   // re-render the whole page, so the asset-request form, paging, and
@@ -1614,7 +1636,7 @@ function startTransfersAutoRefresh() {
     if (!transfersBody) return;
     transfersInFlight = true;
     try {
-      const [downloads, uploads] = await Promise.all([api("/admin/downloads"), api("/admin/uploads")]);
+      const [downloads, uploads] = await Promise.all([api(TRANSFERS_POLL_PATH), api("/admin/uploads")]);
       if (
         window.location.hash === "#admin/transfers" &&
         transfersBody.isConnected &&
@@ -6926,8 +6948,12 @@ function renderTransfersPanel(payload, uploads) {
   ];
   const currentPager = renderTransferPager("active", "Transfers", current);
   const recentPager = renderTransferPager("recent", "Recent", allRecent);
+  const queuedHidden = Math.max(0, Number(transferPayload.queued_total || 0) - queued.length);
+  const queuedNotice = queuedHidden
+    ? `<div class="small text-muted mb-2">Showing the next ${queued.length.toLocaleString()} of ${Number(transferPayload.queued_total).toLocaleString()} queued transfers.</div>`
+    : "";
   return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}
-    ${currentPager.html}
+    ${queuedNotice}${currentPager.html}
     ${renderTransferRows(currentPager.page.rows, { emptyText: "No pending, downloading, or uploading transfers." })}
     <div class="download-section mt-3 mb-0">
       <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
@@ -10930,7 +10956,9 @@ function renderSwarmDroneCard(drone) {
       ? '<span class="badge text-bg-secondary"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Checking...</span>'
       : drone.online
         ? '<span class="badge text-bg-success">Online</span>'
-        : '<span class="badge text-bg-secondary">Offline</span>';
+        : drone.offline_reason === "tailnet_not_connected"
+          ? '<span class="badge text-bg-warning">Offline &middot; tailnet not connected</span>'
+          : '<span class="badge text-bg-secondary">Offline</span>';
   const latency = !drone.is_self && drone.online && drone.latency_ms != null
     ? `<span class="small text-muted">${Number(drone.latency_ms)} ms</span>`
     : "";
@@ -10968,7 +10996,7 @@ function renderSwarmDroneCard(drone) {
     : drone.online && drone.summary_error
       ? `<div class="small text-warning mt-2"><i class="bi bi-hourglass-split me-1" aria-hidden="true"></i>Online; inventory is delayed: ${escapeHtml(drone.summary_error)}</div>`
     : drone.error
-      ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
+      ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${drone.offline_hint ? `${escapeHtml(drone.offline_hint)} ` : ""}<span class="text-muted">${escapeHtml(drone.error)}</span></div>`
       : "";
   const networkShareButton = share
     ? `<button class="btn btn-sm btn-outline-secondary" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Manage Reference" : "Manage Reference"}</button>`
@@ -11911,7 +11939,7 @@ async function renderIntegrationTransfersPanel(target) {
     </div>`;
 
   async function loadTransfers() {
-    const [downloads, uploads] = await Promise.all([api("/admin/downloads"), api("/admin/uploads")]);
+    const [downloads, uploads] = await Promise.all([api(TRANSFERS_POLL_PATH), api("/admin/uploads")]);
     const body = document.getElementById("transfersBody");
     if (body) body.innerHTML = renderTransfersPanel(downloads, uploads);
   }
@@ -12455,7 +12483,8 @@ async function queueLocalBulkCopy(body) {
     if (!assets && !artwork) {
       showToast(skipped ? `All ${skipped} already on this machine — nothing to download.` : "Nothing matched to download.", skipped ? "info" : "warning");
     } else {
-      showToast(`Queued ${assets} ${body.asset_type}${artwork ? ` (+${artwork} artwork files)` : ""} for local transfer.${skippedNote}`, "success");
+      const limitNote = result.truncated ? ` Stopped at the ${Number(result.max_jobs) || 0} job limit per request; run it again to queue the rest once these finish.` : "";
+      showToast(`Queued ${assets} ${body.asset_type}${artwork ? ` (+${artwork} artwork files)` : ""} for local transfer.${skippedNote}${limitNote}`, "success");
     }
     if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
   } catch (err) {
@@ -13786,7 +13815,7 @@ async function renderAdminSystemInfoPage() {
   setLoading(true, "Loading system information...");
   try {
     const [payload, updateHistoryPayload] = await Promise.all([
-      api("/admin/system-info?speed=1"),
+      api("/admin/system-info?speed=1", { timeoutMs: 0 }),
       api("/admin/system/update-history").catch(() => ({ updates: [] })),
     ]);
     const updateHistory = Array.isArray(updateHistoryPayload.updates) ? updateHistoryPayload.updates : [];

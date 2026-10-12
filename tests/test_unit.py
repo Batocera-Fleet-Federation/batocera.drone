@@ -2689,7 +2689,7 @@ class SettingsTests(unittest.TestCase):
         panel_end = js.index("async function renderLocalTransferRequestPanel(target)")
         panel_source = js[panel_start:panel_end]
         self.assertEqual(panel_source.count("card log-card"), 1)  # exactly one card, not two
-        self.assertIn('api("/admin/downloads")', panel_source)
+        self.assertIn("api(TRANSFERS_POLL_PATH)", panel_source)
         self.assertIn('api("/admin/uploads")', panel_source)
 
         # Per-job pause/resume, wired the same way as the existing cancel/retry.
@@ -2959,7 +2959,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("await loadSystemInfoBar();", js_source)
         self.assertIn('getSystemsData(),\n      api("/bios?limit=1&offset=0")', js_source)
         self.assertNotIn("getSystemsData(),\n        refreshRandomThemeLogo(),", js_source)
-        self.assertIn('api("/admin/system-info?speed=1")', js_source)
+        self.assertIn('api("/admin/system-info?speed=1", { timeoutMs: 0 })', js_source)
         self.assertIn("include_speed = ", api_routes)
         self.assertIn("def _handle_admin_system_info(self, include_speed: bool = False)", drone_source)
         self.assertIn("_sample_speed() if include_speed else", drone_source)
@@ -8779,7 +8779,7 @@ class NavRestructureTests(unittest.TestCase):
         refresh_start = self.js.index("function startTransfersAutoRefresh()")
         refresh_end = self.js.index("function startLogAutoRefresh()", refresh_start)
         refresh_body = self.js[refresh_start:refresh_end]
-        self.assertIn('Promise.all([api("/admin/downloads"), api("/admin/uploads")])', refresh_body)
+        self.assertIn('Promise.all([api(TRANSFERS_POLL_PATH), api("/admin/uploads")])', refresh_body)
         self.assertIn("renderTransfersPanel(downloads, uploads)", refresh_body)
 
     def test_transfer_request_uses_independent_file_options_and_small_buttons(self) -> None:

@@ -6,6 +6,7 @@ pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHa
 """
 
 import os
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ try:
         tailnet_sharing_status as _tailnet_sharing_status,
     )
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
-    from ..storage.rom_metadata_store import match_rom_cache_page
+    from ..storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts
     from ..transfer import local_network as _local_network
     from ..transfer.drone_network import _network_mode
     from ..transfer.drone_tls import DroneCertificateManager
@@ -55,7 +56,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         tailnet_sharing_status as _tailnet_sharing_status,
     )
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
-    from storage.rom_metadata_store import match_rom_cache_page  # type: ignore
+    from storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _network_mode  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
@@ -93,6 +94,11 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
 # instead of being reported Offline. Hostname candidates stay bounded by
 # PEER_DNS_TIMEOUT_SECONDS in peer_connectivity, and non-final candidates by
 # PEER_CHECK_TIMEOUT_SECONDS, so a dead route still fails over quickly.
+# One bulk sync request may enqueue at most this many jobs (ROM + artwork each
+# count). A single "copy everything" click used to put thousands of rows into
+# the download queue at once, which every status poll then had to carry; the
+# response reports ``truncated`` so the caller knows to run it again.
+SYNC_BULK_MAX_JOBS = max(1, int(os.environ.get("DRONE_SYNC_BULK_MAX_JOBS", "2000")))
 SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "10"))
 
 # The health fallback's own guaranteed budget, never taken from the summary's.
@@ -661,7 +667,33 @@ class HandlersNetworkMixin:
                 entry["summary_error"] = str(summary_error) or summary_error.__class__.__name__
             except Exception as health_error:
                 entry["error"] = str(health_error) or health_error.__class__.__name__
+                entry.update(HandlersNetworkMixin._swarm_offline_reason(peer))
         return entry
+
+    @staticmethod
+    def _swarm_offline_reason(peer: dict) -> dict:
+        """Explain an unreachable peer that this Drone could only reach over the tailnet.
+
+        A peer with a tailnet address is unreachable for a reason that has
+        nothing to do with the peer when *this* Drone is logged out of the
+        tailnet; a plain "Offline" then sends the operator chasing the wrong
+        machine. Empty when the tailnet is not the likely cause.
+        """
+        if not str(peer.get("tailnet_ip") or "").strip():
+            return {}
+        try:
+            status = tailnet_status()
+        except Exception:
+            return {}
+        if status.get("enrolled") or not status.get("installed"):
+            return {}
+        return {
+            "offline_reason": "tailnet_not_connected",
+            "offline_hint": (
+                "This Drone is not connected to the tailnet, so this peer's tailnet address "
+                "cannot be reached. Join the tailnet from the Swarm page; the peer itself may be fine."
+            ),
+        }
 
     def _handle_admin_tailnet_status(self) -> None:
         payload = tailnet_status()
@@ -799,9 +831,37 @@ class HandlersNetworkMixin:
             return
         self._send_json(200, {"status": "enrolled" if result.get("enrolled") else "pending", **result})
 
+    def _swarm_self_summary(self) -> dict:
+        """This Drone's inventory summary for the Swarm card, from cache only.
+
+        ``_collect_peer_inventory("summary")`` falls back to a filesystem walk
+        while a metadata scan is running (30 s+ on a large library), which
+        stalled the whole Swarm page. The self card only needs system names and
+        counts, so read the SQLite cache and never block on the disk.
+        """
+        counts = read_cached_asset_counts(self.repository.roms_root.parent)
+        try:
+            rows = self.repository.list_cached_systems()
+        except Exception:
+            rows = []
+        system_counts = {
+            str(row.get("name") or ""): int(row.get("rom_count") or 0)
+            for row in rows
+            if str(row.get("name") or "")
+        }
+        counts["systems"] = len(system_counts)
+        counts["total"] = counts["roms"] + counts["bios"] + counts["artwork"]
+        return {
+            "name": socket.gethostname(),
+            "systems": sorted(system_counts, key=str.lower),
+            "system_counts": system_counts,
+            "counts": counts,
+            "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        }
+
     def _swarm_self_entry(self) -> dict:
         own = _local_network.discovery_payload(self.settings, "")
-        self_summary = self._collect_peer_inventory("summary", {})
+        self_summary = self._swarm_self_summary()
         return {
             "drone_id": str(self.settings.device_id),
             "name": str(self_summary.get("name") or own.get("name") or ""),
@@ -1464,13 +1524,14 @@ class HandlersNetworkMixin:
         queued_jobs: List[dict] = []
         skipped_existing = 0
         total = 0
+        truncated = False
         local_index_cache: dict = {}
         local_artwork_cache: dict = {}
 
         def walk_scope(scope_system: str) -> None:
             """Page through one scope (a single system, or the whole library when
             scope_system is empty) and enqueue each item."""
-            nonlocal queued_assets, queued_artwork, queued_bytes, skipped_existing, total
+            nonlocal queued_assets, queued_artwork, queued_bytes, skipped_existing, total, truncated
             offset = 0
             scope_total = None
             while True:
@@ -1490,6 +1551,9 @@ class HandlersNetworkMixin:
                 for entry in items:
                     if not isinstance(entry, dict):
                         continue
+                    if queued_assets + queued_artwork >= SYNC_BULK_MAX_JOBS:
+                        truncated = True
+                        return
                     jobs = self._enqueue_local_asset(
                         enqueue_manager,
                         config,
@@ -1538,26 +1602,37 @@ class HandlersNetworkMixin:
                 if len(items) < page_size:
                     break
 
-        # For ROMs, walk one system at a time so each peer inventory fetch stays
-        # small (the peer scans only that system) instead of rescanning its whole
-        # library for every page -- which is slow and times out on large libraries.
-        # An "all systems" request is expanded via the cheap summary endpoint.
-        if asset_type == "roms":
-            scope_systems = systems or ([system] if system else [])
-            if not scope_systems:
-                try:
-                    summary = self._fetch_peer_inventory(peer, peer_id, "summary", [])
-                    scope_systems = [str(name) for name in (summary.get("systems") or []) if str(name).strip()]
-                except Exception:
-                    scope_systems = []
-            if scope_systems:
-                for scope_system in scope_systems:
-                    walk_scope(scope_system)
+        def walk_all() -> None:
+            # For ROMs, walk one system at a time so each peer inventory fetch stays
+            # small (the peer scans only that system) instead of rescanning its whole
+            # library for every page -- which is slow and times out on large libraries.
+            # An "all systems" request is expanded via the cheap summary endpoint.
+            if asset_type == "roms":
+                scope_systems = systems or ([system] if system else [])
+                if not scope_systems:
+                    try:
+                        summary = self._fetch_peer_inventory(peer, peer_id, "summary", [])
+                        scope_systems = [str(name) for name in (summary.get("systems") or []) if str(name).strip()]
+                    except Exception:
+                        scope_systems = []
+                if scope_systems:
+                    for scope_system in scope_systems:
+                        walk_scope(scope_system)
+                        if truncated:
+                            break
+                else:
+                    walk_scope("")
             else:
-                walk_scope("")
+                # bios/saves/artwork inventories aren't per-system scanned the same way.
+                walk_scope(system)
+
+        # One state write for the whole request instead of one per queued job.
+        batch = getattr(type(manager), "batch_persistence", None) and manager.batch_persistence
+        if dry_run or batch is None:
+            walk_all()
         else:
-            # bios/saves/artwork inventories aren't per-system scanned the same way.
-            walk_scope(system)
+            with batch():
+                walk_all()
         if dry_run:
             # Preview only: nothing was enqueued, so no job list is returned.
             self._send_json(200, {
@@ -1571,6 +1646,8 @@ class HandlersNetworkMixin:
                 "queued_bytes": queued_bytes,
                 "skipped_existing": skipped_existing,
                 "total_available": total,
+                "truncated": truncated,
+                "max_jobs": SYNC_BULK_MAX_JOBS,
             })
             return
         self._send_json(202, {
@@ -1585,6 +1662,8 @@ class HandlersNetworkMixin:
             "queued_jobs": queued_jobs,
             "skipped_existing": skipped_existing,
             "total_available": total,
+            "truncated": truncated,
+            "max_jobs": SYNC_BULK_MAX_JOBS,
         })
 
     def _fetch_peer_inventory(self, peer: dict, peer_id: str, asset_type: str, params: List[str]) -> dict:

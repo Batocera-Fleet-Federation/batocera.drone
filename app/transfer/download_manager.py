@@ -10,6 +10,7 @@ legacy direct-public). ``_directpublic_fetch`` is the direct-public tier callbac
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,6 +216,8 @@ class DownloadManager:
         self._cancel_events: Dict[str, Event] = {}
         self._wake = Event()
         self._paused = False
+        self._persist_defer_depth = 0
+        self._persist_dirty = False
         self._last_download_state_push_at = 0.0
         self._concurrency = self._resolve_concurrency()
         self._restore_state()
@@ -240,7 +243,30 @@ class DownloadManager:
         ][-DOWNLOAD_PERSISTED_RECENT_LIMIT:]
         return pending + recent
 
+    @contextmanager
+    def batch_persistence(self):
+        """Coalesce queue persistence while a bulk enqueue runs.
+
+        Every enqueue otherwise rewrites the whole queue under the lock, so
+        queueing N jobs costs O(N^2) serialization (seconds-long stalls for every
+        other request once the queue reaches the thousands). Inside this block the
+        state is written once, on exit, no matter how many jobs were added.
+        """
+        with self._lock:
+            self._persist_defer_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._persist_defer_depth -= 1
+                if self._persist_defer_depth == 0 and self._persist_dirty:
+                    self._persist_dirty = False
+                    self._persist_state_locked()
+
     def _persist_state_locked(self) -> None:
+        if self._persist_defer_depth > 0:
+            self._persist_dirty = True
+            return
         _save_state_payload(
             _state_database_path(self.settings.userdata_root),
             DOWNLOAD_QUEUE_STATE_NAMESPACE,
@@ -833,7 +859,15 @@ class DownloadManager:
                     return self._public_job_locked(job)
         return None
 
-    def snapshot(self) -> dict:
+    def snapshot(self, compact: bool = False, queued_limit: Optional[int] = None) -> dict:
+        """Queue state for the UI/API.
+
+        ``compact`` drops the ``downloads`` key (active + queued + recent again),
+        which otherwise doubles the payload. ``queued_limit`` returns only the
+        first N queued jobs -- the next ones to run -- while the ETA estimate
+        and ``queued_total`` still cover the whole queue. Both default to the
+        full legacy shape.
+        """
         with self._lock:
             jobs = [self._public_job_locked(job) for job in self._jobs.values()]
             paused = self._paused
@@ -845,16 +879,23 @@ class DownloadManager:
         queued = [job for job in jobs if job.get("status") in {"queued", "pending", "paused"}]
         recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
         estimate = self._queue_estimate(active, queued, recent, paused, self._concurrency)
-        return {
+        queued_total = len(queued)
+        if queued_limit is not None:
+            queued = queued[:max(0, int(queued_limit))]
+        snapshot = {
             "target_drone_id": self.settings.device_id,
             "concurrency": {"scope": "target_drone", "active_limit": self._concurrency},
             "paused": paused,
             "active": active,
             "queued": queued,
+            "queued_total": queued_total,
+            "queued_truncated": len(queued) < queued_total,
             "recent": list(reversed(recent)),
-            "downloads": active + queued + list(reversed(recent)),
             **estimate,
         }
+        if not compact:
+            snapshot["downloads"] = active + queued + list(reversed(recent))
+        return snapshot
 
     @staticmethod
     def _queue_estimate(active: List[dict], queued: List[dict], recent: List[dict], paused: bool, concurrency: int = 1) -> dict:

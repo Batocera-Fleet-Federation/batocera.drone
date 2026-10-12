@@ -201,6 +201,9 @@ pairing (`transfer/swarm_membership.py`) is gossiped only to Drones already
 paired with the sender, so a join through any member converges on every roster.
 A newer removal beats an older add. Discovery and an unpaired caller cannot
 insert members, and gossip cannot replace a fingerprint already pinned locally.
+Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
+runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
+(default 300) while a Drone is not enrolled.
 
 ## Integrations (`app/integrations/`) — optional local extensions
 
