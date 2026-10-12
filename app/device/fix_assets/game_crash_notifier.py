@@ -36,6 +36,8 @@ NOTIFY_URL = os.environ.get("DRONE_CRASH_NOTIFIER_URL", "http://127.0.0.1:1234/n
 # The launcher logs the emulator's whole stderr as ERROR even on a clean exit,
 # so only genuine crash text is matched, never the log level.
 UNPLUG_ACTION = "Try unplugging USB controllers or adapters, then relaunch."
+UNPLUG_SOME_ACTION = "Unplug some and relaunch."
+TOAST_MAX_CHARS = 80
 CRASH_SIGNATURES = (
     (r"stack smashing detected", "the emulator aborted with a memory-corruption error", UNPLUG_ACTION),
     (r"segmentation fault|SIGSEGV", "the emulator hit a segmentation fault", UNPLUG_ACTION),
@@ -336,15 +338,25 @@ def assess_launch(log_text, duration, dmesg_evidence, config, launcher_text=""):
     return {"crashed": False, "reason": "", "signature": "", "action": "", "short": short}
 
 
-def build_messages(system, rom, verdict, joysticks, device_names, config, hostname):
-    """Return the toasts to show in order: what happened, then what to do."""
+def toast_text(text):
+    """Backstop length guard: EmulationStation toasts vanish quickly, so cut long text."""
+    if len(text) <= TOAST_MAX_CHARS:
+        return text
+    return text[:TOAST_MAX_CHARS - 3].rstrip() + "..."
+
+
+def build_messages(system, rom, verdict, joysticks, config):
+    """Return the toasts to show in order: what happened, then what to do.
+
+    Device names stay in the crash history; the toast only carries the count.
+    """
     game = Path(str(rom)).stem if rom else "The game"
     # Keep each message glanceable: EmulationStation toasts disappear quickly.
     first = f"{game} ({system}) crashed: {verdict['reason']}."
     action = verdict["action"]
     if joysticks > config["joystick_hint_threshold"] and MEMORY_CORRUPTION.search(verdict["signature"] + " " + verdict["reason"]):
-        action = f"{joysticks} controllers connected ({', '.join(device_names)}). {UNPLUG_ACTION}"
-    return [first, f"{action} Details: Admin > Debug > Game Crashes on {hostname}."]
+        action = f"{joysticks} controllers. {UNPLUG_SOME_ACTION}"
+    return [toast_text(first), toast_text(f"{action} Details: Debug > Game Crashes.")]
 
 
 def post_toast(message):
@@ -424,7 +436,7 @@ def watch(state):
         log(f"{state['system']}: clean exit after {duration:.0f}s")
         return
     joysticks, names = joystick_count(), joystick_names()
-    messages = build_messages(state["system"], state["rom"], verdict, joysticks, names, config, socket.gethostname())
+    messages = build_messages(state["system"], state["rom"], verdict, joysticks, config)
     # Persist the evidence before the toast wait so a killed watcher cannot lose it.
     write_history(build_record(state, verdict, duration, log_text, evidence, messages, joysticks, names, launcher_text))
     delivered = send_notifications(messages)

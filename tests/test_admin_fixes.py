@@ -265,26 +265,46 @@ class InstalledFixAssetTests(unittest.TestCase):
     def test_messages_name_game_give_an_action_and_point_to_the_logs(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
-        names = ["Nintendo GameCube Adapter (x4)", "Sinden Lightgun (x2)"]
-        first, second = game_crash_notifier.build_messages(
-            "snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 10, names, config, "batocera")
+        first, second = game_crash_notifier.build_messages("snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 12, config)
         self.assertIn("Super Mario World (snes) crashed", first)
-        self.assertIn("10 controllers connected", second)
-        self.assertIn("GameCube Adapter (x4)", second)
-        self.assertIn("unplugging", second)
-        self.assertIn("Admin > Debug > Game Crashes on batocera", second)
+        self.assertIn("12 controllers", second)
+        self.assertIn("Unplug some and relaunch.", second)
+        self.assertIn("Details: Debug > Game Crashes.", second)
+
+    def test_controller_toast_omits_device_names_and_hostname(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
+        messages = game_crash_notifier.build_messages("snes", "x.zip", verdict, 12, config)
+        for text in messages:
+            self.assertNotIn("GameCube", text)
+            self.assertNotIn("Lightgun", text)
+            self.assertNotIn("box", text)
+
+    def test_every_crash_toast_stays_under_the_length_limit(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        long_rom = "/userdata/roms/snes/" + "A very long game title " * 10 + ".zip"
+        signatures = [
+            "stack smashing detected", "segmentation fault", "core dumped", "Aborted",
+            "illegal instruction", "bus error", "Failed to load content",
+        ]
+        for signature in signatures:
+            verdict = game_crash_notifier.assess_launch(signature, 5, "", config)
+            for joysticks in (0, 12):
+                for message in game_crash_notifier.build_messages("snes", long_rom, verdict, joysticks, config):
+                    self.assertLessEqual(len(message), game_crash_notifier.TOAST_MAX_CHARS)
+        self.assertTrue(game_crash_notifier.toast_text("x" * 200).endswith("..."))
 
     def test_actions_are_cause_specific_and_skip_controller_hint_for_other_causes(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         missing = game_crash_notifier.assess_launch("Failed to load content", 5, "", config)
-        _, action = game_crash_notifier.build_messages("snes", "x.zip", missing, 12, ["Pad"], config, "box")
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", missing, 12, config)
         self.assertIn("ROM file and any required BIOS", action)
         self.assertNotIn("controllers", action)
         few = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
-        _, action = game_crash_notifier.build_messages("snes", "x.zip", few, 4, ["Pad"], config, "box")
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", few, 4, config)
         self.assertNotIn("controllers connected", action)
         oom = game_crash_notifier.assess_launch("", 3, "Out of memory: Killed process 5", config)
-        _, action = game_crash_notifier.build_messages("snes", "x.zip", oom, 4, [], config, "box")
+        _, action = game_crash_notifier.build_messages("snes", "x.zip", oom, 4, config)
         self.assertIn("lighter core", action)
 
     def test_joystick_names_are_grouped_with_counts(self) -> None:

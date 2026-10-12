@@ -317,6 +317,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_145_crash_toast_length.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-145-crash-toast-length",
+      "name": "Issue #145 crash toast length and controller-name omission acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/fix_assets/game_crash_notifier.py",
+          "tests/adversarial/test_issue_145_crash_toast_length.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
