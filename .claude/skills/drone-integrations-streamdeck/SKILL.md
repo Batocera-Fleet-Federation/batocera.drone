@@ -108,6 +108,13 @@ before non-trivial work; keep it accurate in the same change.
   USB iSerial (Mini: 12 vs 14 chars); `serials_match` / `same_physical_device`
   merge those into one Connected Devices row. Keep the runtime `id` as the
   command key; display the longer USB serial.
+- `manager.devices()` also returns remembered decks from `state/known-devices.json`
+  (`connected: false`, `source: "remembered"`) with their last `rows`/`columns`.
+  The UI must not treat them as attached: `integrations.js` uses
+  `sdConnectedDevices()` / `sdSelectedDevice()` (never `devices[0]`) for the
+  layout, Device Settings, and device tests, and `sdLayout(null)` returns no keys
+  (no placeholder grid). `get_status().layout_available` is true only when an
+  attached deck reports a layout (#142).
 - Stream Deck UI follows `bff-ui-theme-functionality`: `themed-table`,
   `themed-modal` + `btn-close-white`, `themed-accordion`. Help/confirm opened
   from the button editor must use `sd-modal-nested` so it stacks above the
