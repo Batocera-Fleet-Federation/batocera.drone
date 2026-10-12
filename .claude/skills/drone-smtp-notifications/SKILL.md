@@ -1,6 +1,6 @@
 ---
 name: drone-smtp-notifications
-description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP configuration (outgoing mail only, no IMAP), peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the activity-digest poller and its user-configurable "check every" interval (1 minute-24 hours, default 5 minutes), the relational audit_log/notifications SQLite tables, the 10 notification-type toggles, the notifications bell/dropdown reachable from the top-left drone icon, the per-drone identifying label stamped on every outgoing email, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP configuration (outgoing mail only, no IMAP), peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the activity-digest poller and its user-configurable "check every" interval (1 minute-24 hours, default 5 minutes), the relational audit_log/notifications SQLite tables, the notification-type toggles (18 types), the notifications bell/dropdown reachable from the top-left drone icon, the per-drone identifying label stamped on every outgoing email, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
 ---
 
 # Drone SMTP / Notifications Skill
@@ -26,7 +26,7 @@ app/device/
                       # vpn_manager.py's shape closely. Outgoing mail only --
                       # no IMAP, this app never reads a mailbox (removed
                       # 2026-07-28; it was stored-but-unused from the start).
-  notifications.py    # EVENT_TYPES/EVENT_TYPE_LABELS (the 10 types) +
+  notifications.py    # EVENT_TYPES/EVENT_TYPE_LABELS (the 18 types) +
                       # record_event() -- a dependency-free "leaf" module
                       # (only imports storage/audit_store.py) so every layer
                       # of the app can call it with no import-cycle risk
@@ -183,13 +183,13 @@ system exists in this repo; schema changes are always additive
 message="", details=None)` with zero import-cycle risk. **It never raises**
 (internally try/except + log) — a notifications bug must never break the
 feature that triggered it (a VPN connect, a completed download, a torrent
-finishing, …). Logging is **unconditional** for all 10 event types — the
+finishing, …). Logging is **unconditional** for all event types — the
 per-type toggles the SMTP page exposes only filter what the digest poller
 *emails*, they do not gate whether an event is recorded or shown in the bell
 dropdown. Don't add a toggle check inside `record_event()` or at a call
 site; that check belongs solely in `smtp_manager.send_digest_if_needed()`.
 
-## The 10 event types and their hook sites
+## The event types (18) and their hook sites
 
 `notifications.EVENT_TYPES` (also `EVENT_TYPE_LABELS` for display — keep
 both in sync, and keep `drone.js`'s `SMTP_EVENT_TYPES` array in sync by hand
@@ -206,6 +206,7 @@ the frontend):
 | `asset_uploaded` | `web/handlers_peer.py`'s `_stream_file()` | Right after `tracker.finish(upload_id, "completed")` — the one choke point shared by all 5 peer-serving asset types (rom/bios/movie/save/artwork all funnel through `_stream_file`). Note this call site has `self.settings`; `transfer/upload_tracker.py`'s `UploadTracker` class deliberately does **not** — it's a standalone singleton with no settings/repository dependency by design (see its own module docstring), so the hook lives in the caller, not inside `UploadTracker.finish()`. |
 | `asset_downloaded` | `transfer/download_manager.py`'s `_run_job()` `finally:` block | On `terminal_activity.get("status") == "completed"`, **without** the pre-existing `asset_type == "rom"` restriction that a different, older action (`_kick_asset_metadata_sync_after_download`) is gated on right next to it — bios/saves/movies/artwork downloads must fire this too. |
 | `game_crash` | `device/crash_history.py`'s `ingest_new_crashes()`, called every tick of `run_audit_email_digest_poller` | One event per entry the Game crash notifier hook (`device/fix_assets/game_crash_notifier.py`, a separate process) appended to `history.jsonl`, tracked by an epoch cursor in `app_state` (`crash_history_cursor.json`; first pass skips history older than 60s). It is in `notifications.URGENT_EVENT_TYPES`, so `send_digest_if_needed()` sends it without waiting out the digest interval, and `_compose_digest` renders its full `format_crash_report()` text from `details`. |
+| `usb_enumeration_failed` | `device/usb_enumeration.py`'s `check_usb_enumeration_throttled()`, called every tick of `run_audit_email_digest_poller` (runs the real check at most every 5 min) | Parses `dmesg` for `usb usbN-portM: unable to enumerate USB device` (a **root** port the kernel gave up on; hub ports `N-M-portK` are ignored). Quiet when a `057e:0337` Wii U/GameCube adapter has a sysfs node (it enumerated elsewhere), otherwise one event per root port per boot (dedup state `usb_enumeration_notified.json`, keyed by `boot_id`). Strictly read-only — no USB sysfs writes, rescans or `udevadm` (issue #133: the kernel already power-cycles the port, and the fix is a different port or a powered hub). |
 | `torrent_completed` | `transfer/torrent_manager.py`'s `_apply_aria2_status_locked()` | Inside the two `if not entry.get("completed_at"):` blocks (there are two because aria2 can report completion via either its `"active"`+fully-downloaded branch or its own `"complete"` status) — **not** on the bare `entry["status"] = "complete"` assignment, which re-fires on every poll tick while a torrent stays complete/seeding. |
 
 When adding a new hook site for a *new* event type in the future: add the
@@ -377,7 +378,7 @@ else on this page.
 - Calling `_apply_screen_mode`/`_apply_audio_volume`/`_save_automation_config`/
   etc. and forgetting the paired `record_event()` call when adding a *new*
   manual-control or automation action — check the existing call sites in
-  "The 10 event types" table above for the pattern to copy.
+  "The event types" table above for the pattern to copy.
 - Assuming `UploadTracker` has access to `self.settings` — it doesn't (see
   its own module docstring); the `asset_uploaded` hook lives in
   `handlers_peer.py`'s `_stream_file()`, the caller, not inside
