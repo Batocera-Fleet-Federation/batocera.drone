@@ -48,7 +48,7 @@ def _log(message: str) -> None:
 
 def _reset_database(settings: Any) -> Dict[str, int]:
     removed: Dict[str, int] = {}
-    with open_database(database_path(Path(settings.userdata_root))) as connection:
+    with open_database(database_path(settings.userdata_root)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         for namespace in IDENTITY_BOUND_NAMESPACES:
             cursor = connection.execute("DELETE FROM app_state WHERE namespace = ?", (namespace,))

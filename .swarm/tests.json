@@ -1655,6 +1655,206 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_spec_path_mock_pollution.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-spec-path-mock-pollution",
+      "name": "Issue #169 spec=Path and autospec mocks must not open the state DB under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/storage/audit_store.py",
+          "app/device/notifications.py",
+          "app/transfer/local_network.py",
+          "app/transfer/swarm_reset.py",
+          "app/storage/rom_metadata_store.py",
+          "tests/adversarial/test_issue_169_spec_path_mock_pollution.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_record_collision_spec_mock.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-record-collision-spec-mock",
+      "name": "Issue #169 spec=Path roots via Path() wrappers must not open the state DB under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/storage/saves_store.py",
+          "app/storage/update_history_store.py",
+          "app/storage/mail_queue_store.py",
+          "app/storage/music_scrape_job_items.py",
+          "app/storage/audit_store.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_169_record_collision_spec_mock.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_out_of_scope_legacy_db_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-out-of-scope-legacy-db-path",
+      "name": "Out of scope for #169: legacy DB path helper accepts spec=Path mocks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/common/auth.py",
+          "tests/adversarial/test_issue_169_out_of_scope_legacy_db_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_out_of_scope_cwd_identity_files.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-out-of-scope-cwd-identity-files",
+      "name": "Out of scope for #169: spec=Path roots unlink or write files under cwd in identity and swarm reset",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_169_out_of_scope_cwd_identity_files.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_spec_mock_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-spec-mock-boundaries",
+      "name": "Issue #169 spec'd-mock guard boundaries: every mock flavour rejected, unittest-absent and real roots still resolve",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/storage/rom_metadata_store.py",
+          "tests/adversarial/test_issue_169_spec_mock_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_out_of_scope_identity_lock_cwd.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-out-of-scope-identity-lock-cwd",
+      "name": "Out of scope for #169: identity hardware-change lock is written under cwd for spec'd roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_169_out_of_scope_identity_lock_cwd.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

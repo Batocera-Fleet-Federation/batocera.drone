@@ -15,11 +15,29 @@ DATABASE_FILENAME = "rom_metadata_cache.sqlite3"
 PEER_ROUTE_KINDS = frozenset({"tailnet", "host", "ip"})
 
 
+def _is_mock(value: object) -> bool:
+    """Return whether *value* is a unittest mock, including spec masquerades."""
+    # Import lazily: production does not need unittest.mock, and a spec'd mock can
+    # pass isinstance(value, Path) despite not being a filesystem path.
+    try:
+        from unittest import mock
+    except ImportError:  # pragma: no cover - unittest is part of supported Python
+        return type(value).__module__ == "unittest.mock"
+    mock_types = tuple(
+        candidate
+        for name in ("Mock", "MagicMock", "NonCallableMock", "NonCallableMagicMock")
+        if isinstance((candidate := getattr(mock, name, None)), type)
+    )
+    return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
+
+
 def database_path(userdata_root: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
-    if not isinstance(userdata_root, (str, Path)) and type(userdata_root).__module__ == "unittest.mock":
+
+    # Mock subclasses can impersonate concrete path classes via spec/spec_set.
+    if _is_mock(userdata_root):
         raise TypeError("userdata_root must be a filesystem path")
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
