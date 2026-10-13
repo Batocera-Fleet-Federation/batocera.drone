@@ -48,6 +48,7 @@ def test_release_workflow_is_main_only_and_uploads_drone_assets():
     assert "app/integrations/__init__.py" in workflow
     assert "app/integrations/registry.py" in workflow
     assert "app/integrations/streamdeck/manager.py" in workflow
+    assert "app/integrations/media_keys/manager.py" in workflow
     assert "scripts/batocera_install.sh" in workflow
     assert "refs/tags/latest --force" in workflow
     assert 'args=(--version "$RELEASE_VERSION")' in workflow

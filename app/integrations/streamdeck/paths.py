@@ -16,10 +16,8 @@ Nothing here follows symbolic links: a symlinked component anywhere inside the
 boundary is refused rather than written through or recursively deleted.
 """
 
-import json
 import os
 import shutil
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,8 +30,10 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
 
 try:
     from ...common.install_paths import drone_install_root
+    from ..shared.files import atomic_write_bytes, atomic_write_json, read_json  # noqa: F401 - re-exported
 except ImportError:  # pragma: no cover - flat execution
     from common.install_paths import drone_install_root  # type: ignore
+    from integrations.shared.files import atomic_write_bytes, atomic_write_json, read_json  # type: ignore  # noqa: F401
 
 
 INTEGRATION_ID = "streamdeck"
@@ -213,36 +213,6 @@ class StreamDeckPaths:
             return False
         shutil.rmtree(self.root)
         return True
-
-
-def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, raw = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(raw, mode)
-        os.replace(raw, path)
-    finally:
-        if os.path.exists(raw):
-            os.unlink(raw)
-
-
-def atomic_write_json(path: Path, payload: Any, *, mode: int = 0o600) -> None:
-    data = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str) + "\n"
-    atomic_write_bytes(path, data.encode("utf-8"), mode=mode)
-
-
-def read_json(path: Path, default: Any = None) -> Any:
-    try:
-        if path.is_symlink():
-            return default
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return default
 
 
 @contextmanager

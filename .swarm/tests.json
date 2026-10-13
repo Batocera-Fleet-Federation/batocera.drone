@@ -413,6 +413,227 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_safety.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-safety",
+      "name": "Issue #152 Media Keys hold confirmation, malformed state, and release boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "app/integrations/media_keys/manager.py",
+          "tests/adversarial/test_issue_152_media_keys_safety.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_hold_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-hold-uat",
+      "name": "Issue #152 Media Keys separate-press hold gate, sustained-hold timing, and HTTP hold progress",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "app/integrations/media_keys/manager.py",
+          "app/web/handlers_integrations.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_binding_transitions.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-binding-transitions",
+      "name": "Issue #152 dangerous binding hold progress resets after edits and lifecycle changes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/config.py",
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_binding_transitions.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_fast_taps.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-fast-taps",
+      "name": "Issue #152 Media Keys rapid separate taps cannot accumulate into hold confirmation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_fast_taps.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_launcher_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-launcher-uat",
+      "name": "Issue #152 generated drone-media-key launcher reaches the dispatcher in a bare hotkeygen-style environment",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_launcher_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_concurrency_and_input.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-concurrency-and-input",
+      "name": "Issue #152 concurrent key-repeat dispatchers fire once and non-finite hold values are refused",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_concurrency_and_input.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_http_malformed_input.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-http-malformed-input",
+      "name": "Issue #152 Media Keys HTTP routes refuse malformed bodies, NaN/Infinity holds and unknown bindings",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

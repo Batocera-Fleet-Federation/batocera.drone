@@ -2861,6 +2861,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('app/integrations/__init__.py', bootstrap)
         self.assertIn('app/integrations/registry.py', bootstrap)
         self.assertIn('app/integrations/streamdeck/manager.py', bootstrap)
+        self.assertIn('app/integrations/media_keys/manager.py', bootstrap)
         self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", bootstrap)
         self.assertIn("request_host_reboot()", bootstrap)
         self.assertIn("service_control_worker()", bootstrap)

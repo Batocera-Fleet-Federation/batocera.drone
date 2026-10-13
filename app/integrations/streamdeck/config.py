@@ -24,6 +24,11 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 from .paths import OwnershipError, StreamDeckPaths, atomic_write_json
 
+try:
+    from ..shared.files import clean_text, hex_id, new_id  # noqa: F401 - re-exported
+except ImportError:  # pragma: no cover - flat execution
+    from integrations.shared.files import clean_text, hex_id, new_id  # type: ignore  # noqa: F401
+
 
 SCHEMA_VERSION = 1
 DEFAULT_PROFILE_ID = "default"
@@ -55,22 +60,6 @@ def safe_id(value: Any, label: str = "id") -> str:
     if not _SAFE_ID.fullmatch(normalized) or ".." in normalized:
         raise ValueError(f"invalid {label}")
     return normalized
-
-
-def hex_id(value: Any, label: str = "id") -> str:
-    normalized = str(value if value is not None else "").strip().lower()
-    if not _HEX_ID.fullmatch(normalized):
-        raise ValueError(f"invalid {label}")
-    return normalized
-
-
-def new_id() -> str:
-    return uuid.uuid4().hex
-
-
-def clean_text(value: Any, limit: int) -> str:
-    text = "".join(ch for ch in str(value if value is not None else "") if ch.isprintable())
-    return text.strip()[:limit]
 
 
 def _color(value: Any, default: str) -> str:
