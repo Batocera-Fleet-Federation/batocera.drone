@@ -13,7 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..registry import Integration, IntegrationDescriptor
 from .config import (ConfigStore, MANAGED_KEYS, builtin_catalog, hold_seconds, requires_hold)
-from .dispatch import execute_binding, log_media_key, media_keys_script_store, record_press, script_owner
+from .dispatch import (HoldGate, execute_binding, log_media_key, media_keys_script_store,
+                       record_press, script_owner)
 from .hotkeygen import HotkeygenOverrides, detect_keyboards
 from .paths import MediaKeysPaths, default_integration_root
 
@@ -196,8 +197,12 @@ class MediaKeysIntegration(Integration):
         if binding.get("action_type") == "none":
             raise ValueError("this key has no action assigned")
         confirm_needed = binding.get("action_type") == "builtin" and BUILTIN_COMMANDS[binding["action_id"]][2]
-        if confirm_needed and (payload or {}).get("confirm") is not True:
-            raise ValueError("this action needs confirmation")
+        if confirm_needed:
+            if (payload or {}).get("confirm") is not True:
+                raise ValueError("this action needs confirmation")
+            gate = HoldGate(self.paths).check(binding_id, hold_seconds(binding))
+            if gate != "fire":
+                return {"status": gate, "message": "Keep holding to confirm this action."}
         run_as = script_owner(self.paths) if binding.get("action_type") == "script" else None
         result = execute_binding(binding, self.paths, control=self.control, scripts=self.scripts,
                                  requested_by=f"test:{requested_by}"[:80], run_as=run_as)

@@ -18,6 +18,7 @@ never hang or lose a key press, and every outcome is logged and recorded in
 
 import json
 import os
+import math
 import sys
 import time
 from typing import Any, Callable, Optional
@@ -98,14 +99,29 @@ class HoldGate:
         with self._locked():
             state = read_json(self.paths.hold_file, {}) or {}
             entry = state.get(binding_id) if isinstance(state, dict) else None
-            if not isinstance(entry, dict) or now - float(entry.get("last", 0)) > HOLD_GAP_SECONDS:
+            def timestamp(value: Any) -> Optional[float]:
+                if isinstance(value, bool):
+                    return None
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                return parsed if math.isfinite(parsed) else None
+
+            last = timestamp(entry.get("last")) if isinstance(entry, dict) else None
+            started = timestamp(entry.get("start")) if isinstance(entry, dict) else None
+            # Corrupt persisted data starts a fresh window. Never let malformed,
+            # infinite, or future timestamps satisfy a dangerous hold.
+            invalid = (last is None or started is None or last > now or started > now or started > last
+                       or not isinstance(entry, dict) or not isinstance(entry.get("fired"), bool))
+            if not isinstance(entry, dict) or invalid or now - last > HOLD_GAP_SECONDS:
                 entry = {"start": now, "last": now, "fired": False}
                 outcome = "holding"
             else:
                 entry["last"] = now
                 if entry.get("fired"):
                     outcome = "fired"
-                elif now - float(entry.get("start", now)) >= seconds:
+                elif now - started >= seconds:
                     entry["fired"] = True
                     outcome = "fire"
                 else:

@@ -1527,7 +1527,7 @@ function sdBindHandlers() {
 // Separate state/handlers (data-mk-*) from the Stream Deck page above; shares
 // only the sd* modal/toast/escape helpers and the same-origin api helpers.
 const MK_API = "/admin/integrations/media-keys";
-const MK_HOLD_MS = 2000;
+const MK_HOLD_MS = 3000;
 const MK_STARTERS = {
   bash: "#!/bin/bash\n# Runs on this Batocera machine as the Drone service when the key is pressed.\necho \"Hello from Media Keys\"\n",
   python3: "#!/usr/bin/env python3\n# Runs on this Batocera machine as the Drone service when the key is pressed.\nprint(\"Hello from Media Keys\")\n",
@@ -1778,9 +1778,22 @@ async function mkOnAction(action, element) {
 }
 
 function mkCancelHold() {
-  if (mkState.holdTimer) clearTimeout(mkState.holdTimer);
+  if (mkState.holdTimer) clearInterval(mkState.holdTimer);
   mkState.holdTimer = null;
   document.querySelectorAll("[data-mk-hold].active").forEach((node) => node.classList.remove("active"));
+}
+
+async function mkHoldTestPulse(id) {
+  try {
+    const result = await mkPost(`/bindings/${encodeURIComponent(id)}/test`, { confirm: true });
+    if (result.status === "holding") return;
+    mkCancelHold();
+    sdToast(result.status === "ok" ? "Action ran." : `Action: ${result.status}`);
+    try { mkState.status = await mkGet("/status"); mkRenderMain(); } catch (error) { /* ignore */ }
+  } catch (error) {
+    mkCancelHold();
+    sdError(error);
+  }
 }
 
 function mkBindHandlers() {
@@ -1810,7 +1823,8 @@ function mkBindHandlers() {
     mkCancelHold();
     element.classList.add("active");
     const id = element.dataset.mkHold;
-    mkState.holdTimer = setTimeout(() => { mkCancelHold(); mkTest(id, true).catch(sdError); }, MK_HOLD_MS);
+    mkHoldTestPulse(id);
+    mkState.holdTimer = setInterval(() => mkHoldTestPulse(id), 350);
   });
   ["pointerup", "pointerleave", "pointercancel"].forEach((name) => document.addEventListener(name, (event) => {
     if (mkState.holdTimer && (name === "pointerup" || event.target.closest && event.target.closest("[data-mk-hold]"))) mkCancelHold();
