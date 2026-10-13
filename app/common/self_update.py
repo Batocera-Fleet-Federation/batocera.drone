@@ -73,6 +73,7 @@ DRONE_INTEGRATIONS_REQUIRED_FILES = (
     Path("app/integrations/__init__.py"),
     Path("app/integrations/registry.py"),
     Path("app/integrations/streamdeck/manager.py"),
+    Path("app/integrations/media_keys/manager.py"),
 )
 
 _DRONE_UPDATE_LOCK = Lock()

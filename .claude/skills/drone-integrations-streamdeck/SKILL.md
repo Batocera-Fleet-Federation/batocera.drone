@@ -36,6 +36,42 @@ before non-trivial work; keep it accurate in the same change.
   through the updater to the latest semantic release; otherwise a device can remain
   on an older UI forever while appearing to run normally.
 
+## Media Keys integration (`app/integrations/media_keys/`)
+
+Second registered integration (`media-keys`, files under
+`<install root>/integrations/media-keys/`). Batocera `hotkeygen` stays the only
+keyboard reader; the Drone writes ONE file, `drone-media-keys.conf`, into
+`/userdata/system/configs/hotkeygen/` (marker-checked, never overwrites or
+deletes a file it did not write, stock `/etc/hotkeygen` untouched) mapping the
+5 managed keys (`MANAGED_KEYS` in `config.py`) to the generated
+`bin/drone-media-key <binding-id>` launcher. The launcher runs
+`python3 -m app.integrations.media_keys.dispatch` detached; the dispatcher reads
+`config/media-keys.json` from disk at press time (no Drone web service needed, so
+binding/script edits apply on the next press and a restarting Drone cannot hang a
+key). Reboot/shutdown (and any `hold_seconds` binding) fire only after a
+typematic repeat train lasts the hold duration (`HoldGate`, state in
+`state/hold.json`) -- a single press or a series of separate taps does
+nothing; the admin Hold-to-test control is a separate origin so HTTP pulses
+do not share keyboard hold progress. When the dispatcher runs as
+root, scripts drop to the owner of the integration dir (`run_as`).
+
+Shared code lives in `app/integrations/shared/`: `process.py` (ProcessRunner),
+`scripts.py` (generic `ScriptStore`: paths object + env prefix + log callable),
+`batocera_control.py` (`BatoceraControl` + `BUILTIN_COMMANDS` catalog of stable
+IDs), `files.py` (atomic writers, `hex_id`/`new_id`/`clean_text`). The Stream Deck
+modules (`streamdeck/process.py`, `scripts.py`, `actions.py`, `config.py`,
+`paths.py`) re-export them, so existing imports/tests keep working. Bindings
+store typed references (built-in ID or script ID), never commands.
+
+Unverified on a real device (issue #152 open items): hotkeygen's override line
+syntax and merge-vs-replace behaviour (`hotkeygen.render_override` /
+`OVERRIDE_FILE_NAME` are the one place to change), whether `KEY_RESTART` does
+anything stock, and whether hotkeygen re-sends events while a key is held.
+Routes: `/admin/integrations/media-keys/...` (status, enable/disable/repair/remove,
+`bindings/<id>` + `/test`, `scripts...`); page `#admin/integrations/media-keys`
+(`mk*` functions at the end of `integrations.js`). Release gates name
+`integrations/media_keys/manager.py` too. Tests: `tests/test_media_keys.py`.
+
 ## Stream Deck shape
 
 - Drone process (stdlib only): `manager.py` (lifecycle jobs, supervisor, status,

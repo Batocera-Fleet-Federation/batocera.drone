@@ -61,6 +61,7 @@ def _complete_install_members(members=(), *, version="v0.1.245"):
         "app/integrations/__init__.py": b"# integrations\n",
         "app/integrations/registry.py": b"class IntegrationRegistry:\n    pass\n",
         "app/integrations/streamdeck/manager.py": b"class StreamDeckManager:\n    pass\n",
+        "app/integrations/media_keys/manager.py": b"class MediaKeysIntegration:\n    pass\n",
         "content/batocera-swarm-mascot.jpg": b"jpg-bytes",
         "content/drone.png": b"png-bytes",
     }

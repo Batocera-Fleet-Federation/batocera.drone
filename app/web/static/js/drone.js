@@ -14429,6 +14429,9 @@ async function router(retryDepth = 0) {
     if (!hash.startsWith("#admin/integrations/streamdeck") && typeof stopStreamDeckAutoRefresh === "function") {
       stopStreamDeckAutoRefresh();
     }
+    if (hash !== "#admin/integrations/media-keys" && typeof stopMediaKeysAutoRefresh === "function") {
+      stopMediaKeysAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
@@ -14610,6 +14613,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderStreamDeckPage();
+    } else if (hash === "#admin/integrations/media-keys") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderMediaKeysPage();
     } else if (
       (hash.startsWith("#admin/integration") && !hash.startsWith("#admin/integrations"))
       || ["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"].includes(hash)

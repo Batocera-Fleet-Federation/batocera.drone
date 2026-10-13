@@ -68,7 +68,9 @@ working. Layout:
   (per-batch started/finished bell entries; per-asset rows are audit-only), download_errors
   (`DownloadCancelled`), transfer_files, local_network, network_identity,
   drone_network, drone_tls (`DroneCertificateManager`)
-- `integrations/` — the small static registry for optional local extensions. Stream
+- `integrations/` — the small static registry for optional local extensions, plus
+  `shared/` (process runner, script store, Batocera built-in catalog) and `media_keys/`
+  (hotkeygen-backed media-key bindings). Stream
   Deck owns isolated tooling/worker, devices, profiles, typed actions, game launching,
   scripts, images, and diagnostics under `<install root>/integrations/streamdeck/`;
   see `drone-integrations-streamdeck`.
@@ -217,6 +219,13 @@ Batocera or other Drone features. Routes: `/v1/api/admin/integrations/...` in
 `web/handlers_integrations.py` (real session cookie — loopback pre-auth is not
 enough — plus `admin_enabled`, JSON/multipart bodies, same-origin `Origin`); page:
 `web/static/js/integrations.js`.
+
+**Media Keys** (`integrations/media_keys/`) is the second: Batocera `hotkeygen`
+stays the key reader and the Drone adds one marker-checked override file mapping
+volume/mute/exit/reboot to a generated launcher that runs a standalone dispatcher
+(reads bindings from disk at press time; reboot/shutdown need a key hold). It shares
+`integrations/shared/` (ProcessRunner, `ScriptStore`, `BatoceraControl` built-in
+catalog, file helpers) with Stream Deck. See `drone-integrations-streamdeck`.
 
 **Stream Deck** is the first. Its third-party deps (`streamdeck==0.10.0`, Pillow)
 are installed into the integration's private `lib/` (venv/bundled pip, `--target`,

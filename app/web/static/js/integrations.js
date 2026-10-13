@@ -1522,3 +1522,311 @@ function sdBindHandlers() {
     }
   });
 }
+
+// ------------------------------------------------------- media keys page
+// Separate state/handlers (data-mk-*) from the Stream Deck page above; shares
+// only the sd* modal/toast/escape helpers and the same-origin api helpers.
+const MK_API = "/admin/integrations/media-keys";
+const MK_HOLD_MS = 3000;
+const MK_STARTERS = {
+  bash: "#!/bin/bash\n# Runs on this Batocera machine as the Drone service when the key is pressed.\necho \"Hello from Media Keys\"\n",
+  python3: "#!/usr/bin/env python3\n# Runs on this Batocera machine as the Drone service when the key is pressed.\nprint(\"Hello from Media Keys\")\n",
+};
+let mkState = { status: null, scripts: [], editor: null, pollTimer: null, holdTimer: null, holdStarted: 0 };
+let mkHandlersBound = false;
+
+function mkGet(path) { return api(`${MK_API}${path}`); }
+function mkPost(path, body = {}) { return apiPost(`${MK_API}${path}`, body); }
+
+function stopMediaKeysAutoRefresh() {
+  if (mkState.pollTimer) clearInterval(mkState.pollTimer);
+  mkState.pollTimer = null;
+}
+
+async function mkLoad() {
+  const [status, scripts] = await Promise.all([mkGet("/status"), mkGet("/scripts")]);
+  mkState.status = status;
+  mkState.scripts = scripts.scripts || [];
+}
+
+async function renderMediaKeysPage() {
+  mkBindHandlers();
+  stopMediaKeysAutoRefresh();
+  titleNode.textContent = "Media Keys";
+  subtitleNode.textContent = "USB keyboard media-key bindings for this Batocera machine";
+  content.innerHTML = `<div class="text-center py-5"><div class="spinner-border" role="status"></div></div>`;
+  try {
+    await mkLoad();
+  } catch (error) {
+    content.innerHTML = `<div class="alert alert-danger">${sdEsc(error.message)}</div>`;
+    return;
+  }
+  mkRender();
+  mkState.pollTimer = setInterval(async () => {
+    if (document.hidden || !window.location.hash.startsWith("#admin/integrations/media-keys")) return;
+    if (document.querySelector(".modal.show") || document.activeElement && document.activeElement.closest("#mkScriptEditor")) return;
+    try { mkState.status = await mkGet("/status"); mkRenderMain(); } catch (error) { /* transient */ }
+  }, 5000);
+}
+
+function mkActionLabel(row) {
+  if (row.action_type === "script") return row.script_missing ? "Script (missing)" : `Script: ${row.script_name}`;
+  if (row.action_type === "builtin") {
+    const found = ((mkState.status || {}).builtins || []).find((item) => item.id === row.action_id);
+    return found ? found.label : row.action_id;
+  }
+  return "No action";
+}
+
+function mkLastPress(row) {
+  const press = row.last_press;
+  if (!press) return `<span class="text-muted">—</span>`;
+  const tone = press.status === "ok" ? "success" : (press.status === "skipped" ? "secondary" : "danger");
+  return `${sdBadge(press.status, tone)} <span class="small text-muted">${sdEsc(sdTime(press.at))}</span>${press.error ? `<div class="small text-danger">${sdEsc(press.error)}</div>` : ""}`;
+}
+
+function mkActionSelect(row) {
+  const status = mkState.status || {};
+  const builtins = (status.builtins || []).map((item) => `<option value="builtin:${sdEsc(item.id)}" ${row.action_type === "builtin" && row.action_id === item.id ? "selected" : ""}>${sdEsc(item.label)}${item.requires_hold ? " (hold)" : ""}</option>`).join("");
+  const scripts = mkState.scripts.map((item) => `<option value="script:${sdEsc(item.id)}" ${row.action_type === "script" && row.script_id === item.id ? "selected" : ""}>${sdEsc(item.name)}</option>`).join("");
+  return `<select class="form-select form-select-sm" data-mk-change="binding" data-id="${sdEsc(row.id)}" aria-label="Action for ${sdEsc(row.label)}">
+    <option value="none" ${row.action_type === "none" ? "selected" : ""}>No action</option>
+    <optgroup label="Built-in">${builtins}</optgroup>${scripts ? `<optgroup label="Custom scripts">${scripts}</optgroup>` : ""}</select>`;
+}
+
+function mkBindingRowsHtml() {
+  return ((mkState.status || {}).bindings || []).map((row) => {
+    const hold = row.requires_hold && row.action_type !== "none";
+    const test = hold
+      ? `<button type="button" class="btn btn-sm btn-outline-warning" data-mk-hold="${sdEsc(row.id)}" title="Press and hold for ${MK_HOLD_MS / 1000} seconds"><i class="bi bi-hand-index-thumb me-1"></i>Hold to test</button>`
+      : `<button type="button" class="btn btn-sm btn-outline-warning" data-mk-action="test" data-id="${sdEsc(row.id)}" ${row.action_type === "none" ? "disabled" : ""}><i class="bi bi-play me-1"></i>Test</button>`;
+    return `<tr><td><strong>${sdEsc(row.label)}</strong><div class="small text-muted"><code>${sdEsc(row.key)}</code></div></td>
+      <td>${mkActionSelect(row)}${hold ? `<div class="small text-warning mt-1"><i class="bi bi-hand-index-thumb me-1"></i>Hold the key ${sdEsc(row.hold_seconds || 3)} s to run.</div>` : ""}</td>
+      <td>${mkLastPress(row)}</td><td class="text-end text-nowrap">${test}</td></tr>`;
+  }).join("");
+}
+
+function mkStatusHtml() {
+  const s = mkState.status || {};
+  const keyboards = (s.keyboards || []).map((item) => `<li>${sdEsc(item.name)} <span class="text-muted">(${sdEsc(item.event)})</span></li>`).join("");
+  return `<div class="d-flex flex-wrap gap-2 mb-2">${sdBadge(s.enabled ? "Enabled" : "Disabled", s.enabled ? "success" : "secondary")}
+      ${sdBadge(`Health: ${s.health}`, sdHealthTone(s.health))}
+      ${sdBadge(s.hotkeygen_running ? "hotkeygen running" : "hotkeygen not detected", s.hotkeygen_running ? "success" : "warning")}
+      ${sdBadge(s.overrides_applied ? "Overrides applied" : "Overrides not applied", s.overrides_applied ? "success" : "secondary")}</div>
+    <div class="small mb-2">${sdEsc(s.health_message)}</div>
+    <div class="small"><span class="text-muted">Detected keyboards:</span>${keyboards ? `<ul class="mb-2">${keyboards}</ul>` : " none"}</div>
+    <div class="small text-muted mb-2">Override file: <code>${sdEsc(s.override_path)}</code></div>
+    <div class="d-flex flex-wrap gap-2">
+      ${s.enabled
+        ? `<button type="button" class="btn btn-outline-warning" data-mk-action="disable"><i class="bi bi-pause-circle me-1"></i>Disable (restore stock keys)</button>`
+        : `<button type="button" class="btn btn-success" data-mk-action="enable"><i class="bi bi-play-circle me-1"></i>Enable Media Keys</button>`}
+      <button type="button" class="btn btn-outline-secondary" data-mk-action="repair"><i class="bi bi-wrench me-1"></i>Repair</button>
+      <button type="button" class="btn btn-outline-danger" data-mk-action="remove"><i class="bi bi-trash me-1"></i>Remove</button></div>`;
+}
+
+function mkScriptsHtml() {
+  const rows = mkState.scripts.map((script) => `<tr><td><strong>${sdEsc(script.name)}</strong><div class="small text-muted">${sdEsc(script.description || "")}</div></td>
+    <td class="small">${sdEsc(sdScriptLanguageLabel(script.language))}</td>
+    <td class="text-end text-nowrap">
+      <button type="button" class="btn btn-sm btn-outline-primary" data-mk-action="script-edit" data-id="${sdEsc(script.id)}"><i class="bi bi-pencil"></i> Edit</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-mk-action="script-duplicate" data-id="${sdEsc(script.id)}"><i class="bi bi-copy"></i></button>
+      <button type="button" class="btn btn-sm btn-outline-danger" data-mk-action="script-delete" data-id="${sdEsc(script.id)}"><i class="bi bi-trash"></i></button></td></tr>`).join("");
+  return `<div class="d-flex align-items-center mb-2"><h2 class="h6 mb-0">Custom scripts</h2><button type="button" class="btn btn-sm btn-primary ms-auto" data-mk-action="script-new"><i class="bi bi-plus-lg me-1"></i>New script</button></div>
+    <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><tbody>${rows || '<tr><td class="text-muted small">No scripts yet.</td></tr>'}</tbody></table></div>`;
+}
+
+function mkRenderMain() {
+  const target = document.getElementById("mkMain");
+  if (!target) return;
+  target.innerHTML = `<div class="row g-3">
+    <div class="col-xl-5"><section class="card h-100"><div class="card-body"><h2 class="h6">Status</h2>${mkStatusHtml()}</div></section></div>
+    <div class="col-xl-7"><section class="card h-100"><div class="card-body"><h2 class="h6">Key bindings</h2>
+      <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><thead><tr><th>Key</th><th>Action</th><th>Last press</th><th></th></tr></thead><tbody>${mkBindingRowsHtml()}</tbody></table></div>
+      <p class="small text-muted mt-2 mb-0">Changes apply on the next key press — no reboot. Reboot and shutdown only run while the key is held.</p></div></section></div></div>`;
+}
+
+function mkRender() {
+  content.innerHTML = `<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-mk-action="back"><i class="bi bi-arrow-left me-1"></i>Integrations</button>
+      <span class="badge text-bg-dark border"><i class="bi bi-house-door me-1"></i>This machine only</span></div>
+    <div class="alert alert-info small"><i class="bi bi-info-circle me-2"></i>Batocera's <code>hotkeygen</code> keeps reading the keyboard. Enabling adds one override file so the volume, mute, exit, and reboot keys call the Drone. Disabling removes that file and the stock behaviour returns.</div>
+    <div id="mkMain"></div>
+    <section class="card mt-3"><div class="card-body" id="mkScripts"></div></section>
+    <section class="card mt-3"><div class="card-body"><h2 class="h6">Help</h2>
+      <div class="accordion themed-accordion" id="mkHelp">
+        <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#mkHelp1">What does this change on Batocera?</button></h3>
+          <div id="mkHelp1" class="accordion-collapse collapse" data-bs-parent="#mkHelp"><div class="accordion-body small">Only one file, <code>drone-media-keys.conf</code>, in <code>/userdata/system/configs/hotkeygen/</code>, plus the Drone's own <code>integrations/media-keys/</code> folder. Stock files in <code>/etc/hotkeygen</code> are never modified.</div></div></div>
+        <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#mkHelp2">Scripts</button></h3>
+          <div id="mkHelp2" class="accordion-collapse collapse" data-bs-parent="#mkHelp"><div class="accordion-body small">A script is Bash or Python 3 that runs <strong>as the Drone service with full administrative rights</strong> when its key is pressed, with a clean environment and a 30 s timeout. Variable: <code>DRONE_MEDIA_KEYS_TRIGGER</code>. A script cannot be deleted while a key uses it.</div></div></div>
+        <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#mkHelp3">Troubleshooting</button></h3>
+          <div id="mkHelp3" class="accordion-collapse collapse" data-bs-parent="#mkHelp"><div class="accordion-body small">If a key does nothing after enabling, restart hotkeygen or reboot so it re-reads its configuration, then check "Last press". Dispatcher events are in Admin → Debug → System Logs (<code>[media-keys]</code>).</div></div></div>
+      </div></div></section>`;
+  mkRenderMain();
+  mkRenderScripts();
+}
+
+function mkRenderScripts() {
+  const target = document.getElementById("mkScripts");
+  if (!target) return;
+  const script = mkState.editor;
+  const language = script && script.language === "python3" ? "python3" : "bash";
+  target.innerHTML = mkScriptsHtml() + (script ? `<hr><div id="mkScriptEditor"><div class="row g-2">
+      <div class="col-md-4"><label class="form-label small" for="mkScriptName">Name</label><input class="form-control" id="mkScriptName" maxlength="80" value="${sdEsc(script.name)}"></div>
+      <div class="col-md-3"><label class="form-label small" for="mkScriptLanguage">Language</label><select class="form-select" id="mkScriptLanguage" data-mk-change="script-language">
+        <option value="bash" ${language === "bash" ? "selected" : ""}>Bash</option><option value="python3" ${language === "python3" ? "selected" : ""}>Python 3</option></select></div>
+      <div class="col-md-5"><label class="form-label small" for="mkScriptDescription">Description</label><input class="form-control" id="mkScriptDescription" maxlength="300" value="${sdEsc(script.description)}"></div>
+      <div class="col-12"><label class="form-label small" for="mkScriptCode">Code <span class="text-muted">(first line must be <code>#!/bin/bash</code> or <code>#!/usr/bin/env python3</code>; max 64 KiB)</span></label>
+        <textarea class="form-control font-monospace sd-code" id="mkScriptCode" rows="12" spellcheck="false">${sdEsc(script.code)}</textarea></div></div>
+      <div class="small text-muted mt-1">${(script.references || []).length ? `Used by: ${(script.references || []).map((ref) => sdEsc(ref.label)).join(", ")}` : "Not assigned to any key."}</div>
+      <div class="d-flex gap-2 mt-2"><button type="button" class="btn btn-primary" data-mk-action="script-save"><i class="bi bi-save me-1"></i>Save</button>
+        <button type="button" class="btn btn-outline-secondary" data-mk-action="script-close">Close</button></div></div>` : "");
+}
+
+async function mkSetBinding(id, value) {
+  let payload = { action_type: "none" };
+  if (value.startsWith("builtin:")) payload = { action_type: "builtin", action_id: value.slice(8) };
+  else if (value.startsWith("script:")) payload = { action_type: "script", script_id: value.slice(7) };
+  try {
+    await mkPost(`/bindings/${encodeURIComponent(id)}`, payload);
+    mkState.status = await mkGet("/status");
+    sdToast("Binding saved. It applies on the next key press.");
+  } catch (error) {
+    sdError(error);
+  }
+  mkRenderMain();
+}
+
+async function mkTest(id, confirm) {
+  try {
+    const result = await mkPost(`/bindings/${encodeURIComponent(id)}/test`, confirm ? { confirm: true } : {});
+    sdToast(result.status === "ok" ? "Action ran." : `Action: ${result.status}`);
+  } catch (error) {
+    sdError(error);
+  }
+  try { mkState.status = await mkGet("/status"); mkRenderMain(); } catch (error) { /* ignore */ }
+}
+
+async function mkLifecycle(path, body = {}) {
+  try {
+    const result = await mkPost(path, body);
+    sdToast(result.message || "Done.");
+  } catch (error) {
+    sdError(error);
+  }
+  try { await mkLoad(); mkRender(); } catch (error) { sdError(error); }
+}
+
+async function mkEditScript(id) {
+  try {
+    mkState.editor = id ? await mkGet(`/scripts/${encodeURIComponent(id)}`)
+      : { id: "", name: "New script", description: "", language: "bash", code: MK_STARTERS.bash, references: [] };
+    mkRenderScripts();
+  } catch (error) {
+    sdError(error);
+  }
+}
+
+async function mkSaveScript() {
+  const script = mkState.editor;
+  const payload = {
+    name: document.getElementById("mkScriptName").value, description: document.getElementById("mkScriptDescription").value,
+    code: document.getElementById("mkScriptCode").value, language: document.getElementById("mkScriptLanguage").value,
+  };
+  try {
+    const saved = script.id ? await mkPost(`/scripts/${encodeURIComponent(script.id)}/update`, payload) : await mkPost("/scripts", payload);
+    mkState.editor = { ...saved, references: script.references || [] };
+    mkState.scripts = (await mkGet("/scripts")).scripts || [];
+    mkState.status = await mkGet("/status");
+    sdToast("Script saved.");
+    mkRender();
+  } catch (error) {
+    sdError(error);
+  }
+}
+
+async function mkOnAction(action, element) {
+  const id = element.dataset.id;
+  switch (action) {
+    case "back": setHash("#admin/integrations"); return;
+    case "enable": await mkLifecycle("/enable"); return;
+    case "disable":
+      if (await sdConfirm("Disable Media Keys?", "<p>The hotkeygen override is removed and Batocera's stock key behaviour returns. Bindings and scripts are kept.</p>", "Disable", "warning")) await mkLifecycle("/disable");
+      return;
+    case "repair": await mkLifecycle("/repair"); return;
+    case "remove":
+      if (await sdConfirm("Remove Media Keys?", "<p>Removes the hotkeygen override and the Drone's <code>integrations/media-keys/</code> folder, including your bindings and scripts. Nothing else is touched.</p>", "Remove everything")) await mkLifecycle("/remove", { include_configuration: true });
+      return;
+    case "test": await mkTest(id, false); return;
+    case "script-new": await mkEditScript(""); return;
+    case "script-edit": await mkEditScript(id); return;
+    case "script-close": mkState.editor = null; mkRenderScripts(); return;
+    case "script-save": await mkSaveScript(); return;
+    case "script-duplicate":
+      try { const copy = await mkPost(`/scripts/${encodeURIComponent(id)}/duplicate`, {}); mkState.scripts = (await mkGet("/scripts")).scripts || []; await mkEditScript(copy.id); } catch (error) { sdError(error); }
+      return;
+    case "script-delete":
+      if (!(await sdConfirm("Delete this script?", "<p>A script that a key uses cannot be deleted; reassign that key first.</p>", "Delete script"))) return;
+      try {
+        await mkPost(`/scripts/${encodeURIComponent(id)}/delete`, {});
+        if (mkState.editor && mkState.editor.id === id) mkState.editor = null;
+        mkState.scripts = (await mkGet("/scripts")).scripts || [];
+        mkRender();
+      } catch (error) { sdError(error); }
+      return;
+    default:
+  }
+}
+
+function mkCancelHold() {
+  if (mkState.holdTimer) clearInterval(mkState.holdTimer);
+  mkState.holdTimer = null;
+  document.querySelectorAll("[data-mk-hold].active").forEach((node) => node.classList.remove("active"));
+}
+
+async function mkHoldTestPulse(id) {
+  try {
+    const result = await mkPost(`/bindings/${encodeURIComponent(id)}/test`, { confirm: true });
+    if (result.status === "holding") return;
+    mkCancelHold();
+    sdToast(result.status === "ok" ? "Action ran." : `Action: ${result.status}`);
+    try { mkState.status = await mkGet("/status"); mkRenderMain(); } catch (error) { /* ignore */ }
+  } catch (error) {
+    mkCancelHold();
+    sdError(error);
+  }
+}
+
+function mkBindHandlers() {
+  if (mkHandlersBound) return;
+  mkHandlersBound = true;
+  document.addEventListener("click", (event) => {
+    const element = event.target.closest("[data-mk-action]");
+    if (!element || element.disabled) return;
+    event.preventDefault();
+    mkOnAction(element.dataset.mkAction, element).catch(sdError);
+  });
+  document.addEventListener("change", (event) => {
+    const element = event.target.closest("[data-mk-change]");
+    if (!element) return;
+    if (element.dataset.mkChange === "binding") {
+      mkSetBinding(element.dataset.id, element.value).catch(sdError);
+    } else if (element.dataset.mkChange === "script-language" && mkState.editor) {
+      const code = document.getElementById("mkScriptCode");
+      const wasStarter = Object.values(MK_STARTERS).includes(code.value);
+      if (wasStarter) code.value = MK_STARTERS[element.value] || MK_STARTERS.bash;
+    }
+  });
+  // Reboot/shutdown tests need a deliberate hold, never a single click.
+  document.addEventListener("pointerdown", (event) => {
+    const element = event.target.closest("[data-mk-hold]");
+    if (!element || element.disabled) return;
+    mkCancelHold();
+    element.classList.add("active");
+    const id = element.dataset.mkHold;
+    mkHoldTestPulse(id);
+    mkState.holdTimer = setInterval(() => mkHoldTestPulse(id), 350);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((name) => document.addEventListener(name, (event) => {
+    if (mkState.holdTimer && (name === "pointerup" || event.target.closest && event.target.closest("[data-mk-hold]"))) mkCancelHold();
+  }, true));
+}

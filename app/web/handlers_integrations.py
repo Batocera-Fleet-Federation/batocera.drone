@@ -22,6 +22,7 @@ try:
     from ..integrations.streamdeck.manager import get_streamdeck_integration
     from ..integrations.streamdeck.paths import OwnershipError
     from ..integrations.streamdeck.scripts import ScriptInUseError
+    from ..integrations.media_keys.manager import get_media_keys_integration
 except ImportError:  # pragma: no cover - flat execution
     from common.multipart import boundary_from_content_type, parse_multipart_file_parts  # type: ignore
     from integrations.registry import build_integration_registry  # type: ignore
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - flat execution
     from integrations.streamdeck.manager import get_streamdeck_integration  # type: ignore
     from integrations.streamdeck.paths import OwnershipError  # type: ignore
     from integrations.streamdeck.scripts import ScriptInUseError  # type: ignore
+    from integrations.media_keys.manager import get_media_keys_integration  # type: ignore
 
 
 _UPLOAD_OVERHEAD = 64 * 1024
@@ -62,6 +64,9 @@ class HandlersIntegrationsMixin:
 
     def _streamdeck(self):
         return get_streamdeck_integration(self.settings, self.repository)
+
+    def _media_keys(self):
+        return get_media_keys_integration(self.settings, self.repository)
 
     def _integration_actor(self) -> str:
         try:
@@ -107,6 +112,9 @@ class HandlersIntegrationsMixin:
         if not parts:
             cards = build_integration_registry(self.settings, self.repository).cards()
             self._send_json(200, {"integrations": cards, "scope": "local-only"})
+            return
+        if parts[0] == "media-keys":
+            self._dispatch_media_keys_get(parts[1:])
             return
         if parts[0] != "streamdeck":
             raise KeyError("unknown integration")
@@ -161,6 +169,19 @@ class HandlersIntegrationsMixin:
         else:
             raise KeyError("not found")
 
+    def _dispatch_media_keys_get(self, sub: list) -> None:
+        manager = self._media_keys()
+        if not sub or sub == ["status"]:
+            self._send_json(200, manager.get_status())
+        elif sub == ["scripts"]:
+            self._send_json(200, {"scripts": manager.scripts.list()})
+        elif len(sub) == 2 and sub[0] == "scripts":
+            script = manager.scripts.get(sub[1])
+            script["references"] = manager.script_references(script["id"])
+            self._send_json(200, script)
+        else:
+            raise KeyError("not found")
+
     # ------------------------------------------------------------------- POST
     def _handle_admin_integrations_post(self, parts: list) -> None:
         if not self._require_integration_session():
@@ -179,6 +200,9 @@ class HandlersIntegrationsMixin:
             self._integration_error(error)
 
     def _dispatch_integrations_post(self, parts: list, is_upload: bool) -> None:
+        if parts and parts[0] == "media-keys" and len(parts) >= 2:
+            self._dispatch_media_keys_post(parts[1:])
+            return
         if not parts or parts[0] != "streamdeck" or len(parts) < 2:
             raise KeyError("not found")
         manager = self._streamdeck()
@@ -243,6 +267,37 @@ class HandlersIntegrationsMixin:
                                                            requested_by=actor))
         elif len(sub) == 3 and sub[0] == "jobs" and sub[2] == "cancel":
             self._send_json(200, manager.jobs.cancel(sub[1]))
+        else:
+            raise KeyError("not found")
+
+    def _dispatch_media_keys_post(self, sub: list) -> None:
+        manager = self._media_keys()
+        actor = self._integration_actor()
+        body = self._read_json_body()
+        if sub == ["enable"]:
+            self._send_json(200, manager.enable(requested_by=actor))
+        elif sub == ["disable"]:
+            self._send_json(200, manager.disable(requested_by=actor))
+        elif sub == ["repair"]:
+            self._send_json(200, manager.repair(reinstall=body.get("reinstall") is True, requested_by=actor))
+        elif sub == ["remove"]:
+            self._send_json(200, manager.remove(include_configuration=body.get("include_configuration") is True,
+                                                requested_by=actor))
+        elif len(sub) == 2 and sub[0] == "bindings":
+            self._send_json(200, manager.set_binding(sub[1], body, requested_by=actor))
+        elif len(sub) == 3 and sub[0] == "bindings" and sub[2] == "test":
+            result = manager.test_binding(sub[1], body, requested_by=actor)
+            self._send_json(200 if result.get("status") in ("ok", "holding") else 409, result)
+        elif sub == ["scripts"]:
+            self._send_json(201, manager.scripts.create(body))
+        elif len(sub) == 3 and sub[0] == "scripts" and sub[2] == "update":
+            self._send_json(200, manager.scripts.update(sub[1], body))
+        elif len(sub) == 3 and sub[0] == "scripts" and sub[2] == "duplicate":
+            self._send_json(201, manager.scripts.duplicate(sub[1]))
+        elif len(sub) == 3 and sub[0] == "scripts" and sub[2] == "delete":
+            script_id = hex_id(sub[1], "script id")
+            manager.scripts.delete(script_id, manager.script_references(script_id), noun="key binding")
+            self._send_json(200, {"status": "deleted", "id": script_id})
         else:
             raise KeyError("not found")
 
