@@ -293,5 +293,22 @@ class CredentialsUpdateRevocationTests(unittest.TestCase):
         self.assertIsNotNone(self.auth.login("arcade-admin", "BetterPass123"))
 
 
+class CredentialStoreStateDatabaseDefaultTests(unittest.TestCase):
+    def test_omitted_state_database_file_uses_derived_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict("os.environ", {}, clear=True):
+            path = Path(tmp) / "credentials.json"
+            store = DroneCredentialStore(path)
+            self.assertEqual(store.state_database_file, database_path_for_legacy_file(path))
+
+    def test_falsy_injected_state_database_file_is_not_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            injected = mock.MagicMock(spec=str)
+            self.assertFalse(injected)
+            store = DroneCredentialStore(Path(tmp) / "credentials.json", state_database_file=injected)
+            self.assertIs(store.state_database_file, injected)
+            with self.assertRaises(TypeError):
+                store.load()
+
+
 if __name__ == "__main__":
     unittest.main()
