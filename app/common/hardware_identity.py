@@ -73,6 +73,32 @@ _VIRTUAL_VENDOR_MARKERS = (
 )
 
 
+def _counting_filler(value: str, base: int) -> bool:
+    """Recognize firmware's ascending, descending, and mirrored counting patterns.
+
+    Check the entire value, rather than a substring: a real serial may contain
+    ``123456`` without itself being a vendor filler. Repeated digits between
+    increments (``001122...``) and wraparound (``...ef0``) are common in UUIDs.
+    """
+    alphabet = "0123456789abcdef"[:base]
+    if len(value) < _MIN_SERIAL_LENGTH or any(ch not in alphabet for ch in value):
+        return False
+    digits = [alphabet.index(ch) for ch in value]
+    if len(set(digits)) < 5:
+        return False
+    directions = []
+    for left, right in zip(digits, digits[1:]):
+        if right == left:
+            continue
+        if right == (left + 1) % base:
+            directions.append(1)
+        elif right == (left - 1) % base:
+            directions.append(-1)
+        else:
+            return False
+    return bool(directions) and sum(a != b for a, b in zip(directions, directions[1:])) <= 2
+
+
 def normalize_identifier(kind: str, raw: object) -> Optional[str]:
     """Return a canonical identifier, or ``None`` for empty/placeholder/non-unique values."""
     if raw is None:
@@ -92,6 +118,8 @@ def normalize_identifier(kind: str, raw: object) -> Optional[str]:
         if len(compact) < _MIN_SERIAL_LENGTH or value in _PLACEHOLDER_UUIDS:
             return None
     if len(set(compact)) < 3:  # 0000..., ffff..., 1212...
+        return None
+    if _counting_filler(compact, 16 if kind == "dmi_product_uuid" else 10):
         return None
     if compact in {"0123456789abcdef", "123456789abcdef0", "fedcba9876543210"}:
         return None

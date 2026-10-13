@@ -30,6 +30,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import secrets
 import ssl
 import sys
@@ -406,10 +407,14 @@ def _load_binding(settings: Any):
         return None, "binding_invalid"
     if version < 1:
         return None, "binding_invalid"
-    installation_id = str(raw.get("installation_id") or "")
-    device_id = _normalize_device_id(raw.get("device_id"))
-    fingerprint = str(raw.get("identity_certificate_fingerprint") or "").lower()
-    if not installation_id or not device_id or len(fingerprint) != 64:
+    installation_id = raw.get("installation_id")
+    raw_device_id = raw.get("device_id")
+    raw_fingerprint = raw.get("identity_certificate_fingerprint")
+    if not all(isinstance(value, str) for value in (installation_id, raw_device_id, raw_fingerprint)):
+        return None, "binding_invalid"
+    device_id = _normalize_device_id(raw_device_id)
+    fingerprint = raw_fingerprint.lower()
+    if not installation_id or not device_id or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         return None, "binding_invalid"
     hardware = HardwareSnapshot.from_dict(raw.get("hardware"))
     if (raw.get("hardware_bound") or raw.get("hardware_fingerprint")) and not (hardware and hardware.components):
@@ -533,6 +538,35 @@ def _consume_authorization(settings: Any) -> None:
 
 def _record_journal(settings: Any, journal: dict) -> None:
     _atomic_write_json(_journal_path(settings), journal)
+
+
+def _valid_journal(journal: dict) -> bool:
+    """Accept only journals that our provisioning state machine could have written.
+
+    A JSON object is not evidence that an identity was being retired. In
+    particular, a stray ``{"reason": "clone"}`` must not destroy an intact
+    original or trap it in a recovery state that forbids keeping its identity.
+    """
+    if journal.get("reason") not in {"initial", "clone", "operator_new_identity"}:
+        return False
+    if journal.get("state") not in {State.CLONE_DETECTED.value, State.PROVISIONING.value}:
+        return False
+    if not isinstance(journal.get("steps"), dict) or not isinstance(journal.get("started_at"), str):
+        return False
+    if not journal["started_at"]:
+        return False
+    for field in ("previous_device_id", "previous_installation_id", "previous_certificate_fingerprint"):
+        if not isinstance(journal.get(field), str):
+            return False
+    previous = journal["previous_certificate_fingerprint"]
+    if previous and not re.fullmatch(r"[0-9a-fA-F]{64}", previous):
+        return False
+    if HardwareSnapshot.from_dict(journal.get("hardware")) is None:
+        return False
+    new_device_id = journal.get("new_device_id")
+    if new_device_id is not None and (not isinstance(new_device_id, str) or not _normalize_device_id(new_device_id)):
+        return False
+    return True
 
 
 def _retire_device_id(settings: Any) -> None:
@@ -872,7 +906,7 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
 def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> IdentityResult:
     hardware = provider.collect()
     journal = _read_json(_journal_path(settings))
-    if journal is _CORRUPT:
+    if journal is _CORRUPT or (isinstance(journal, dict) and not _valid_journal(journal)):
         # The journal contains no trustworthy intent. It may be a torn provisioning write,
         # or simply a damaged file on the original machine. Re-derive the decision from the
         # durable binding and present hardware before doing anything destructive.
