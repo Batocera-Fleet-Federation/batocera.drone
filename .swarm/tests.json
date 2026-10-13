@@ -1376,7 +1376,9 @@
       "requirements": {
         "credentials": [],
         "devices": [],
-        "executables": ["python3"],
+        "executables": [
+          "python3"
+        ],
         "files": [
           "app/transfer/swarm_reset.py",
           "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py"
@@ -1405,7 +1407,9 @@
       "requirements": {
         "credentials": [],
         "devices": [],
-        "executables": ["python3"],
+        "executables": [
+          "python3"
+        ],
         "files": [
           "app/transfer/swarm_reset.py",
           "tests/adversarial/security/test_issue_163_clone_auth_revocation.py"
@@ -2195,7 +2199,10 @@
       "requirements": {
         "credentials": [],
         "devices": [],
-        "executables": ["python3", "openssl"],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
         "files": [
           "app/common/identity_provisioning.py",
           "app/transfer/swarm_reset.py",
@@ -2272,6 +2279,73 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_177_transfer_membership_fallback_runtime.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-177-transfer-membership-fallback-runtime",
+      "name": "Issue #177 transfer/ swarm_membership except-branch runtime under forced relative ImportError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/peer_workers.py",
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_177_transfer_membership_fallback_runtime.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_177_transfer_membership_fallback_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-177-transfer-membership-fallback-boundaries",
+      "name": "Issue #177 transfer/ swarm_membership fallback source contract and forget_peer boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_177_transfer_membership_fallback_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
