@@ -99,7 +99,7 @@ def build_runtime(paths: StreamDeckPaths, roms_root: Path) -> StreamDeckRuntime:
     runner = ProcessRunner()
     es_api = EmulationStationApi()
     game_runtime = GameRuntime(es_api=es_api)
-    actions = BuiltInActionRegistry(BatoceraControl(runner), RetroArchControl(), game_runtime)
+    actions = BuiltInActionRegistry(BatoceraControl(runner, log=log_event), RetroArchControl(), game_runtime)
     coordinator = LaunchGameCoordinator(game_runtime, GameLauncher(roms_root, es_api), actions,
                                         lock_path=paths.launch_lock)
     scripts = ScriptStore(paths, runner)

@@ -94,7 +94,8 @@ validate_local_app() {
     "$WORK_DIR/app/web/handlers_integrations.py" \
     "$WORK_DIR/app/integrations/__init__.py" \
     "$WORK_DIR/app/integrations/registry.py" \
-    "$WORK_DIR/app/integrations/streamdeck/manager.py"; do
+    "$WORK_DIR/app/integrations/streamdeck/manager.py" \
+    "$WORK_DIR/app/integrations/media_keys/manager.py"; do
     if [ ! -s "$required_file" ]; then
       echo "[drone-service] Local Drone app validation failed: missing or empty ${required_file}"
       return 1

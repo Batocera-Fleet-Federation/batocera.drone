@@ -19,6 +19,11 @@ from .game_runtime import GameRuntime
 from .logs import log_event
 from .process import ProcessRunner
 
+try:
+    from ..shared.batocera_control import BatoceraControl  # noqa: F401 - re-exported
+except ImportError:  # pragma: no cover - flat execution
+    from integrations.shared.batocera_control import BatoceraControl  # type: ignore  # noqa: F401
+
 
 @dataclass
 class ActionContext:
@@ -116,66 +121,6 @@ class BuiltInAction:
         }
 
 
-class BatoceraControl:
-    """The only place trusted Batocera commands for built-ins are spelled out."""
-
-    SWISSKNIFE = "batocera-es-swissknife"
-    AUDIO = "batocera-audio"
-
-    def __init__(self, runner: Optional[ProcessRunner] = None,
-                 which: Callable[[str], Optional[str]] = shutil.which,
-                 restart_frontend: Optional[Callable[[], bool]] = None) -> None:
-        self.runner = runner or ProcessRunner()
-        self.which = which
-        self._restart_frontend = restart_frontend
-
-    def _run(self, candidates: List[tuple], *, timeout: float = 30.0, success_codes: tuple = (0,)) -> dict:
-        for executable, arguments in candidates:
-            path = self.which(executable)
-            if not path:
-                continue
-            result = self.runner.run(path, arguments, timeout=timeout)
-            log_event("builtin-command", executable=executable, exit_code=result.exit_code,
-                      duration=result.duration_seconds, timed_out=result.timed_out or None)
-            if result.exit_code in success_codes and not (result.timed_out or result.cancelled or result.start_error):
-                return {"status": "ok", "exit_code": result.exit_code,
-                        "duration_seconds": round(result.duration_seconds, 3)}
-            return {"status": "error", "error": f"{executable} failed: {result.summary()}"}
-        return {"status": "unavailable", "error": f"Required Batocera tool not found: {candidates[0][0]}"}
-
-    def has(self, *executables: str) -> bool:
-        return any(self.which(name) for name in executables)
-
-    def exit_game(self) -> dict:
-        # Physically verified on Batocera: returns a running game to ES.
-        # Newer swissknife returns informational codes: 20 graceful hotkey,
-        # 21 already stopped, 22 forced exit, 25 Wine exit requested. The
-        # coordinator still waits for actual process termination in all cases.
-        return self._run([(self.SWISSKNIFE, ["--emukill"])], success_codes=(0, 20, 21, 22, 25))
-
-    def reboot(self) -> dict:
-        return self._run([(self.SWISSKNIFE, ["--reboot"]), ("reboot", [])], timeout=60, success_codes=(0, 10, 11))
-
-    def shutdown(self) -> dict:
-        return self._run([(self.SWISSKNIFE, ["--shutdown"]), ("poweroff", [])], timeout=60, success_codes=(0, 10, 11))
-
-    def restart_frontend(self) -> dict:
-        if self._restart_frontend is not None:
-            ok = self._restart_frontend()
-        else:
-            # The same mechanism as the admin "Restart EmulationStation" button.
-            try:
-                from ...device.device_control import _restart_emulationstation
-            except ImportError:  # pragma: no cover - flat execution
-                from device.device_control import _restart_emulationstation  # type: ignore
-            ok = _restart_emulationstation()
-        return {"status": "ok"} if ok else {"status": "error", "error": "EmulationStation did not restart."}
-
-    def volume(self, change: str) -> dict:
-        amixer = {"+5": "5%+", "-5": "5%-", "mute-toggle": "toggle"}[change]
-        return self._run([(self.AUDIO, ["setSystemVolume", change]), ("amixer", ["-q", "sset", "Master", amixer])])
-
-
 class RetroArchControl:
     """Commands for RetroArch's own UDP command interface, only when it is enabled.
 
@@ -263,7 +208,7 @@ class UnknownActionError(KeyError):
 class BuiltInActionRegistry:
     def __init__(self, control: Optional[BatoceraControl] = None, retroarch: Optional[RetroArchControl] = None,
                  game_runtime: Optional[GameRuntime] = None) -> None:
-        self.control = control or BatoceraControl()
+        self.control = control or BatoceraControl(log=log_event)
         self.retroarch = retroarch or RetroArchControl()
         self.game_runtime = game_runtime or GameRuntime()
         self._actions: Dict[str, BuiltInAction] = {}

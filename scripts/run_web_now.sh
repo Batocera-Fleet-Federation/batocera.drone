@@ -108,6 +108,7 @@ INTEGRATIONS_HANDLER_PATH="$APP_DIR/web/handlers_integrations.py"
 INTEGRATIONS_INIT_PATH="$APP_DIR/integrations/__init__.py"
 INTEGRATIONS_REGISTRY_PATH="$APP_DIR/integrations/registry.py"
 STREAMDECK_MANAGER_PATH="$APP_DIR/integrations/streamdeck/manager.py"
+MEDIA_KEYS_MANAGER_PATH="$APP_DIR/integrations/media_keys/manager.py"
 CONTENT_DIR="$APP_ROOT/content"
 API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
@@ -309,6 +310,7 @@ validate_staged_payload() {
     "$INTEGRATIONS_INIT_PATH" \
     "$INTEGRATIONS_REGISTRY_PATH" \
     "$STREAMDECK_MANAGER_PATH" \
+    "$MEDIA_KEYS_MANAGER_PATH" \
     "$CONTENT_DIR/batocera-swarm-mascot.jpg" \
     "$CONTENT_DIR/drone.png"; do
     if [[ ! -s "$required_file" ]]; then
@@ -440,7 +442,8 @@ if [[ "$using_stage" != "1" ]]; then
     "$INTEGRATIONS_HANDLER_PATH" \
     "$INTEGRATIONS_INIT_PATH" \
     "$INTEGRATIONS_REGISTRY_PATH" \
-    "$STREAMDECK_MANAGER_PATH"; do
+    "$STREAMDECK_MANAGER_PATH" \
+    "$MEDIA_KEYS_MANAGER_PATH"; do
     if [[ ! -s "$required_file" ]]; then
       echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
       exit 1

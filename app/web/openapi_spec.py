@@ -1972,6 +1972,9 @@ def _schemas() -> Dict[str, Schema]:
         "IntegrationCard": _object({"id": _string(), "name": _string(), "description": _string(), "icon": _string(), "configure_route": _string(), "capabilities": _array(_string()), "documentation": _string(), "installed": _boolean(), "enabled": _boolean(), "health": _enum(["disabled", "healthy", "installing", "waiting", "degraded", "error"]), "health_message": _string(), "version": _string(), "metrics": _array(_object({"label": _string(), "value": freeform}))}, ("id", "name", "installed", "enabled", "health"), description="One optional integration's card on Admin -> Integrations."),
         "IntegrationsResponse": _object({"integrations": _array(_ref("IntegrationCard")), "scope": _enum(["local-only"])}, ("integrations", "scope"), description="Optional integrations for this local machine (never another Drone)."),
         "StreamDeckJob": _object({"id": _string(), "kind": _string(), "status": _enum(["running", "completed", "failed", "cancelled"]), "message": _string(), "steps": _array(_string()), "result": freeform, "error": _string(), "cancellable": _boolean(), "started_at": _string(fmt="date-time"), "finished_at": _string(fmt="date-time", nullable=True)}, ("id", "kind", "status"), description="Background job (install/repair progress, script test, Test Action / Test Game Launch)."),
+        "MediaKeysStatusResponse": _object({"id": _string(), "enabled": _boolean(), "installed": _boolean(), "health": _string(), "health_message": _string(), "hotkeygen_running": _boolean(), "overrides_applied": _boolean(), "keyboards": _array(freeform), "bindings": _array(freeform), "builtins": _array(freeform), "paths": freeform, "scope": _enum(["local-only"])}, ("enabled", "bindings"), description="Media Keys status: detected keyboards, hotkeygen state, and the five managed key bindings."),
+        "MediaKeysBindingRequest": _object({"action_type": _enum(["builtin", "script", "none"]), "action_id": _string(), "script_id": _string(), "hold_seconds": _integer(minimum=0), "confirm": _boolean("Test only: confirm a reboot/shutdown")}, description="A typed reference to a built-in or script -- never a command."),
+        "MediaKeysBindingResponse": _object({"status": _string(), "error": _string(), "binding": freeform}, ("status",)),
         "StreamDeckLifecycleRequest": _object({"reinstall": _boolean("Repair only: reinstall integration-owned tooling"), "include_configuration": _boolean("Remove only: also delete profiles, scripts, images, and logs")}, description="Lifecycle options."),
         "StreamDeckLifecycleResponse": _object({"status": _string(), "message": _string(), "job": _ref("StreamDeckJob"), "removed": _array(_string()), "kept": _array(_string()), "configuration_removed": _boolean()}, ("status",), description="Lifecycle result; enable/repair return a job to poll."),
         "StreamDeckDevice": _object({"id": _string(), "model": _string(), "serial": _string(), "firmware": _string(), "key_count": _integer(), "rows": _integer(), "columns": _integer(), "key_image_size": _array(_integer()), "has_key_images": _boolean(), "connected": _boolean(), "runtime_state": _string(), "source": _enum(["runtime", "usb", "remembered"]), "active_profile_id": _string(), "brightness": _integer(), "startup_profile_id": _string(), "usb_id": _string()}, ("id", "model"), description="A Stream Deck described through the device abstraction (never library objects)."),
@@ -2980,7 +2983,7 @@ def _integration_paths() -> Dict[str, Schema]:
                                    request_body=_json_request(request, required=False) if request else None, **kwargs)}
 
     image = {"200": _media_response("Image bytes", ["image/png", "image/jpeg", "image/webp", "image/gif"])}
-    return {
+    paths: Dict[str, Schema] = {
         "/admin/integrations": {"get": _operation("List optional local integrations", {"200": _json_response("IntegrationsResponse")}, tags=["admin", "integrations"])},
         f"{sd}/status": get("Stream Deck status: tooling, runtime, devices, last actions", "StreamDeckStatusResponse"),
         f"{sd}/devices": get("Connected, USB-detected, and remembered Stream Decks", "StreamDeckDevicesResponse"),
@@ -3021,6 +3024,34 @@ def _integration_paths() -> Dict[str, Schema]:
         f"{sd}/devices/{{device_id}}/identify": post("Show key numbers on the device, then restore", "StreamDeckDiagnosticResponse", parameters=[_path_param("device_id")]),
         f"{sd}/devices/{{device_id}}/test-button": post("Flash one key without running its action", "StreamDeckDiagnosticResponse", "StreamDeckDiagnosticRequest", parameters=[_path_param("device_id")]),
     }
+
+    mk = "/admin/integrations/media-keys"
+    mtags = ["admin", "integrations", "media-keys"]
+
+    def mget(summary: str, schema: str, **kwargs: Any) -> Schema:
+        return {"get": _operation(summary, {"200": _json_response(schema)}, tags=mtags, **kwargs)}
+
+    def mpost(summary: str, schema: str, request: Optional[str] = None, code: str = "200", **kwargs: Any) -> Schema:
+        return {"post": _operation(summary, {code: _json_response(schema)}, tags=mtags, error_codes=errors,
+                                   request_body=_json_request(request, required=False) if request else None, **kwargs)}
+
+    paths.update({
+        f"{mk}/status": mget("Media Keys status: keyboards, hotkeygen, override, bindings", "MediaKeysStatusResponse"),
+        f"{mk}/enable": mpost("Enable: write the hotkeygen override", "StreamDeckLifecycleResponse"),
+        f"{mk}/disable": mpost("Disable: restore stock hotkeygen behaviour, keep configuration", "StreamDeckLifecycleResponse"),
+        f"{mk}/repair": mpost("Re-apply (or remove, when disabled) the hotkeygen override", "StreamDeckLifecycleResponse", "StreamDeckLifecycleRequest"),
+        f"{mk}/remove": mpost("Remove the override and the integration's files", "StreamDeckLifecycleResponse", "StreamDeckLifecycleRequest"),
+        f"{mk}/bindings/{{binding_id}}": mpost("Assign a built-in action, a script, or nothing to a key", "MediaKeysBindingResponse", "MediaKeysBindingRequest", parameters=[_path_param("binding_id")]),
+        f"{mk}/bindings/{{binding_id}}/test": mpost("Run a key's action now (reboot/shutdown need confirm)", "MediaKeysBindingResponse", "MediaKeysBindingRequest", parameters=[_path_param("binding_id")]),
+        f"{mk}/scripts": {**mget("List Media Keys scripts", "StreamDeckScriptsResponse"),
+                          **mpost("Create a Media Keys script", "StreamDeckScript", "StreamDeckScriptRequest", code="201")},
+        f"{mk}/scripts/{{script_id}}": mget("Get a script with its code and key references", "StreamDeckScript", parameters=[_path_param("script_id")]),
+        f"{mk}/scripts/{{script_id}}/update": mpost("Edit a script", "StreamDeckScript", "StreamDeckScriptRequest", parameters=[_path_param("script_id")]),
+        f"{mk}/scripts/{{script_id}}/duplicate": mpost("Duplicate a script", "StreamDeckScript", code="201", parameters=[_path_param("script_id")]),
+        f"{mk}/scripts/{{script_id}}/delete": mpost("Delete an unassigned script", "StreamDeckLifecycleResponse", parameters=[_path_param("script_id")]),
+    })
+    return paths
+
 
 def _artwork_search_params() -> Iterable[Schema]:
     return [

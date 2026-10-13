@@ -113,6 +113,12 @@ def build_integration_registry(settings: Any, repository: Any) -> IntegrationReg
     except ImportError:  # pragma: no cover - flat execution
         from integrations.streamdeck.manager import DESCRIPTOR as STREAMDECK, get_streamdeck_integration  # type: ignore
 
+    try:
+        from .media_keys.manager import DESCRIPTOR as MEDIA_KEYS, get_media_keys_integration
+    except ImportError:  # pragma: no cover - flat execution
+        from integrations.media_keys.manager import DESCRIPTOR as MEDIA_KEYS, get_media_keys_integration  # type: ignore
+
     registry = IntegrationRegistry()
     registry.register(STREAMDECK, lambda: get_streamdeck_integration(settings, repository))
+    registry.register(MEDIA_KEYS, lambda: get_media_keys_integration(settings, repository))
     return registry

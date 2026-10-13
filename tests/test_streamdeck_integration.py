@@ -149,8 +149,8 @@ class RegistryTests(unittest.TestCase):
         registry.register(IntegrationDescriptor('a', 'A', '', '', ''), lambda: 1 / 0)
         self.assertEqual(registry.cards()[0]['health'], 'error')
 
-    def test_shipped_registry_contains_only_streamdeck(self):
-        self.assertEqual(build_integration_registry(None, None).ids(), ['streamdeck'])
+    def test_shipped_registry_contains_the_reviewed_integrations(self):
+        self.assertEqual(build_integration_registry(None, None).ids(), ['streamdeck', 'media-keys'])
 
 
 class ConfigTests(TemporaryPaths):
