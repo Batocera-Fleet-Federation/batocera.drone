@@ -1385,6 +1385,40 @@
         "servers": []
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_162_mock_userdata_sqlite_pollution.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-162-mock-userdata-sqlite-pollution",
+      "name": "Issue #162 mocked userdata_root must not open SQLite in the checkout",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/storage/audit_store.py",
+          "app/device/notifications.py",
+          ".gitignore",
+          "tests/adversarial/test_issue_162_mock_userdata_sqlite_pollution.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

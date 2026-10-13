@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from os import PathLike
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -14,11 +15,13 @@ DATABASE_FILENAME = "rom_metadata_cache.sqlite3"
 PEER_ROUTE_KINDS = frozenset({"tailnet", "host", "ip"})
 
 
-def database_path(userdata_root: Path) -> Path:
+def database_path(userdata_root: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
-    return (userdata_root / "system" / "drone-app" / DATABASE_FILENAME).resolve()
+    if not isinstance(userdata_root, (str, Path)) and type(userdata_root).__module__ == "unittest.mock":
+        raise TypeError("userdata_root must be a filesystem path")
+    return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
 
 def database_path_for_legacy_file(path: Path) -> Path:

@@ -712,3 +712,10 @@ When unsure, choose the option that keeps:
 - migrations/schema versions current,
 - expensive scans out of request paths,
 - local state durable across restarts.
+# Database paths
+
+`state_store.database_path()` requires a real filesystem path for
+`userdata_root`. Tests that exercise database-backed code should pass a real
+temporary directory or configure `DRONE_STATE_DATABASE_FILE`; do not pass an
+unconfigured `Mock`/`MagicMock`, since it is not a filesystem path and must be
+rejected before SQLite is opened.
