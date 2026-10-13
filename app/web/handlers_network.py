@@ -9,6 +9,7 @@ import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -122,6 +123,12 @@ def _get_download_manager():
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import _get_download_manager as _impl  # type: ignore
     return _impl()
+
+
+def _transfer_batch_scope(manager, peer: dict):
+    """Open one transfer batch for a user action, when the manager supports batches."""
+    opener = getattr(type(manager), "transfer_batch", None)
+    return manager.transfer_batch(peer=peer) if opener else nullcontext()
 
 
 def _job_total_bytes(job: dict) -> int:
@@ -1450,19 +1457,20 @@ class HandlersNetworkMixin:
             self._send_json(503, {"error": "download manager unavailable"})
             return
         config = {"network_mode": "local_network"}
-        jobs = self._enqueue_local_asset(
-            manager,
-            config,
-            peer,
-            asset_type,
-            item,
-            default_system=str(payload.get("system") or ""),
-            include_artwork=include_artwork,
-            include_roms=include_roms,
-            overwrite_files=overwrite_files,
-            overwrite_artwork=overwrite_artwork,
-            artwork_only=artwork_only,
-        )
+        with _transfer_batch_scope(manager, peer):
+            jobs = self._enqueue_local_asset(
+                manager,
+                config,
+                peer,
+                asset_type,
+                item,
+                default_system=str(payload.get("system") or ""),
+                include_artwork=include_artwork,
+                include_roms=include_roms,
+                overwrite_files=overwrite_files,
+                overwrite_artwork=overwrite_artwork,
+                artwork_only=artwork_only,
+            )
         rom_skipped = asset_type == "roms" and not any(job.get("file_type") == "ROM" for job in jobs)
         rom_absent = False
         if asset_type == "roms" and not include_roms:
@@ -1628,11 +1636,14 @@ class HandlersNetworkMixin:
 
         # One state write for the whole request instead of one per queued job.
         batch = getattr(type(manager), "batch_persistence", None) and manager.batch_persistence
-        if dry_run or batch is None:
-            walk_all()
-        else:
-            with batch():
+        # One request is one user action: the bell gets a single started/finished pair for it.
+        transfer_scope = nullcontext() if dry_run else _transfer_batch_scope(manager, peer)
+        with transfer_scope:
+            if dry_run or batch is None:
                 walk_all()
+            else:
+                with batch():
+                    walk_all()
         if dry_run:
             # Preview only: nothing was enqueued, so no job list is returned.
             self._send_json(200, {

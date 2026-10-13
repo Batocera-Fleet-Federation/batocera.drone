@@ -276,6 +276,11 @@ underlying `audit_log` permanent trail, only the separate `notifications`
 inbox table. See the dedicated **drone-smtp-notifications** skill for the
 full schema and the 10 event types that populate this inbox.
 
+Asset transfers add one **started** and one **finished** entry per batch (a
+selection or bulk copy), not one per asset. Per-asset rows are audit-only and
+only feed the email digest. See `drone-smtp-notifications` → "Asset transfer
+batches".
+
 ## The Swarm page (top-level nav, not an admin tile)
 
 Fleet management lives on its own top-level nav item, `#admin/swarm`
