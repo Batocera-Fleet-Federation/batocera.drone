@@ -413,6 +413,38 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_safety.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-safety",
+      "name": "Issue #152 Media Keys hold confirmation, malformed state, and release boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "app/integrations/media_keys/manager.py",
+          "tests/adversarial/test_issue_152_media_keys_safety.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
