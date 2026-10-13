@@ -396,11 +396,63 @@ def _unexport_client(settings: Settings, address: str) -> Optional[str]:
     return errors[0] if errors else None
 
 
-def _cleanup_bind_mounts(settings: Settings) -> None:
+def _client_export_present(settings: Settings, address: str) -> Optional[bool]:
+    """Confirm whether a recorded client still has one of Drone's live exports.
+
+    ``exportfs -u`` can fail when a copied SQLite record describes an export
+    that exists only on the source machine. Treat that failure as harmless only
+    after a successful kernel export listing proves the exact grants absent.
+    ``None`` means the listing could not be trusted, so provisioning stays held.
+    """
+    exportfs = _find_command("exportfs")
+    if not exportfs:
+        return None
+    try:
+        result = _run([exportfs, "-s"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    paths = {str(path) for path, _options in _export_specs(settings)}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            return None
+        if fields[0] in paths and fields[1].split("(", 1)[0] == address:
+            return True
+    return False
+
+
+def _cleanup_bind_mounts(settings: Settings, *, best_effort: bool = True) -> None:
     root = export_root(settings)
     roms_export = root / "roms"
     for target in [*_mounted_descendants(roms_export), root / "bios"]:
-        _unmount_path(target, best_effort=True)
+        _unmount_path(target, best_effort=best_effort)
+
+
+def revoke_exports_for_identity_change(settings: Settings) -> None:
+    """Revoke live Drone exports before clone cleanup removes their ownership rows.
+
+    Keep the rows on failure so a journal retry still knows which clients to revoke.
+    The caller serializes identity replacement; the NFS state lock excludes local
+    authorization changes while the kernel and SQLite state are reconciled.
+    """
+    with _STATE_LOCK:
+        state = _load_state(settings)
+        addresses = {
+            str(address)
+            for record in state["peers"].values()
+            if isinstance(record, dict)
+            for address in record.get("addresses") or []
+        }
+        errors = []
+        for address in sorted(addresses):
+            error = _unexport_client(settings, address)
+            if error and _client_export_present(settings, address) is not False:
+                errors.append(f"{address}: {error}")
+        if errors:
+            raise RuntimeError(f"could not revoke inherited NFS export: {errors[0]}")
+        _cleanup_bind_mounts(settings, best_effort=False)
 
 
 def authorize_peer(settings: Settings, peer_id: str, observed_address: object = "") -> dict:

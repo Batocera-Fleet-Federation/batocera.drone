@@ -1735,6 +1735,31 @@ def _schemas() -> Dict[str, Schema]:
             {"status": _enum(["revoked", "not_found", "error"]), "peer_id": _string(), "status_detail": _string()},
             ("status", "peer_id"),
         ),
+        "IdentityStatusResponse": _object(
+            {
+                "state": _enum(["UNINITIALIZED", "VALIDATING", "CLONE_DETECTED", "PROVISIONING", "READY", "RECOVERY_REQUIRED"]),
+                "status": _string("identity_verified | new_installation_provisioned | clone_automatically_provisioned | identity_verification_unavailable | identity_recovery_required | identity_managed_externally"),
+                "swarm_networking_enabled": _boolean("False while identity is unresolved; no discovery, pairing or peer traffic runs"),
+                "device_id": _string(),
+                "hardware_verification": _enum(["verified", "unavailable"]),
+                "hardware": _object(description="Non-secret hardware evidence summary: fingerprint prefix, identifier kinds, architecture. Raw serials are never returned."),
+                "recovery": _object(description="Pending recovery reason and the administrator actions that can resolve it (keep | new), or null.") ,
+                "hardware_change_authorization": _object(description="Active pre-authorization for a planned hardware change, or null."),
+            },
+            ("state", "status", "swarm_networking_enabled"),
+            description="Clone-detection and identity-provisioning status for this Drone.",
+        ),
+        "IdentityActionRequest": _object(
+            {
+                "password": _string("The administrator's current password (required to authorize or resolve)."),
+                "action": _enum(["keep", "new"], "resolve only: keep this identity on the current hardware, or provision a new one"),
+                "hours": _integer("authorize-hardware-change only: how long the authorization stays valid (default 24, max 72)", minimum=1, maximum=72),
+            },
+        ),
+        "IdentityActionResponse": _object(
+            {"authorized": _boolean(), "cancelled": _boolean(), "action": _string(), "status": _string(), "restarting": _boolean()},
+            description="Result of an identity action; resolving a recovery restarts the Drone.",
+        ),
         "TailnetStatusResponse": _object(
             {
                 "installed": _boolean(description="tailscale binaries present under /userdata/system/tailscale"),
@@ -2772,6 +2797,10 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     error_codes=("400", "401", "403", "429", "500"),
                 )
             },
+            "/admin/identity/status": {"get": _operation("Drone identity, clone-detection and recovery status (admin session required)", {"200": _json_response("IdentityStatusResponse")}, tags=["admin", "identity"])},
+            "/admin/identity/authorize-hardware-change": {"post": _operation("Pre-authorize one planned hardware change so this identity is kept (password re-entry required)", {"200": _json_response("IdentityActionResponse")}, request_body=_json_request("IdentityActionRequest"), tags=["admin", "identity"], error_codes=("400", "401", "403", "415", "429", "500"))},
+            "/admin/identity/cancel-hardware-change": {"post": _operation("Cancel a pending hardware-change authorization", {"200": _json_response("IdentityActionResponse")}, request_body=_json_request("IdentityActionRequest", required=False), tags=["admin", "identity"])},
+            "/admin/identity/resolve": {"post": _operation("Resolve a pending identity recovery: keep this identity on the current hardware, or provision a new one (password re-entry required; restarts the Drone)", {"200": _json_response("IdentityActionResponse")}, request_body=_json_request("IdentityActionRequest"), tags=["admin", "identity"], error_codes=("400", "401", "403", "409", "415", "429", "500"))},
             "/admin/tailnet/status": {"get": _operation("Tailscale mesh status for the Swarm page onboarding card", {"200": _json_response("TailnetStatusResponse")}, tags=["admin", "local-network"])},
             "/admin/tailnet/enroll": {"post": _operation("Enroll this Drone in the tailnet with an auth key pasted in the UI", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
             "/admin/tailnet/install": {"post": _operation("Install or upgrade the Tailscale binaries and the DRONE_TAILNET service on this Drone (mode: ensure | install | update)", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetInstallRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},

@@ -1321,6 +1321,22 @@ except ImportError:
 
 
 try:
+    from .web.handlers_identity import HandlersIdentityMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_identity import HandlersIdentityMixin  # type: ignore
+
+
+try:
+    from .common import identity_provisioning as _identity
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from common import identity_provisioning as _identity  # type: ignore
+
+
+try:
     from .web.mcp_server import McpServerMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1328,7 +1344,7 @@ except ImportError:
     from web.mcp_server import McpServerMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersIntegrationsMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersIntegrationsMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1680,6 +1696,12 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         except Exception:
             der = None
         fingerprint = hashlib.sha256(der).hexdigest() if der else ""
+        if fingerprint and fingerprint == _identity.own_certificate_fingerprint(self.settings):
+            # A caller presenting *this* Drone's own identity certificate is a duplicate of it
+            # (e.g. a clone that was never reprovisioned). Isolate it; change no trust.
+            _identity.record_collision(self.settings, "peer-request-own-certificate")
+            self._send_json(409, {"error": "duplicate Drone identity detected"})
+            return False
         trusted = {
             str(peer.get("certificate_fingerprint") or "").strip().lower()
             for peer in _local_network.paired_peers(self.settings)
@@ -2453,6 +2475,12 @@ def _build_cast_http_handler(settings: Settings):
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
+    # Identity validation (main()) decides whether this Drone may take part in the swarm at
+    # all. While it is unresolved nothing peer-facing starts: no discovery, pairing, mTLS
+    # listener, sharing pollers, share replays or sync workers.
+    swarm_enabled = _identity.swarm_networking_allowed()
+    if not swarm_enabled:
+        print("[Identity] Swarm networking is held; starting the local admin surface only", file=sys.stderr, flush=True)
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2486,7 +2514,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         max_items=settings.json_cache_max_items,
         max_bytes=settings.json_cache_max_bytes,
     )
-    if _DOWNLOAD_MANAGER is None:
+    if _DOWNLOAD_MANAGER is None and swarm_enabled:
         _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
     if _TORRENT_MANAGER is None:
         _TORRENT_MANAGER = TorrentManager(settings)
@@ -2496,7 +2524,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # openvpn, waiting for it to daemonize) and must never delay the
         # server from accepting its first request.
         Thread(target=_vpn_manager.maybe_auto_connect, args=(settings,), name="drone-vpn-auto-connect", daemon=True).start()
-    if not _VPN_SHARING_POLLER_STARTED:
+    if not _VPN_SHARING_POLLER_STARTED and swarm_enabled:
         _VPN_SHARING_POLLER_STARTED = True
         # Backgrounded forever-loop: the only way to learn a peer revoked
         # sharing is to periodically ask it (Drones are outbound-only, no push
@@ -2509,29 +2537,29 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
-    if not _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED:
+    if not _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED and swarm_enabled:
         _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = True
         # Recreate source-side bind mounts and exact-peer exports after a
         # service or machine restart. This is independent of client mount
         # replay and never delays the HTTP listeners from becoming available.
         Thread(target=_nfs_export_manager.restore_exports, args=(settings,), name="drone-nfs-export-boot-replay", daemon=True).start()
-    if not _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED:
+    if not _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED and swarm_enabled:
         _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: mounting
         # a peer's network filesystem can block for real time and must never delay the
         # server accepting its first request.
         Thread(target=_network_share_manager.maybe_reconnect_all_on_boot, args=(settings,), name="drone-network-share-boot-replay", daemon=True).start()
-    if not _NETWORK_SHARE_WATCHDOG_STARTED:
+    if not _NETWORK_SHARE_WATCHDOG_STARTED and swarm_enabled:
         _NETWORK_SHARE_WATCHDOG_STARTED = True
         # Backgrounded forever-loop: re-mounts a referenced peer's share if it
         # drops, same shape as VPN's self-heal poller above.
         Thread(target=_network_share_manager.run_watchdog_poller, args=(settings,), name="drone-network-share-watchdog", daemon=True).start()
-    if not _SMTP_BOOTSTRAP_ATTEMPTED:
+    if not _SMTP_BOOTSTRAP_ATTEMPTED and swarm_enabled:
         _SMTP_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a
         # peer fetch must never delay the server accepting its first request.
         Thread(target=_smtp_manager.maybe_bootstrap_smtp, args=(settings,), name="drone-smtp-bootstrap", daemon=True).start()
-    if not _SMTP_SHARING_POLLER_STARTED:
+    if not _SMTP_SHARING_POLLER_STARTED and swarm_enabled:
         _SMTP_SHARING_POLLER_STARTED = True
         # Same reasoning as VPN's sharing-revocation poller: outbound-only,
         # no push channel, so revocation can only be learned by periodically asking.
@@ -2541,13 +2569,13 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # One API-owned worker handles all outbound mail and satellite relay;
         # browsers/native clients only enqueue jobs through request handlers.
         Thread(target=_smtp_manager.run_audit_email_digest_poller, args=(settings,), name="drone-outbound-mail-worker", daemon=True).start()
-    if not _TAILNET_BOOTSTRAP_ATTEMPTED:
+    if not _TAILNET_BOOTSTRAP_ATTEMPTED and swarm_enabled:
         _TAILNET_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a
         # peer fetch (and the tailscale CLI call it feeds into) must never
         # delay the server accepting its first request.
         Thread(target=_tailnet_service.maybe_bootstrap_tailnet, args=(settings,), name="drone-tailnet-bootstrap", daemon=True).start()
-    if not _TAILNET_SHARING_POLLER_STARTED:
+    if not _TAILNET_SHARING_POLLER_STARTED and swarm_enabled:
         _TAILNET_SHARING_POLLER_STARTED = True
         # Same reasoning as VPN's sharing-revocation poller: outbound-only,
         # no push channel, so revocation can only be learned by periodically
@@ -2612,9 +2640,10 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     # rather than silently going P2P-dark behind a healthy-looking browser UI.
     peer_mtls_server = None
     try:
-        peer_mtls_server = DroneThreadingHTTPServer(("0.0.0.0", settings.peer_mtls_port), handler_factory)
-        peer_mtls_server.auth = auth  # type: ignore[attr-defined]
-        _apply_server_tls(settings, peer_mtls_server, peer_mtls=True)
+        if swarm_enabled:
+            peer_mtls_server = DroneThreadingHTTPServer(("0.0.0.0", settings.peer_mtls_port), handler_factory)
+            peer_mtls_server.auth = auth  # type: ignore[attr-defined]
+            _apply_server_tls(settings, peer_mtls_server, peer_mtls=True)
     except OSError as error:
         print(
             f"Drone peer-mTLS listener skipped on port {settings.peer_mtls_port} (falling back to "
@@ -2624,15 +2653,16 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         )
         peer_mtls_server = None
     else:
-        peer_mtls_thread = Thread(
-            target=peer_mtls_server.serve_forever,
-            name="drone-peer-mtls-listener",
-            daemon=True,
-        )
-        peer_mtls_thread.start()
-        peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
-        scheme = "http" if settings.http_only else "https"
-        print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
+        if peer_mtls_server is not None:
+            peer_mtls_thread = Thread(
+                target=peer_mtls_server.serve_forever,
+                name="drone-peer-mtls-listener",
+                daemon=True,
+            )
+            peer_mtls_thread.start()
+            peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
+            scheme = "http" if settings.http_only else "https"
+            print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
 
     # Plain-HTTP -> HTTPS redirect listener. Skipped in http_only mode (there is
     # no HTTPS to redirect to there) and when disabled via http_redirect_port=0.
@@ -2706,7 +2736,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if peer_mtls_server is not None:
         peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
 
-    if not _LOCAL_NETWORK_WORKERS_STARTED:
+    if not _LOCAL_NETWORK_WORKERS_STARTED and swarm_enabled:
         _start_local_network_workers(settings)
         _LOCAL_NETWORK_WORKERS_STARTED = True
     if not _AUTOMATION_POLLER_STARTED:
@@ -2744,6 +2774,9 @@ def main() -> None:
             seed_mock_userdata(settings.userdata_root)
             print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
         _configure_rotating_logs(settings)
+        # Clone detection / identity provisioning: must finish before any listener, poller,
+        # discovery or peer worker exists (see common/identity_provisioning.py).
+        settings = _identity.ensure_identity(settings).settings
         server = create_server(settings)
         _start_drone_auto_update_poller(settings)
         # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.

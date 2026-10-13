@@ -432,6 +432,127 @@ def ensure_tailnet_networking(settings: Optional[Any] = None) -> None:
     _repair_tailnet_data_path()
 
 
+def _tailscaled_answering() -> bool:
+    try:
+        return _run_cli(["status", "--json"], timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _stop_tailscaled() -> bool:
+    """Stop the local daemon via its service script; True once it no longer answers."""
+    if not _tailscaled_answering():
+        return True
+    if TAILNET_SERVICE.exists():
+        try:
+            subprocess.run(
+                ["sh", str(TAILNET_SERVICE), "stop"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for _ in range(5):
+        if not _tailscaled_answering():
+            return True
+        time.sleep(1)
+    return False
+
+
+def reset_local_node_identity() -> dict:
+    """Make a cloned disk stop presenting the source Drone's Tailscale node identity.
+
+    Only the *local* daemon state is removed (daemon stopped first, so it cannot
+    rewrite the old node key on exit). Deliberately no ``tailscale logout``: that
+    would deregister the node key server-side, and a clone shares that key with the
+    original Drone, whose tailnet authorization must stay untouched. The daemon is
+    restarted afterwards and comes up unenrolled (NeedsLogin); enrolling requires a
+    fresh auth key from an administrator and is never attempted automatically.
+
+    Returns ``{"status": ...}`` where status is one of ``not_installed``,
+    ``reset`` (state removed, enrollment required), ``held`` (the daemon could not
+    be stopped or the state not fully removed; the node was taken down with
+    ``tailscale down`` and the reset is retried on the next start) or ``error``
+    (neither a reset nor a confirmed hold was possible).
+    """
+    if not TAILSCALE_CLI.exists():
+        return {"status": "not_installed"}
+    state_dir = TAILSCALE_DIR / "state"
+    stopped = _stop_tailscaled()
+    if not stopped:
+        if not hold_local_node():
+            # Neither cleared nor offline: the inherited node may still be live.
+            return {"status": "error", "detail": "tailscaled could not be stopped or taken down"}
+        return {"status": "held", "detail": "tailscaled could not be stopped; node taken down"}
+    removed = 0
+    try:
+        entries = list(state_dir.iterdir()) if state_dir.is_dir() else []
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                for child in entry.rglob("*"):
+                    if child.is_file() or child.is_symlink():
+                        child.unlink()
+                removed += 1
+            else:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    remaining = []
+    try:
+        remaining = [entry for entry in state_dir.iterdir() if entry.is_file()] if state_dir.is_dir() else []
+    except OSError:
+        pass
+    if remaining:
+        if not hold_local_node():
+            return {"status": "error", "detail": "tailscale state could not be removed or taken down"}
+        return {"status": "held", "detail": "tailscale state could not be fully removed; node taken down"}
+    daemon_error = _start_daemon_if_needed()
+    return {
+        "status": "reset",
+        "state_entries_removed": removed,
+        "enrollment_required": True,
+        "daemon": daemon_error or "started",
+    }
+
+
+def hold_local_node() -> bool:
+    """Take the (possibly inherited) node offline without logging it out of the tailnet."""
+    if not TAILSCALE_CLI.exists():
+        return False
+    try:
+        if _run_cli(["down"], timeout=15).returncode == 0:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # A failed `down` must not leave a copied node key serving traffic during
+    # recovery. Stopping only the local daemon does not revoke the original.
+    return _stop_tailscaled()
+
+
+def release_local_node() -> bool:
+    """Bring a node previously taken down by ``hold_local_node`` back up (no re-auth)."""
+    if not TAILSCALE_CLI.exists():
+        return False
+    try:
+        return _run_cli(
+            [
+                "up",
+                f"--hostname={socket.gethostname().lower()}",
+                "--accept-dns=false",
+                "--netfilter-mode=off",
+                "--timeout=30s",
+            ],
+            timeout=45,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _start_daemon_if_needed() -> Optional[str]:
     """Best-effort DRONE_TAILNET service start; returns an error string or None."""
     try:

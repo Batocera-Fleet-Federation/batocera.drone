@@ -14,6 +14,7 @@ from threading import Thread
 from typing import Any, Callable, Optional
 
 try:
+    from ..common import identity_provisioning as _identity
     from ..device import notifications as _notifications
     from ..storage.state_store import (
         append_event,
@@ -25,6 +26,7 @@ try:
     )
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:
+    from common import identity_provisioning as _identity  # type: ignore
     from device import notifications as _notifications  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event,
@@ -214,10 +216,14 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     self_source = _is_self_source_ip(source_ip) if peer_id == own_id else False
     if peer_id == own_id and self_source:
         return None
-    identity_conflict = peer_id == own_id
+    claimed_fingerprint = str(payload.get("certificate_fingerprint") or "").strip().lower()
+    own_fingerprint = _identity.own_certificate_fingerprint(settings)
+    identity_conflict = peer_id == own_id or bool(own_fingerprint and claimed_fingerprint == own_fingerprint)
     storage_id = f"identity-conflict:{source_ip or peer_id}" if identity_conflict else peer_id
     peers = _load_peer_map(settings, "local_discovered_peers")
     existing = dict(peers.get(storage_id) or {})
+    if identity_conflict and not existing:
+        _identity.record_collision(settings, "discovery-duplicate-identity")
     scheme = str(payload.get("scheme") or "https")
     api_port = int(payload.get("api_port") or 443)
     peer_mtls_port = int(payload.get("peer_mtls_port") or api_port)
