@@ -2378,6 +2378,68 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_190_str_pathlike_acceptance.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-190-str-pathlike-acceptance",
+      "name": "Issue #190 open_database and legacy helper accept str and non-Path PathLike without AttributeError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_190_str_pathlike_acceptance.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_190_malformed_error_paths.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-190-malformed-error-paths",
+      "name": "Issue #190 malformed paths raise TypeError/OSError, never AttributeError, and do not open SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_190_malformed_error_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
