@@ -1655,6 +1655,42 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_spec_path_mock_pollution.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-spec-path-mock-pollution",
+      "name": "Issue #169 spec=Path and autospec mocks must not open the state DB under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/storage/audit_store.py",
+          "app/device/notifications.py",
+          "app/transfer/local_network.py",
+          "app/transfer/swarm_reset.py",
+          "app/storage/rom_metadata_store.py",
+          "tests/adversarial/test_issue_169_spec_path_mock_pollution.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
