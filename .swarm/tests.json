@@ -348,6 +348,40 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_146_transfer_batch_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-146-transfer-batch-boundaries",
+      "name": "Issue #146 transfer batch terminal, empty, digest, and upload peer boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/transfer_batch.py",
+          "app/transfer/download_manager.py",
+          "app/device/notifications.py",
+          "app/storage/audit_store.py",
+          "tests/adversarial/test_issue_146_transfer_batch_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
