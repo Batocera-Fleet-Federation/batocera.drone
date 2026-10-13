@@ -54,7 +54,7 @@ class HandlersVpnMixin:
 
     def _handle_admin_vpn_connect(self) -> None:
         result = _vpn.connect(self.settings)
-        status_code = 400 if result.get("status") == "error" else 200
+        status_code = 409 if result.get("identity_held") else 400 if result.get("status") == "error" else 200
         self._send_json(status_code, result)
 
     def _handle_admin_vpn_disconnect(self) -> None:
@@ -64,7 +64,7 @@ class HandlersVpnMixin:
 
     def _handle_admin_vpn_reconnect(self) -> None:
         result = _vpn.reconnect(self.settings)
-        status_code = 400 if result.get("status") == "error" else 200
+        status_code = 409 if result.get("identity_held") else 400 if result.get("status") == "error" else 200
         self._send_json(status_code, result)
 
     def _handle_admin_vpn_verify_ip(self) -> None:

@@ -1331,5 +1331,64 @@ class SetSelfHealEnabledTests(unittest.TestCase):
             self.assertTrue(result["self_heal_enabled"])
 
 
+class IdentityHoldTests(unittest.TestCase):
+    """While swarm_networking_allowed() is False no path may raise the tunnel."""
+
+    def _ready(self, tmp: str) -> Settings:
+        settings = _build_settings(self, Path(tmp))
+        vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+        vpn_manager.save_credentials(settings, "user", "pass")
+        return settings
+
+    def test_connect_refused_without_spawning_openvpn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False), \
+                    mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager.subprocess, "run") as run:
+                result = vpn_manager.connect(settings)
+            run.assert_not_called()
+            self.assertEqual(result["status"], "error")
+            self.assertTrue(result["identity_held"])
+
+    def test_reconnect_refused_without_disconnecting_existing_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False), \
+                    mock.patch.object(vpn_manager, "disconnect") as disconnect, \
+                    mock.patch.object(vpn_manager, "connect") as connect:
+                result = vpn_manager.reconnect(settings)
+            disconnect.assert_not_called()
+            connect.assert_not_called()
+            self.assertTrue(result["identity_held"])
+
+    def test_auto_connect_skips_bootstrap_and_connect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False), \
+                    mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "bootstrap_vpn_from_swarm") as bootstrap, \
+                    mock.patch.object(vpn_manager.subprocess, "run") as run:
+                vpn_manager.maybe_auto_connect(settings)
+            bootstrap.assert_not_called()
+            run.assert_not_called()
+
+    def test_self_heal_does_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False), \
+                    mock.patch.object(vpn_manager, "status") as status, \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            status.assert_not_called()
+            reconnect.assert_not_called()
+
+    def test_disconnect_still_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False):
+                self.assertEqual(vpn_manager.disconnect(settings)["status"], "not_running")
+
+
 if __name__ == "__main__":
     unittest.main()
