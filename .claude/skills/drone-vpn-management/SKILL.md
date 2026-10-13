@@ -436,6 +436,18 @@ own startup. Do not build a second boot-ordering-dependent OS service for
 this; it would be strictly more complex and less reliable than reusing the
 existing one.
 
+### Identity hold: nothing raises the tunnel while swarm networking is held
+
+When `identity_provisioning.swarm_networking_allowed()` is False
+(`RECOVERY_REQUIRED`), `create_server()` starts no VPN pollers, **and** the
+manager itself refuses: `connect()` returns `{"status": "error",
+"identity_held": True, ...}` (every connect path funnels through it),
+`reconnect()` refuses *before* disconnecting (so a held Drone doesn't drop a
+tunnel it can't restore), and `maybe_auto_connect()` / `check_and_self_heal()`
+return early. `POST /admin/vpn/connect|reconnect` map `identity_held` to
+**409**. `disconnect()` stays allowed. Keep the check inside `vpn_manager`, not
+in individual callers, so new entry points inherit it.
+
 ### Swarm bootstrap: a fresh/unconfigured drone adopts a connected peer's shared VPN
 
 Added 2026-07-28, same day as the toggle removal above, per an explicit user

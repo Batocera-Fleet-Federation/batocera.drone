@@ -165,6 +165,17 @@ class VpnConnectDisconnectHandlerTests(unittest.TestCase):
                 handler._handle_admin_vpn_connect()
             self.assertEqual(handler.response[0], 200)
 
+    def test_connect_and_reconnect_held_identity_is_409(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "_swarm_networking_allowed", return_value=False):
+                for name in ("_handle_admin_vpn_connect", "_handle_admin_vpn_reconnect"):
+                    handler = _handler(settings)
+                    getattr(handler, name)()
+                    status, payload = handler.response
+                    self.assertEqual(status, 409)
+                    self.assertTrue(payload["identity_held"])
+
     def test_disconnect_not_running_is_200(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
