@@ -48,8 +48,10 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
 
 
 SCRIPT_TIMEOUT_SECONDS = 30.0
-# Key auto-repeat events further apart than this are separate presses.
-HOLD_GAP_SECONDS = 1.0
+# Kernel auto-repeat: one initial-delay gap, then a rapid stream. Events further
+# apart than these are separate presses, so deliberate taps never add up to a hold.
+HOLD_FIRST_GAP_SECONDS = 0.75
+HOLD_REPEAT_GAP_SECONDS = 0.5
 
 
 def log_media_key(event: str, **fields: Any) -> None:
@@ -112,13 +114,17 @@ class HoldGate:
             started = timestamp(entry.get("start")) if isinstance(entry, dict) else None
             # Corrupt persisted data starts a fresh window. Never let malformed,
             # infinite, or future timestamps satisfy a dangerous hold.
+            repeats = entry.get("repeats") if isinstance(entry, dict) else None
             invalid = (last is None or started is None or last > now or started > now or started > last
-                       or not isinstance(entry, dict) or not isinstance(entry.get("fired"), bool))
-            if not isinstance(entry, dict) or invalid or now - last > HOLD_GAP_SECONDS:
-                entry = {"start": now, "last": now, "fired": False}
+                       or not isinstance(entry, dict) or not isinstance(entry.get("fired"), bool)
+                       or isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 0)
+            max_gap = HOLD_FIRST_GAP_SECONDS if repeats == 0 else HOLD_REPEAT_GAP_SECONDS
+            if not isinstance(entry, dict) or invalid or now - last > max_gap:
+                entry = {"start": now, "last": now, "fired": False, "repeats": 0}
                 outcome = "holding"
             else:
                 entry["last"] = now
+                entry["repeats"] = repeats + 1
                 if entry.get("fired"):
                     outcome = "fired"
                 elif now - started >= seconds:

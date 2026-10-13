@@ -287,7 +287,7 @@ class HandlersIntegrationsMixin:
             self._send_json(200, manager.set_binding(sub[1], body, requested_by=actor))
         elif len(sub) == 3 and sub[0] == "bindings" and sub[2] == "test":
             result = manager.test_binding(sub[1], body, requested_by=actor)
-            self._send_json(200 if result.get("status") == "ok" else 409, result)
+            self._send_json(200 if result.get("status") in ("ok", "holding") else 409, result)
         elif sub == ["scripts"]:
             self._send_json(201, manager.scripts.create(body))
         elif len(sub) == 3 and sub[0] == "scripts" and sub[2] == "update":

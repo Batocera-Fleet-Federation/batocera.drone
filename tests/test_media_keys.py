@@ -282,8 +282,9 @@ class ManagerLifecycleTests(Base):
         with self.assertRaises(ValueError):
             manager.test_binding("reboot", {})
         control = manager.control
-        self.assertEqual(manager.test_binding("reboot", {"confirm": True})["status"], "ok")
-        self.assertEqual(control.calls, ["reboot"])
+        # A single confirm is only hold progress; the reboot needs a sustained hold.
+        self.assertEqual(manager.test_binding("reboot", {"confirm": True})["status"], "holding")
+        self.assertEqual(control.calls, [])
         self.assertEqual(manager.test_binding("volume-up", {})["status"], "ok")
 
     def test_status_reports_bindings_and_last_press(self):
