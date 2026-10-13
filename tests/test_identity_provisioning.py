@@ -228,6 +228,30 @@ class FirstInstallAndRebootTests(ProvisioningTestBase):
             self.install()
         self.assertEqual(identity._binding_path(first).read_bytes(), binding)
 
+    def test_fresh_installs_on_one_host_do_not_share_the_nic_derived_device_id(self) -> None:
+        host_mac = "5e:98:ab:b9:e3:8b"
+        first_root, second_root = self.tmp / "install-1", self.tmp / "install-2"
+        first_root.mkdir()
+        second_root.mkdir()
+        with mock.patch("app.common.device_identity._physical_mac_candidates", return_value=[host_mac]):
+            first = settings_for(first_root)
+            second = settings_for(second_root)
+        self.assertNotEqual(first.device_id, host_mac)
+        self.assertNotEqual(second.device_id, host_mac)
+        self.assertNotEqual(first.device_id, second.device_id)
+        identity.ensure_identity(first, provider_for(self.hw_a))
+        identity.ensure_identity(second, provider_for(self.hw_a))
+        self.assertEqual(read_binding(first)["device_id"], first.device_id)
+        self.assertEqual(read_binding(second)["device_id"], second.device_id)
+        self.assertNotEqual(read_binding(first)["device_id"], read_binding(second)["device_id"])
+
+    def test_pinned_device_id_survives_first_installation(self) -> None:
+        settings = settings_for(self.root, DRONE_DEVICE_ID="pinned-drone-9")
+        with mock.patch.dict("os.environ", {"DRONE_DEVICE_ID": "pinned-drone-9"}):
+            result = identity.ensure_identity(settings, provider_for(self.hw_a))
+        self.assertEqual(result.settings.device_id, "pinned-drone-9")
+        self.assertEqual(read_binding(settings)["device_id"], "pinned-drone-9")
+
     def test_generic_hardware_ids_are_not_treated_as_unique(self) -> None:
         generic = x86_tree(self.tmp / "hw-generic", uuid="03000200-0400-0500-0006-000700080009", board="Default string")
         settings, result = self.install(generic)

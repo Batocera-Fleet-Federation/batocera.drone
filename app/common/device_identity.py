@@ -1,16 +1,17 @@
 """Stable per-device machine identity for the Drone.
 
-Extracted from ``drone_api.py``. This Drone's own device id is derived from the first
-physical NIC MAC (virtual interfaces such as docker/veth/wg are skipped and
-locally-administered MACs de-prioritised), then persisted under ``USERDATA_ROOT``
-so it stays stable across reboots and NIC enumeration order; if no physical NIC is
-found it falls back to ``uuid.getnode()``.
+Extracted from ``drone_api.py``. This Drone's own device id is a random, locally
+administered, MAC-shaped value generated on first boot (never the NIC's MAC, so two
+installs on one host do not share it), then persisted under ``USERDATA_ROOT`` so it stays
+stable across reboots. Installations that already persisted an id keep it. If the id
+cannot be persisted, the physical NIC MAC (or ``uuid.getnode()``) is used as before.
 
 Pure stdlib, no Drone-internal dependencies.
 """
 
 import os
 import re
+import secrets
 import uuid
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -80,17 +81,25 @@ def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
         return None
 
 
-def _write_persisted_machine_id(userdata_root: Path, value: str) -> None:
+def _write_persisted_machine_id(userdata_root: Path, value: str) -> bool:
     normalized = _normalize_device_id(value)
     if not normalized:
-        return
+        return False
     try:
         path = _device_id_path(userdata_root)
         if not path.parent.exists():
-            return
+            return False
         path.write_text(f"{normalized}\n", encoding="utf-8")
     except OSError:
-        return
+        return False
+    return True
+
+
+def random_device_id() -> str:
+    """A random, locally administered, MAC-shaped logical id (not derived from the NIC)."""
+    octets = bytearray(secrets.token_bytes(6))
+    octets[0] = (octets[0] | 0x02) & 0xFE
+    return ":".join(f"{octet:02x}" for octet in octets)
 
 
 def _interface_priority(name: str, has_device: bool, mac: str) -> Tuple[int, int, str]:
@@ -133,9 +142,18 @@ def _machine_id(userdata_root: Optional[Path] = None) -> str:
     persisted = _read_persisted_machine_id(userdata_root)
     if persisted:
         return persisted
-    generated = next(iter(_physical_mac_candidates()), None) or _runtime_machine_id()
-    _write_persisted_machine_id(userdata_root, generated)
-    return generated
+    # The first boot must not adopt the NIC's MAC: installs on one host would share it and
+    # refuse each other as "this Drone itself". The random id is persisted before use so
+    # every later start agrees. If it cannot be persisted, fall back to the NIC-derived id
+    # instead of one that would change on every start.
+    generated = random_device_id()
+    try:
+        _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    if _write_persisted_machine_id(userdata_root, generated):
+        return generated
+    return next(iter(_physical_mac_candidates()), None) or _runtime_machine_id()
 
 
 def _fake_machine_id() -> str:
