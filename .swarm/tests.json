@@ -676,6 +676,37 @@
         "-s",
         "tests/adversarial/security",
         "-p",
+        "test_issue_191_discovery_packet_type.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-191-discovery-packet-type",
+      "name": "Issue #191 malformed LAN announcement must not terminate discovery",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_191_discovery_packet_type.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
         "test_issue_155_hardlinked_lock_chown.py"
       ],
       "disruptive": false,
