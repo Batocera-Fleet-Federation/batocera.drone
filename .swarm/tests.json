@@ -510,6 +510,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_fast_taps.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-fast-taps",
+      "name": "Issue #152 Media Keys rapid separate taps cannot accumulate into hold confirmation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "tests/adversarial/test_issue_152_media_keys_fast_taps.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
