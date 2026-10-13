@@ -1890,14 +1890,17 @@ class SettingsTests(unittest.TestCase):
             }
             with mock.patch.object(manager._selector, "fetch", return_value=completed), \
                     mock.patch("app.transfer.download_manager._notifications.record_event") as record_event, \
+                    mock.patch("app.transfer.download_manager._notifications.record_audit_event") as record_audit_event, \
                     mock.patch("app.transfer.download_manager._kick_asset_metadata_sync_after_download"):
                 manager._run_job(queued["job_id"])
 
-            record_event.assert_called_once()
-            self.assertEqual(record_event.call_args.args[1], "asset_downloaded")
-            self.assertEqual(record_event.call_args.args[3], "Game.zip")
+            # Per-asset rows are audit-only: the bell gets batch entries, not one per asset.
+            record_event.assert_not_called()
+            record_audit_event.assert_called_once()
+            self.assertEqual(record_audit_event.call_args.args[1], "asset_downloaded")
+            self.assertEqual(record_audit_event.call_args.args[3], "Game.zip")
             # The digest summarizes by system and size, so both must be recorded.
-            details = record_event.call_args.kwargs["details"]
+            details = record_audit_event.call_args.kwargs["details"]
             self.assertEqual(details["system"], "snes")
             self.assertEqual(details["size_bytes"], 123)
 

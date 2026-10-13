@@ -64,7 +64,8 @@ working. Layout:
   swarm_membership (approved-pair roster gossip and removal tombstones over already-paired peers),
   peer_workers (public-IP probe + health-check/local-net worker threads), peer_download
   (`_download_*_from_peer` direct tier + state helpers), download_manager
-  (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), download_errors
+  (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), transfer_batch
+  (per-batch started/finished bell entries; per-asset rows are audit-only), download_errors
   (`DownloadCancelled`), transfer_files, local_network, network_identity,
   drone_network, drone_tls (`DroneCertificateManager`)
 - `integrations/` — the small static registry for optional local extensions. Stream

@@ -51,6 +51,11 @@ EVENT_TYPES = (
 # listing one line per asset. Every other type is listed line by line.
 ASSET_EVENT_TYPES = ("asset_downloaded", "asset_uploaded")
 
+# Bell-only stage entries for a whole transfer batch (see transfer/transfer_batch.py).
+# Not in EVENT_TYPES: they have no SMTP toggle, and their audit rows are stamped as
+# already emailed so the digest never picks them up.
+BATCH_EVENT_TYPES = ("asset_transfer_started", "asset_transfer_finished")
+
 EVENT_TYPE_LABELS = {
     "vpn_connected": "VPN connected",
     "vpn_disconnected": "VPN disconnected",
@@ -86,10 +91,48 @@ def record_event(
     callers should not depend on the return value for anything but an
     optional log line; this must never raise.
     """
-    if event_type not in EVENT_TYPES:
+    if event_type not in EVENT_TYPES and event_type not in BATCH_EVENT_TYPES:
         _LOG.warning("record_event called with unknown event_type=%r", event_type)
+    return _insert(
+        settings,
+        event_type,
+        title,
+        message,
+        details,
+        notify=True,
+        digest=event_type not in BATCH_EVENT_TYPES,
+    )
+
+
+def record_audit_event(
+    settings: Any,
+    event_type: str,
+    title: str,
+    message: str = "",
+    details: Optional[dict] = None,
+) -> Optional[dict]:
+    """Log ``event_type`` to the audit trail only, with no bell entry.
+
+    Per-asset transfers use this: the digest still counts each one, while the
+    bell gets a single started/finished pair per batch. Never raises.
+    """
+    return _insert(settings, event_type, title, message, details, notify=False, digest=True)
+
+
+def _insert(
+    settings: Any,
+    event_type: str,
+    title: str,
+    message: str,
+    details: Optional[dict],
+    *,
+    notify: bool,
+    digest: bool,
+) -> Optional[dict]:
     try:
-        return _audit_store.insert_event(settings, event_type, title, message=message, details=details)
+        return _audit_store.insert_event(
+            settings, event_type, title, message=message, details=details, notify=notify, digest=digest
+        )
     except Exception:
         _LOG.exception("failed to record audit event event_type=%s", event_type)
         return None

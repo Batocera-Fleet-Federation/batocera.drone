@@ -7,7 +7,8 @@ Two tables, deliberately kept separate despite being written together by
   (``device/smtp_manager.py``), which marks rows ``emailed_at`` once included
   in a sent digest. Never touched by a user clearing notifications.
 * ``notifications`` -- the UI-facing inbox (bell icon dropdown). One row per
-  audit event, linked via ``audit_log_id``, with its own ``read_at`` state.
+  bell-visible audit event, linked via ``audit_log_id``, with its own ``read_at``
+  state. Per-asset transfer rows are audit-only; the bell gets batch entries.
   Rows here are hard-deleted when a user clears them -- that must never
   reach back into ``audit_log``, which is the trail the email pipeline
   depends on.
@@ -132,28 +133,38 @@ def insert_event(
     title: str,
     message: str = "",
     details: Optional[dict] = None,
+    *,
+    notify: bool = True,
+    digest: bool = True,
 ) -> dict:
-    """Insert one audit_log row and its linked notifications row, atomically."""
+    """Insert one audit_log row, and its linked notifications row when ``notify``.
+
+    ``digest=False`` stamps the audit row as already emailed, so the digest never
+    selects it and retention can prune it. Used for bell-only batch entries.
+    """
     event_type = str(event_type or "").strip()
     if not event_type:
         raise ValueError("event_type is required")
     title = str(title or "").strip() or event_type
     message = str(message or "")
     created_at = _now()
+    emailed_at = None if digest else created_at
     details_json = json.dumps(details, sort_keys=True, default=str) if details else None
     with _open(settings.userdata_root) as connection:
         cursor = connection.execute(
             "INSERT INTO audit_log (event_type, title, message, details, created_at, emailed_at) "
-            "VALUES (?, ?, ?, ?, ?, NULL)",
-            (event_type, title, message, details_json, created_at),
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (event_type, title, message, details_json, created_at, emailed_at),
         )
         audit_log_id = cursor.lastrowid
-        notification_cursor = connection.execute(
-            "INSERT INTO notifications (audit_log_id, event_type, title, message, created_at, read_at) "
-            "VALUES (?, ?, ?, ?, ?, NULL)",
-            (audit_log_id, event_type, title, message, created_at),
-        )
-        notification_id = notification_cursor.lastrowid
+        notification_id = None
+        if notify:
+            notification_cursor = connection.execute(
+                "INSERT INTO notifications (audit_log_id, event_type, title, message, created_at, read_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL)",
+                (audit_log_id, event_type, title, message, created_at),
+            )
+            notification_id = notification_cursor.lastrowid
     return {
         "id": notification_id,
         "audit_log_id": audit_log_id,
