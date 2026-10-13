@@ -31,14 +31,25 @@ def _is_mock(value: object) -> bool:
     return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
 
 
+def _require_filesystem_path(value: object, label: str) -> None:
+    """Reject unittest mocks and non-path values before SQLite can see them.
+
+    ``str(mock)`` is a ``<MagicMock ...>`` repr, which SQLite would happily treat as a
+    relative filename. Mocks are checked first because a spec'd mock can also satisfy
+    ``os.PathLike``.
+    """
+    if _is_mock(value):
+        raise TypeError(f"{label} must be a filesystem path")
+    if not isinstance(value, (str, os.PathLike)):
+        raise TypeError(f"{label} must be a filesystem path")
+
+
 def database_path(userdata_root: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
 
-    # Mock subclasses can impersonate concrete path classes via spec/spec_set.
-    if _is_mock(userdata_root):
-        raise TypeError("userdata_root must be a filesystem path")
+    _require_filesystem_path(userdata_root, "userdata_root")
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
 
@@ -46,10 +57,12 @@ def database_path_for_legacy_file(path: Path) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
+    _require_filesystem_path(path, "path")
     return path.resolve().parent / DATABASE_FILENAME
 
 
 def open_database(path: Path) -> sqlite3.Connection:
+    _require_filesystem_path(path, "database path")
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path), timeout=30)
     try:
