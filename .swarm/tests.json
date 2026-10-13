@@ -1621,6 +1621,40 @@
         "servers": []
       },
       "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_165_held_identity_vpn_startup.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-165-held-identity-vpn-startup",
+      "name": "Issue #165 held identity must not start VPN auto-connect or self-heal",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/device/vpn_manager.py",
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_165_held_identity_vpn_startup.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
