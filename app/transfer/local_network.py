@@ -507,12 +507,14 @@ def start_discovery_worker(
             try:
                 raw, address = sock.recvfrom(65535)
                 payload = json.loads(raw.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    continue
                 peer = record_discovered_peer(settings, payload, address[0])
                 if peer and on_discovery:
                     on_discovery(peer)
             except socket.timeout:
                 continue
-            except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
+            except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error, AttributeError, TypeError):
                 continue
         if sock is not None:
             sock.close()
