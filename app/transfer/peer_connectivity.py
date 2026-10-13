@@ -383,7 +383,7 @@ def _local_pair_peer(
     try:
         from . import swarm_membership
     except ImportError:  # pragma: no cover - direct script execution fallback
-        import swarm_membership  # type: ignore
+        from transfer import swarm_membership  # type: ignore
     swarm_membership.record_approved_member(settings, stored)
     try:
         swarm_membership.propagate_membership(settings)

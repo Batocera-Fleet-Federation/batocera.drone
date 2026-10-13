@@ -342,7 +342,7 @@ def forget_peer(settings: Any, peer_id: str, *, publish_membership: bool = True)
         try:
             from . import swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
-            import swarm_membership  # type: ignore
+            from transfer import swarm_membership  # type: ignore
 
         swarm_membership.record_local_removal(settings, normalized, previous if isinstance(previous, dict) else {})
     return removed
