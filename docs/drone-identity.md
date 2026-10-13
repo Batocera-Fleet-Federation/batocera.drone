@@ -126,8 +126,9 @@ health checks, the peer route cache, sync activity, tailnet "forgotten peers", n
 and NFS-export authorizations/references, and queued downloads that name a source peer.
 Live NFS client exports are revoked and Drone-owned bind mounts are removed before
 their SQLite records are deleted; a failed revocation holds provisioning for retry.
-All browser sessions from the source are invalidated, so a fresh login is required
-on the new Drone while the configured login credentials remain available.
+All browser sessions and the MCP bearer token from the source are invalidated. A fresh
+login and a new MCP token are required on the new Drone, while the configured login
+credentials remain available. The source Drone's sessions and MCP token keep working.
 Credentials imported *from a peer* (VPN/SMTP) are revoked using the existing revocation
 path; our own VPN/SMTP config stays, with sharing switched off. The stored Tailscale auth key
 is cleared.

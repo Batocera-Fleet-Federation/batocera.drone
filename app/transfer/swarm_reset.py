@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path, open_database  # type: ignore
 
-# app_state namespaces that exist only because of the inherited swarm identity.
+# app_state namespaces that must not be inherited by a newly provisioned identity.
 IDENTITY_BOUND_NAMESPACES = (
     "local_paired_peers",
     "local_discovered_peers",
@@ -32,6 +32,8 @@ IDENTITY_BOUND_NAMESPACES = (
     "network_reference_selection.json",
     "network_share_manager.json",
     "nfs_export_manager.json",
+    # This local API credential grants admin-level MCP access to its issuing Drone.
+    "mcp",
 )
 IDENTITY_BOUND_EVENT_NAMESPACES = ("local_sync_activity",)
 DOWNLOAD_QUEUE_NAMESPACE = "download_manager.json"
