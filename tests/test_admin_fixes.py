@@ -271,6 +271,23 @@ class InstalledFixAssetTests(unittest.TestCase):
         self.assertIn("Unplug some and relaunch.", second)
         self.assertIn("Details: Debug > Game Crashes.", second)
 
+    def test_details_pointer_survives_when_the_action_is_long(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
+        verdict["action"] = "Check the ROM, any required BIOS and this system's emulator settings, then relaunch."
+        for message in game_crash_notifier.build_messages("snes", "x.zip", verdict, 4, config):
+            self.assertLessEqual(len(message), game_crash_notifier.TOAST_MAX_CHARS)
+        second = game_crash_notifier.build_messages("snes", "x.zip", verdict, 4, config)[1]
+        self.assertTrue(second.endswith(" Details: Debug > Game Crashes."), second)
+        self.assertIn("...", second)
+
+    def test_default_memory_corruption_toasts_are_not_cut(self) -> None:
+        config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
+        verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
+        first, second = game_crash_notifier.build_messages("snes", "/userdata/roms/snes/Super Mario World.zip", verdict, 4, config)
+        self.assertEqual(first, "Super Mario World (snes) crashed: the emulator hit a memory-corruption error.")
+        self.assertEqual(second, "Unplug USB controllers or adapters and relaunch. Details: Debug > Game Crashes.")
+
     def test_controller_toast_omits_device_names_and_hostname(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
         verdict = game_crash_notifier.assess_launch("stack smashing detected", 5, "", config)
