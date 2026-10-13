@@ -382,6 +382,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_147_crash_toast_details_pointer.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-147-crash-toast-details-pointer",
+      "name": "Issue #147 crash toast action cap and details pointer acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/fix_assets/game_crash_notifier.py",
+          "tests/adversarial/test_issue_147_crash_toast_details_pointer.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1

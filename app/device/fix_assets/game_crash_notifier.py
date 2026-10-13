@@ -35,11 +35,12 @@ NOTIFY_URL = os.environ.get("DRONE_CRASH_NOTIFIER_URL", "http://127.0.0.1:1234/n
 
 # The launcher logs the emulator's whole stderr as ERROR even on a clean exit,
 # so only genuine crash text is matched, never the log level.
-UNPLUG_ACTION = "Try unplugging USB controllers or adapters, then relaunch."
+UNPLUG_ACTION = "Unplug USB controllers or adapters and relaunch."
+DETAILS_LINE = "Details: Debug > Game Crashes."
 UNPLUG_SOME_ACTION = "Unplug some and relaunch."
 TOAST_MAX_CHARS = 80
 CRASH_SIGNATURES = (
-    (r"stack smashing detected", "the emulator aborted with a memory-corruption error", UNPLUG_ACTION),
+    (r"stack smashing detected", "the emulator hit a memory-corruption error", UNPLUG_ACTION),
     (r"segmentation fault|SIGSEGV", "the emulator hit a segmentation fault", UNPLUG_ACTION),
     (r"core dumped", "the emulator crashed and dumped core", UNPLUG_ACTION),
     (r"\bAborted\b|SIGABRT", "the emulator aborted unexpectedly", UNPLUG_ACTION),
@@ -338,11 +339,18 @@ def assess_launch(log_text, duration, dmesg_evidence, config, launcher_text=""):
     return {"crashed": False, "reason": "", "signature": "", "action": "", "short": short}
 
 
-def toast_text(text):
-    """Backstop length guard: EmulationStation toasts vanish quickly, so cut long text."""
-    if len(text) <= TOAST_MAX_CHARS:
-        return text
-    return text[:TOAST_MAX_CHARS - 3].rstrip() + "..."
+def toast_text(text, suffix=""):
+    """Backstop length guard: EmulationStation toasts vanish quickly, so cut long text.
+
+    A ``suffix`` (the details pointer) is never cut; only the text before it is.
+    """
+    joined = f"{text} {suffix}" if suffix else text
+    if len(joined) <= TOAST_MAX_CHARS:
+        return joined
+    if not suffix:
+        return joined[:TOAST_MAX_CHARS - 3].rstrip() + "..."
+    room = max(TOAST_MAX_CHARS - len(suffix) - len(" ..."), 0)
+    return f"{text[:room].rstrip()}... {suffix}"
 
 
 def build_messages(system, rom, verdict, joysticks, config):
@@ -356,7 +364,7 @@ def build_messages(system, rom, verdict, joysticks, config):
     action = verdict["action"]
     if joysticks > config["joystick_hint_threshold"] and MEMORY_CORRUPTION.search(verdict["signature"] + " " + verdict["reason"]):
         action = f"{joysticks} controllers. {UNPLUG_SOME_ACTION}"
-    return [toast_text(first), toast_text(f"{action} Details: Debug > Game Crashes.")]
+    return [toast_text(first), toast_text(action, DETAILS_LINE)]
 
 
 def post_toast(message):
