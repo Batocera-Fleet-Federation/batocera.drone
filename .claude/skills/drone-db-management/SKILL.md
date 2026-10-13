@@ -41,11 +41,13 @@ SQLite should be used as a real relational database, not just as a key/value blo
 `transfer/swarm_reset.py` clears exactly the swarm-identity rows when a clone provisions a new
 identity: `app_state` namespaces `local_paired_peers`, `local_discovered_peers`,
 `local_pairing_code`, `local_peer_checks`, `tailnet_forgotten_peers`, `swarm_membership`,
-`network_reference_selection.json`, `network_share_manager.json`, `nfs_export_manager.json`;
+`network_reference_selection.json`, `network_share_manager.json`, `nfs_export_manager.json`,
+and `mcp` (the source Drone's bearer-token digest); all `sessions` rows;
 `app_events` `local_sync_activity`; all `peer_route_cache` rows; and download jobs with a
 `source_drone_id`. When you add a new table/namespace that stores peer ids, pinned
-fingerprints or per-peer authorizations, add it to `IDENTITY_BOUND_NAMESPACES` (or its own
-step) — otherwise a cloned disk inherits it. Never `DROP`/rebuild the DB for this; deletes are
+fingerprints, per-peer authorizations, or source-device access tokens, add it to
+`IDENTITY_BOUND_NAMESPACES` (or its own step) — otherwise a cloned disk inherits it.
+Never `DROP`/rebuild the DB for this; deletes are
 idempotent, one transaction.
 
 ## Core Database Principles
