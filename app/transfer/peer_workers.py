@@ -9,7 +9,8 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from threading import Thread
+from threading import Event, Thread
+from typing import Optional
 
 try:
     from ..common.settings import Settings
@@ -25,7 +26,29 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address  # type: ignore
 
 
+_LOCAL_NETWORK_STOP: Optional[Event] = None
+_LOCAL_NETWORK_DISCOVERY: Optional[Thread] = None
+
+
+def stop_local_network_workers(timeout: float = 2.0) -> None:
+    """Signal the local-network workers to stop and join the discovery listener.
+
+    The health loop sleeps between passes, so it is only signalled: once it wakes
+    it sees the event and returns before touching the state DB.
+    """
+    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
+    if _LOCAL_NETWORK_STOP is not None:
+        _LOCAL_NETWORK_STOP.set()
+    if _LOCAL_NETWORK_DISCOVERY is not None:
+        _LOCAL_NETWORK_DISCOVERY.join(timeout)
+    _LOCAL_NETWORK_STOP = None
+    _LOCAL_NETWORK_DISCOVERY = None
+
+
 def _start_local_network_workers(settings: Settings) -> None:
+    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
+    stop = Event()
+    _LOCAL_NETWORK_STOP = stop
     Thread(target=ensure_tailnet_networking, args=(settings,), name="drone-tailnet-networking", daemon=True).start()
 
     def tailnet_watchdog() -> None:
@@ -64,12 +87,14 @@ def _start_local_network_workers(settings: Settings) -> None:
     def fingerprint() -> str:
         return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")
 
-    _local_network.start_discovery_worker(settings, fingerprint)
+    _LOCAL_NETWORK_DISCOVERY = _local_network.start_discovery_worker(settings, fingerprint, stop_event=stop)
     interval = max(10, int(os.environ.get("DRONE_LOCAL_HEALTH_INTERVAL_SECONDS", "30")))
 
     def health_loop() -> None:
-        while True:
+        while not stop.is_set():
             time.sleep(interval)
+            if stop.is_set():
+                return
             if not _local_network.is_local_mode(settings):
                 continue
             checks = []

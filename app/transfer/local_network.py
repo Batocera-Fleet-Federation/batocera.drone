@@ -6,11 +6,12 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import struct
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Optional
 
 try:
@@ -105,6 +106,18 @@ def _load_peer_map(settings: Any, namespace: str) -> dict[str, dict]:
 
 def _save_peer_map(settings: Any, namespace: str, peers: dict[str, dict]) -> None:
     save_payload(_db(settings), namespace, peers)
+
+
+def _discovery_port(payload: dict, key: str, default: int) -> int:
+    """Return a valid TCP port from an untrusted discovery announcement."""
+    value = payload.get(key)
+    if value in (None, "", 0):
+        return default
+    try:
+        port = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return port if 1 <= port <= 65535 else default
 
 
 def _local_ipv4_addresses() -> list[str]:
@@ -225,8 +238,8 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     if identity_conflict and not existing:
         _identity.record_collision(settings, "discovery-duplicate-identity")
     scheme = str(payload.get("scheme") or "https")
-    api_port = int(payload.get("api_port") or 443)
-    peer_mtls_port = int(payload.get("peer_mtls_port") or api_port)
+    api_port = _discovery_port(payload, "api_port", 443)
+    peer_mtls_port = _discovery_port(payload, "peer_mtls_port", api_port)
     advertised_url = str(payload.get("reachable_url") or "")
     reachable_url = advertised_url
     if source_ip:
@@ -460,13 +473,21 @@ def start_discovery_worker(
     settings: Any,
     certificate_fingerprint: Callable[[], str],
     on_discovery: Optional[Callable[[dict], None]] = None,
+    stop_event: Optional[Event] = None,
 ) -> Thread:
-    """Listen for multicast announcements and periodically advertise this Drone."""
+    """Listen for multicast announcements and periodically advertise this Drone.
+
+    The worker exits once ``stop_event`` is set. Callers that own the state DB
+    (tests, shutdown) must set it and join the returned thread before removing
+    that DB, or a late announcement writes into a deleted directory.
+    """
+
+    stop = stop_event or Event()
 
     def run() -> None:
         sock: Optional[socket.socket] = None
         last_announce = 0.0
-        while True:
+        while not stop.is_set():
             if not is_local_mode(settings):
                 if sock is not None:
                     sock.close()
@@ -498,13 +519,26 @@ def start_discovery_worker(
             try:
                 raw, address = sock.recvfrom(65535)
                 payload = json.loads(raw.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    continue
                 peer = record_discovered_peer(settings, payload, address[0])
                 if peer and on_discovery:
                     on_discovery(peer)
             except socket.timeout:
                 continue
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                sqlite3.Error,
+                AttributeError,
+                TypeError,
+                OverflowError,
+                RecursionError,
+            ):
                 continue
+        if sock is not None:
+            sock.close()
 
     thread = Thread(target=run, name="drone-local-discovery", daemon=True)
     thread.start()
