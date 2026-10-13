@@ -109,7 +109,7 @@ def _start_local_network_workers(settings: Settings) -> None:
             try:
                 from . import swarm_membership
             except ImportError:  # pragma: no cover - direct script execution fallback
-                import swarm_membership  # type: ignore
+                from transfer import swarm_membership  # type: ignore
             try:
                 swarm_membership.propagate_membership(settings)
             except Exception as error:
