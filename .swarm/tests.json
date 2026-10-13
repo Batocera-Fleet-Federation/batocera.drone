@@ -1356,6 +1356,35 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_160_reprovisioning_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-160-reprovisioning-boundaries",
+      "name": "Issue #160 clone reset revokes live NFS access and source sessions",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": ["python3"],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
