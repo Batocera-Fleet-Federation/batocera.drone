@@ -45,7 +45,16 @@ DEFAULT_BINDINGS = {
 
 
 def default_config() -> dict:
-    return {"version": CONFIG_VERSION, "enabled": False, "bindings": copy.deepcopy(DEFAULT_BINDINGS)}
+    return {"version": CONFIG_VERSION, "enabled": False, "epoch": 0, "bindings": copy.deepcopy(DEFAULT_BINDINGS)}
+
+
+def hold_identity(config: dict, binding: dict) -> dict:
+    """What a hold is counting toward: the binding itself and the enable epoch.
+
+    Hold progress only carries over while both stay the same, so disabling,
+    re-enabling, or reassigning a key can never reuse a previous hold.
+    """
+    return {"epoch": config.get("epoch", 0), "binding": copy.deepcopy(binding)}
 
 
 def builtin_catalog() -> list:
@@ -103,6 +112,9 @@ def normalize_config(raw: Any) -> dict:
     if not isinstance(raw, dict):
         return config
     config["enabled"] = raw.get("enabled") is True
+    epoch = raw.get("epoch")
+    if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 0:
+        config["epoch"] = epoch
     bindings = raw.get("bindings")
     if isinstance(bindings, dict):
         for binding_id in MANAGED_KEYS:
@@ -135,6 +147,8 @@ class ConfigStore:
         with self._lock:
             config = self.load()
             config["enabled"] = bool(enabled)
+            # A new epoch invalidates every hold started before this change.
+            config["epoch"] = config["epoch"] + 1
             return self._save(config)
 
     def set_binding(self, binding_id: str, raw: Any) -> dict:

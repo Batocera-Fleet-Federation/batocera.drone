@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Any, Callable, Optional
 
-from .config import ConfigStore, MANAGED_KEYS, hold_seconds, requires_hold
+from .config import ConfigStore, MANAGED_KEYS, hold_identity, hold_seconds, requires_hold
 from .paths import MediaKeysPaths
 
 try:
@@ -95,8 +95,12 @@ class HoldGate:
                     os.close(inner.fd)
         return _Lock()
 
-    def check(self, binding_id: str, seconds: float) -> str:
-        """Return ``"fire"``, ``"holding"`` (still counting) or ``"fired"`` (already acted)."""
+    def check(self, binding_id: str, seconds: float, identity: Optional[dict] = None) -> str:
+        """Return ``"fire"``, ``"holding"`` (still counting) or ``"fired"`` (already acted).
+
+        ``identity`` (see ``hold_identity``) must match the stored hold, otherwise
+        the hold restarts from zero.
+        """
         now = self.clock()
         with self._locked():
             state = read_json(self.paths.hold_file, {}) or {}
@@ -117,10 +121,11 @@ class HoldGate:
             repeats = entry.get("repeats") if isinstance(entry, dict) else None
             invalid = (last is None or started is None or last > now or started > now or started > last
                        or not isinstance(entry, dict) or not isinstance(entry.get("fired"), bool)
-                       or isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 0)
+                       or isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 0
+                       or entry.get("identity") != identity)
             max_gap = HOLD_FIRST_GAP_SECONDS if repeats == 0 else HOLD_REPEAT_GAP_SECONDS
             if not isinstance(entry, dict) or invalid or now - last > max_gap:
-                entry = {"start": now, "last": now, "fired": False, "repeats": 0}
+                entry = {"start": now, "last": now, "fired": False, "repeats": 0, "identity": identity}
                 outcome = "holding"
             else:
                 entry["last"] = now
@@ -192,7 +197,7 @@ def handle_press(binding_id: str, paths: Optional[MediaKeysPaths] = None, *,
     if binding.get("action_type") == "none":
         return {"status": "skipped"}
     if requires_hold(binding):
-        gate = HoldGate(paths, clock).check(binding_id, hold_seconds(binding))
+        gate = HoldGate(paths, clock).check(binding_id, hold_seconds(binding), hold_identity(config, binding))
         if gate != "fire":
             return {"status": gate}
     if binding.get("action_type") == "script" and run_as is None:

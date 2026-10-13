@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..registry import Integration, IntegrationDescriptor
-from .config import (ConfigStore, MANAGED_KEYS, builtin_catalog, hold_seconds, requires_hold)
+from .config import (ConfigStore, MANAGED_KEYS, builtin_catalog, hold_identity, hold_seconds, requires_hold)
 from .dispatch import (HoldGate, execute_binding, log_media_key, media_keys_script_store,
                        record_press, script_owner)
 from .hotkeygen import HotkeygenOverrides, detect_keyboards
@@ -200,7 +200,8 @@ class MediaKeysIntegration(Integration):
         if confirm_needed:
             if (payload or {}).get("confirm") is not True:
                 raise ValueError("this action needs confirmation")
-            gate = HoldGate(self.paths).check(binding_id, hold_seconds(binding))
+            gate = HoldGate(self.paths).check(binding_id, hold_seconds(binding),
+                                              hold_identity(self.config.load(), binding))
             if gate != "fire":
                 return {"status": gate, "message": "Keep holding to confirm this action."}
         run_as = script_owner(self.paths) if binding.get("action_type") == "script" else None
