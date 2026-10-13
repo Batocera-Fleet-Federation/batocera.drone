@@ -200,6 +200,49 @@ class DispatcherTests(Base):
         self.assertEqual(gate.check("reboot", 3, origin="key"), "holding")
 
 
+class RootDispatcherStateOwnershipTests(Base):
+    """hotkeygen runs the dispatcher as root; state/ must stay usable by the Drone user."""
+
+    def setUp(self):
+        super().setUp()
+        self.paths.ensure_layout()
+
+    def test_state_files_are_handed_to_the_integration_owner_when_root(self):
+        owner = (4242, 4343)
+        chowned = []
+        with mock.patch.object(dispatch_module, "script_owner", return_value=owner), \
+                mock.patch("os.fchown", side_effect=lambda fd, uid, gid: chowned.append((uid, gid))), \
+                mock.patch("os.lchown", side_effect=lambda path, uid, gid: chowned.append((str(path), uid, gid))):
+            HoldGate(self.paths, clock=lambda: 1000.0).check("reboot", 2)
+            dispatch_module.record_press(self.paths, "reboot", {"status": "ok"})
+        # hold.lock, hold.json and last-press.json each get the owner; the state dir too if foreign.
+        self.assertGreaterEqual(chowned.count(owner), 3, chowned)
+
+    def test_no_chown_when_not_root(self):
+        with mock.patch.object(dispatch_module, "script_owner", return_value=None), \
+                mock.patch("os.fchown") as fchown, mock.patch("os.lchown") as lchown:
+            HoldGate(self.paths, clock=lambda: 1000.0).check("reboot", 2)
+            dispatch_module.record_press(self.paths, "reboot", {"status": "ok"})
+        fchown.assert_not_called()
+        lchown.assert_not_called()
+
+    def test_unopenable_stale_lock_is_recreated(self):
+        lock = self.paths.state_dir / "hold.lock"
+        lock.write_text("")
+        real_open = os.open
+        calls = []
+
+        def flaky_open(path, *args, **kwargs):
+            if str(path) == str(lock) and not calls:
+                calls.append(path)
+                raise PermissionError(13, "denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=flaky_open):
+            self.assertEqual(HoldGate(self.paths, clock=lambda: 1000.0).check("reboot", 2), "holding")
+        self.assertTrue(lock.exists())
+
+
 class BuiltinCatalogTests(unittest.TestCase):
     def test_catalog_runs_reviewed_commands_only(self):
         runner = FakeRunner()

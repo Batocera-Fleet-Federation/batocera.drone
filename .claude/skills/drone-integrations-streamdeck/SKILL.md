@@ -53,7 +53,10 @@ typematic repeat train lasts the hold duration (`HoldGate`, state in
 `state/hold.json`) -- a single press or a series of separate taps does
 nothing; the admin Hold-to-test control is a separate origin so HTTP pulses
 do not share keyboard hold progress. When the dispatcher runs as
-root, scripts drop to the owner of the integration dir (`run_as`).
+root, scripts drop to the owner of the integration dir (`run_as`) and the
+`state/` files it writes (`hold.lock`, `hold.json`, `last-press.json`) are
+chowned to that owner (`atomic_write_*` `owner=`), so the unprivileged Drone
+can read them and take the hold lock; never leave root-owned files in `state/`.
 
 Shared code lives in `app/integrations/shared/`: `process.py` (ProcessRunner),
 `scripts.py` (generic `ScriptStore`: paths object + env prefix + log callable),

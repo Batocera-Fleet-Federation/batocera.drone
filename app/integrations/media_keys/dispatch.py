@@ -13,7 +13,9 @@ never hang or lose a key press, and every outcome is logged and recorded in
 * built-ins go through the shared ``BatoceraControl`` catalog; scripts go
   through the shared ``ScriptStore`` (``shell=False``, clean environment,
   timeout, bounded output). When started as root, scripts drop to the owner of
-  the integration directory (the Drone service user) before running.
+  the integration directory (the Drone service user) before running, and the
+  ``state/`` files the dispatcher writes are handed to that same user so the
+  admin page can read them and the hold lock stays usable by the web service.
 """
 
 import json
@@ -79,6 +81,17 @@ def script_owner(paths: MediaKeysPaths) -> Optional[tuple]:
     return (info.st_uid, info.st_gid) if info.st_uid != 0 else None
 
 
+def hand_over_state(paths: MediaKeysPaths, owner: Optional[tuple]) -> None:
+    """Give a root-created ``state/`` directory to the Drone service user (best effort)."""
+    if owner is None:
+        return
+    try:
+        if os.lstat(paths.state_dir).st_uid != owner[0]:
+            os.lchown(paths.state_dir, owner[0], owner[1])
+    except (AttributeError, OSError):
+        pass
+
+
 class HoldGate:
     """Tracks a key's repeat events; passes once held long enough, once per hold.
 
@@ -92,6 +105,9 @@ class HoldGate:
     def __init__(self, paths: MediaKeysPaths, clock: Callable[[], float] = time.time) -> None:
         self.paths = paths
         self.clock = clock
+        # hotkeygen runs the dispatcher as root; the unprivileged Drone service
+        # must still be able to read/lock/replace everything it leaves in state/.
+        self.owner = script_owner(paths)
 
     def _locked(self):
         class _Lock:
@@ -99,8 +115,20 @@ class HoldGate:
                 inner.fd = None
                 if fcntl is not None:
                     self.paths.ensure(self.paths.state_dir)
-                    inner.fd = os.open(str(self.paths.state_dir / "hold.lock"),
-                                       os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    hand_over_state(self.paths, self.owner)
+                    lock_path = str(self.paths.state_dir / "hold.lock")
+                    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+                    try:
+                        inner.fd = os.open(lock_path, flags, 0o600)
+                    except PermissionError:
+                        # A lock left root-owned by an earlier build; state/ is ours, so recreate it.
+                        os.unlink(lock_path)
+                        inner.fd = os.open(lock_path, flags, 0o600)
+                    if self.owner is not None:
+                        try:
+                            os.fchown(inner.fd, self.owner[0], self.owner[1])
+                        except (AttributeError, OSError):
+                            pass
                     fcntl.flock(inner.fd, fcntl.LOCK_EX)
 
             def __exit__(inner, *_exc):
@@ -166,13 +194,15 @@ class HoldGate:
             state = state if isinstance(state, dict) else {}
             state[binding_id] = entry
             self.paths.ensure(self.paths.state_dir)
-            atomic_write_json(self.paths.hold_file, state)
+            atomic_write_json(self.paths.hold_file, state, owner=self.owner)
         return outcome
 
 
 def record_press(paths: MediaKeysPaths, binding_id: str, result: dict, clock: Callable[[], float] = time.time) -> None:
     try:
+        owner = script_owner(paths)
         paths.ensure(paths.state_dir)
+        hand_over_state(paths, owner)
         data = read_json(paths.press_file, {}) or {}
         data = data if isinstance(data, dict) else {}
         data[binding_id] = {
@@ -180,7 +210,7 @@ def record_press(paths: MediaKeysPaths, binding_id: str, result: dict, clock: Ca
             "status": str(result.get("status") or "unknown")[:40],
             "error": str(result.get("error") or "")[:300],
         }
-        atomic_write_json(paths.press_file, data)
+        atomic_write_json(paths.press_file, data, owner=owner)
     except Exception:  # noqa: BLE001 - recording is best effort
         pass
 
