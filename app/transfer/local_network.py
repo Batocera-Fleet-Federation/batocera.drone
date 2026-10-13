@@ -108,6 +108,18 @@ def _save_peer_map(settings: Any, namespace: str, peers: dict[str, dict]) -> Non
     save_payload(_db(settings), namespace, peers)
 
 
+def _discovery_port(payload: dict, key: str, default: int) -> int:
+    """Return a valid TCP port from an untrusted discovery announcement."""
+    value = payload.get(key)
+    if value in (None, "", 0):
+        return default
+    try:
+        port = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return port if 1 <= port <= 65535 else default
+
+
 def _local_ipv4_addresses() -> list[str]:
     addresses = {"127.0.0.1"}
     try:
@@ -226,8 +238,8 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     if identity_conflict and not existing:
         _identity.record_collision(settings, "discovery-duplicate-identity")
     scheme = str(payload.get("scheme") or "https")
-    api_port = int(payload.get("api_port") or 443)
-    peer_mtls_port = int(payload.get("peer_mtls_port") or api_port)
+    api_port = _discovery_port(payload, "api_port", 443)
+    peer_mtls_port = _discovery_port(payload, "peer_mtls_port", api_port)
     advertised_url = str(payload.get("reachable_url") or "")
     reachable_url = advertised_url
     if source_ip:
@@ -514,7 +526,16 @@ def start_discovery_worker(
                     on_discovery(peer)
             except socket.timeout:
                 continue
-            except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error, AttributeError, TypeError):
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                sqlite3.Error,
+                AttributeError,
+                TypeError,
+                OverflowError,
+                RecursionError,
+            ):
                 continue
         if sock is not None:
             sock.close()
