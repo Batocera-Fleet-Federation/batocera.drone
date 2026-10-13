@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
     fcntl = None  # type: ignore
 
 try:
-    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id
+    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
     from .hardware_identity import (
         BASELINE,
         CONTRADICTORY,
@@ -67,6 +67,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _normalize_device_id,
         _require_real_path,
         _write_persisted_machine_id,
+        random_device_id,
     )
     from common.hardware_identity import (  # type: ignore
         BASELINE,
@@ -627,9 +628,7 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     userdata_root = Path(settings.userdata_root)
     _retire_device_id(settings)
     _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
-    octets = bytearray(secrets.token_bytes(6))
-    octets[0] = (octets[0] | 0x02) & 0xFE
-    candidate = ":".join(f"{octet:02x}" for octet in octets)
+    candidate = random_device_id()
     _write_persisted_machine_id(userdata_root, candidate)
     return candidate
 

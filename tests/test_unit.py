@@ -586,19 +586,22 @@ class SettingsTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"DRONE_HTTP_REDIRECT_PORT": "0"}, clear=True):
             self.assertEqual(Settings.from_env().http_redirect_port, 0)
 
-    def test_device_id_persists_after_first_physical_mac_selection(self) -> None:
+    def test_first_boot_device_id_is_random_and_persists_across_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             device_id_file = root / "system" / "drone-app" / "device-id"
-            device_id_file.parent.mkdir(parents=True)
+            root.mkdir()
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
                 "app.common.device_identity._physical_mac_candidates",
                 return_value=["58:47:ca:7e:38:57"],
             ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="2c:cf:67:97:8c:8f"):
                 first = Settings.from_env()
 
-            self.assertEqual(first.device_id, "58:47:ca:7e:38:57")
-            self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
+            self.assertNotEqual(first.device_id, "58:47:ca:7e:38:57")
+            self.assertNotEqual(first.device_id, "2c:cf:67:97:8c:8f")
+            self.assertRegex(first.device_id, r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+            self.assertEqual(int(first.device_id.split(":")[0], 16) & 0x03, 0x02)
+            self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), first.device_id)
 
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
                 "app.common.device_identity._physical_mac_candidates",
@@ -606,7 +609,19 @@ class SettingsTests(unittest.TestCase):
             ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="aa:bb:cc:dd:ee:ff"):
                 restarted = Settings.from_env()
 
-            self.assertEqual(restarted.device_id, "58:47:ca:7e:38:57")
+            self.assertEqual(restarted.device_id, first.device_id)
+
+    def test_device_id_falls_back_to_nic_mac_when_it_cannot_be_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            root.mkdir()
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
+                "app.common.device_identity._physical_mac_candidates",
+                return_value=["58:47:ca:7e:38:57"],
+            ), mock.patch("app.common.device_identity._write_persisted_machine_id", return_value=False):
+                settings = Settings.from_env()
+
+            self.assertEqual(settings.device_id, "58:47:ca:7e:38:57")
 
     def test_configured_device_id_wins_without_rewriting_persisted_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3360,7 +3375,7 @@ class SettingsTests(unittest.TestCase):
                 clear=True,
             ):
                 settings = Settings.from_env()
-            _rom_metadata_cache_path(settings).parent.mkdir(parents=True)
+            _rom_metadata_cache_path(settings).parent.mkdir(parents=True, exist_ok=True)
             _rom_metadata_cache_path(settings).write_text("{broken", encoding="utf-8")
 
             snapshot, changed, stats = _poll_rom_metadata_cache(settings, RomRepository(settings.roms_root, settings.bios_root))
@@ -3378,7 +3393,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
             db_path = _rom_metadata_cache_path(settings)
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_bytes(b"not touched")
 
             with mock.patch("app.storage.rom_metadata_store._read_sqlite_rom_metadata_cache", side_effect=sqlite3.OperationalError("unable to open database file")):
@@ -3395,7 +3410,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
             legacy_path = root / "system" / "drone-app" / "rom_metadata_cache.json"
-            legacy_path.parent.mkdir(parents=True)
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
             legacy_path.write_text(
                 json.dumps({
                     "schema_version": 1,
@@ -3468,7 +3483,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
             db_path = _rom_metadata_cache_path(settings)
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             with sqlite3.connect(db_path) as connection:
                 connection.execute(
                     "CREATE TABLE cache_changes (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
