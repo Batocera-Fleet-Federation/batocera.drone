@@ -12,6 +12,7 @@ from pathlib import Path
 
 try:
     from ..app_version import drone_app_version as _drone_app_version
+    from ..common import identity_provisioning as _identity
     from ..common.batocera_version import _read_batocera_version
     from ..common.http_errors import _format_http_error
     from ..common.logtail import _tail_lines
@@ -29,6 +30,7 @@ try:
     from ..transfer.drone_network import _get_router_ip_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
+    from common import identity_provisioning as _identity  # type: ignore
     from common.batocera_version import _read_batocera_version  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
@@ -390,6 +392,9 @@ class HandlersDiagnosticsMixin:
                 fields["batocera_version"] = file_batocera_version
 
             entries.insert(0, {"key": "Machine ID", "value": self.settings.device_id})
+            identity_status = _identity.current_status()
+            entries.insert(1, {"key": "Drone Identity", "value": _identity.status_label(identity_status)})
+            fields["identity_status"] = identity_status
             entries.append({"key": "PixN Installed", "value": "yes" if pixen_installed else "no"})
             if not fields.get("router_ip_address"):
                 router_entry = {"key": "Router IP Address", "value": router_ip_address}

@@ -75,6 +75,20 @@ Application authorization *is* the paired-peer-list check above — connectivity
 checks (below) confirm a peer is *reachable*, never that it's *authorized*. Depth:
 `drone-p2p-transfer-security` skill.
 
+## Identity and cloned disks
+
+A Drone's swarm identity (cert + key + logical id + the peers that pinned them) is
+**bound to the hardware it was created on** (`common/identity_provisioning.py`,
+`common/hardware_identity.py`; depth `docs/drone-identity.md`). `main()` runs
+`ensure_identity()` before `create_server()` starts anything peer-facing. Same hardware →
+nothing is written. A confident hardware mismatch (a restored disk image) → the inherited
+key is destroyed, swarm state is cleared (`transfer/swarm_reset.py`), the local Tailscale
+node state is removed (never `tailscale logout` — the original shares that node key), and a
+fresh identity is created; the original swarm is never told. Missing/contradictory evidence
+→ `RECOVERY_REQUIRED`: keys kept, **swarm networking held** (`swarm_networking_allowed()`),
+an administrator resolves it. A clone is a *new device*: never broadcast a removal or rotation
+for the original, and never let a peer cause an identity reset.
+
 ## Reaching a specific peer (the transport layer)
 
 `app/transport/`'s `TransportSelector` tries each tier best-first and falls
@@ -255,6 +269,7 @@ sharing" section docstrings cover the Tailscale-specific deviations inline.
 - **Admin UI, routes, Swarm page, network-share peer ROM referencing** → `drone-admin-features`
 - **Dark-theme tables/modals/accordions (do not ship Bootstrap-white UI)** → `bff-ui-theme-functionality`
 - **Torrents/aria2c + magnet links implementation depth** → `drone-torrents-management`
+- **Clone detection / identity provisioning / hardware replacement** → `docs/drone-identity.md`
 - **SQLite schemas/migrations** → `drone-db-management`
 - **Debugging a real, running Drone** → `drone-live-debugging`
 - **Admin -> Integrations / Stream Deck** → `drone-integrations-streamdeck`

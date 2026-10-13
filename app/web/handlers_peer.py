@@ -17,7 +17,9 @@ from typing import Optional
 from urllib.parse import unquote
 
 try:
+    from ..common import identity_provisioning as _identity
     from ..common.auth import record_unauthorized_response
+    from ..transfer.drone_network import _certificate_pem_fingerprint
     from ..device.tailnet_service import tailnet_peer_ips
     from ..device.tailnet_service import export_tailnet_payload as _tailnet_export_payload
     from ..device.game_activity import (
@@ -52,7 +54,9 @@ try:
     from ..transfer.transfer_batch import get_upload_batches as _get_upload_batches
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common import identity_provisioning as _identity  # type: ignore
     from common.auth import record_unauthorized_response  # type: ignore
+    from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
     from device.tailnet_service import export_tailnet_payload as _tailnet_export_payload  # type: ignore
     from device.game_activity import (  # type: ignore
@@ -108,8 +112,18 @@ class HandlersPeerMixin:
             return
         peer_id = str(payload.get("drone_id") or "").strip()
         certificate_pem = str(payload.get("certificate_pem") or "")
+        if peer_id and peer_id == self.settings.device_id:
+            _identity.record_collision(self.settings, "pair-request-own-device-id")
         if not peer_id or peer_id == self.settings.device_id:
             raise ValueError("invalid peer id")
+        try:
+            claimed_fingerprint = _certificate_pem_fingerprint(certificate_pem).lower()
+        except Exception:  # noqa: BLE001 - the save below reports malformed certificates
+            claimed_fingerprint = ""
+        if claimed_fingerprint and claimed_fingerprint == _identity.own_certificate_fingerprint(self.settings):
+            _identity.record_collision(self.settings, "pair-request-own-certificate")
+            self._send_json(409, {"error": "duplicate Drone identity detected"})
+            return
         cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
         expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
         if expected and expected != fingerprint.lower():

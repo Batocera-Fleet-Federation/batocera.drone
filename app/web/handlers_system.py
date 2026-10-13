@@ -31,6 +31,7 @@ try:
     from ..device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
     from ..storage import update_history_store as _update_history_store
     from ..transfer.drone_tls import DroneCertificateManager
+    from ..common import identity_provisioning as _identity
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
         get_drone_update_status,
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
     from storage import update_history_store as _update_history_store  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
+    from common import identity_provisioning as _identity  # type: ignore
     from web.route_config import api_url  # type: ignore
 
 
@@ -215,6 +217,7 @@ class HandlersSystemMixin:
         manager = DroneCertificateManager(self.settings)
         try:
             metadata = manager.regenerate_self_signed_certificate()
+            _identity.record_certificate_rotation(self.settings)
             self._send_json(200, {"status": "rotated", "certificate": metadata})
         except Exception as error:
             self._send_json(502, {"status": "failed", "error": str(error), "certificate": manager.metadata()})

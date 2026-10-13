@@ -7,6 +7,11 @@ except ImportError:
     from web.route_config import API_PREFIX  # type: ignore
 
 try:
+    from ..common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed
+except ImportError:  # pragma: no cover - flat execution
+    from common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed  # type: ignore
+
+try:
     from .api_bridge import active as _api_bridge_active
 except ImportError:  # pragma: no cover - flat execution
     from web.api_bridge import active as _api_bridge_active  # type: ignore
@@ -28,6 +33,11 @@ class ApiRoutesMixin:
         keeps working on the main listener rather than the fleet silently
         losing P2P connectivity behind a healthy-looking browser UI.
         """
+        if bool(parts) and parts[0] == "peer" and not _identity_swarm_networking_allowed():
+            # Identity unresolved (see common/identity_provisioning.py): no peer surface at all,
+            # on any listener, until an administrator resolves it.
+            self._send_json(503, {"error": "swarm networking is held pending Drone identity verification"})
+            return True
         all_tls_servers = getattr(self.server, "all_tls_servers", None) or ()
         if not any(getattr(candidate, "is_peer_mtls_listener", False) for candidate in all_tls_servers):
             return False
@@ -396,6 +406,11 @@ class ApiRoutesMixin:
             # Admin -> Integrations (local-only optional extensions; see handlers_integrations).
             if len(parts) >= 2 and parts[0] == "admin" and parts[1] == "integrations":
                 self._handle_admin_integrations_get(parts[2:], query_params)
+                return
+
+            # Drone identity / clone-detection status (see handlers_identity).
+            if len(parts) >= 2 and parts[0] == "admin" and parts[1] == "identity":
+                self._handle_admin_identity_get(parts[2:])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
@@ -800,6 +815,10 @@ class ApiRoutesMixin:
 
             if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "integrations":
                 self._handle_admin_integrations_post(parts[2:])
+                return
+
+            if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "identity":
+                self._handle_admin_identity_post(parts[2:])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "credentials" and parts[2] == "update":

@@ -150,6 +150,22 @@ curl --cert client.crt --key client.key -k "https://<drone-host>/health"
 
 Keep private keys private. If the identity key is exposed, rotate it and re-pair the Drone with its peers. Routine startup replacement of only the HTTPS server certificate does not require re-pairing.
 
+## Disk Images And Cloned Drones
+
+You can image a configured Batocera disk and restore it to as many other physical machines as you like. **No special imaging mode, command, or cleanup is needed.**
+
+1. Install and configure Drone (pair it with other Drones if you want).
+2. Image the Batocera disk normally.
+3. Restore the image to another supported machine and boot it.
+4. The clone notices it is on different hardware and automatically creates its own certificate, private key, and Drone id; the original's keys, paired peers, pinned certificates, swarm roster, pairing codes, and Tailscale node state are removed *before* the new identity exists. The event is logged as `[Identity] … Clone provisioning completed`.
+5. Pair the new Drone into a swarm through the normal pairing flow whenever you like.
+
+Your login, ROMs/BIOS/saves, artwork, game and emulator settings, and UI preferences are kept. The original Drone is never told anything: it keeps its identity and its swarm, and the clone never announces a removal for it.
+
+How it works: Drone binds its identity to hashed hardware identifiers (DMI product UUID, DMI serials, Raspberry Pi/device-tree serial — never hostname, IP, a lone MAC, disk/filesystem UUIDs, or `/etc/machine-id`). A *confident mismatch* provisions a new identity automatically. *Missing or contradictory* evidence on an installation that was bound earlier never rotates anything: keys and state are kept, swarm networking is held, and an administrator decides under **Admin → System Info** (status) and the `/v1/api/admin/identity/*` API. A **planned motherboard swap** can be pre-authorized so the identity is kept. On a clone, Tailscale is left safely un-enrolled (the original's tailnet authorization is never touched) until you supply a new auth key.
+
+Known limits: identical virtual hardware, spoofed identifiers, containers, and machines without a unique hardware identifier cannot be detected; a disk cloned *before* this feature existed looks like the original (an administrator can provision a new identity on it). See [docs/drone-identity.md](docs/drone-identity.md) for the full rules, diagnostics, hardware-replacement procedure, and limitations.
+
 ## Releases
 
 Every commit pushed to `main` creates a GitHub release and advances the latest `vMAJOR.MINOR.PATCH` tag. Normal commits advance the final component, such as `v0.1.50` to `v0.1.51`.

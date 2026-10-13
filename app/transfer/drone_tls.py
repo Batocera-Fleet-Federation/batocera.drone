@@ -9,9 +9,11 @@ listeners use a replaceable leaf signed by this identity; see ``web.server_tls``
 import hashlib
 import os
 import re
+import shutil
 import socket
 import ssl
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -67,37 +69,54 @@ class DroneCertificateManager:
         return self.metadata()
 
     def _generate_local_certificate(self, cert_file: Path, key_file: Path) -> None:
+        """Generate into a private scratch dir, then rename into place.
+
+        A crash or full disk mid-generation therefore never leaves a truncated key or
+        certificate where the live identity is expected.
+        """
         cert_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.parent.mkdir(parents=True, exist_ok=True)
         common_name = certificate_common_name(self.settings)
         san = ",".join(certificate_alt_names(self.settings))
-        command = [
-            "openssl",
-            "req",
-            "-x509",
-            "-nodes",
-            "-newkey",
-            "rsa:2048",
-            "-keyout",
-            str(key_file),
-            "-out",
-            str(cert_file),
-            "-days",
-            str(max(1, int(self.settings.drone_cert_days))),
-            "-subj",
-            f"/CN={common_name}",
-            "-addext",
-            f"subjectAltName={san}",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,digitalSignature,keyCertSign",
-            "-addext",
-            "extendedKeyUsage=serverAuth,clientAuth",
-        ]
+        scratch = Path(tempfile.mkdtemp(prefix=".drone-identity-", dir=str(cert_file.parent)))
         try:
-            subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except (FileNotFoundError, subprocess.CalledProcessError) as error:
-            raise RuntimeError(f"failed to generate Drone certificate with openssl: {error}") from error
+            scratch.chmod(0o700)
+            temp_key = scratch / "drone.key"
+            temp_cert = scratch / "drone.crt"
+            command = [
+                "openssl",
+                "req",
+                "-x509",
+                "-nodes",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                str(temp_key),
+                "-out",
+                str(temp_cert),
+                "-days",
+                str(max(1, int(self.settings.drone_cert_days))),
+                "-subj",
+                f"/CN={common_name}",
+                "-addext",
+                f"subjectAltName={san}",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyCertSign",
+                "-addext",
+                "extendedKeyUsage=serverAuth,clientAuth",
+            ]
+            try:
+                subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (FileNotFoundError, subprocess.CalledProcessError) as error:
+                raise RuntimeError(f"failed to generate Drone certificate with openssl: {error}") from error
+            temp_key.chmod(0o600)
+            temp_cert.chmod(0o644)
+            os.replace(temp_key, key_file)
+            os.replace(temp_cert, cert_file)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def metadata(self) -> dict:
         cert_file = self.settings.drone_cert_file
