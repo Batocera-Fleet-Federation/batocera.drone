@@ -1155,7 +1155,7 @@ def _read_sqlite_asset_systems(userdata_root: Path, allow_scan_in_progress: bool
     the last committed counts instead, for callers that must stay fast.
     """
     try:
-        db_path = _state_database_path(Path(userdata_root))
+        db_path = _state_database_path(userdata_root)
         with _open_state_database(db_path) as connection:
             _ensure_schema(connection)
             state = {
@@ -1186,7 +1186,7 @@ def read_cached_asset_counts(userdata_root: Path) -> dict:
     """
     counts = {"roms": 0, "bios": 0, "artwork": 0}
     try:
-        db_path = _state_database_path(Path(userdata_root))
+        db_path = _state_database_path(userdata_root)
         with _open_state_database(db_path) as connection:
             _ensure_schema(connection)
             for key, table in (("roms", "rom_cache_entries"), ("bios", "bios_cache_entries"), ("artwork", "artwork_cache_entries")):
