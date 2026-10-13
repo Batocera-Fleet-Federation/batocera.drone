@@ -1949,6 +1949,135 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_170_injected_store_mock_paths.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-170-injected-store-mock-paths",
+      "name": "Issue #170 SessionStore and DroneCredentialStore must reject injected mock database paths before SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/common/auth.py",
+          "tests/adversarial/test_issue_170_injected_store_mock_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_170_pathlike_protocol_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-170-pathlike-protocol-boundaries",
+      "name": "Issue #170 os.PathLike values must open real paths and reject mock or bytes fspath results before SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_170_pathlike_protocol_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_170_unittest_absent_identity_import.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-170-unittest-absent-identity-import",
+      "name": "Issue #170 identity modules must import without unittest (stdlib-only device contract)",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/identity_provisioning.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_170_unittest_absent_identity_import.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_170_flat_mode_swarm_reset_import.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-170-flat-mode-swarm-reset-import",
+      "name": "Issue #170 swarm reset and identity modules must import in flat-mode entrypoints",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_170_flat_mode_swarm_reset_import.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
