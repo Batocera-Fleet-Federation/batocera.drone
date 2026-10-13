@@ -171,6 +171,11 @@ class SessionAuthTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
+    def test_database_path_rejects_mocked_userdata_root(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
+                database_path(mock.MagicMock())
+
     def _write_gamelist(self, system: Path, *roms: str) -> None:
         games = "".join(
             f"<game><path>./{rom}</path><name>{Path(rom).stem}</name></game>"
