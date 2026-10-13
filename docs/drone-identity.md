@@ -87,6 +87,15 @@ Tailscale bootstrap exists:
 
 Concurrent starts cannot create two identities, and repeated starts are idempotent.
 
+## First-boot logical id
+
+A fresh install gets a random, locally administered, MAC-shaped `device-id` on its first
+`Settings` build (`common/device_identity.py::random_device_id`), persisted under
+`system/drone-app/device-id` before use. It is never the NIC's MAC, so two installs on one host
+do not refuse each other as "this Drone itself". Installations that already persisted an id keep
+it, and `DRONE_DEVICE_ID` still pins one explicitly. If the id cannot be persisted, the NIC-derived
+id is used as before.
+
 ## Clone provisioning (what happens on different hardware)
 
 State machine: `UNINITIALIZED → VALIDATING → CLONE_DETECTED → PROVISIONING → READY`, or
