@@ -1552,6 +1552,75 @@
         "servers": []
       },
       "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_164_flat_mode_import_fallback.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-164-flat-mode-import-fallback",
+      "name": "Issue #164 flat-mode swarm_membership import fallback acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/web/handlers_peer.py",
+          "app/web/handlers_network.py",
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_164_flat_mode_import_fallback.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_164_flat_entrypoint_pairing_e2e_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-164-flat-entrypoint-pairing-e2e-uat",
+      "name": "Issue #164 flat python app/main.py pairing handler UAT",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/main.py",
+          "app/web/handlers_peer.py",
+          "app/web/handlers_network.py",
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_164_flat_entrypoint_pairing_e2e_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
     }
   ],
   "version": 1
