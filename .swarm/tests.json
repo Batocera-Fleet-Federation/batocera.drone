@@ -928,6 +928,105 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_power_loss_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-power-loss-uat",
+      "name": "Issue #160 hard process death at every clone-provisioning stage resumes without the inherited identity",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "app/transfer/drone_tls.py",
+          "tests/adversarial/test_issue_160_power_loss_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_held_identity_outbound_pairing_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-held-identity-outbound-pairing-uat",
+      "name": "Issue #160 a held or half-provisioned identity must not be sent to a peer during pairing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_160_held_identity_outbound_pairing_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_placeholder_spelling_variants.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-placeholder-spelling-variants",
+      "name": "Issue #160 placeholder serials are rejected in every spelling, not only literal strings",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_placeholder_spelling_variants.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
