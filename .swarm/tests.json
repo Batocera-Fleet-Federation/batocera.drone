@@ -2346,6 +2346,38 @@
         "servers": []
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_180_held_identity_vpn_connect.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-180-held-identity-vpn-connect",
+      "name": "Issue #180 held identity VPN connect and recovery guards",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/web/handlers_vpn.py",
+          "tests/adversarial/test_issue_180_held_identity_vpn_connect.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
