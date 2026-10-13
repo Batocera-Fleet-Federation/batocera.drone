@@ -14,7 +14,7 @@ provisioning run can simply repeat it.
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     from ..storage.state_store import database_path, open_database
@@ -84,19 +84,29 @@ def _reset_database(settings: Any) -> Dict[str, int]:
 
 
 def _clear_pinned_peer_certificates(settings: Any) -> int:
+    """Remove every pinned peer certificate; raises if any cannot be removed.
+
+    A pin that survives would keep trusting an inherited peer, so the caller must not
+    treat provisioning as complete (the journal makes the next start retry).
+    """
     directory = Path(settings.userdata_root) / "system" / "drone-app" / "local-peer-certs"
     count = 0
     try:
         entries = list(directory.iterdir())
-    except OSError:
+    except FileNotFoundError:
         return 0
+    failure: Optional[OSError] = None
     for entry in entries:
         try:
             if entry.is_file() or entry.is_symlink():
                 entry.unlink()
                 count += 1
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError as error:
+            failure = failure or error
+    if failure is not None:
+        raise failure
     return count
 
 

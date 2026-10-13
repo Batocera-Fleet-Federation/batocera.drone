@@ -53,6 +53,11 @@ class DroneCertificateManager:
                 "key_file": str(key_file),
             }
         self._generate_local_certificate(cert_file, key_file)
+        try:
+            from ..common.identity_provisioning import record_certificate_rotation
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            from common.identity_provisioning import record_certificate_rotation  # type: ignore
+        record_certificate_rotation(self.settings)  # keep the identity binding current
         return self.metadata()
 
     def regenerate_self_signed_certificate(self) -> dict:

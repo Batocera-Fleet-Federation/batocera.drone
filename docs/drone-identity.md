@@ -69,7 +69,9 @@ time/origin and a short event history. It is bookkeeping, **not proof of hardwar
 copied with the disk, which is exactly why only a *confident hardware mismatch* reveals a
 clone. It is created when the identity is created, reused on every normal start (no writes),
 survives Drone and Batocera upgrades, and is reconciled with the certificate on disk and the
-device id (a rotation from the admin UI updates it).
+device id (a rotation from the admin UI, or automatic renewal of an expired certificate, updates it). A
+*valid* certificate that the binding never recorded (for example one copied in from another installation)
+is not adopted silently: it holds swarm networking (`certificate_mismatch`) until an administrator resolves it.
 
 ## Startup order
 
@@ -103,6 +105,10 @@ State machine: `UNINITIALIZED → VALIDATING → CLONE_DETECTED → PROVISIONING
    scratch directory and renamed into place); verified to differ from the inherited one and
    to match its key. The HTTPS leaf is re-issued by the normal startup reconcile.
 6. Write the binding, delete the journal, log `[Identity] Clone provisioning completed`.
+
+Every cleanup step must succeed before the clone becomes `READY`: a pinned peer certificate that cannot
+be deleted, or an inherited Tailscale node that can be neither cleared nor taken offline, fails the run
+instead of leaving a partly trusting clone, and the next start retries from the journal.
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the

@@ -837,25 +837,86 @@ class TailnetCloneTests(unittest.TestCase):
         with mock.patch.object(self.ts, "TAILSCALE_CLI", self.tmp / "missing"):
             self.assertEqual(self.ts.reset_local_node_identity(), {"status": "not_installed"})
 
-    def test_clone_provisioning_resets_tailnet_and_survives_tailnet_failure(self) -> None:
+    def _clone_with_tailnet_failure(self, hold_result: bool):
         identity.reset_runtime_state_for_tests()
+        self.addCleanup(identity.reset_runtime_state_for_tests)
         hw_a = x86_tree(self.tmp / "hw-a")
         hw_b = x86_tree(self.tmp / "hw-b", uuid=UUID_B, board="BOARDSERIAL02")
         root = self.tmp / "disk"
         root.mkdir()
-        original = settings_for(root)
-        identity.ensure_identity(original, provider_for(hw_a))
+        identity.ensure_identity(settings_for(root), provider_for(hw_a))
         save_payload(database_path(root), "tailnet_sharing.json", {"auth_key": "tskey-secret", "sharing_enabled": True})
         target = self.tmp / "clone"
         image_disk(root, target)
-        with mock.patch.object(self.ts, "reset_local_node_identity", side_effect=RuntimeError("boom")) as reset:
+        with mock.patch.object(self.ts, "reset_local_node_identity", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.ts, "hold_local_node", return_value=hold_result):
             result = identity.ensure_identity(settings_for(target), provider_for(hw_b))
-        reset.assert_called_once()
+        return target, result
+
+    def test_unclearable_tailnet_node_that_can_be_held_lets_the_clone_continue_offline(self) -> None:
+        target, result = self._clone_with_tailnet_failure(hold_result=True)
         self.assertEqual(result.state, State.READY)
+        self.assertTrue(read_binding(settings_for(target))["tailnet_reset_pending"])
         sharing = load_payload(database_path(target), "tailnet_sharing.json", {})
         self.assertEqual(sharing["auth_key"], "")
         self.assertFalse(sharing["sharing_enabled"])
-        self.addCleanup(identity.reset_runtime_state_for_tests)
+
+    def test_unclearable_and_unholdable_tailnet_node_holds_the_swarm(self) -> None:
+        target, result = self._clone_with_tailnet_failure(hold_result=False)
+        self.assertEqual(result.state, State.RECOVERY_REQUIRED)
+        self.assertFalse(identity.swarm_networking_allowed())
+        self.assertTrue(identity._journal_path(settings_for(target)).exists())
+
+
+class FailureBoundaryTests(ProvisioningTestBase):
+    def test_unremovable_peer_pin_blocks_ready_and_is_retried(self) -> None:
+        original, _ = self.install()
+        seed_swarm(original)
+        target = self.tmp / "disk-b"
+        image_disk(self.root, target)
+        clone = settings_for(target)
+        stuck = target / "system" / "drone-app" / "local-peer-certs" / "peer.crt"
+        real_unlink = Path.unlink
+
+        def flaky(path, *args, **kwargs):
+            if path == stuck:
+                raise PermissionError("read-only")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(swarm_reset.Path, "unlink", flaky):
+            failed = identity.ensure_identity(clone, provider_for(self.hw_b))
+        self.assertEqual(failed.state, State.RECOVERY_REQUIRED)
+        self.assertTrue(stuck.exists())
+        identity.reset_runtime_state_for_tests()
+        retried = identity.ensure_identity(settings_for(target), provider_for(self.hw_b))
+        self.assertEqual(retried.state, State.READY)
+        self.assertFalse(stuck.exists())
+
+    def test_valid_foreign_certificate_does_not_silently_replace_the_bound_identity(self) -> None:
+        original, _ = self.install()
+        other_root = self.tmp / "other"
+        other_root.mkdir()
+        other = settings_for(other_root)
+        identity.ensure_identity(other, provider_for(self.hw_a))
+        bound = identity._binding_path(original).read_bytes()
+        original.drone_cert_file.write_bytes(other.drone_cert_file.read_bytes())
+        original.drone_key_file.write_bytes(other.drone_key_file.read_bytes())
+        identity.reset_runtime_state_for_tests()
+        result = identity.ensure_identity(settings_for(self.root), provider_for(self.hw_a))
+        self.assertEqual(result.reason, "certificate_mismatch")
+        self.assertFalse(identity.swarm_networking_allowed())
+        self.assertEqual(identity._binding_path(original).read_bytes(), bound)
+        # An administrator can explicitly keep it.
+        identity.resolve_recovery(original, "keep", provider_for(self.hw_a))
+        self.assertEqual(read_binding(original)["identity_certificate_fingerprint"], fingerprint_of(original))
+
+    def test_automatic_certificate_renewal_keeps_the_binding_current(self) -> None:
+        original, _ = self.install()
+        original.drone_cert_file.write_text("garbage", encoding="utf-8")
+        DroneCertificateManager(original).ensure_certificate()
+        self.assertEqual(read_binding(original)["identity_certificate_fingerprint"], fingerprint_of(original))
+        identity.reset_runtime_state_for_tests()
+        self.assertEqual(identity.ensure_identity(settings_for(self.root), provider_for(self.hw_a)).status, identity.STATUS_VERIFIED)
 
 
 class IdentityHandlerTests(ProvisioningTestBase):

@@ -630,6 +630,16 @@ def _provision(
         settings = dataclasses.replace(settings, device_id=new_device_id)
 
         tailnet = _reset_tailnet()
+        if tailnet.get("status") == "error":
+            # The inherited node identity could not be cleared. Without a confirmed hold the
+            # clone would keep presenting it, so only a successful hold lets provisioning go on.
+            try:
+                held = bool(_tailnet_module().hold_local_node())
+            except Exception:  # noqa: BLE001
+                held = False
+            if not held:
+                raise IdentityError("the inherited Tailscale node identity could neither be cleared nor taken offline")
+            tailnet = {"status": "held", "detail": tailnet.get("detail", "")}
         steps["tailnet"] = tailnet
         journal["tailnet_status"] = tailnet.get("status")
         _record_journal(settings, journal)
@@ -936,6 +946,11 @@ def _rebind_authorized(settings: Any, binding: dict, hardware: HardwareSnapshot,
 def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: dict, hardware_verified: bool) -> IdentityResult:
     """Reconcile binding, certificate and device id; write only when something differs."""
     changed = False
+    if pair["valid"] and pair["fingerprint"] != binding["identity_certificate_fingerprint"]:
+        # A valid certificate the binding never recorded (swapped in from another installation,
+        # or an unrecorded rotation) must not silently become this Drone's identity; the
+        # administrator-initiated rotation path updates the binding itself.
+        return _enter_recovery(settings, "certificate_mismatch", binding)
     if not pair["valid"]:
         # Missing/corrupt/expired certificate on the *same* machine: re-issue it (peers must
         # re-pin, as with any certificate rotation) -- never fall back to an unchecked key.
@@ -946,9 +961,8 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
         binding["history"].append(_history_entry("certificate_reissued", certificate=pair["fingerprint"][:12]))
         changed = True
     if pair["fingerprint"] != binding["identity_certificate_fingerprint"]:
+        # Only reachable right after the re-issue above.
         binding["identity_certificate_fingerprint"] = pair["fingerprint"]
-        if not changed:
-            binding["history"].append(_history_entry("certificate_rotation_recorded", certificate=pair["fingerprint"][:12]))
         changed = True
     if binding["device_id"] != settings.device_id:
         if _env_pinned_device_id() and settings.device_id not in (binding.get("retired_device_ids") or []):
@@ -979,7 +993,7 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
 
 def record_certificate_rotation(settings: Any) -> None:
     """Keep the binding current after an administrator-initiated certificate rotation."""
-    if _externally_managed(settings):
+    if _externally_managed(settings) or not _binding_path(settings).exists():
         return
     with _ProvisioningLock(settings):
         binding, _problem = _load_binding(settings)
