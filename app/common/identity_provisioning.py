@@ -1148,7 +1148,7 @@ def record_collision(settings: Any, source: str, detail: str = "") -> None:
         except ImportError:  # pragma: no cover - direct script execution fallback
             from storage.state_store import append_event, database_path  # type: ignore
         append_event(
-            database_path(Path(settings.userdata_root)),
+            database_path(settings.userdata_root),
             _COLLISION_EVENT_NAMESPACE,
             {"at": _now_iso(), "source": safe_source, "detail": str(detail)[:200]},
             max_events=100,

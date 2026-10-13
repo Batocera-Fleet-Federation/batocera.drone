@@ -176,6 +176,17 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
                 database_path(mock.MagicMock())
 
+    def test_database_path_rejects_path_spec_mocks(self) -> None:
+        path_spec_mock = mock.MagicMock(spec=Path)
+        autospec_path_mock = mock.create_autospec(Path)
+        self.assertIsInstance(path_spec_mock, Path)
+        self.assertIsInstance(autospec_path_mock, Path)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            for mocked_path in (path_spec_mock, autospec_path_mock):
+                with self.subTest(mock_type=type(mocked_path).__name__):
+                    with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
+                        database_path(mocked_path)
+
     def _write_gamelist(self, system: Path, *roms: str) -> None:
         games = "".join(
             f"<game><path>./{rom}</path><name>{Path(rom).stem}</name></game>"

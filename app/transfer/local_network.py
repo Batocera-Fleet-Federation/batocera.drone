@@ -63,7 +63,7 @@ def _now_iso() -> str:
 
 
 def _db(settings: Any) -> Path:
-    return database_path(Path(settings.userdata_root))
+    return database_path(settings.userdata_root)
 
 
 def get_integrations(settings: Any) -> dict:
