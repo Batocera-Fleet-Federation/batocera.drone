@@ -445,6 +445,39 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_152_media_keys_hold_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-152-media-keys-hold-uat",
+      "name": "Issue #152 Media Keys separate-press hold gate, sustained-hold timing, and HTTP hold progress",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/integrations/media_keys/dispatch.py",
+          "app/integrations/media_keys/manager.py",
+          "app/web/handlers_integrations.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
