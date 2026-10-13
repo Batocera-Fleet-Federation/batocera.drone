@@ -1419,6 +1419,110 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_163_clone_session_mcp_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-163-clone-session-mcp-boundaries",
+      "name": "Issue #163 clone session and MCP token revocation boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "app/common/identity_provisioning.py",
+          "app/common/mcp_auth.py",
+          "app/common/auth.py",
+          "tests/adversarial/test_issue_163_clone_session_mcp_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_163_clone_auth_http_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-163-clone-auth-http-uat",
+      "name": "Issue #163 captured admin cookie and MCP bearer rejected on clone HTTP",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "app/common/identity_provisioning.py",
+          "app/web/mcp_server.py",
+          "app/web/handlers_auth.py",
+          "tests/adversarial/test_issue_163_clone_auth_http_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_163_clone_auth_real_boot_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-163-clone-auth-real-boot-uat",
+      "name": "Issue #163 real entrypoint clone boot rejects captured admin tokens",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/main.py",
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_163_clone_auth_real_boot_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
     }
   ],
   "version": 1
