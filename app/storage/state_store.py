@@ -53,16 +53,17 @@ def database_path(userdata_root: PathLike[str] | str) -> Path:
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
 
-def database_path_for_legacy_file(path: Path) -> Path:
+def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
     _require_filesystem_path(path, "path")
-    return path.resolve().parent / DATABASE_FILENAME
+    return Path(path).resolve().parent / DATABASE_FILENAME
 
 
-def open_database(path: Path) -> sqlite3.Connection:
+def open_database(path: PathLike[str] | str) -> sqlite3.Connection:
     _require_filesystem_path(path, "database path")
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path), timeout=30)
     try:
