@@ -307,6 +307,8 @@ def _local_pair_peer(
     *,
     tailnet_auto_pair: bool = False,
 ) -> dict:
+    if not _identity_swarm_networking_allowed():
+        raise PermissionError("peer pairing is held pending Drone identity verification")
     if not _local_network.is_local_mode(settings):
         raise ValueError("Drone is not in local network mode")
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
@@ -339,6 +341,8 @@ def _local_pair_peer(
         method="POST",
     )
     context = ssl._create_unverified_context() if address.startswith("https://") else None
+    if not _identity_swarm_networking_allowed():
+        raise PermissionError("peer pairing is held pending Drone identity verification")
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
     result = json.loads(raw.decode("utf-8")) if raw else {}

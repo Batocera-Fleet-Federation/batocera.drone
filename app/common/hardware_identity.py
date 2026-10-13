@@ -42,6 +42,7 @@ ALL_KINDS = PRIMARY_KINDS + SECONDARY_KINDS
 _PLACEHOLDER_TEXT = {
     "", "none", "null", "nil", "n/a", "na", "unknown", "undefined", "default", "default string", "empty",
     "invalid", "oem", "o.e.m.", "to be filled by o.e.m.", "to be filled by oem", "not specified",
+    "not supplied", "unspecified",
     "not settable", "notsettable", "not defined", "notdefined", "mb-1234567890",
     "not applicable", "not available", "not present", "not set", "system serial number",
     "system product name", "serial number", "chassis serial number", "base board serial number",
@@ -50,6 +51,9 @@ _PLACEHOLDER_TEXT = {
     "xxxxxxxx", "to be filled by o.e.m", "tobefilledbyo.e.m.", "sn1234567890", "ser1234567890",
     "chassis manufacturer", "chassis version", "all series", "ffffffffffffffff",
 }
+# Firmware uses punctuation, spaces and capitalization interchangeably in filler
+# serials. Compare a separator-free spelling so variants cannot become evidence.
+_PLACEHOLDER_KEYS = {re.sub(r"[^a-z0-9]", "", value) for value in _PLACEHOLDER_TEXT}
 _PLACEHOLDER_UUIDS = {
     "00000000-0000-0000-0000-000000000000",
     "ffffffff-ffff-ffff-ffff-ffffffffffff",
@@ -77,7 +81,7 @@ def normalize_identifier(kind: str, raw: object) -> Optional[str]:
     if not text or len(text) > _MAX_RAW_LENGTH:
         return None
     value = re.sub(r"\s+", " ", text).lower()
-    if value in _PLACEHOLDER_TEXT:
+    if re.sub(r"[^a-z0-9]", "", value) in _PLACEHOLDER_KEYS:
         return None
     if kind == "dmi_product_uuid":
         if not _UUID_PATTERN.match(value) or value in _PLACEHOLDER_UUIDS:
