@@ -185,6 +185,11 @@ this identity on this hardware and record it as the new baseline; or `action: ne
 provision a new identity). Both need a real session and the password; the Drone restarts
 afterwards. Peers can never cause a reset.
 
+On a failed provisioning run the Drone also revokes the browser sessions and the local MCP token
+copied from the source installation (`swarm_reset.revoke_inherited_access`), because the full swarm
+reset may never have run. The administrator logs in again with the configured password, and the MCP
+token must be regenerated. The source installation keeps both.
+
 ## Duplicate-identity detection (defence in depth)
 
 When two endpoints claim one identity, Drone isolates the connection and logs it

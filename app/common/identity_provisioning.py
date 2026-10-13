@@ -933,6 +933,15 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
                 _recovery_path(settings),
                 {"reason": "provisioning_failed", "detail": error.__class__.__name__, "since": _now_iso()},
             )
+        except Exception:  # noqa: BLE001 - the failure is already reported above
+            pass
+        # A held Drone must not keep honouring admin sessions or MCP bearers copied from the
+        # source installation; the full swarm reset may never run, so drop them here.
+        try:
+            _swarm_reset_module().revoke_inherited_access(settings)
+        except Exception as revoke_error:  # noqa: BLE001 - reported, the hold below still applies
+            _log(f"Inherited sessions/tokens could not be revoked ({revoke_error.__class__.__name__})")
+        try:
             journal = _read_json(_journal_path(settings))
             if isinstance(journal, dict) and journal.get("reason") != "initial":
                 # A half-reprovisioned clone must not keep presenting the inherited tailnet node.

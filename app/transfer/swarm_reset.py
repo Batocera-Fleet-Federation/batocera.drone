@@ -165,6 +165,21 @@ def _revoke_shared_credentials(settings: Any) -> List[str]:
     return incomplete
 
 
+def revoke_inherited_access(settings: Any) -> None:
+    """Invalidate browser sessions and the MCP token copied from the source installation.
+
+    Used when provisioning of a clone is held: the full reset may never run, so the
+    inherited admin session and MCP bearer must be dropped here, in one transaction,
+    without touching peers, pins or credentials. Raises if the database cannot be
+    updated; the caller decides how to report that.
+    """
+    with open_database(database_path(settings.userdata_root)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM sessions")
+        connection.execute("DELETE FROM app_state WHERE namespace = ?", ("mcp",))
+        connection.commit()
+
+
 def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
     """Clear inherited swarm trust. Raises if the SQLite reset itself fails."""
     try:

@@ -569,6 +569,23 @@ class RecoveryAndInterruptionTests(ProvisioningTestBase):
         self.assertFalse(identity._recovery_path(clone).exists())
         self.assertTrue(identity.swarm_networking_allowed())
 
+    def test_held_clone_revokes_inherited_session_and_mcp_token_when_reset_fails(self) -> None:
+        original, _ = self.install()
+        session_token = SessionStore(database_path(original.userdata_root)).create("admin")
+        mcp_token = mcp_auth.generate_token(original)["token"]
+        target = self.tmp / "disk-b"
+        image_disk(self.root, target)
+        clone = settings_for(target)
+        with mock.patch.object(swarm_reset, "reset_swarm_identity_state", side_effect=OSError("io error")):
+            result = identity.ensure_identity(clone, provider_for(self.hw_b))
+        self.assertEqual(result.reason, "provisioning_failed")
+        self.assertFalse(result.swarm_networking_enabled)
+        self.assertIsNone(SessionStore(database_path(clone.userdata_root)).validate(session_token))
+        self.assertFalse(mcp_auth.verify_token(clone, mcp_token))
+        # The source installation keeps its own credentials.
+        self.assertEqual(SessionStore(database_path(original.userdata_root)).validate(session_token), "admin")
+        self.assertTrue(mcp_auth.verify_token(original, mcp_token))
+
     def test_failure_during_swarm_cleanup_resumes(self) -> None:
         original, _ = self.install()
         seed_swarm(original)
