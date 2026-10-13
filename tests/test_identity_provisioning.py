@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import ast
 import shutil
 import ssl
 import subprocess
@@ -34,6 +35,27 @@ from tests.test_hardware_identity import UUID_A, UUID_B, pi_tree, write, x86_tre
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 needs_openssl = unittest.skipUnless(shutil.which("openssl"), "openssl is required")
+
+
+class HeldIdentityStartupGateTests(unittest.TestCase):
+    def test_vpn_auto_connect_and_self_heal_start_only_when_swarm_is_allowed(self) -> None:
+        source = (REPO_ROOT / "app" / "drone_api.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        create_server = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "create_server"
+        )
+        gates = {}
+        for node in ast.walk(create_server):
+            if not isinstance(node, ast.If):
+                continue
+            test_text = ast.unparse(node.test)
+            if "_VPN_AUTO_CONNECT_ATTEMPTED" in test_text:
+                gates["maybe_auto_connect"] = test_text
+            if "_VPN_SELF_HEAL_POLLER_STARTED" in test_text:
+                gates["run_self_heal_poller"] = test_text
+        self.assertIn("swarm_enabled", gates.get("maybe_auto_connect", ""))
+        self.assertIn("swarm_enabled", gates.get("run_self_heal_poller", ""))
 
 
 def settings_for(root: Path, **extra: str) -> Settings:
