@@ -97,7 +97,11 @@ class DroneCredentialStore:
         self.path = path
         self.env_username = env_username
         self.env_password = env_password
-        self.state_database_file = state_database_file or _state_database_path_for_legacy_file(path)
+        # ``is None``, not truthiness: a falsy injected value (e.g. ``MagicMock(spec=str)``)
+        # must reach the state_store path guard instead of being silently replaced.
+        self.state_database_file = (
+            _state_database_path_for_legacy_file(path) if state_database_file is None else state_database_file
+        )
         self._lock = Lock()
 
     def _hash_password(self, password: str, salt: Optional[str] = None) -> str:

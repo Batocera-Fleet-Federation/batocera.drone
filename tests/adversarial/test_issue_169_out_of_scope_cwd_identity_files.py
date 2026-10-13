@@ -68,7 +68,8 @@ class IdentityFilesSpecRootTests(unittest.TestCase):
                 seeded.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
                 settings = SimpleNamespace(userdata_root=factory(), device_id="aa:bb:cc:dd:ee:ff")
 
-                identity_provisioning._retire_device_id(settings)
+                with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
+                    identity_provisioning._retire_device_id(settings)
 
                 self.assertTrue(seeded.exists(), msg="a spec'd root unlinked a file under the cwd")
 
@@ -78,7 +79,8 @@ class IdentityFilesSpecRootTests(unittest.TestCase):
                 settings = SimpleNamespace(userdata_root=factory(), device_id="aa:bb:cc:dd:ee:ff")
 
                 with contextlib.redirect_stdout(io.StringIO()):
-                    identity_provisioning._choose_device_id(settings, {})
+                    with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
+                        identity_provisioning._choose_device_id(settings, {})
 
                 self.assertEqual(sorted(p.name for p in cwd.iterdir()), [], msg="a spec'd root wrote into the cwd")
 
@@ -90,7 +92,8 @@ class IdentityFilesSpecRootTests(unittest.TestCase):
                 pin.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
                 settings = SimpleNamespace(userdata_root=factory())
 
-                swarm_reset._clear_pinned_peer_certificates(settings)
+                with self.assertRaisesRegex(TypeError, "userdata_root must be a filesystem path"):
+                    swarm_reset._clear_pinned_peer_certificates(settings)
 
                 self.assertTrue(pin.exists(), msg="a spec'd root unlinked a pinned certificate under the cwd")
 
