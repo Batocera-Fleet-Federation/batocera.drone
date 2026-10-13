@@ -676,6 +676,68 @@
         "-s",
         "tests/adversarial/security",
         "-p",
+        "test_issue_191_discovery_infinite_port.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-191-discovery-infinite-port",
+      "name": "Issue #191 overflowing or deeply nested LAN packets must not terminate discovery",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_191_discovery_infinite_port.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_191_discovery_packet_type.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-191-discovery-packet-type",
+      "name": "Issue #191 malformed LAN announcement must not terminate discovery",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_191_discovery_packet_type.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
         "test_issue_155_hardlinked_lock_chown.py"
       ],
       "disruptive": false,
@@ -2435,6 +2497,72 @@
         "files": [
           "app/storage/state_store.py",
           "tests/adversarial/test_issue_190_malformed_error_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_191_teardown_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-191-teardown-uat",
+      "name": "Issue #191 discovery stop-and-join before temp DB teardown acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_workers.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_191_teardown_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_191_lifecycle_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-191-lifecycle-boundaries",
+      "name": "Issue #191 discovery stop API, malformed packets, and health-loop teardown boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_workers.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_191_lifecycle_boundaries.py"
         ],
         "mounts": [],
         "servers": []
