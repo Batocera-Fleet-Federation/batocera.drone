@@ -159,7 +159,7 @@ class HandlersPeerMixin:
         try:
             from ..transfer import swarm_membership as _swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
-            import swarm_membership as _swarm_membership  # type: ignore
+            from transfer import swarm_membership as _swarm_membership  # type: ignore
         _swarm_membership.record_approved_member(self.settings, peer)
         load_peer_cert_everywhere(self.server, cert_path)
         _local_network.pairing_code(self.settings, rotate=True)
@@ -196,7 +196,7 @@ class HandlersPeerMixin:
         try:
             from ..transfer import swarm_membership as _swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
-            import swarm_membership as _swarm_membership  # type: ignore
+            from transfer import swarm_membership as _swarm_membership  # type: ignore
         caller = self._membership_caller_id(payload if isinstance(payload, dict) else {})
         try:
             result = _swarm_membership.handle_membership_request(self.settings, payload if isinstance(payload, dict) else {}, caller)
@@ -212,7 +212,7 @@ class HandlersPeerMixin:
         try:
             from ..transfer import swarm_membership as _swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
-            import swarm_membership as _swarm_membership  # type: ignore
+            from transfer import swarm_membership as _swarm_membership  # type: ignore
         fingerprint = self._presented_client_fingerprint()
         if fingerprint:
             removed = _swarm_membership.peer_id_for_removed_fingerprint(self.settings, fingerprint)
