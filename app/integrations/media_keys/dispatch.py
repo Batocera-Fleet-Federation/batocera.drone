@@ -7,9 +7,9 @@ never hang or lose a key press, and every outcome is logged and recorded in
 ``state/last-press.json`` for the admin page.
 
 * disabled integration, unknown binding, or "none" -> does nothing;
-* reboot/shutdown (and any binding with ``hold_seconds``) only fire after the
-  key's auto-repeat events keep arriving for the hold duration -- a single
-  press, or a hold that is released early, does nothing;
+* reboot/shutdown (and any binding with ``hold_seconds``) only fire after a
+  typematic repeat *train* has lasted the hold duration -- a single press,
+  a hold released early, or a series of separate taps does nothing;
 * built-ins go through the shared ``BatoceraControl`` catalog; scripts go
   through the shared ``ScriptStore`` (``shell=False``, clean environment,
   timeout, bounded output). When started as root, scripts drop to the owner of
@@ -48,10 +48,16 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
 
 
 SCRIPT_TIMEOUT_SECONDS = 30.0
-# Kernel auto-repeat: one initial-delay gap, then a rapid stream. Events further
-# apart than these are separate presses, so deliberate taps never add up to a hold.
+# Physical key (hotkeygen): Linux typematic is one delayed repeat (commonly
+# 250-600 ms) then a rapid train (~25-40 Hz). Discrete taps -- even 450 ms
+# apart, faster than a naive "repeat gap" -- never produce that train, so the
+# post-delay gap must be tighter than a human tap. The admin Hold-to-test
+# control is a different origin: the UI posts ~350 ms pulses over HTTP, so it
+# uses a looser pulse window rather than typematic timing.
 HOLD_FIRST_GAP_SECONDS = 0.75
-HOLD_REPEAT_GAP_SECONDS = 0.5
+HOLD_REPEAT_GAP_SECONDS = 0.20
+TEST_HOLD_GAP_SECONDS = 1.0
+HOLD_ORIGINS = ("key", "test")
 
 
 def log_media_key(event: str, **fields: Any) -> None:
@@ -74,7 +80,14 @@ def script_owner(paths: MediaKeysPaths) -> Optional[tuple]:
 
 
 class HoldGate:
-    """Tracks a key's repeat events; passes once held long enough, once per hold."""
+    """Tracks a key's repeat events; passes once held long enough, once per hold.
+
+    ``origin="key"`` (hotkeygen dispatcher) requires a typematic train: one
+    delayed first repeat, then events at repeat rate. Separate taps cannot
+    accumulate even when they arrive faster than the first-repeat delay.
+    ``origin="test"`` (admin Hold-to-test pulses) uses a wider HTTP pulse
+    window. The two origins never share progress.
+    """
 
     def __init__(self, paths: MediaKeysPaths, clock: Callable[[], float] = time.time) -> None:
         self.paths = paths
@@ -95,12 +108,20 @@ class HoldGate:
                     os.close(inner.fd)
         return _Lock()
 
-    def check(self, binding_id: str, seconds: float, identity: Optional[dict] = None) -> str:
+    @staticmethod
+    def _max_gap(origin: str, repeats: int) -> float:
+        if origin == "test":
+            return TEST_HOLD_GAP_SECONDS
+        return HOLD_FIRST_GAP_SECONDS if repeats == 0 else HOLD_REPEAT_GAP_SECONDS
+
+    def check(self, binding_id: str, seconds: float, identity: Optional[dict] = None,
+              *, origin: str = "key") -> str:
         """Return ``"fire"``, ``"holding"`` (still counting) or ``"fired"`` (already acted).
 
         ``identity`` (see ``hold_identity``) must match the stored hold, otherwise
-        the hold restarts from zero.
+        the hold restarts from zero. ``origin`` must also match.
         """
+        origin = origin if origin in HOLD_ORIGINS else "key"
         now = self.clock()
         with self._locked():
             state = read_json(self.paths.hold_file, {}) or {}
@@ -119,13 +140,18 @@ class HoldGate:
             # Corrupt persisted data starts a fresh window. Never let malformed,
             # infinite, or future timestamps satisfy a dangerous hold.
             repeats = entry.get("repeats") if isinstance(entry, dict) else None
-            invalid = (last is None or started is None or last > now or started > now or started > last
-                       or not isinstance(entry, dict) or not isinstance(entry.get("fired"), bool)
-                       or isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 0
-                       or entry.get("identity") != identity)
-            max_gap = HOLD_FIRST_GAP_SECONDS if repeats == 0 else HOLD_REPEAT_GAP_SECONDS
-            if not isinstance(entry, dict) or invalid or now - last > max_gap:
-                entry = {"start": now, "last": now, "fired": False, "repeats": 0, "identity": identity}
+            intact = (
+                isinstance(entry, dict)
+                and last is not None and started is not None
+                and last <= now and started <= now and started <= last
+                and isinstance(entry.get("fired"), bool)
+                and isinstance(repeats, int) and not isinstance(repeats, bool) and repeats >= 0
+                and entry.get("identity") == identity
+                and entry.get("origin") == origin
+            )
+            if not intact or now - last > self._max_gap(origin, repeats):
+                entry = {"start": now, "last": now, "fired": False, "repeats": 0,
+                         "identity": identity, "origin": origin}
                 outcome = "holding"
             else:
                 entry["last"] = now

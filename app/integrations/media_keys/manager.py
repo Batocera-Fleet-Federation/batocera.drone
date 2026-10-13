@@ -201,7 +201,8 @@ class MediaKeysIntegration(Integration):
             if (payload or {}).get("confirm") is not True:
                 raise ValueError("this action needs confirmation")
             gate = HoldGate(self.paths).check(binding_id, hold_seconds(binding),
-                                              hold_identity(self.config.load(), binding))
+                                              hold_identity(self.config.load(), binding),
+                                              origin="test")
             if gate != "fire":
                 return {"status": gate, "message": "Keep holding to confirm this action."}
         run_as = script_owner(self.paths) if binding.get("action_type") == "script" else None

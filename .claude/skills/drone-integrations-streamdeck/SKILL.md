@@ -48,9 +48,11 @@ deletes a file it did not write, stock `/etc/hotkeygen` untouched) mapping the
 `python3 -m app.integrations.media_keys.dispatch` detached; the dispatcher reads
 `config/media-keys.json` from disk at press time (no Drone web service needed, so
 binding/script edits apply on the next press and a restarting Drone cannot hang a
-key). Reboot/shutdown (and any `hold_seconds` binding) fire only after key
-auto-repeat events keep arriving for the hold duration (`HoldGate`, state in
-`state/hold.json`) -- a single press does nothing. When the dispatcher runs as
+key). Reboot/shutdown (and any `hold_seconds` binding) fire only after a
+typematic repeat train lasts the hold duration (`HoldGate`, state in
+`state/hold.json`) -- a single press or a series of separate taps does
+nothing; the admin Hold-to-test control is a separate origin so HTTP pulses
+do not share keyboard hold progress. When the dispatcher runs as
 root, scripts drop to the owner of the integration dir (`run_as`).
 
 Shared code lives in `app/integrations/shared/`: `process.py` (ProcessRunner),

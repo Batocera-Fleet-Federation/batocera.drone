@@ -134,11 +134,23 @@ class DispatcherTests(Base):
     def test_reboot_fires_once_after_a_sustained_hold(self):
         ConfigStore(self.paths).set_enabled(True)
         results = []
-        for _ in range(12):  # auto-repeat every 0.5 s for 5.5 s
+        # Kernel auto-repeat: ~0.6 s initial delay, then ~30 Hz until release.
+        start = self.now[0]
+        offsets = [0.0, 0.6] + [0.6 + 0.033 * step for step in range(1, 90)]
+        for offset in offsets:
+            self.now[0] = start + offset
             results.append(self.press("reboot")["status"])
-            self.now[0] += 0.5
         self.assertEqual(self.control.calls, ["reboot"])
         self.assertEqual(results.count("ok"), 1)
+
+    def test_fast_separate_taps_do_not_confirm_reboot(self):
+        ConfigStore(self.paths).set_enabled(True)
+        results = []
+        for _ in range(12):
+            results.append(self.press("reboot")["status"])
+            self.now[0] += 0.45
+        self.assertEqual(self.control.calls, [])
+        self.assertTrue(all(status == "holding" for status in results), results)
 
     def test_script_dispatch_uses_the_script_store(self):
         manager = self.manager()
@@ -170,6 +182,22 @@ class DispatcherTests(Base):
         self.assertEqual(gate.check("reboot", 2), "holding")
         self.now[0] += 3  # gap > 1 s: a fresh press
         self.assertEqual(gate.check("reboot", 2), "holding")
+
+    def test_hold_gate_test_origin_accepts_ui_pulse_spacing(self):
+        gate = HoldGate(self.paths, clock=lambda: self.now[0])
+        outcomes = []
+        for _ in range(10):
+            outcomes.append(gate.check("reboot", 3, origin="test"))
+            self.now[0] += 0.35
+        self.assertEqual(outcomes.count("fire"), 1, outcomes)
+
+    def test_hold_gate_key_and_test_origins_do_not_share_progress(self):
+        gate = HoldGate(self.paths, clock=lambda: self.now[0])
+        self.assertEqual(gate.check("reboot", 3, origin="key"), "holding")
+        self.now[0] += 0.1
+        self.assertEqual(gate.check("reboot", 3, origin="test"), "holding")
+        self.now[0] += 0.1
+        self.assertEqual(gate.check("reboot", 3, origin="key"), "holding")
 
 
 class BuiltinCatalogTests(unittest.TestCase):
