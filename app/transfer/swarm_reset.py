@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
+    from ..storage import access_quarantine
     from ..storage.state_store import database_path, open_database
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from storage import access_quarantine  # type: ignore
     from storage.state_store import database_path, open_database  # type: ignore
 
 # app_state namespaces that must not be inherited by a newly provisioned identity.
@@ -163,6 +165,56 @@ def _revoke_shared_credentials(settings: Any) -> List[str]:
         if not _guarded(label, step):
             incomplete.append(label)
     return incomplete
+
+
+def revoke_inherited_access(settings: Any) -> None:
+    """Invalidate browser sessions and the MCP token copied from the source installation.
+
+    Used when provisioning of a clone is held: the full reset may never run, so the
+    inherited admin session and MCP bearer must be dropped here without touching peers,
+    pins or credentials. Each credential is revoked independently, and a blocked DELETE
+    falls back to neutralising the row in place, so one failure cannot leave the other
+    (or the same) credential usable. Raises only if some access could not be revoked.
+    """
+    db_path = database_path(settings.userdata_root)
+    # Deny the copied credentials first: if SQLite then refuses both the delete and the
+    # in-place rewrite, they still cannot authenticate.
+    try:
+        with open_database(db_path) as connection:
+            tokens = [row[0] for row in connection.execute("SELECT token FROM sessions")]
+            mcp_row = connection.execute(
+                "SELECT payload FROM app_state WHERE namespace = ?", ("mcp",)
+            ).fetchone()
+        mcp_digests = []
+        if mcp_row:
+            record = json.loads(mcp_row[0])
+            if isinstance(record, dict) and record.get("token_sha256"):
+                mcp_digests.append(str(record["token_sha256"]))
+        access_quarantine.deny(db_path, sessions=tokens, mcp=mcp_digests)
+    except Exception as error:  # noqa: BLE001 - the SQLite revocation below still runs
+        _log(f"Inherited access could not be denied up front ({error.__class__.__name__})")
+    steps = (
+        ("sessions", "DELETE FROM sessions", (),
+         "UPDATE sessions SET expires_at = ?", ("1970-01-01T00:00:00+00:00",)),
+        ("mcp", "DELETE FROM app_state WHERE namespace = ?", ("mcp",),
+         "UPDATE app_state SET payload = ? WHERE namespace = ?", ("{}", "mcp")),
+    )
+    failure: Optional[Exception] = None
+    for label, delete_sql, delete_args, neutralise_sql, neutralise_args in steps:
+        for sql, args in ((delete_sql, delete_args), (neutralise_sql, neutralise_args)):
+            try:
+                with open_database(db_path) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(sql, args)
+                    connection.commit()
+                break
+            except Exception as error:  # noqa: BLE001 - try the fallback, then report
+                _log(f"Inherited {label} revocation step failed: {error.__class__.__name__}")
+                last = error
+        else:
+            failure = failure or last
+    if failure is not None:
+        raise failure
 
 
 def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:

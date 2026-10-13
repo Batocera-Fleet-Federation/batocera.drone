@@ -660,6 +660,9 @@ def _provision(
     """Create (or recreate) the identity. ``reason``: initial | clone | operator_new_identity."""
     destructive = reason != "initial"
     resumed = journal is not None
+    if destructive:
+        # Revoke before anything else can fail (even the journal write) and hold the clone.
+        _revoke_inherited_access(settings)
     if journal is None:
         previous_pair = _identity_pair_status(settings)
         journal = {
@@ -787,6 +790,14 @@ def _swarm_reset_module():
     except ImportError:  # pragma: no cover - direct script execution fallback
         from transfer import swarm_reset  # type: ignore
     return swarm_reset
+
+
+def _revoke_inherited_access(settings: Any) -> None:
+    """Best effort: a held clone must not keep honouring sessions or MCP bearers copied from the source."""
+    try:
+        _swarm_reset_module().revoke_inherited_access(settings)
+    except Exception as error:  # noqa: BLE001 - reported; the hold still applies
+        _log(f"Inherited sessions/tokens could not be revoked ({error.__class__.__name__})")
 
 
 def _tailnet_module():
@@ -933,12 +944,24 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
                 _recovery_path(settings),
                 {"reason": "provisioning_failed", "detail": error.__class__.__name__, "since": _now_iso()},
             )
-            journal = _read_json(_journal_path(settings))
-            if isinstance(journal, dict) and journal.get("reason") != "initial":
-                # A half-reprovisioned clone must not keep presenting the inherited tailnet node.
-                _tailnet_module().hold_local_node()
         except Exception:  # noqa: BLE001 - the failure is already reported above
             pass
+        try:
+            journal = _read_json(_journal_path(settings))
+            # Only a run that got as far as journaling a clone/replacement is known to hold
+            # inherited state; a transient failure on the original must not log it out.
+            inherited = isinstance(journal, dict) and journal.get("reason") != "initial"
+        except Exception:  # noqa: BLE001 - the failure is already reported above
+            inherited = False
+        if inherited:
+            # A held clone must not keep honouring admin sessions or MCP bearers copied from the
+            # source installation; the full swarm reset may never run, so drop them here.
+            _revoke_inherited_access(settings)
+            try:
+                # A half-reprovisioned clone must not keep presenting the inherited tailnet node.
+                _tailnet_module().hold_local_node()
+            except Exception:  # noqa: BLE001 - the failure is already reported above
+                pass
         _publish(State.RECOVERY_REQUIRED, STATUS_RECOVERY, "provisioning_failed", False)
         return IdentityResult(settings, State.RECOVERY_REQUIRED, STATUS_RECOVERY, reason="provisioning_failed", swarm_networking_enabled=False)
 
