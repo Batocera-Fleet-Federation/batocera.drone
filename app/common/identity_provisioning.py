@@ -935,19 +935,25 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
             )
         except Exception:  # noqa: BLE001 - the failure is already reported above
             pass
-        # A held Drone must not keep honouring admin sessions or MCP bearers copied from the
-        # source installation; the full swarm reset may never run, so drop them here.
-        try:
-            _swarm_reset_module().revoke_inherited_access(settings)
-        except Exception as revoke_error:  # noqa: BLE001 - reported, the hold below still applies
-            _log(f"Inherited sessions/tokens could not be revoked ({revoke_error.__class__.__name__})")
         try:
             journal = _read_json(_journal_path(settings))
-            if isinstance(journal, dict) and journal.get("reason") != "initial":
+            # Only a run that got as far as journaling a clone/replacement is known to hold
+            # inherited state; a transient failure on the original must not log it out.
+            inherited = isinstance(journal, dict) and journal.get("reason") != "initial"
+        except Exception:  # noqa: BLE001 - the failure is already reported above
+            inherited = False
+        if inherited:
+            # A held clone must not keep honouring admin sessions or MCP bearers copied from the
+            # source installation; the full swarm reset may never run, so drop them here.
+            try:
+                _swarm_reset_module().revoke_inherited_access(settings)
+            except Exception as revoke_error:  # noqa: BLE001 - reported, the hold below still applies
+                _log(f"Inherited sessions/tokens could not be revoked ({revoke_error.__class__.__name__})")
+            try:
                 # A half-reprovisioned clone must not keep presenting the inherited tailnet node.
                 _tailnet_module().hold_local_node()
-        except Exception:  # noqa: BLE001 - the failure is already reported above
-            pass
+            except Exception:  # noqa: BLE001 - the failure is already reported above
+                pass
         _publish(State.RECOVERY_REQUIRED, STATUS_RECOVERY, "provisioning_failed", False)
         return IdentityResult(settings, State.RECOVERY_REQUIRED, STATUS_RECOVERY, reason="provisioning_failed", swarm_networking_enabled=False)
 

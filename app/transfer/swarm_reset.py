@@ -169,15 +169,34 @@ def revoke_inherited_access(settings: Any) -> None:
     """Invalidate browser sessions and the MCP token copied from the source installation.
 
     Used when provisioning of a clone is held: the full reset may never run, so the
-    inherited admin session and MCP bearer must be dropped here, in one transaction,
-    without touching peers, pins or credentials. Raises if the database cannot be
-    updated; the caller decides how to report that.
+    inherited admin session and MCP bearer must be dropped here without touching peers,
+    pins or credentials. Each credential is revoked independently, and a blocked DELETE
+    falls back to neutralising the row in place, so one failure cannot leave the other
+    (or the same) credential usable. Raises only if some access could not be revoked.
     """
-    with open_database(database_path(settings.userdata_root)) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM sessions")
-        connection.execute("DELETE FROM app_state WHERE namespace = ?", ("mcp",))
-        connection.commit()
+    db_path = database_path(settings.userdata_root)
+    steps = (
+        ("sessions", "DELETE FROM sessions", (),
+         "UPDATE sessions SET expires_at = ?", ("1970-01-01T00:00:00+00:00",)),
+        ("mcp", "DELETE FROM app_state WHERE namespace = ?", ("mcp",),
+         "UPDATE app_state SET payload = ? WHERE namespace = ?", ("{}", "mcp")),
+    )
+    failure: Optional[Exception] = None
+    for label, delete_sql, delete_args, neutralise_sql, neutralise_args in steps:
+        for sql, args in ((delete_sql, delete_args), (neutralise_sql, neutralise_args)):
+            try:
+                with open_database(db_path) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(sql, args)
+                    connection.commit()
+                break
+            except Exception as error:  # noqa: BLE001 - try the fallback, then report
+                _log(f"Inherited {label} revocation step failed: {error.__class__.__name__}")
+                last = error
+        else:
+            failure = failure or last
+    if failure is not None:
+        raise failure
 
 
 def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
