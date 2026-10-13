@@ -471,16 +471,19 @@ def reset_local_node_identity() -> dict:
     fresh auth key from an administrator and is never attempted automatically.
 
     Returns ``{"status": ...}`` where status is one of ``not_installed``,
-    ``reset`` (state removed, enrollment required) or ``held`` (the daemon could not
-    be stopped; it is taken down with ``tailscale down`` and the reset is retried
-    on the next start).
+    ``reset`` (state removed, enrollment required), ``held`` (the daemon could not
+    be stopped or the state not fully removed; the node was taken down with
+    ``tailscale down`` and the reset is retried on the next start) or ``error``
+    (neither a reset nor a confirmed hold was possible).
     """
     if not TAILSCALE_CLI.exists():
         return {"status": "not_installed"}
     state_dir = TAILSCALE_DIR / "state"
     stopped = _stop_tailscaled()
     if not stopped:
-        hold_local_node()
+        if not hold_local_node():
+            # Neither cleared nor offline: the inherited node may still be live.
+            return {"status": "error", "detail": "tailscaled could not be stopped or taken down"}
         return {"status": "held", "detail": "tailscaled could not be stopped; node taken down"}
     removed = 0
     try:
@@ -505,7 +508,9 @@ def reset_local_node_identity() -> dict:
     except OSError:
         pass
     if remaining:
-        return {"status": "held", "detail": "tailscale state could not be fully removed"}
+        if not hold_local_node():
+            return {"status": "error", "detail": "tailscale state could not be removed or taken down"}
+        return {"status": "held", "detail": "tailscale state could not be fully removed; node taken down"}
     daemon_error = _start_daemon_if_needed()
     return {
         "status": "reset",

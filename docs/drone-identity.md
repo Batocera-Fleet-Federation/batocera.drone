@@ -107,7 +107,7 @@ State machine: `UNINITIALIZED → VALIDATING → CLONE_DETECTED → PROVISIONING
 6. Write the binding, delete the journal, log `[Identity] Clone provisioning completed`.
 
 Every cleanup step must succeed before the clone becomes `READY`: a pinned peer certificate that cannot
-be deleted, or an inherited Tailscale node that can be neither cleared nor taken offline, fails the run
+be deleted, an imported credential or stored enrollment key that cannot be revoked, or an inherited Tailscale node that can be neither cleared nor confirmed offline (`tailscale down` must succeed), fails the run
 instead of leaving a partly trusting clone, and the next start retries from the journal.
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`

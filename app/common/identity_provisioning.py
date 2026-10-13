@@ -621,8 +621,13 @@ def _provision(
 
         from_swarm = _swarm_reset_module()
         result = from_swarm.reset_swarm_identity_state(settings)
-        steps["swarm_reset"] = {"incomplete": result.get("incomplete", [])}
+        incomplete = list(result.get("incomplete", []))
+        steps["swarm_reset"] = {"incomplete": incomplete}
         _record_journal(settings, journal)
+        if incomplete:
+            # Imported credentials / enrollment keys from the old swarm are still usable; the
+            # journal makes the next start repeat the (idempotent) cleanup.
+            raise IdentityError("inherited credentials could not be cleared: " + ", ".join(incomplete))
 
         new_device_id = _choose_device_id(settings, journal)
         journal["new_device_id"] = new_device_id

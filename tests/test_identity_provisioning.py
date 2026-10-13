@@ -833,6 +833,13 @@ class TailnetCloneTests(unittest.TestCase):
         self.assertIn(["down"], calls)
         self.assertTrue((self.tmp / "state" / "tailscaled.state").exists())
 
+    def test_failed_down_is_an_error_not_a_hold(self) -> None:
+        first, second = self.patches()
+        with first, second, mock.patch.object(self.ts, "_stop_tailscaled", return_value=False), \
+                mock.patch.object(self.ts, "hold_local_node", return_value=False):
+            self.assertEqual(self.ts.reset_local_node_identity()["status"], "error")
+        self.assertTrue((self.tmp / "state" / "tailscaled.state").exists())
+
     def test_not_installed(self) -> None:
         with mock.patch.object(self.ts, "TAILSCALE_CLI", self.tmp / "missing"):
             self.assertEqual(self.ts.reset_local_node_identity(), {"status": "not_installed"})
@@ -891,6 +898,22 @@ class FailureBoundaryTests(ProvisioningTestBase):
         retried = identity.ensure_identity(settings_for(target), provider_for(self.hw_b))
         self.assertEqual(retried.state, State.READY)
         self.assertFalse(stuck.exists())
+
+    def test_failed_credential_revocation_blocks_ready_and_is_retried(self) -> None:
+        from app.device import tailnet_service
+
+        original, _ = self.install()
+        save_payload(database_path(self.root), "tailnet_sharing.json", {"auth_key": "tskey-copied", "sharing_enabled": True})
+        target = self.tmp / "disk-b"
+        image_disk(self.root, target)
+        with mock.patch.object(tailnet_service, "_revoke_local_sharing", side_effect=OSError("read-only")):
+            failed = identity.ensure_identity(settings_for(target), provider_for(self.hw_b))
+        self.assertEqual(failed.state, State.RECOVERY_REQUIRED)
+        self.assertEqual(load_payload(database_path(target), "tailnet_sharing.json", {})["auth_key"], "tskey-copied")
+        identity.reset_runtime_state_for_tests()
+        retried = identity.ensure_identity(settings_for(target), provider_for(self.hw_b))
+        self.assertEqual(retried.state, State.READY)
+        self.assertEqual(load_payload(database_path(target), "tailnet_sharing.json", {})["auth_key"], "")
 
     def test_valid_foreign_certificate_does_not_silently_replace_the_bound_identity(self) -> None:
         original, _ = self.install()
