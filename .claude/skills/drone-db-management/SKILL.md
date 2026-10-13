@@ -722,4 +722,6 @@ temporary directory or configure `DRONE_STATE_DATABASE_FILE`; do not pass an
 unconfigured `Mock`/`MagicMock`, including `spec=Path` and
 `create_autospec(Path)` mocks. A spec mock can satisfy `isinstance(value, Path)`
 but remains a mock, not a filesystem path, and must be rejected before SQLite
-is opened.
+is opened. The same guard (`state_store._require_filesystem_path`) also protects
+`open_database()` and `database_path_for_legacy_file()`, so any path handed
+straight to SQLite must be a real `str`/`os.PathLike`, never a mock.
