@@ -172,7 +172,6 @@ def identity_dir(settings: Any) -> Path:
     configured = os.environ.get("DRONE_IDENTITY_DIR")
     if configured:
         return Path(configured)
-    from .device_identity import _require_real_path
     _require_real_path(settings.userdata_root, "userdata_root")
     return Path(settings.userdata_root) / "system" / "drone-app" / "identity"
 

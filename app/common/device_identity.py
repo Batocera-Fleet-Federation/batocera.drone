@@ -12,7 +12,6 @@ Pure stdlib, no Drone-internal dependencies.
 import os
 import re
 import uuid
-from unittest import mock
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -53,8 +52,14 @@ def _device_id_path(userdata_root: Path) -> Path:
 
 
 def _is_mock_path(value: object) -> bool:
+    """Return whether *value* is a unittest mock, including spec masquerades."""
+    try:
+        from unittest import mock
+    except ImportError:  # pragma: no cover - unittest is part of supported Python
+        return type(value).__module__ == "unittest.mock"
     mock_types = tuple(
-        candidate for name in ("Mock", "MagicMock", "NonCallableMock", "NonCallableMagicMock")
+        candidate
+        for name in ("Mock", "MagicMock", "NonCallableMock", "NonCallableMagicMock")
         if isinstance((candidate := getattr(mock, name, None)), type)
     )
     return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
