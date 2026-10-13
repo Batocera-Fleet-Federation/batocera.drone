@@ -2518,7 +2518,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
     if _TORRENT_MANAGER is None:
         _TORRENT_MANAGER = TorrentManager(settings)
-    if not _VPN_AUTO_CONNECT_ATTEMPTED:
+    if not _VPN_AUTO_CONNECT_ATTEMPTED and swarm_enabled:
         _VPN_AUTO_CONNECT_ATTEMPTED = True
         # Backgrounded: connect() can block for several seconds (spawning
         # openvpn, waiting for it to daemonize) and must never delay the
@@ -2530,7 +2530,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # sharing is to periodically ask it (Drones are outbound-only, no push
         # channel) -- see run_sharing_revocation_poller's own docstring.
         Thread(target=_vpn_manager.run_sharing_revocation_poller, args=(settings,), name="drone-vpn-sharing-revocation", daemon=True).start()
-    if not _VPN_SELF_HEAL_POLLER_STARTED:
+    if not _VPN_SELF_HEAL_POLLER_STARTED and swarm_enabled:
         _VPN_SELF_HEAL_POLLER_STARTED = True
         # Backgrounded forever-loop: detects and recovers from a broken tunnel
         # (explicit connection errors, or a decrypt/replay-error flood) without
