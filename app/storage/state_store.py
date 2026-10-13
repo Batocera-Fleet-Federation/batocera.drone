@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    from . import access_quarantine
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from storage import access_quarantine  # type: ignore
+
 
 DATABASE_FILENAME = "rom_metadata_cache.sqlite3"
 PEER_ROUTE_KINDS = frozenset({"tailnet", "host", "ip"})
@@ -237,7 +242,7 @@ def get_session(db_path: Path, token: str) -> Optional[dict]:
             "SELECT token, username, created_at, last_seen_at, expires_at FROM sessions WHERE token = ?",
             (normalized,),
         ).fetchone()
-    if not row:
+    if not row or access_quarantine.session_denied(db_path, normalized):
         return None
     return {"token": row[0], "username": row[1], "created_at": row[2], "last_seen_at": row[3], "expires_at": row[4]}
 
