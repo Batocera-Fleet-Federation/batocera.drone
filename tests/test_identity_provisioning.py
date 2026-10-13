@@ -6,6 +6,7 @@ import ast
 import shutil
 import ssl
 import subprocess
+import types
 import sys
 import tempfile
 import threading
@@ -1166,3 +1167,24 @@ class IdentityHandlerTests(ProvisioningTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MockUserdataRootRejectionTests(unittest.TestCase):
+    """A mocked userdata_root must raise, never silently keep the old id or report success."""
+
+    def _mock_settings(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(userdata_root=mock.MagicMock(), device_id="AA:BB:CC:DD:EE:FF")
+
+    def test_choose_device_id_rejects_mock_root_instead_of_reusing_configured_id(self) -> None:
+        with self.assertRaises(TypeError):
+            identity._choose_device_id(self._mock_settings(), {})
+
+    def test_retire_device_id_rejects_mock_root(self) -> None:
+        with self.assertRaises(TypeError):
+            identity._retire_device_id(self._mock_settings())
+
+    def test_clear_pinned_peer_certificates_rejects_mock_root_instead_of_reporting_zero(self) -> None:
+        from app.transfer import swarm_reset
+
+        with self.assertRaises(TypeError):
+            swarm_reset._clear_pinned_peer_certificates(self._mock_settings())

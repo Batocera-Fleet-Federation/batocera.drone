@@ -98,11 +98,9 @@ def _clear_pinned_peer_certificates(settings: Any) -> int:
     treat provisioning as complete (the journal makes the next start retry).
     """
     try:
-        from ..common.device_identity import _is_mock_path, _require_real_path
+        from ..common.device_identity import _require_real_path
     except ImportError:  # pragma: no cover - direct script execution fallback
-        from common.device_identity import _is_mock_path, _require_real_path  # type: ignore
-    if _is_mock_path(settings.userdata_root):
-        return 0
+        from common.device_identity import _require_real_path  # type: ignore
     _require_real_path(settings.userdata_root, "userdata_root")
     directory = Path(settings.userdata_root) / "system" / "drone-app" / "local-peer-certs"
     count = 0
