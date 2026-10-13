@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest import mock
 
 from app.common import identity_provisioning as identity
+from app.common import mcp_auth
+from app.common.auth import SessionStore
 from app.common.hardware_identity import HardwareIdentityProvider
 from app.common.identity_provisioning import State
 from app.common.settings import Settings
@@ -172,6 +174,19 @@ class FirstInstallAndRebootTests(ProvisioningTestBase):
         reset.assert_not_called()
         opened.assert_not_called()
 
+    def test_normal_reboot_preserves_admin_session_and_mcp_token(self) -> None:
+        original, _ = self.install()
+        sessions = SessionStore(database_path(original.userdata_root))
+        session_token = sessions.create("admin")
+        mcp_token = mcp_auth.generate_token(original)["token"]
+
+        identity.reset_runtime_state_for_tests()
+        result = identity.ensure_identity(settings_for(self.root), provider_for(self.hw_a))
+
+        self.assertEqual(result.status, identity.STATUS_VERIFIED)
+        self.assertEqual(sessions.validate(session_token), "admin")
+        self.assertTrue(mcp_auth.verify_token(original, mcp_token))
+
     def test_application_upgrade_preserves_identity(self) -> None:
         settings, _ = self.install()
         fingerprint = fingerprint_of(settings)
@@ -203,6 +218,29 @@ class FirstInstallAndRebootTests(ProvisioningTestBase):
 
 
 class CloneProvisioningTests(ProvisioningTestBase):
+    def test_clone_revokes_copied_admin_sessions_and_mcp_token(self) -> None:
+        original, _ = self.install()
+        original_db = database_path(original.userdata_root)
+        original_sessions = SessionStore(original_db)
+        session_token = original_sessions.create("admin")
+        mcp_token = mcp_auth.generate_token(original)["token"]
+
+        self.assertEqual(original_sessions.validate(session_token), "admin")
+        self.assertTrue(mcp_auth.verify_token(original, mcp_token))
+        clone, result = self.clone_boot(self.hw_b)
+        self.assertEqual(result.status, identity.STATUS_CLONE)
+        clone_sessions = SessionStore(database_path(clone.userdata_root))
+        self.assertIsNone(clone_sessions.validate(session_token))
+        self.assertFalse(mcp_auth.verify_token(clone, mcp_token))
+        self.assertFalse(mcp_auth.token_status(clone)["configured"])
+        self.assertEqual(load_payload(database_path(clone.userdata_root), "mcp", "missing"), "missing")
+
+        # Revocation is confined to the clone; both credentials still work on the source.
+        self.assertEqual(original_sessions.validate(session_token), "admin")
+        self.assertTrue(mcp_auth.verify_token(original, mcp_token))
+        self.assertEqual(clone_sessions.validate(clone_sessions.create("admin")), "admin")
+        self.assertTrue(mcp_auth.verify_token(clone, mcp_auth.generate_token(clone)["token"]))
+
     def test_clone_on_different_hardware_gets_a_new_identity_and_no_inherited_swarm(self) -> None:
         original, _ = self.install()
         seed_swarm(original)
