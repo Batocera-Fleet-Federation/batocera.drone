@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from os import PathLike
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,22 @@ def database_path(userdata_root: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
         return Path(configured).resolve()
-    if not isinstance(userdata_root, (str, Path)) and type(userdata_root).__module__ == "unittest.mock":
+
+    # Mock subclasses can impersonate concrete path classes via spec/spec_set,
+    # so ``isinstance(userdata_root, Path)`` is not sufficient validation.
+    mock_module = sys.modules.get("unittest.mock")
+    mock_types = (
+        tuple(
+            mock_type
+            for name in ("Mock", "MagicMock", "NonCallableMock", "NonCallableMagicMock")
+            if isinstance((mock_type := getattr(mock_module, name, None)), type)
+        )
+        if mock_module is not None
+        else ()
+    )
+    if type(userdata_root).__module__ == "unittest.mock" or (
+        mock_types and isinstance(userdata_root, mock_types)
+    ):
         raise TypeError("userdata_root must be a filesystem path")
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
