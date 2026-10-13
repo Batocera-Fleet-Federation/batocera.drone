@@ -13,12 +13,15 @@ never hang or lose a key press, and every outcome is logged and recorded in
 * built-ins go through the shared ``BatoceraControl`` catalog; scripts go
   through the shared ``ScriptStore`` (``shell=False``, clean environment,
   timeout, bounded output). When started as root, scripts drop to the owner of
-  the integration directory (the Drone service user) before running.
+  the integration directory (the Drone service user) before running, and the
+  ``state/`` files the dispatcher writes are handed to that same user so the
+  admin page can read them and the hold lock stays usable by the web service.
 """
 
 import json
-import os
 import math
+import os
+import stat
 import sys
 import time
 from typing import Any, Callable, Optional
@@ -79,6 +82,17 @@ def script_owner(paths: MediaKeysPaths) -> Optional[tuple]:
     return (info.st_uid, info.st_gid) if info.st_uid != 0 else None
 
 
+def hand_over_state(paths: MediaKeysPaths, owner: Optional[tuple]) -> None:
+    """Give a root-created ``state/`` directory to the Drone service user (best effort)."""
+    if owner is None:
+        return
+    try:
+        if os.lstat(paths.state_dir).st_uid != owner[0]:
+            os.lchown(paths.state_dir, owner[0], owner[1])
+    except (AttributeError, OSError):
+        pass
+
+
 class HoldGate:
     """Tracks a key's repeat events; passes once held long enough, once per hold.
 
@@ -92,6 +106,73 @@ class HoldGate:
     def __init__(self, paths: MediaKeysPaths, clock: Callable[[], float] = time.time) -> None:
         self.paths = paths
         self.clock = clock
+        # hotkeygen runs the dispatcher as root; the unprivileged Drone service
+        # must still be able to read/lock/replace everything it leaves in state/.
+        self.owner = script_owner(paths)
+
+    def _hand_over_lock_fd(self, fd: int) -> None:
+        """Give away only a regular, single-link inode (never a planted hard link)."""
+        if self.owner is None:
+            return
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return
+            os.fchown(fd, self.owner[0], self.owner[1])
+        except (AttributeError, OSError):
+            pass
+
+    def _open_hold_lock(self) -> int:
+        """Open ``state/hold.lock`` without chowning a file the Drone user linked here.
+
+        ``O_NOFOLLOW`` stops a symlink at the last component; a hard link to a
+        root-owned inode still opens. Create with ``O_EXCL`` when we can, and
+        only ``fchown`` a regular file whose link count is 1. A planted
+        multi-link name is unlinked (the other name keeps the victim inode)
+        and replaced with a lock we created.
+        """
+        lock_path = str(self.paths.state_dir / "hold.lock")
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        exclusive = os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow
+        existing = os.O_RDWR | nofollow
+
+        def create() -> int:
+            fd = os.open(lock_path, exclusive, 0o600)
+            self._hand_over_lock_fd(fd)
+            return fd
+
+        def recreate() -> int:
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
+            return create()
+
+        try:
+            return create()
+        except FileExistsError:
+            pass
+        except PermissionError:
+            return recreate()
+
+        try:
+            fd = os.open(lock_path, existing)
+        except PermissionError:
+            return recreate()
+        try:
+            info = os.fstat(fd)
+            planted = (not stat.S_ISREG(info.st_mode)) or info.st_nlink != 1
+        except OSError:
+            planted = True
+        if planted:
+            os.close(fd)
+            try:
+                return recreate()
+            except FileExistsError:
+                # Lost the race to another name at this path; lock it, never chown.
+                return os.open(lock_path, existing)
+        self._hand_over_lock_fd(fd)
+        return fd
 
     def _locked(self):
         class _Lock:
@@ -99,8 +180,8 @@ class HoldGate:
                 inner.fd = None
                 if fcntl is not None:
                     self.paths.ensure(self.paths.state_dir)
-                    inner.fd = os.open(str(self.paths.state_dir / "hold.lock"),
-                                       os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    hand_over_state(self.paths, self.owner)
+                    inner.fd = self._open_hold_lock()
                     fcntl.flock(inner.fd, fcntl.LOCK_EX)
 
             def __exit__(inner, *_exc):
@@ -166,13 +247,15 @@ class HoldGate:
             state = state if isinstance(state, dict) else {}
             state[binding_id] = entry
             self.paths.ensure(self.paths.state_dir)
-            atomic_write_json(self.paths.hold_file, state)
+            atomic_write_json(self.paths.hold_file, state, owner=self.owner)
         return outcome
 
 
 def record_press(paths: MediaKeysPaths, binding_id: str, result: dict, clock: Callable[[], float] = time.time) -> None:
     try:
+        owner = script_owner(paths)
         paths.ensure(paths.state_dir)
+        hand_over_state(paths, owner)
         data = read_json(paths.press_file, {}) or {}
         data = data if isinstance(data, dict) else {}
         data[binding_id] = {
@@ -180,7 +263,7 @@ def record_press(paths: MediaKeysPaths, binding_id: str, result: dict, clock: Ca
             "status": str(result.get("status") or "unknown")[:40],
             "error": str(result.get("error") or "")[:300],
         }
-        atomic_write_json(paths.press_file, data)
+        atomic_write_json(paths.press_file, data, owner=owner)
     except Exception:  # noqa: BLE001 - recording is best effort
         pass
 
