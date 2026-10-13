@@ -1393,6 +1393,35 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_163_clone_auth_revocation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-163-clone-auth-revocation",
+      "name": "Issue #163 clone reset revokes copied sessions and MCP tokens",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": ["python3"],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/security/test_issue_163_clone_auth_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial",
         "-p",
         "test_issue_162_mock_userdata_sqlite_pollution.py"
