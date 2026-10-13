@@ -242,6 +242,26 @@ class RootDispatcherStateOwnershipTests(Base):
             self.assertEqual(HoldGate(self.paths, clock=lambda: 1000.0).check("reboot", 2), "holding")
         self.assertTrue(lock.exists())
 
+    def test_hardlinked_lock_is_replaced_without_chowning_the_victim(self):
+        victim = self.base / "root-owned-victim"
+        victim.write_text("#!/bin/sh\n")
+        lock = self.paths.state_dir / "hold.lock"
+        os.link(victim, lock)
+        victim_inode = os.stat(victim).st_ino
+        chowned_inodes = []
+
+        def record_fchown(fd, uid, gid):
+            chowned_inodes.append(os.fstat(fd).st_ino)
+
+        owner = (os.getuid() + 1, os.getgid())
+        with mock.patch.object(dispatch_module, "script_owner", return_value=owner), \
+                mock.patch("os.fchown", side_effect=record_fchown), \
+                mock.patch("os.lchown"):
+            self.assertEqual(HoldGate(self.paths, clock=lambda: 1000.0).check("reboot", 2), "holding")
+        self.assertNotIn(victim_inode, chowned_inodes)
+        self.assertTrue(lock.exists())
+        self.assertNotEqual(os.stat(lock).st_ino, victim_inode)
+
 
 class BuiltinCatalogTests(unittest.TestCase):
     def test_catalog_runs_reviewed_commands_only(self):

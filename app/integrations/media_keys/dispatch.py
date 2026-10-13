@@ -19,8 +19,9 @@ never hang or lose a key press, and every outcome is logged and recorded in
 """
 
 import json
-import os
 import math
+import os
+import stat
 import sys
 import time
 from typing import Any, Callable, Optional
@@ -109,6 +110,70 @@ class HoldGate:
         # must still be able to read/lock/replace everything it leaves in state/.
         self.owner = script_owner(paths)
 
+    def _hand_over_lock_fd(self, fd: int) -> None:
+        """Give away only a regular, single-link inode (never a planted hard link)."""
+        if self.owner is None:
+            return
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return
+            os.fchown(fd, self.owner[0], self.owner[1])
+        except (AttributeError, OSError):
+            pass
+
+    def _open_hold_lock(self) -> int:
+        """Open ``state/hold.lock`` without chowning a file the Drone user linked here.
+
+        ``O_NOFOLLOW`` stops a symlink at the last component; a hard link to a
+        root-owned inode still opens. Create with ``O_EXCL`` when we can, and
+        only ``fchown`` a regular file whose link count is 1. A planted
+        multi-link name is unlinked (the other name keeps the victim inode)
+        and replaced with a lock we created.
+        """
+        lock_path = str(self.paths.state_dir / "hold.lock")
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        exclusive = os.O_CREAT | os.O_EXCL | os.O_RDWR | nofollow
+        existing = os.O_RDWR | nofollow
+
+        def create() -> int:
+            fd = os.open(lock_path, exclusive, 0o600)
+            self._hand_over_lock_fd(fd)
+            return fd
+
+        def recreate() -> int:
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
+            return create()
+
+        try:
+            return create()
+        except FileExistsError:
+            pass
+        except PermissionError:
+            return recreate()
+
+        try:
+            fd = os.open(lock_path, existing)
+        except PermissionError:
+            return recreate()
+        try:
+            info = os.fstat(fd)
+            planted = (not stat.S_ISREG(info.st_mode)) or info.st_nlink != 1
+        except OSError:
+            planted = True
+        if planted:
+            os.close(fd)
+            try:
+                return recreate()
+            except FileExistsError:
+                # Lost the race to another name at this path; lock it, never chown.
+                return os.open(lock_path, existing)
+        self._hand_over_lock_fd(fd)
+        return fd
+
     def _locked(self):
         class _Lock:
             def __enter__(inner):
@@ -116,19 +181,7 @@ class HoldGate:
                 if fcntl is not None:
                     self.paths.ensure(self.paths.state_dir)
                     hand_over_state(self.paths, self.owner)
-                    lock_path = str(self.paths.state_dir / "hold.lock")
-                    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-                    try:
-                        inner.fd = os.open(lock_path, flags, 0o600)
-                    except PermissionError:
-                        # A lock left root-owned by an earlier build; state/ is ours, so recreate it.
-                        os.unlink(lock_path)
-                        inner.fd = os.open(lock_path, flags, 0o600)
-                    if self.owner is not None:
-                        try:
-                            os.fchown(inner.fd, self.owner[0], self.owner[1])
-                        except (AttributeError, OSError):
-                            pass
+                    inner.fd = self._open_hold_lock()
                     fcntl.flock(inner.fd, fcntl.LOCK_EX)
 
             def __exit__(inner, *_exc):

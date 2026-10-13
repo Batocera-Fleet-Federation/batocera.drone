@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from pathlib import Path
@@ -23,7 +24,10 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600, owner: Opt
             os.fsync(handle.fileno())
             if owner is not None:
                 try:
-                    os.fchown(handle.fileno(), owner[0], owner[1])
+                    info = os.fstat(handle.fileno())
+                    # mkstemp is exclusive; still refuse to give away a linked inode.
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                        os.fchown(handle.fileno(), owner[0], owner[1])
                 except (AttributeError, OSError):
                     pass  # best effort: the writer may not be allowed to give files away
         os.chmod(raw, mode)
