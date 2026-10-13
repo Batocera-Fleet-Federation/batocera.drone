@@ -13,6 +13,7 @@ the device's package-mode launch (``python3 -m app.main``) and the flat
    (this is the branch a generic shim-generator once got wrong: ``from handlers_x import``
    instead of ``from web.handlers_x import`` — invisible in package mode).
 """
+import ast
 import importlib
 import os
 import subprocess
@@ -134,6 +135,33 @@ class ModuleImportModeTests(unittest.TestCase):
         for method in ("apply_launchbox_artwork", "list_gamelist_rom_metadata", "search_roms",
                        "list_bios_entries", "build_fingerprint"):
             self.assertTrue(hasattr(drone_api.RomRepository, method), f"RomRepository lost {method}")
+
+    def test_transfer_fallbacks_never_import_siblings_as_top_level(self):
+        """A bare ``import swarm_membership`` only resolves if ``transfer/`` is on sys.path.
+
+        Inside ``transfer/`` the sibling modules are reachable as ``from . import X``
+        (package mode) or ``from transfer import X`` (flat mode). A fallback written as a
+        bare ``import X`` raises ModuleNotFoundError as soon as the relative import fails
+        (direct script execution), so reject any top-level import of a transfer sibling.
+        """
+        transfer_dir = APP_DIR / "transfer"
+        siblings = {path.stem for path in transfer_dir.glob("*.py") if path.name != "__init__.py"}
+        offenders = []
+        for path in sorted(transfer_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "transfer":
+                    continue  # flat-mode fallback form: ``from transfer import X``
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    names = [node.module or ""]
+                else:
+                    continue
+                for name in names:
+                    if name.split(".")[0] in siblings:
+                        offenders.append(f"{path.name}:{node.lineno} imports {name!r} bare")
+        self.assertEqual(offenders, [], "bare sibling imports in transfer/:\n" + "\n".join(offenders))
 
 
 if __name__ == "__main__":
