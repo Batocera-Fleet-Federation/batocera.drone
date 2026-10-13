@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
     fcntl = None  # type: ignore
 
 try:
-    from .device_identity import _device_id_path, _normalize_device_id, _write_persisted_machine_id
+    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id
     from .hardware_identity import (
         BASELINE,
         CONTRADICTORY,
@@ -63,7 +63,9 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import (  # type: ignore
         _device_id_path,
+        _is_mock_path,
         _normalize_device_id,
+        _require_real_path,
         _write_persisted_machine_id,
     )
     from common.hardware_identity import (  # type: ignore
@@ -170,6 +172,7 @@ def identity_dir(settings: Any) -> Path:
     configured = os.environ.get("DRONE_IDENTITY_DIR")
     if configured:
         return Path(configured)
+    _require_real_path(settings.userdata_root, "userdata_root")
     return Path(settings.userdata_root) / "system" / "drone-app" / "identity"
 
 
@@ -599,6 +602,9 @@ def _resume_journal(settings: Any, hardware: HardwareSnapshot, journal: dict,
 
 
 def _retire_device_id(settings: Any) -> None:
+    if _is_mock_path(settings.userdata_root):
+        return
+    _require_real_path(settings.userdata_root, "userdata_root")
     try:
         _device_id_path(Path(settings.userdata_root)).unlink()
     except FileNotFoundError:
@@ -613,6 +619,9 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     """
     if journal.get("new_device_id"):
         return str(journal["new_device_id"])
+    if _is_mock_path(settings.userdata_root):
+        return str(settings.device_id)
+    _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
     userdata_root = Path(settings.userdata_root)

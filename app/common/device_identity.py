@@ -46,7 +46,31 @@ def _normalize_device_id(value: Optional[str]) -> Optional[str]:
 
 
 def _device_id_path(userdata_root: Path) -> Path:
+    if _is_mock_path(userdata_root):
+        raise TypeError("userdata_root must be a filesystem path")
     return Path(os.environ.get("DRONE_DEVICE_ID_FILE", str(userdata_root / "system" / "drone-app" / "device-id")))
+
+
+def _is_mock_path(value: object) -> bool:
+    """Return whether *value* is a unittest mock, including spec masquerades."""
+    try:
+        from unittest import mock
+    except ImportError:  # pragma: no cover - unittest is part of supported Python
+        return type(value).__module__ == "unittest.mock"
+    mock_types = tuple(
+        candidate
+        for name in ("Mock", "MagicMock", "NonCallableMock", "NonCallableMagicMock")
+        if isinstance((candidate := getattr(mock, name, None)), type)
+    )
+    return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
+
+
+def _require_real_path(value: object, label: str) -> None:
+    """Reject unittest mocks before pathlib can turn their repr into a cwd path."""
+    if _is_mock_path(value):
+        raise TypeError(f"{label} must be a filesystem path")
+    if not isinstance(value, (str, os.PathLike)):
+        raise TypeError(f"{label} must be a filesystem path")
 
 
 def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
@@ -105,6 +129,7 @@ def _runtime_machine_id() -> str:
 def _machine_id(userdata_root: Optional[Path] = None) -> str:
     if userdata_root is None:
         return _runtime_machine_id()
+    _require_real_path(userdata_root, "userdata_root")
     persisted = _read_persisted_machine_id(userdata_root)
     if persisted:
         return persisted
