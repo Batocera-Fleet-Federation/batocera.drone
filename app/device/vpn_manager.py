@@ -48,6 +48,7 @@ from typing import List, Optional
 from urllib.error import HTTPError
 
 try:
+    from ..common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.logtail import _tail_lines
     from ..common.settings import Settings
@@ -56,6 +57,7 @@ try:
     from ..storage.state_store import save_payload as _save_state_payload
     from . import notifications as _notifications
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed  # type: ignore
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from common.settings import Settings  # type: ignore
@@ -415,7 +417,22 @@ def validate_ready(settings: Settings) -> List[str]:
     return errors
 
 
+IDENTITY_HELD_MESSAGE = (
+    "Swarm networking is held while this Drone's identity is unresolved; "
+    "the VPN cannot be started until the identity check is resolved."
+)
+
+
+def _identity_held_result() -> dict:
+    return {"status": "error", "identity_held": True, "errors": [IDENTITY_HELD_MESSAGE]}
+
+
 def connect(settings: Settings) -> dict:
+    # Every path that raises the tunnel (manual connect/reconnect, startup
+    # auto-connect, self-heal) funnels through here, so the identity hold is
+    # enforced once at the lowest level rather than at each caller.
+    if not _swarm_networking_allowed():
+        return _identity_held_result()
     errors = validate_ready(settings)
     if errors:
         return {"status": "error", "errors": errors}
@@ -548,6 +565,9 @@ def maybe_auto_connect(settings: Settings) -> None:
     (and therefore the rest of the admin UI) from starting.
     """
     try:
+        if not _swarm_networking_allowed():
+            print("VPN auto-connect skipped: swarm networking is held (identity unresolved)", file=sys.stderr, flush=True)
+            return
         if validate_ready(settings):
             bootstrap_vpn_from_swarm(settings)
         if validate_ready(settings):
@@ -922,7 +942,12 @@ def reconnect(settings: Settings) -> dict:
     No extra locking here on top of what ``connect``/``disconnect`` already do
     individually -- ``_CONNECT_LOCK`` is a plain, non-reentrant ``Lock``, so
     wrapping both calls in it too would deadlock.
+
+    Refuses up front while the identity hold is active so a held Drone does
+    not drop a tunnel it could not bring back up.
     """
+    if not _swarm_networking_allowed():
+        return _identity_held_result()
     disconnect(settings)
     return connect(settings)
 
@@ -1005,6 +1030,8 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
     Never raises -- intended for an unattended background poller.
     """
     try:
+        if not _swarm_networking_allowed():
+            return None
         state = _load_state(settings)
         if not state["self_heal_enabled"]:
             return None
