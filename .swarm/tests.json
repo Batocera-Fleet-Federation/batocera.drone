@@ -2568,6 +2568,71 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_192_mock_userdata_root_rejection.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-192-mock-userdata-root-rejection",
+      "name": "Issue #192 mock userdata_root must raise instead of reusing the old id or reporting pin-clear success",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_192_mock_userdata_root_rejection.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_192_clone_reset_mock_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-192-clone-reset-mock-boundaries",
+      "name": "Issue #192 clone reset and flat-mode helpers reject mock userdata_root",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_192_clone_reset_mock_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
