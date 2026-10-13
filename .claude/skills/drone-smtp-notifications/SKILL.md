@@ -143,8 +143,9 @@ written together by `insert_event()`:
 - **`audit_log`** — the permanent record. `emailed_at` (nullable) tracks
   digest inclusion. Feeds `smtp_manager.send_digest_if_needed()`. Never
   touched by a user clearing notifications from the bell dropdown.
-- **`notifications`** — the UI-facing inbox. One row per audit event, linked
-  via `audit_log_id` (`REFERENCES audit_log(id)`, declared for schema
+- **`notifications`** — the UI-facing inbox. One row per bell-visible audit
+  event (per-asset transfer rows are audit-only, see "Asset transfer batches"
+  below), linked via `audit_log_id` (`REFERENCES audit_log(id)`, declared for schema
   clarity — `PRAGMA foreign_keys=ON` is deliberately **not** enabled on the
   shared connection app-wide, since that's a broader change than this
   feature warrants). Its own `read_at` (nullable). Rows are **hard-deleted**
@@ -189,6 +190,15 @@ per-type toggles the SMTP page exposes only filter what the digest poller
 dropdown. Don't add a toggle check inside `record_event()` or at a call
 site; that check belongs solely in `smtp_manager.send_digest_if_needed()`.
 
+Three entry points, chosen by the call site (`device/notifications.py`):
+`record_event()` writes the audit row **and** a bell row; `record_audit_event()`
+writes the audit row only (the digest still counts it, the bell never shows it);
+and the bell-only batch types `BATCH_EVENT_TYPES` go through `record_event()` but
+are kept out of `EVENT_TYPES`, so they have no toggle and never reach the digest
+(their audit rows are stamped `emailed_at` at insert, which also lets retention
+prune them). `audit_store.insert_event(..., notify=, digest=)` implements both
+switches.
+
 ## The event types (18) and their hook sites
 
 `notifications.EVENT_TYPES` (also `EVENT_TYPE_LABELS` for display — keep
@@ -203,8 +213,8 @@ the frontend):
 | `asset_added` / `asset_removed` | `roms/rom_scanner.py`'s `_poll_rom_metadata_once()` | Once per **completed scan pass** (already single-flight-guarded via `_begin_rom_metadata_activity`), not per file. `_poll_rom_metadata_cache()`'s `stats` dict gained a `roms_added` key (`len(rom_updates.keys() - previous_keys)` — genuinely new keys, as opposed to an existing ROM that merely changed) alongside the pre-existing `stats["deleted"]`. Only fires when the respective count is truthy. |
 | `manual_control_submitted` | `web/handlers_diagnostics.py`'s `_handle_admin_system_volume` / `_handle_admin_screen_mode_post` | Right after `_apply_audio_volume`/`_apply_screen_mode` succeed. |
 | `automation_updated` | `web/handlers_system.py`'s 3 automation POST handlers | Right after each `_save_automation_config()` call. |
-| `asset_uploaded` | `web/handlers_peer.py`'s `_stream_file()` | Right after `tracker.finish(upload_id, "completed")` — the one choke point shared by all 5 peer-serving asset types (rom/bios/movie/save/artwork all funnel through `_stream_file`). Note this call site has `self.settings`; `transfer/upload_tracker.py`'s `UploadTracker` class deliberately does **not** — it's a standalone singleton with no settings/repository dependency by design (see its own module docstring), so the hook lives in the caller, not inside `UploadTracker.finish()`. |
-| `asset_downloaded` | `transfer/download_manager.py`'s `_run_job()` `finally:` block | On `terminal_activity.get("status") == "completed"`, **without** the pre-existing `asset_type == "rom"` restriction that a different, older action (`_kick_asset_metadata_sync_after_download`) is gated on right next to it — bios/saves/movies/artwork downloads must fire this too. |
+| `asset_uploaded` | `web/handlers_peer.py`'s `_stream_file()` | Right after `tracker.finish(upload_id, "completed")`, via `record_audit_event()` (audit only — no bell row per asset; the bell gets batch entries, see below) — the one choke point shared by all 5 peer-serving asset types (rom/bios/movie/save/artwork all funnel through `_stream_file`). Note this call site has `self.settings`; `transfer/upload_tracker.py`'s `UploadTracker` class deliberately does **not** — it's a standalone singleton with no settings/repository dependency by design (see its own module docstring), so the hook lives in the caller, not inside `UploadTracker.finish()`. |
+| `asset_downloaded` | `transfer/download_manager.py`'s `_run_job()` `finally:` block | Via `record_audit_event()` (audit only). On `terminal_activity.get("status") == "completed"`, **without** the pre-existing `asset_type == "rom"` restriction that a different, older action (`_kick_asset_metadata_sync_after_download`) is gated on right next to it — bios/saves/movies/artwork downloads must fire this too. |
 | `game_crash` | `device/crash_history.py`'s `ingest_new_crashes()`, called every tick of `run_audit_email_digest_poller` | One event per entry the Game crash notifier hook (`device/fix_assets/game_crash_notifier.py`, a separate process) appended to `history.jsonl`, tracked by an epoch cursor in `app_state` (`crash_history_cursor.json`; first pass skips history older than 60s). It waits for the digest interval like every other type (there is no urgent bypass; issue #136 removed it because a crash row that skipped the interval kept every digest firing). `_compose_digest` renders its full `format_crash_report()` text from `details`. |
 | `usb_enumeration_failed` | `device/usb_enumeration.py`'s `check_usb_enumeration_throttled()`, called every tick of `run_audit_email_digest_poller` (runs the real check at most every 5 min) | Parses `dmesg` for `usb usbN-portM: unable to enumerate USB device` (a **root** port the kernel gave up on; hub ports `N-M-portK` are ignored). Quiet when a `057e:0337` Wii U/GameCube adapter has a sysfs node (it enumerated elsewhere), otherwise one event per root port per boot (dedup state `usb_enumeration_notified.json`, keyed by `boot_id`). Strictly read-only — no USB sysfs writes, rescans or `udevadm` (issue #133: the kernel already power-cycles the port, and the fix is a different port or a powered hub). |
 | `torrent_completed` | `transfer/torrent_manager.py`'s `_apply_aria2_status_locked()` | Inside the two `if not entry.get("completed_at"):` blocks (there are two because aria2 can report completion via either its `"active"`+fully-downloaded branch or its own `"complete"` status) — **not** on the bare `entry["status"] = "complete"` assignment, which re-fires on every poll tick while a torrent stays complete/seeding. |
@@ -311,6 +321,32 @@ it into their own subject line and the first body line (so it survives a mail
 client that only shows the bare From address). All three are deliberately
 redundant — don't collapse them down to just the `From` header without a
 concrete reason, since some clients hide/collapse display names.
+
+## Asset transfer batches (bell-only, issue #146)
+
+A batch transfer must not flood the bell, so the bell gets one entry pair per
+batch while the digest keeps counting per asset:
+
+- **Downloads**: `DownloadManager.transfer_batch(peer=...)` (a context manager,
+  thread-local) wraps each user action. `web/handlers_network.py` opens it around
+  the single-asset path and around the bulk walk. Jobs enqueued inside the block
+  join the batch. On exit it seals the batch and emits `asset_transfer_started`
+  ("Downloading N assets from <peer> (systems, size).") if anything was selected.
+  `asset_transfer_finished` ("Download finished: X completed, Y failed (size).
+  Failed: names.") follows once every job is terminal. Terminal paths that skip
+  `_run_job` (`cancel()` on a queued/paused job, `clear_queue()`) also count
+  toward it. A retry is its own one-job batch. Worker-enqueued artwork is not batched.
+- **Uploads**: no user action on this side, so `transfer/transfer_batch.py`'s
+  `UploadBatches` groups one peer's uploads. A batch opens with the first upload
+  (started text is "Serving assets to <peer>.", since the peer chooses what to
+  pull) and closes after `UPLOAD_BATCH_IDLE_SECONDS` (60) with nothing in flight.
+  Its finished entry is emitted from a daemon timer thread.
+- Failed names are capped at `MAX_LISTED_FAILURES` (5) with "and N more". The
+  started entry names at most `MAX_LISTED_SYSTEMS` (3) systems.
+- Batch state is in memory only. A batch interrupted by a Drone restart emits no
+  finished entry (restored jobs carry no batch).
+- Peer names in these entries come from the paired-peer record, which is
+  peer-supplied. Keep them escaped wherever the bell renders them.
 
 ## Frontend: SMTP page + the notifications bell
 

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, local as _thread_local
 from typing import Dict, List, Optional
 from urllib.error import HTTPError
 
@@ -30,6 +30,7 @@ try:
     from ..transport.lan import LanDirectTransport
     from . import local_network as _local_network
     from .download_errors import DownloadCancelled
+    from .transfer_batch import TransferBatch as _TransferBatch
     from .network_identity import local_network_snapshot as _local_network_snapshot
     from .peer_download import (
         _download_artwork_from_peer,
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transport.lan import LanDirectTransport  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.download_errors import DownloadCancelled  # type: ignore
+    from transfer.transfer_batch import TransferBatch as _TransferBatch  # type: ignore
     from transfer.network_identity import local_network_snapshot as _local_network_snapshot  # type: ignore
     from transfer.peer_download import (  # type: ignore
         _download_artwork_from_peer,
@@ -191,6 +193,10 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
     )
 
 
+def _peer_label(peer: dict) -> str:
+    return str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "a paired peer")
+
+
 class DownloadManager:
     """Per-target Drone download queue with a small pool of worker threads.
 
@@ -214,6 +220,9 @@ class DownloadManager:
         self._lock = Lock()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
+        # Transfer batches by id, and the batch (if any) the current thread is enqueuing into.
+        self._batches: Dict[str, _TransferBatch] = {}
+        self._batch_scope = _thread_local()
         self._wake = Event()
         self._paused = False
         self._persist_defer_depth = 0
@@ -229,6 +238,84 @@ class DownloadManager:
             thread = Thread(target=self._worker, name=f"drone-download-worker-{index + 1}", daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    @contextmanager
+    def transfer_batch(self, *, peer: dict):
+        """Group the jobs this thread enqueues inside the block into one transfer batch.
+
+        One user action (a selection or bulk copy) produces a started entry on exit and
+        a finished entry once its last job reaches a terminal state. A nested block joins
+        the outer batch. Jobs that workers enqueue later (receiver-driven artwork) are
+        not batched.
+        """
+        if getattr(self._batch_scope, "batch", None) is not None:
+            yield
+            return
+        batch = _TransferBatch(str(uuid.uuid4()), "download", _peer_label(peer))
+        with self._lock:
+            self._batches[batch.batch_id] = batch
+        self._batch_scope.batch = batch
+        try:
+            yield
+        finally:
+            self._batch_scope.batch = None
+            with self._lock:
+                batch.sealed = True
+                events = self._batch_events_locked(batch)
+            self._emit_batch_events(events)
+
+    def _attach_batch_locked(self, job: dict) -> None:
+        batch = getattr(self._batch_scope, "batch", None)
+        if batch is None:
+            return
+        job["_batch_id"] = batch.batch_id
+        batch.add_selected(system=job.get("system"), total_bytes=job.get("total_bytes") or job.get("file_size"))
+
+    def _open_single_batch_locked(self, job: dict) -> list:
+        """A retried job is a new user action, so it gets a batch of its own."""
+        batch = _TransferBatch(str(job["job_id"]), "download", _peer_label(job.get("_peer") or {}))
+        batch.add_selected(system=job.get("system"), total_bytes=job.get("total_bytes") or job.get("file_size"))
+        job["_batch_id"] = batch.batch_id
+        self._batches[batch.batch_id] = batch
+        batch.sealed = True
+        return self._batch_events_locked(batch)
+
+    def _record_batch_outcome_locked(self, job: dict) -> list:
+        batch = self._batches.get(str(job.get("_batch_id") or ""))
+        if batch is None:
+            return []
+        batch.record_outcome(
+            str(job.get("job_id") or job.get("id") or ""),
+            status=job.get("status"),
+            name=job.get("file_name") or job.get("relative_path") or job.get("file_path"),
+            size_bytes=job.get("downloaded_bytes") or job.get("total_bytes") or job.get("file_size"),
+            system=job.get("system"),
+        )
+        return self._batch_events_locked(batch)
+
+    def _batch_events_locked(self, batch: _TransferBatch) -> list:
+        """Events a batch is due for now. Nothing is due before the batch is sealed,
+        so the started entry always precedes the finished one."""
+        if not batch.sealed:
+            return []
+        events = []
+        if not batch.started:
+            batch.started = True
+            started = batch.started_event()
+            if started:
+                events.append(started)
+        if batch.selected and not batch.finished and batch.open_count <= 0:
+            batch.finished = True
+            events.append(batch.finished_event())
+        if batch.finished or not batch.selected:
+            self._batches.pop(batch.batch_id, None)
+        return events
+
+    def _emit_batch_events(self, events: list) -> None:
+        for event in events:
+            _notifications.record_event(
+                self.settings, event["event_type"], event["title"], event["message"], details=event["details"]
+            )
 
     def _persistent_jobs_locked(self) -> list[dict]:
         pending = [
@@ -330,6 +417,7 @@ class DownloadManager:
                     job["resume_reason"] = "Drone restarted before the transfer completed"
                     job.pop("_started_mono", None)
                     restored_pending = True
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
         self._update_queue_positions_locked()
@@ -433,6 +521,7 @@ class DownloadManager:
             "_overwrite": bool(overwrite),
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -484,6 +573,7 @@ class DownloadManager:
             "_overwrite": bool(overwrite),
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -536,6 +626,7 @@ class DownloadManager:
             "_local_rom_path": local_rom_path,
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -583,6 +674,7 @@ class DownloadManager:
             "_overwrite": bool(overwrite),
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -633,6 +725,7 @@ class DownloadManager:
             "_overwrite": bool(overwrite),
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -697,6 +790,7 @@ class DownloadManager:
             "_source_created_at": source_created_at,
         }
         with self._lock:
+            self._attach_batch_locked(job)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
@@ -706,6 +800,7 @@ class DownloadManager:
         return snapshot
 
     def cancel(self, job_id: str, reason: str = "cancelled by user") -> dict:
+        batch_events: list = []
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -728,8 +823,10 @@ class DownloadManager:
                 job["error_message"] = reason
                 job["pause_requested"] = False
                 self._update_queue_positions_locked()
+                batch_events = self._record_batch_outcome_locked(job)
             self._persist_state_locked()
             snapshot = self._public_job_locked(job)
+        self._emit_batch_events(batch_events)
         self._wake.set()
         return {"status": snapshot.get("status"), "job": snapshot}
 
@@ -799,6 +896,7 @@ class DownloadManager:
         job.pop("_started_mono", None)
 
     def retry(self, job_id: str) -> dict:
+        batch_events: list = []
         with self._lock:
             original = self._jobs.get(job_id)
             if not original:
@@ -830,11 +928,14 @@ class DownloadManager:
                 "created_at": now,
             })
             retry_job.pop("_started_mono", None)
+            retry_job.pop("_batch_id", None)
+            batch_events = self._open_single_batch_locked(retry_job)
             self._jobs[retry_id] = retry_job
             self._cancel_events[retry_id] = Event()
             self._update_queue_positions_locked()
             self._persist_state_locked()
             snapshot = self._public_job_locked(retry_job)
+        self._emit_batch_events(batch_events)
         self._wake.set()
         return {"status": "queued", "job": snapshot, "retried_from_job_id": job_id}
 
@@ -981,6 +1082,7 @@ class DownloadManager:
         job (if any) is left running."""
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         cleared = 0
+        batch_events: list = []
         with self._lock:
             for job in self._jobs.values():
                 if job.get("status") == "queued":
@@ -994,8 +1096,10 @@ class DownloadManager:
                     if event:
                         event.set()
                     cleared += 1
+                    batch_events.extend(self._record_batch_outcome_locked(job))
             self._update_queue_positions_locked()
             self._persist_state_locked()
+        self._emit_batch_events(batch_events)
         result = self.snapshot()
         result["cleared"] = cleared
         return result
@@ -1195,19 +1299,22 @@ class DownloadManager:
                         current["download_completed_at"] = current["completed_at"]
         finally:
             terminal_activity = None
+            batch_events: list = []
             with self._lock:
                 current = self._jobs.get(job_id)
                 if current and current.get("status") in DOWNLOAD_TERMINAL_STATUSES:
                     terminal_activity = self._public_job_locked(current)
+                    batch_events = self._record_batch_outcome_locked(current)
                 self._update_queue_positions_locked()
                 self._persist_state_locked()
+            self._emit_batch_events(batch_events)
             if terminal_activity:
                 if _local_network.is_local_mode(self.settings):
                     _local_network.record_activity(self.settings, terminal_activity)
                 if terminal_activity.get("status") == "completed":
                     # Artwork jobs have no total_bytes, so the bytes actually written are the size.
                     size_bytes = terminal_activity.get("downloaded_bytes") or terminal_activity.get("total_bytes")
-                    _notifications.record_event(
+                    _notifications.record_audit_event(
                         self.settings,
                         "asset_downloaded",
                         "Asset downloaded",

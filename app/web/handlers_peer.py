@@ -49,6 +49,7 @@ try:
     from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
     from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
+    from ..transfer.transfer_batch import get_upload_batches as _get_upload_batches
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
@@ -83,7 +84,15 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
+    from transfer.transfer_batch import get_upload_batches as _get_upload_batches  # type: ignore
     from web.server_tls import load_peer_cert_everywhere  # type: ignore
+
+
+def _upload_peer_label(settings, device_id: Optional[str]) -> str:
+    peer = _local_network.get_paired_peer(settings, device_id) if device_id else None
+    if peer:
+        return str(peer.get("name") or peer.get("hostname") or device_id)
+    return device_id or "a paired peer"
 
 
 class HandlersPeerMixin:
@@ -1085,14 +1094,23 @@ class HandlersPeerMixin:
 
         tracker = _get_upload_tracker()
         upload_id = None
+        upload_batch = None
+        asset_name = str((upload_meta or {}).get("relative_path") or path.name)
         if upload_meta is not None:
+            peer_device_id = self._peer_requester_device_id()
             upload_id = tracker.start(
-                peer_device_id=self._peer_requester_device_id(),
+                peer_device_id=peer_device_id,
                 asset_type=str(upload_meta.get("asset_type") or "rom"),
                 relative_path=str(upload_meta.get("relative_path") or path.name),
                 system=upload_meta.get("system"),
                 transport="direct",
                 total_bytes=file_size,
+            )
+            upload_batch = _get_upload_batches().begin(
+                self.settings,
+                peer_key=peer_device_id or "unknown",
+                peer_label=_upload_peer_label(self.settings, peer_device_id),
+                system=upload_meta.get("system"),
             )
         sent = 0
         try:
@@ -1107,20 +1125,29 @@ class HandlersPeerMixin:
                         tracker.progress(upload_id, sent)
             if upload_id:
                 tracker.finish(upload_id, "completed")
-                _notifications.record_event(
+                _notifications.record_audit_event(
                     self.settings,
                     "asset_uploaded",
                     "Asset uploaded",
-                    str((upload_meta or {}).get("relative_path") or path.name),
+                    asset_name,
                     details={
                         "asset_type": (upload_meta or {}).get("asset_type"),
                         "system": (upload_meta or {}).get("system"),
                         "size_bytes": file_size,
                     },
                 )
+            if upload_batch:
+                _get_upload_batches().finish(
+                    upload_batch, status="completed", name=asset_name, size_bytes=file_size,
+                    system=(upload_meta or {}).get("system"),
+                )
         except Exception as error:
             if upload_id:
                 tracker.finish(upload_id, "failed", error=str(error))
+            if upload_batch:
+                _get_upload_batches().finish(
+                    upload_batch, status="failed", name=asset_name, system=(upload_meta or {}).get("system"),
+                )
             raise
 
     def _stream_cached_image(self, path: Path) -> None:
