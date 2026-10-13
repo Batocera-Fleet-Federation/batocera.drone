@@ -2078,6 +2078,37 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_170_real_sqlite_pollution.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-170-real-sqlite-pollution",
+      "name": "Issue #170 rejected mock paths must not create real SQLite files or sidecars",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_170_real_sqlite_pollution.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
