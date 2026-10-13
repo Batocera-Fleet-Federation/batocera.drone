@@ -42,6 +42,7 @@ ALL_KINDS = PRIMARY_KINDS + SECONDARY_KINDS
 _PLACEHOLDER_TEXT = {
     "", "none", "null", "nil", "n/a", "na", "unknown", "undefined", "default", "default string", "empty",
     "invalid", "oem", "o.e.m.", "to be filled by o.e.m.", "to be filled by oem", "not specified",
+    "not settable", "notsettable", "not defined", "notdefined", "mb-1234567890",
     "not applicable", "not available", "not present", "not set", "system serial number",
     "system product name", "serial number", "chassis serial number", "base board serial number",
     "type2 - board serial number", "type1 - serial number", "board serial number", "product serial number",

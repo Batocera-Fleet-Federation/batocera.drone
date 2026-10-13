@@ -821,7 +821,11 @@ def resolve_recovery(settings: Any, action: str, provider: Optional[HardwareIden
         if binding is None:
             binding = _new_binding(settings, hardware, pair["fingerprint"], "adopted", history)
         else:
-            binding.update(hardware=hardware if hardware.components else None, identity_certificate_fingerprint=pair["fingerprint"], history=history)
+            # Even an explicit decision to keep this identity cannot replace a recorded
+            # hardware baseline with an unreadable one. A later clone still needs it.
+            if hardware.usable:
+                binding["hardware"] = hardware
+            binding.update(identity_certificate_fingerprint=pair["fingerprint"], history=history)
         _save_binding(settings, binding)
         _release_after_recovery(settings)
         _publish(State.READY, STATUS_VERIFIED, "", True, binding.get("origin", ""))
@@ -921,7 +925,10 @@ def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> Identit
 
     _log(f"Hardware evidence differs from the recorded binding (verdict={verdict}, "
          f"stored={(stored.fingerprint or '')[:12]}, current={(hardware.fingerprint or '')[:12] or 'unavailable'})")
-    if hardware_change_authorization(settings):
+    # An authorization is for a measured hardware change. A temporarily unreadable or
+    # contradictory reading must neither consume it nor replace the saved binding with
+    # missing evidence: that would make a subsequent disk image impossible to detect.
+    if verdict == DIFFERENT and hardware.usable and hardware_change_authorization(settings):
         return _rebind_authorized(settings, binding, hardware, pair)
     if verdict == DIFFERENT:
         _log("High-confidence hardware mismatch detected")
@@ -960,7 +967,9 @@ def _adopt_baseline(settings: Any, binding: dict, hardware: HardwareSnapshot, pa
 def _rebind_authorized(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: dict) -> IdentityResult:
     if not pair["valid"]:
         return _enter_recovery(settings, "certificate_invalid", binding)
-    binding["hardware"] = hardware if hardware.components else None
+    if pair["fingerprint"] != binding["identity_certificate_fingerprint"]:
+        return _enter_recovery(settings, "certificate_mismatch", binding)
+    binding["hardware"] = hardware
     binding["identity_certificate_fingerprint"] = pair["fingerprint"]
     binding["history"].append(_history_entry("hardware_rebound", via="pre-authorization", hardware=(hardware.fingerprint or "")[:12]))
     _save_binding(settings, binding)

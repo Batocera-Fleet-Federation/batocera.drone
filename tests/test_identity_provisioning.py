@@ -651,6 +651,17 @@ class HardwareReplacementTests(ProvisioningTestBase):
         identity.reset_runtime_state_for_tests()
         self.assertEqual(identity.ensure_identity(settings_for(self.root), provider_for(odd)).status, identity.STATUS_VERIFIED)
 
+    def test_keep_during_missing_hardware_evidence_preserves_the_baseline(self) -> None:
+        original, _ = self.install()
+        baseline = read_binding(original)["hardware_fingerprint"]
+        blind = self.tmp / "hw-blind"
+        blind.mkdir()
+        self.assertEqual(identity.ensure_identity(settings_for(self.root), provider_for(blind)).state, State.RECOVERY_REQUIRED)
+        identity.resolve_recovery(original, "keep", provider_for(blind), actor="admin")
+        self.assertEqual(read_binding(original)["hardware_fingerprint"], baseline)
+        identity.reset_runtime_state_for_tests()
+        self.assertEqual(identity.ensure_identity(settings_for(self.root), provider_for(self.hw_b)).status, identity.STATUS_CLONE)
+
     def test_administrator_can_provision_a_new_identity_after_recovery_hold(self) -> None:
         original, _ = self.install()
         seed_swarm(original)
