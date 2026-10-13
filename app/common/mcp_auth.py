@@ -22,8 +22,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 try:
+    from ..storage import access_quarantine as _access_quarantine
     from ..storage import state_store as _state_store
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from storage import access_quarantine as _access_quarantine  # type: ignore
     from storage import state_store as _state_store  # type: ignore
 
 
@@ -70,7 +72,7 @@ def verify_token(settings, provided: Optional[str]) -> bool:
     if not provided:
         return False
     stored = str(_load(settings).get("token_sha256") or "")
-    if not stored:
+    if not stored or _access_quarantine.mcp_denied(_db_path(settings), stored):
         return False
     return hmac.compare_digest(_digest(provided), stored)
 
