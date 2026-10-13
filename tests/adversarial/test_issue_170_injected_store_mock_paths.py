@@ -102,12 +102,7 @@ class InjectedSessionStoreMockTests(_CwdSandbox):
 
 class InjectedCredentialStoreMockTests(_CwdSandbox):
     def test_credential_store_rejects_injected_mock_state_db_on_every_sqlite_method(self) -> None:
-        # MagicMock(spec=str) is excluded: it is falsy, so DroneCredentialStore's
-        # ``state_database_file or <derived path>`` replaces it before any guard runs.
-        # test_falsy_spec_str_mock_never_reaches_sqlite covers that flavour.
         for label, factory in INJECTED_MOCK_FLAVOURS.items():
-            if label == "MagicMock(spec=str)":
-                continue
             with self.subTest(database=label):
                 store = DroneCredentialStore(self.cwd / "credentials.json", state_database_file=factory())
                 with self._spy_sqlite_connect() as targets:
@@ -121,15 +116,20 @@ class InjectedCredentialStoreMockTests(_CwdSandbox):
                             operation()
                 self._assert_no_pollution(targets)
 
-    def test_falsy_spec_str_mock_never_reaches_sqlite(self) -> None:
-        store = DroneCredentialStore(self.cwd / "credentials.json", state_database_file=mock.MagicMock(spec=str))
+    def test_falsy_spec_str_mock_is_rejected_before_sqlite(self) -> None:
+        injected = mock.MagicMock(spec=str)
+        self.assertFalse(injected)
+        store = DroneCredentialStore(self.cwd / "credentials.json", state_database_file=injected)
+        self.assertIs(store.state_database_file, injected)
         with self._spy_sqlite_connect() as targets:
-            store.update("admin", "correct-horse")
-            self.assertTrue(store.check("admin", "correct-horse"))
-        self.assertTrue(targets)
-        self.assertTrue(all("Mock" not in target and "<" not in target for target in targets), msg=repr(targets))
-        self.assertEqual(_mock_named(self.cwd), [])
-        self.assertEqual(_mock_named(REPO_ROOT), [])
+            for operation in (
+                lambda: store.load(),
+                lambda: store.check("admin", "correct-horse"),
+                lambda: store.update("admin", "correct-horse"),
+            ):
+                with self.assertRaisesRegex(TypeError, PATH_REJECTION):
+                    operation()
+        self._assert_no_pollution(targets)
 
 
 class InjectedRealPathPositiveControlTests(_CwdSandbox):
