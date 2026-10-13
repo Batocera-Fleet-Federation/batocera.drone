@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     BIOS_ROOT=/userdata/bios \
     THEMES_ROOT=/userdata/themes \
     LOG_DIR=/userdata/system/drone-app/logs \
-    HTTPS_PORT=443
+    HTTPS_PORT=443 \
+    DRONE_CONTAINER=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates openssl curl \

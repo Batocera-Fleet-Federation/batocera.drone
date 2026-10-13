@@ -697,6 +697,694 @@
         "servers": []
       },
       "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_clone_identity_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-clone-identity-boundaries",
+      "name": "Issue #160 clone identity binding and logical identity adversarial acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_clone_identity_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_provisioning_failure_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-provisioning-failure-boundaries",
+      "name": "Issue #160 provisioning failure and identity consistency acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_160_provisioning_failure_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_cleanup_safety_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-cleanup-safety-uat",
+      "name": "Issue #160 inherited credential and Tailscale cleanup safety acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_160_cleanup_safety_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_corrupt_journal_original_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-corrupt-journal-original-uat",
+      "name": "Issue #160 corrupt provisioning journal must preserve the verified original",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_corrupt_journal_original_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_real_boot_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-real-boot-uat",
+      "name": "Issue #160 real entrypoint boot of imaged disks: clone, reboot and held-evidence UAT",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/main.py",
+          "app/drone_api.py",
+          "app/common/identity_provisioning.py",
+          "app/web/api_routes.py",
+          "tests/adversarial/test_issue_160_real_boot_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_hardware_evidence_downgrade_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-hardware-evidence-downgrade-uat",
+      "name": "Issue #160 missing hardware evidence must not erase the clone-detection binding",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_hardware_evidence_downgrade_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_placeholder_identifiers.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-placeholder-identifiers",
+      "name": "Issue #160 vendor placeholder serials are not unique hardware identifiers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_placeholder_identifiers.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_power_loss_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-power-loss-uat",
+      "name": "Issue #160 hard process death at every clone-provisioning stage resumes without the inherited identity",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "app/transfer/drone_tls.py",
+          "tests/adversarial/test_issue_160_power_loss_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_held_identity_outbound_pairing_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-held-identity-outbound-pairing-uat",
+      "name": "Issue #160 a held or half-provisioned identity must not be sent to a peer during pairing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_160_held_identity_outbound_pairing_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_placeholder_spelling_variants.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-placeholder-spelling-variants",
+      "name": "Issue #160 placeholder serials are rejected in every spelling, not only literal strings",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_placeholder_spelling_variants.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_clone_pairing_e2e_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-clone-pairing-e2e-uat",
+      "name": "Issue #160 real original and cloned processes: distinct identities, normal pairing, duplicate refusal, hardware swap",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/main.py",
+          "app/common/identity_provisioning.py",
+          "app/web/handlers_peer.py",
+          "app/web/handlers_identity.py",
+          "tests/adversarial/test_issue_160_clone_pairing_e2e_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 900
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_documentation_acceptance.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-documentation-acceptance",
+      "name": "Issue #160 README and identity guide cover the required topics",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "README.md",
+          "docs/drone-identity.md",
+          "tests/adversarial/test_issue_160_documentation_acceptance.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_sequential_placeholder_identifiers.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-sequential-placeholder-identifiers",
+      "name": "Issue #160 sequential filler serials and UUIDs are not unique hardware identifiers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_sequential_placeholder_identifiers.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_malformed_metadata_recovery_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-malformed-metadata-recovery-uat",
+      "name": "Issue #160 malformed journal or binding must not trap or destroy a verified original",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_malformed_metadata_recovery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_imaged_provisioning_journal_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-imaged-provisioning-journal-uat",
+      "name": "Issue #160 an imaged in-flight provisioning journal must not duplicate identity",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_imaged_provisioning_journal_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_forbidden_cloneable_identifiers.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-forbidden-cloneable-identifiers",
+      "name": "Issue #160 hostname, MAC, disk UUID and machine-id are not hardware identity",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_forbidden_cloneable_identifiers.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_inherited_swarm_state_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-inherited-swarm-state-uat",
+      "name": "Issue #160 clone clears identity-bound swarm state and preserves user content",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_160_inherited_swarm_state_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_collision_isolation_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-collision-isolation-uat",
+      "name": "Issue #160 duplicate identity claims isolate and never reset the original",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/swarm_membership.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_160_collision_isolation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_https_leaf_independence_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-https-leaf-independence-uat",
+      "name": "Issue #160 HTTPS leaf renewal is independent of long-lived identity rotation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/web/server_tls.py",
+          "tests/adversarial/test_issue_160_https_leaf_independence_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_imaged_journal_insufficient_evidence_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-imaged-journal-insufficient-evidence-uat",
+      "name": "Issue #160 an imaged in-flight journal without unique hardware stays held",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_160_imaged_journal_insufficient_evidence_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_160_reprovisioning_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-160-reprovisioning-boundaries",
+      "name": "Issue #160 clone reset revokes live NFS access and source sessions",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": ["python3"],
+        "files": [
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1

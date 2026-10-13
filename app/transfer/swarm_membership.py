@@ -18,10 +18,12 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:
+    from ..common import identity_provisioning as _identity
     from ..storage.state_store import database_path, load_payload, save_payload
     from . import local_network as _local_network
     from .drone_network import _certificate_pem_fingerprint
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common import identity_provisioning as _identity  # type: ignore
     from storage.state_store import database_path, load_payload, save_payload  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
@@ -256,6 +258,10 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
         return False
     claimed = str(card.get("certificate_fingerprint") or fingerprint).strip().lower()
     if claimed != fingerprint:
+        return False
+    if fingerprint == _identity.own_certificate_fingerprint(settings):
+        # Gossip naming another member with *our* certificate is a duplicate identity, not a peer.
+        _identity.record_collision(settings, "membership-own-certificate")
         return False
     peer_id = record["peer_id"]
     existing = _local_network.get_paired_peer(settings, peer_id) or {}

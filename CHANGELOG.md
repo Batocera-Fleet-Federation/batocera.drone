@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Add automatic clone detection and identity provisioning. A Drone now binds its identity to hashed
+  hardware identifiers (`common/hardware_identity.py`, `common/identity_provisioning.py`) and, when a
+  disk image boots on different hardware, retires the inherited key/certificate, clears inherited swarm
+  state (peers, pins, membership, pairing codes, share authorizations, peer download jobs), resets the
+  local Tailscale node state without logging the original out, and creates a fresh identity — with no
+  user action and no message to the original's swarm. Missing or contradictory evidence on a bound
+  install holds swarm networking for an administrator instead of rotating anything; planned hardware
+  changes can be pre-authorized. Existing installations keep their identity and record a baseline.
+  Duplicate identities seen during pairing, gossip, discovery or mTLS are isolated and logged. Identity
+  certificate generation is now atomic. See `docs/drone-identity.md`.
+
 - Propagate an approved swarm pairing to every current member. A Drone invited through any member becomes visible on every roster, and a removal converges the same way. Discovery still does not grant access, and an already pinned certificate fingerprint is not replaced by gossip.
 
 - Stream Deck Setup: default brightness 100%, always auto-apply saved keys and

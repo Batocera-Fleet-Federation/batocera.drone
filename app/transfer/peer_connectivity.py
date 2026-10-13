@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 try:
+    from ..common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_peer_route as _load_peer_route
@@ -36,6 +37,7 @@ try:
     from .drone_tls import DroneCertificateManager
     from .network_identity import drone_scheme as _drone_scheme
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_peer_route as _load_peer_route  # type: ignore
@@ -156,6 +158,10 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     """
     if not url.startswith("https://"):
         return None
+    if not _identity_swarm_networking_allowed():
+        # Identity unresolved (clone suspected / recovery required): the inherited client
+        # certificate must not be presented to any peer.
+        raise PermissionError("peer connections are held pending Drone identity verification")
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
     if verify and cafile:
         # The pinned peer certificate was captured directly at pairing time; its
@@ -301,6 +307,8 @@ def _local_pair_peer(
     *,
     tailnet_auto_pair: bool = False,
 ) -> dict:
+    if not _identity_swarm_networking_allowed():
+        raise PermissionError("peer pairing is held pending Drone identity verification")
     if not _local_network.is_local_mode(settings):
         raise ValueError("Drone is not in local network mode")
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
@@ -333,6 +341,8 @@ def _local_pair_peer(
         method="POST",
     )
     context = ssl._create_unverified_context() if address.startswith("https://") else None
+    if not _identity_swarm_networking_allowed():
+        raise PermissionError("peer pairing is held pending Drone identity verification")
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
     result = json.loads(raw.decode("utf-8")) if raw else {}

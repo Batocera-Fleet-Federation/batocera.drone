@@ -307,6 +307,20 @@ for a health probe.) Do not attempt to reach `/v1/api/admin/*` endpoints without
 proper auth, and do not attempt to open any inbound path to a Drone that isn't
 already there — this fleet is intentionally outbound-only.
 
+## Identity / clone-detection state
+
+Identity lives in `/userdata/system/drone-app/identity/` (`binding.json`, `journal.json` only
+while provisioning is unfinished, `recovery.json` only while swarm networking is held,
+`hardware-change-authorization.json`, `provisioning.lock`). Startup logs are `[Identity] …` lines
+in the Drone stdout log (`Validating hardware binding`, `High-confidence hardware mismatch
+detected`, `Clone provisioning completed`, `Identity recovery required (<reason>)`, `Duplicate
+identity observed`). `GET /v1/api/admin/identity/status` (admin session) shows state, hardware
+evidence *kinds and digest prefixes* (never raw serials) and the pending recovery; collisions are
+in `app_events` namespace `identity_collisions`. A Drone that starts but shows no peers and logs
+"Swarm networking is held" is in `RECOVERY_REQUIRED` — read `recovery.json` before touching
+certificates; do not delete `binding.json` to "fix" it (that re-baselines silently). Diagnose
+missing evidence with `ls -l /sys/class/dmi/id/` (needs root) and `grep Serial /proc/cpuinfo`.
+
 ## Safety rules
 
 - Read-only. Never modify config, restart services, or delete files on a live

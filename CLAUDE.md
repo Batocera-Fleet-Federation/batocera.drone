@@ -41,7 +41,7 @@ from one giant `app/drone_api.py` into cohesive subpackages. `drone_api.py` is n
 `from app.drone_api import X` and the flat `python app/main.py` entrypoint both keep
 working. Layout:
 
-- `common/` — settings, device_identity, logging_setup, http_cache, fingerprint, auth,
+- `common/` — settings, device_identity, hardware_identity + identity_provisioning (clone-safe identity), logging_setup, http_cache, fingerprint, auth,
   runtime_state (shared mutable Event/Lock singletons: `_ROM_METADATA_ACTIVE/_WAKE/_LOCK`,
   `_GAMELIST_WRITE_LOCK`, `_ES_LIFECYCLE_LOCK` — imported by every module that needs
   one; reassigned `*_STARTED` flags/singletons stay in drone_api), http_errors
@@ -62,6 +62,7 @@ working. Layout:
   `__init__` + static delegators composed from these; see the god-class-split note below)
 - `transfer/` — peer_connectivity (cert trust/pinning + peer HTTP client + health/pairing),
   swarm_membership (approved-pair roster gossip and removal tombstones over already-paired peers),
+  swarm_reset (targeted removal of identity-bound swarm state for a freshly provisioned clone),
   peer_workers (public-IP probe + health-check/local-net worker threads), peer_download
   (`_download_*_from_peer` direct tier + state helpers), download_manager
   (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), transfer_batch
@@ -76,7 +77,7 @@ working. Layout:
   see `drone-integrations-streamdeck`.
 - `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
   bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
-  **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/
+  **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/identity/
   es_collections/network_share/theme), **plus `static/` + `templates/`**
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
@@ -160,6 +161,25 @@ peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
 hostname/IP-aware HTTPS leaf signed by that identity during startup, including
 current LAN and Tailscale addresses. See
 `drone-p2p-transfer-security` skill.
+
+## Identity and clone safety (`common/identity_provisioning.py`)
+
+The swarm identity (`drone.crt`/`drone.key`, logical `device-id`, pinned peers) is **bound to
+hardware** by `identity/binding.json` (hashed DMI UUID / serials / Pi serial from
+`common/hardware_identity.py`; never hostname, IP, lone MAC, disk UUID or `machine-id`).
+`main()` calls `ensure_identity()` after logging, **before** `create_server()` — nothing
+peer-facing may start earlier. Verdicts: same → no writes; confident different → automatic clone
+provisioning (retire old key first, `transfer/swarm_reset.py` targeted SQLite/pin reset,
+`tailnet_service.reset_local_node_identity()` — local state only, **never `tailscale logout`**,
+fresh random device id, fresh cert via `DroneCertificateManager`, journaled/resumable);
+missing/contradictory → `RECOVERY_REQUIRED` with `swarm_networking_allowed()` False (listener,
+workers, pollers, `/peer/*` and outbound peer TLS all gated). Admin overrides (`/admin/identity/*`,
+`web/handlers_identity.py`) need a real session **and** password re-entry. Rules: a clone never
+broadcasts a removal/rotation for the original; a peer can never force an identity reset
+(collisions are isolated + logged via `record_collision`); when you add per-peer state
+(table/namespace/file), add it to `swarm_reset.py`. Tests: `tests/test_hardware_identity.py`,
+`tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
+disk images via `image_disk`). Depth: `docs/drone-identity.md`.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
 

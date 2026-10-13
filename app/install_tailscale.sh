@@ -89,6 +89,17 @@ start() {
     echo "[drone-tailnet] tailscaled is not installed at $TS_DIR/bin" >&2
     exit 1
   fi
+  # DRONE_TAILNET is an independent Batocera service and may run before Drone.
+  # Validate the bound identity *before* tailscaled opens its cloneable node key.
+  # The preflight is read-only and fails closed while provisioning or recovery
+  # is pending; Drone starts the service after its own validation completes.
+  if ! PYTHONPATH=/userdata/system/drone-app python3 -m app.common.identity_provisioning tailnet-preflight; then
+    echo "[drone-tailnet] Drone identity is not verified; tailnet remains offline" >&2
+    if is_running; then
+      stop >/dev/null 2>&1
+    fi
+    exit 1
+  fi
   if is_running; then
     exit 0
   fi
