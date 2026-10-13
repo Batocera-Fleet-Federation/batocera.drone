@@ -2205,6 +2205,73 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_176_fresh_install_device_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-176-fresh-install-device-id-uat",
+      "name": "Issue #176 unpinned fresh installs on one host pair instead of sharing the NIC MAC",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/identity_provisioning.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_176_fresh_install_device_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_176_device_id_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-176-device-id-boundaries",
+      "name": "Issue #176 first-boot device-id malformed input, persist fallback, upgrade and clone boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_176_device_id_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
