@@ -1792,6 +1792,69 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_spec_mock_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-spec-mock-boundaries",
+      "name": "Issue #169 spec'd-mock guard boundaries: every mock flavour rejected, unittest-absent and real roots still resolve",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "app/storage/rom_metadata_store.py",
+          "tests/adversarial/test_issue_169_spec_mock_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_169_out_of_scope_identity_lock_cwd.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-169-out-of-scope-identity-lock-cwd",
+      "name": "Out of scope for #169: identity hardware-change lock is written under cwd for spec'd roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_169_out_of_scope_identity_lock_cwd.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
