@@ -525,9 +525,13 @@ def hold_local_node() -> bool:
     if not TAILSCALE_CLI.exists():
         return False
     try:
-        return _run_cli(["down"], timeout=15).returncode == 0
+        if _run_cli(["down"], timeout=15).returncode == 0:
+            return True
     except (OSError, subprocess.SubprocessError):
-        return False
+        pass
+    # A failed `down` must not leave a copied node key serving traffic during
+    # recovery. Stopping only the local daemon does not revoke the original.
+    return _stop_tailscaled()
 
 
 def release_local_node() -> bool:

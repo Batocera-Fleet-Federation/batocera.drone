@@ -56,6 +56,10 @@ def _reset_database(settings: Any) -> Dict[str, int]:
             removed[namespace] = max(0, cursor.rowcount or 0)
         cursor = connection.execute("DELETE FROM peer_route_cache")
         removed["peer_route_cache"] = max(0, cursor.rowcount or 0)
+        # Browser sessions belong to the source installation. A new identity must
+        # require a fresh login even though the configured credentials survive.
+        cursor = connection.execute("DELETE FROM sessions")
+        removed["sessions"] = max(0, cursor.rowcount or 0)
         # Queued transfers that name a source peer are meaningless without that peer;
         # unrelated queue state (the paused flag) is kept.
         row = connection.execute(
@@ -154,6 +158,13 @@ def _revoke_shared_credentials(settings: Any) -> List[str]:
 
 def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
     """Clear inherited swarm trust. Raises if the SQLite reset itself fails."""
+    try:
+        from ..device import nfs_export_manager
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from device import nfs_export_manager  # type: ignore
+    # Kernel exports survive a Drone process restart. Retain ownership records
+    # until every client is unexported and the Drone bind mounts are gone.
+    nfs_export_manager.revoke_exports_for_identity_change(settings)
     removed = _reset_database(settings)
     pins = _clear_pinned_peer_certificates(settings)
     incomplete = _revoke_shared_credentials(settings)

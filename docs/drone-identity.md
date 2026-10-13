@@ -124,6 +124,10 @@ Paired peers, discovered peers (including `identity-conflict` rows), pinned peer
 (`local-peer-certs/`), the swarm membership roster/epochs/tombstones, the pairing code, peer
 health checks, the peer route cache, sync activity, tailnet "forgotten peers", network-share
 and NFS-export authorizations/references, and queued downloads that name a source peer.
+Live NFS client exports are revoked and Drone-owned bind mounts are removed before
+their SQLite records are deleted; a failed revocation holds provisioning for retry.
+All browser sessions from the source are invalidated, so a fresh login is required
+on the new Drone while the configured login credentials remain available.
 Credentials imported *from a peer* (VPN/SMTP) are revoked using the existing revocation
 path; our own VPN/SMTP config stays, with sharing switched off. The stored Tailscale auth key
 is cleared.
@@ -137,13 +141,16 @@ are untouched (idempotent `DELETE`s only; never a database rebuild).
 
 ## Tailscale on a clone
 
-A clone also copies Tailscale's node key. Drone removes only the **local** daemon state
+A clone also copies Tailscale's node key. The independently started `DRONE_TAILNET`
+service checks Drone's binding, hardware evidence, certificate and provisioning
+journal **before** launching `tailscaled`; it stays offline on a clone or while
+recovery is pending. Drone removes only the **local** daemon state
 (`/userdata/system/tailscale/state`) after stopping `tailscaled`, then restarts it. It never
 runs `tailscale logout` (that would deregister the node key the original still uses) and never
 re-enrolls by itself: the clone comes up *not enrolled* (`NeedsLogin`) and the Swarm page's
 Tailnet card shows that it needs a new auth key. LAN pairing keeps working independently.
-Because the DRONE_TAILNET service can start before Drone, the clone may briefly present the
-inherited node; Drone resets it within seconds of starting. If the daemon cannot be stopped,
+On the first upgrade from an older ungated service, Drone's service bootstrap stops
+and replaces that script; subsequent boots use the preflight gate. If the daemon cannot be stopped,
 the node is taken offline with `tailscale down` and the reset retried on the next start.
 
 ## Existing installations (one-time migration)

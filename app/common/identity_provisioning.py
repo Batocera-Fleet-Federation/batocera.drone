@@ -934,6 +934,33 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
         return IdentityResult(settings, State.RECOVERY_REQUIRED, STATUS_RECOVERY, reason="provisioning_failed", swarm_networking_enabled=False)
 
 
+def tailnet_start_permitted(settings: Any, provider: Optional[HardwareIdentityProvider] = None) -> bool:
+    """Read-only boot gate for the independently started DRONE_TAILNET service.
+
+    The daemon must never load a copied node key before Drone gets a chance to
+    detect a clone. A ready binding on this hardware, matching the certificate
+    and device id, is required. Journals and recovery markers keep it stopped.
+    This deliberately fails closed when the app or hardware cannot be read.
+    """
+    try:
+        if _externally_managed(settings):
+            return False
+        if _read_json(_journal_path(settings)) is not _ABSENT:
+            return False
+        if _read_json(_recovery_path(settings)) is not _ABSENT:
+            return False
+        binding, problem = _load_binding(settings)
+        if problem or not binding or not binding.get("hardware") or binding.get("tailnet_reset_pending"):
+            return False
+        if compare_hardware(binding["hardware"], (provider or HardwareIdentityProvider()).collect()) != SAME:
+            return False
+        pair = _identity_pair_status(settings)
+        return bool(pair["valid"] and pair["fingerprint"] == binding["identity_certificate_fingerprint"]
+                    and settings.device_id == binding["device_id"])
+    except Exception:  # noqa: BLE001 - boot guard must fail closed
+        return False
+
+
 def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> IdentityResult:
     hardware = provider.collect()
     journal = _read_json(_journal_path(settings))
@@ -1076,9 +1103,12 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
         changed = True
     if binding.get("tailnet_reset_pending"):
         outcome = _reset_tailnet()
-        if outcome.get("status") != "held":
+        if outcome.get("status") in {"reset", "not_installed"}:
             binding.pop("tailnet_reset_pending", None)
             changed = True
+        elif outcome.get("status") == "error":
+            return _enter_recovery(settings, "tailnet_reset_failed", binding,
+                                   detail="The inherited Tailscale node could not be cleared or held offline")
     if changed:
         _save_binding(settings, binding)
     status = STATUS_VERIFIED if hardware_verified else STATUS_UNAVAILABLE
@@ -1191,3 +1221,18 @@ def status_label(status: str) -> str:
 def current_status() -> str:
     with _STATUS_LOCK:
         return str(_CURRENT.get("status") or "")
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args != ["tailnet-preflight"]:
+        return 2
+    try:
+        from .settings import Settings
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from common.settings import Settings  # type: ignore
+    return 0 if tailnet_start_permitted(Settings.from_env()) else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - Batocera service entrypoint
+    raise SystemExit(_main())

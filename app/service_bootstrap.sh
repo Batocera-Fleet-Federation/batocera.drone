@@ -122,6 +122,15 @@ PY
 launch_drone() {
   if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
     if validate_local_app; then
+      # Upgrade the standalone tailnet service before launching Drone. Older
+      # installed copies lacked the identity preflight; stop one before
+      # replacing it so a copied node key cannot remain online during recovery.
+      if [ -x /userdata/system/tailscale/bin/tailscaled ] && [ -f "$WORK_DIR/app/install_tailscale.sh" ]; then
+        if [ -f /userdata/system/services/DRONE_TAILNET ] && ! grep -q 'tailnet-preflight' /userdata/system/services/DRONE_TAILNET; then
+          sh /userdata/system/services/DRONE_TAILNET stop >/dev/null 2>&1 || true
+          sh "$WORK_DIR/app/install_tailscale.sh" service >/dev/null 2>&1 || true
+        fi
+      fi
       # Routine release checks belong exclusively to the API's background
       # update worker. The supervisor only launches a validated local tree;
       # its network download path below is disaster recovery for a missing or
