@@ -869,9 +869,31 @@ def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> Identit
     hardware = provider.collect()
     journal = _read_json(_journal_path(settings))
     if journal is _CORRUPT:
-        # An unreadable journal means a provisioning run was interrupted mid-write; the safe
-        # reading is "clone provisioning was under way".
-        journal = {"state": State.PROVISIONING.value, "reason": "clone", "steps": {}}
+        # The journal contains no trustworthy intent. It may be a torn provisioning write,
+        # or simply a damaged file on the original machine. Re-derive the decision from the
+        # durable binding and present hardware before doing anything destructive.
+        binding, problem = _load_binding(settings)
+        if binding is None:
+            return _enter_recovery(settings, problem or "journal_unreadable", None)
+        verdict = compare_hardware(binding.get("hardware"), hardware)
+        if verdict == DIFFERENT:
+            _log("High-confidence hardware mismatch detected with an unreadable provisioning journal")
+            return _provision(settings, hardware, "clone", binding)
+        pair = _identity_pair_status(settings)
+        if (
+            verdict == SAME
+            and pair["valid"]
+            and pair["fingerprint"] == binding["identity_certificate_fingerprint"]
+            and settings.device_id == binding["device_id"]
+        ):
+            # The bound original is intact. A corrupt journal alone must never retire it.
+            result = _verified(settings, binding, hardware, pair, hardware_verified=True)
+            if result.state == State.READY:
+                _journal_path(settings).unlink()
+                _fsync_directory(identity_dir(settings))
+                _log("Unreadable provisioning journal discarded after verifying the existing identity")
+            return result
+        return _enter_recovery(settings, "journal_unreadable", binding)
     if isinstance(journal, dict):
         binding, _ = _load_binding(settings)
         _log("Resuming an interrupted identity provisioning")
