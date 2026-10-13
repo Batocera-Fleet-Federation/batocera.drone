@@ -828,6 +828,106 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_real_boot_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-real-boot-uat",
+      "name": "Issue #160 real entrypoint boot of imaged disks: clone, reboot and held-evidence UAT",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/main.py",
+          "app/drone_api.py",
+          "app/common/identity_provisioning.py",
+          "app/web/api_routes.py",
+          "tests/adversarial/test_issue_160_real_boot_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_hardware_evidence_downgrade_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-hardware-evidence-downgrade-uat",
+      "name": "Issue #160 missing hardware evidence must not erase the clone-detection binding",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_hardware_evidence_downgrade_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_160_placeholder_identifiers.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-160-placeholder-identifiers",
+      "name": "Issue #160 vendor placeholder serials are not unique hardware identifiers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/common/hardware_identity.py",
+          "tests/adversarial/test_issue_160_placeholder_identifiers.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
