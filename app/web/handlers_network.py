@@ -975,7 +975,7 @@ class HandlersNetworkMixin:
         try:
             from ..transfer import swarm_membership as _swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
-            import swarm_membership as _swarm_membership  # type: ignore
+            from transfer import swarm_membership as _swarm_membership  # type: ignore
         removed = _swarm_membership.publish_forget(self.settings, peer_id)
         _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
         self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})
