@@ -112,7 +112,11 @@ instead of leaving a partly trusting clone, and the next start retries from the 
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the
-earlier attempt is reused.
+earlier attempt is reused only when the journal's recorded hardware still matches. If a disk
+image captures that unfinished journal and boots on different hardware, Drone retires the
+copied in-flight certificate and logical id and provisions a fresh identity. Missing or
+contradictory evidence holds the unfinished identity offline until the administrator
+chooses a new identity or the original evidence returns.
 
 ### State that is cleared
 

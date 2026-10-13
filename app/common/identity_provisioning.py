@@ -569,6 +569,35 @@ def _valid_journal(journal: dict) -> bool:
     return True
 
 
+def _resume_journal(settings: Any, hardware: HardwareSnapshot, journal: dict,
+                    binding: Optional[Dict[str, Any]], *, administrator_replacement: bool = False) -> IdentityResult:
+    """Resume only on the hardware for which the unfinished identity was made.
+
+    A disk image can include both a valid journal and the certificate generated just
+    before an interrupted binding write. That certificate is safe to reuse on the
+    source machine, but it must be retired when the image boots elsewhere.
+    """
+    recorded = HardwareSnapshot.from_dict(journal["hardware"])
+    verdict = compare_hardware(recorded, hardware)
+    if verdict == SAME:
+        _log("Resuming an interrupted identity provisioning")
+        return _provision(settings, hardware, journal["reason"], binding, journal)
+    if verdict == DIFFERENT or (recorded is not None and not recorded.components) or administrator_replacement:
+        _log("Provisioning journal belongs to different or unverified hardware; creating a fresh identity")
+        pair = _identity_pair_status(settings)
+        prior = dict(binding or {})
+        prior["identity_certificate_fingerprint"] = pair["fingerprint"] or journal["previous_certificate_fingerprint"]
+        prior["device_id"] = settings.device_id
+        retired = list(prior.get("retired_device_ids") or [])
+        for old_id in (journal["previous_device_id"], journal.get("new_device_id")):
+            if old_id and old_id not in retired:
+                retired.append(old_id)
+        prior["retired_device_ids"] = retired
+        return _provision(settings, hardware, "clone", prior)
+    return _enter_recovery(settings, "journal_hardware_unverified", binding,
+                           detail="Unfinished provisioning cannot be resumed with current hardware evidence")
+
+
 def _retire_device_id(settings: Any) -> None:
     try:
         _device_id_path(Path(settings.userdata_root)).unlink()
@@ -837,14 +866,16 @@ def resolve_recovery(settings: Any, action: str, provider: Optional[HardwareIden
         hardware = provider.collect()
         if action == "new":
             journal = _read_json(_journal_path(settings))
-            journal = journal if isinstance(journal, dict) else None
-            result = _provision(
-                settings, hardware, "operator_new_identity" if journal is None else str(journal.get("reason") or "clone"),
-                binding, journal,
-            )
+            if isinstance(journal, dict) and _valid_journal(journal):
+                result = _resume_journal(settings, hardware, journal, binding, administrator_replacement=True)
+            else:
+                result = _provision(settings, hardware, "operator_new_identity", binding)
             _log("Administrator provisioned a new identity")
             return {"action": "new", "status": result.status, "device_id": result.settings.device_id}
-        if reason == "provisioning_failed":
+        journal = _read_json(_journal_path(settings))
+        if reason in {"provisioning_failed", "journal_hardware_unverified"} or (
+            isinstance(journal, dict) and _valid_journal(journal)
+        ):
             raise ValueError("an unfinished provisioning can only be resolved by provisioning a new identity")
         pair = _identity_pair_status(settings)
         if not pair["valid"]:
@@ -934,8 +965,7 @@ def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> Identit
         return _enter_recovery(settings, "journal_unreadable", binding)
     if isinstance(journal, dict):
         binding, _ = _load_binding(settings)
-        _log("Resuming an interrupted identity provisioning")
-        return _provision(settings, hardware, str(journal.get("reason") or "clone"), binding, journal)
+        return _resume_journal(settings, hardware, journal, binding)
 
     binding, problem = _load_binding(settings)
     pair = _identity_pair_status(settings)
@@ -1120,7 +1150,8 @@ def status_payload(settings: Any, provider: Optional[HardwareIdentityProvider] =
             {
                 "reason": recovery.get("reason"),
                 "since": recovery.get("since"),
-                "actions": ["new"] if recovery.get("reason") == "provisioning_failed" else ["keep", "new"],
+                "actions": ["new"] if recovery.get("reason") in {"provisioning_failed", "journal_hardware_unverified"}
+                else ["keep", "new"],
             }
             if recovery
             else None
