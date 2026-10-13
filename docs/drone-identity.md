@@ -95,8 +95,9 @@ State machine: `UNINITIALIZED → VALIDATING → CLONE_DETECTED → PROVISIONING
    reactivate the inherited identity.
 2. **Targeted swarm reset** in one SQLite transaction + the pin directory (see below).
 3. **New logical id**: random, locally administered, MAC-shaped (not derived from the NIC, so
-   cloned VMs / spoofed MACs cannot collide). A device id pinned with `DRONE_DEVICE_ID` is
-   operator-owned and is left alone.
+   cloned VMs / spoofed MACs cannot collide). A `DRONE_DEVICE_ID` copied along with the disk is
+   replaced too: the retired id is recorded in the binding so the stale environment pin cannot
+   bring it back.
 4. **Tailscale**: see below.
 5. **New certificate** via the existing `DroneCertificateManager` (generated in a private
    scratch directory and renamed into place); verified to differ from the inherited one and

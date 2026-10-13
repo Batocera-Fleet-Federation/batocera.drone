@@ -331,7 +331,7 @@ class CloneProvisioningTests(ProvisioningTestBase):
                 )
             self.assertEqual(saved["drone_id"], remote.device_id)
 
-    def test_pinned_device_id_is_left_alone(self) -> None:
+    def test_copied_pinned_device_id_is_replaced_on_a_clone(self) -> None:
         settings = settings_for(self.root, DRONE_DEVICE_ID="pinned-drone-1")
         identity.ensure_identity(settings, provider_for(self.hw_a))
         target = self.tmp / "pinned-clone"
@@ -339,9 +339,24 @@ class CloneProvisioningTests(ProvisioningTestBase):
         clone = settings_for(target, DRONE_DEVICE_ID="pinned-drone-1")
         with mock.patch.dict("os.environ", {"DRONE_DEVICE_ID": "pinned-drone-1"}):
             result = identity.ensure_identity(clone, provider_for(self.hw_b))
-        self.assertEqual(result.status, identity.STATUS_CLONE)
-        self.assertEqual(result.settings.device_id, "pinned-drone-1")
-        self.assertNotEqual(fingerprint_of(clone), fingerprint_of(settings))
+            self.assertEqual(result.status, identity.STATUS_CLONE)
+            self.assertNotEqual(result.settings.device_id, "pinned-drone-1")
+            self.assertNotEqual(fingerprint_of(clone), fingerprint_of(settings))
+            # The copied environment pin keeps naming the retired id; it must not revive it.
+            identity.reset_runtime_state_for_tests()
+            again = identity.ensure_identity(settings_for(target, DRONE_DEVICE_ID="pinned-drone-1"), provider_for(self.hw_b))
+        self.assertEqual(again.settings.device_id, result.settings.device_id)
+        self.assertEqual(read_binding(clone)["device_id"], result.settings.device_id)
+
+    def test_erased_hardware_evidence_in_binding_holds_swarm(self) -> None:
+        original, _ = self.install()
+        document = read_binding(original)
+        document["hardware"] = {"version": 1, "components": {}, "metadata": {}}
+        document["hardware_fingerprint"] = None
+        identity._binding_path(original).write_text(json.dumps(document), encoding="utf-8")
+        result = identity.ensure_identity(settings_for(self.root), provider_for(self.hw_b))
+        self.assertEqual(result.state, State.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason, "binding_hardware_evidence_missing")
 
     def test_raspberry_pi_clone(self) -> None:
         pi_a = pi_tree(self.tmp / "pi-a")

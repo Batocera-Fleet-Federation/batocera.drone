@@ -412,6 +412,10 @@ def _load_binding(settings: Any):
     if not installation_id or not device_id or len(fingerprint) != 64:
         return None, "binding_invalid"
     hardware = HardwareSnapshot.from_dict(raw.get("hardware"))
+    if (raw.get("hardware_bound") or raw.get("hardware_fingerprint")) and not (hardware and hardware.components):
+        # The binding says it once recorded hardware evidence but none is left: damaged or
+        # erased, so it cannot be silently re-baselined onto whatever machine is booting.
+        return None, "binding_hardware_evidence_missing"
     binding = dict(raw)
     binding["device_id"] = device_id
     binding["identity_certificate_fingerprint"] = fingerprint
@@ -427,6 +431,7 @@ def _binding_document(binding: Dict[str, Any]) -> dict:
     document["schema_version"] = BINDING_SCHEMA_VERSION
     document["hardware"] = hardware.to_dict() if hardware else None
     document["hardware_fingerprint"] = hardware.fingerprint if hardware else None
+    document["hardware_bound"] = bool(hardware and hardware.components)
     document["hardware_fingerprint_version"] = hardware.version if hardware else FINGERPRINT_VERSION
     document["history"] = list(binding.get("history") or [])[-_HISTORY_LIMIT:]
     return document
@@ -545,10 +550,8 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     """
     if journal.get("new_device_id"):
         return str(journal["new_device_id"])
-    if _env_pinned_device_id():
-        # Operator-pinned (container/CI); not ours to change. Cloned disks should not pin ids.
-        _log("Device id is pinned by DRONE_DEVICE_ID and was left unchanged")
-        return str(settings.device_id)
+    # A clone is a new device even when its copied configuration pins the source's id via
+    # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
     userdata_root = Path(settings.userdata_root)
     _retire_device_id(settings)
     _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
@@ -650,6 +653,11 @@ def _provision(
     origin = {"initial": "initial", "clone": "clone"}.get(reason, "operator")
     event = {"initial": "installation_provisioned", "clone": "clone_provisioned"}.get(reason, "identity_replaced")
     existing_history = list((previous or {}).get("history") or [])
+    retired_ids = list((previous or {}).get("retired_device_ids") or [])
+    if destructive:
+        old_id = str(journal.get("previous_device_id") or "")
+        if old_id and old_id != settings.device_id and old_id not in retired_ids:
+            retired_ids.append(old_id)
     binding = _new_binding(
         settings,
         hardware,
@@ -665,6 +673,8 @@ def _provision(
             )
         ],
     )
+    if retired_ids:
+        binding["retired_device_ids"] = retired_ids[-_HISTORY_LIMIT:]
     if journal.get("tailnet_status") == "held":
         binding["tailnet_reset_pending"] = True
     _save_binding(settings, binding)
@@ -941,7 +951,7 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
             binding["history"].append(_history_entry("certificate_rotation_recorded", certificate=pair["fingerprint"][:12]))
         changed = True
     if binding["device_id"] != settings.device_id:
-        if _env_pinned_device_id():
+        if _env_pinned_device_id() and settings.device_id not in (binding.get("retired_device_ids") or []):
             binding["device_id"] = settings.device_id
             binding["history"].append(_history_entry("device_id_pinned_by_environment"))
         else:
