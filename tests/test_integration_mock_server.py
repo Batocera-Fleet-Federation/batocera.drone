@@ -13,6 +13,7 @@ from unittest import mock
 from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
 from app.drone_api import RomRepository, Settings, _poll_rom_metadata_once, create_server
+from app.transfer.peer_workers import stop_local_network_workers
 
 
 class MockServerIntegrationTests(unittest.TestCase):
@@ -72,6 +73,9 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
+        # create_server() starts the LAN discovery listener against this test's state DB.
+        # Stop it before the temp dir is removed, or a late announce writes into a deleted path.
+        stop_local_network_workers()
         os.environ.clear()
         os.environ.update(self._old_env)
         self._tmp.cleanup()

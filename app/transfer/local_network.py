@@ -6,11 +6,12 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import struct
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Optional
 
 try:
@@ -460,13 +461,21 @@ def start_discovery_worker(
     settings: Any,
     certificate_fingerprint: Callable[[], str],
     on_discovery: Optional[Callable[[dict], None]] = None,
+    stop_event: Optional[Event] = None,
 ) -> Thread:
-    """Listen for multicast announcements and periodically advertise this Drone."""
+    """Listen for multicast announcements and periodically advertise this Drone.
+
+    The worker exits once ``stop_event`` is set. Callers that own the state DB
+    (tests, shutdown) must set it and join the returned thread before removing
+    that DB, or a late announcement writes into a deleted directory.
+    """
+
+    stop = stop_event or Event()
 
     def run() -> None:
         sock: Optional[socket.socket] = None
         last_announce = 0.0
-        while True:
+        while not stop.is_set():
             if not is_local_mode(settings):
                 if sock is not None:
                     sock.close()
@@ -503,8 +512,10 @@ def start_discovery_worker(
                     on_discovery(peer)
             except socket.timeout:
                 continue
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
                 continue
+        if sock is not None:
+            sock.close()
 
     thread = Thread(target=run, name="drone-local-discovery", daemon=True)
     thread.start()
