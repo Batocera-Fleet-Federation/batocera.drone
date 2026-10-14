@@ -156,5 +156,7 @@ def _machine_id(userdata_root: Optional[Path] = None) -> str:
     return next(iter(_physical_mac_candidates()), None) or _runtime_machine_id()
 
 
-def _fake_machine_id() -> str:
-    return _machine_id()
+def _fake_machine_id(userdata_root: Optional[Path] = None) -> str:
+    # Fake-data mode gets the same persisted random id as a real install, scoped to its
+    # USERDATA_ROOT, so two fake-data processes on one host do not share a host-derived id.
+    return _machine_id(userdata_root)
