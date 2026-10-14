@@ -45,6 +45,42 @@ class StateStorePathTypeTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             state_store.database_path_for_legacy_file(None)
 
+    def _legacy_json(self, name="legacy.json"):
+        legacy = self.root / name
+        legacy.write_text('{"migrated": true}', encoding="utf-8")
+        return legacy
+
+    def test_load_payload_migrates_str_legacy_path(self):
+        legacy = self._legacy_json()
+        result = state_store.load_payload(
+            str(self.root / "s.sqlite3"), "ns", {"fallback": True}, legacy_path=str(legacy)
+        )
+        self.assertEqual(result, {"migrated": True})
+        self.assertFalse(legacy.exists())
+
+    def test_load_payload_migrates_pathlike_legacy_path(self):
+        legacy = self._legacy_json()
+        result = state_store.load_payload(
+            self.root / "p.sqlite3", "ns", {"fallback": True}, legacy_path=legacy
+        )
+        self.assertEqual(result, {"migrated": True})
+        self.assertFalse(legacy.exists())
+
+    def test_load_payload_ignores_non_path_legacy_path(self):
+        result = state_store.load_payload(
+            self.root / "m.sqlite3", "ns", {"fallback": True}, legacy_path=mock.MagicMock()
+        )
+        self.assertEqual(result, {"fallback": True})
+
+    def test_load_events_migrates_str_legacy_path(self):
+        legacy = self.root / "events.jsonl"
+        legacy.write_text('{"a": 1}\n', encoding="utf-8")
+        events = state_store.load_events(
+            str(self.root / "e.sqlite3"), "ns", legacy_path=str(legacy)
+        )
+        self.assertEqual(events, [{"a": 1}])
+        self.assertFalse(legacy.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

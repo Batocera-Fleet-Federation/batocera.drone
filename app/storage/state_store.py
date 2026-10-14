@@ -121,8 +121,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _read_legacy_json(path: Optional[Path]) -> Any:
-    if not path:
+def _legacy_file_path(value: object) -> Optional[Path]:
+    """Normalize a legacy-file argument (``str`` or ``PathLike``) to a ``Path``.
+
+    Anything that is not a filesystem path (empty, mock, other types) yields ``None``
+    so the caller skips the one-time import instead of failing mid-migration.
+    """
+    if not value or _is_mock(value) or not isinstance(value, (str, os.PathLike)):
+        return None
+    return Path(value)
+
+
+def _read_legacy_json(path: Optional[PathLike[str] | str]) -> Any:
+    path = _legacy_file_path(path)
+    if path is None:
         return None
     try:
         if path.exists() and path.is_file():
@@ -137,7 +149,7 @@ def load_payload(
     namespace: str,
     fallback: Any,
     *,
-    legacy_path: Optional[Path] = None,
+    legacy_path: Optional[PathLike[str] | str] = None,
     state_key: str = "payload",
 ) -> Any:
     with open_database(db_path) as connection:
@@ -154,7 +166,7 @@ def load_payload(
     if legacy is not None:
         save_payload(db_path, namespace, legacy, state_key=state_key)
         try:
-            legacy_path.unlink(missing_ok=True)  # type: ignore[union-attr]
+            Path(legacy_path).unlink(missing_ok=True)  # type: ignore[arg-type]
         except OSError:
             pass
         return legacy
@@ -298,19 +310,20 @@ def load_events(
     db_path: Path,
     namespace: str,
     *,
-    legacy_path: Optional[Path] = None,
+    legacy_path: Optional[PathLike[str] | str] = None,
     limit: Optional[int] = None,
 ) -> list[dict]:
+    legacy_file = _legacy_file_path(legacy_path)
     with open_database(db_path) as connection:
         count = connection.execute(
             "SELECT COUNT(*) FROM app_events WHERE namespace = ?",
             (namespace,),
         ).fetchone()[0]
-        if count == 0 and legacy_path and legacy_path.exists():
+        if count == 0 and legacy_file and legacy_file.exists():
             try:
                 legacy = [
                     json.loads(line)
-                    for line in legacy_path.read_text(encoding="utf-8").splitlines()
+                    for line in legacy_file.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                 ]
             except Exception:
@@ -324,7 +337,7 @@ def load_events(
             connection.commit()
             if legacy:
                 try:
-                    legacy_path.unlink(missing_ok=True)
+                    legacy_file.unlink(missing_ok=True)
                 except OSError:
                     pass
         sql = "SELECT payload FROM app_events WHERE namespace = ? ORDER BY sequence DESC"
