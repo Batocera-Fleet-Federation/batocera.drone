@@ -37,6 +37,7 @@ try:
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.peer_connectivity import (
         _fetch_peer_info,
+        PeerPairingRejected,
         _local_pair_peer,
         _local_peer_cert_cache_path,
         _normalize_peer_address,
@@ -67,6 +68,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         _fetch_peer_info,
+        PeerPairingRejected,
         _local_pair_peer,
         _local_peer_cert_cache_path,
         _normalize_peer_address,
@@ -674,6 +676,10 @@ class HandlersNetworkMixin:
                 error.close()
             message = f"That drone rejected the pairing request (HTTP {error.code})."
             self._send_json(502, {"error": f"{message} {detail}".rstrip()})
+        except PeerPairingRejected:
+            # A 200 that is not an accepted pairing is still the peer's answer,
+            # not a server bug. The message is fixed, so no peer text is echoed.
+            self._send_json(502, {"error": "That drone did not accept the pairing request."})
         except (URLError, OSError) as error:
             if (
                 isinstance(error, PermissionError)

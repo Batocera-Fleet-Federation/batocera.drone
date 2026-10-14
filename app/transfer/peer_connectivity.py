@@ -391,6 +391,16 @@ def _pairing_tls_context(address: str, expected_fingerprint: str) -> ssl.SSLCont
     raise ssl.SSLError("server certificate does not match the expected fingerprint")
 
 
+class PeerPairingRejected(RuntimeError):
+    """The peer answered the pairing POST, but the answer is not an accepted pairing.
+
+    Covers a 200 whose body is not JSON, not ``status=paired``, or does not match the
+    discovered identity or pinned certificate. It is the peer's answer rather than a local
+    fault, so the pair handlers map it to 502 instead of a generic 500. Messages are fixed
+    strings; the peer's body is never echoed back to the caller.
+    """
+
+
 def _local_pair_peer(
     settings: Settings,
     peer: dict,
@@ -460,12 +470,15 @@ def _local_pair_peer(
         raise PermissionError("peer pairing is held pending Drone identity verification")
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
-    result = json.loads(raw.decode("utf-8")) if raw else {}
+    try:
+        result = json.loads(raw.decode("utf-8")) if raw else {}
+    except ValueError as error:  # UnicodeDecodeError is a ValueError too
+        raise PeerPairingRejected("peer did not accept pairing request") from error
     if not isinstance(result, dict) or str(result.get("status") or "") != "paired":
-        raise RuntimeError("peer did not accept pairing request")
+        raise PeerPairingRejected("peer did not accept pairing request")
     remote_id = str(result.get("drone_id") or "").strip()
     if remote_id != peer_id:
-        raise RuntimeError("paired peer identity did not match discovered peer")
+        raise PeerPairingRejected("paired peer identity did not match discovered peer")
     remote_pem = str(result.get("certificate_pem") or "")
     if anchor:
         # Check before writing: the cert cache file may be the live pin of an
@@ -473,9 +486,9 @@ def _local_pair_peer(
         try:
             offered = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
         except Exception as error:  # noqa: BLE001 - malformed PEM is a rejected pairing
-            raise RuntimeError("paired peer returned an unreadable certificate") from error
+            raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
         if offered != anchor:
-            raise RuntimeError("paired peer certificate fingerprint did not match discovery")
+            raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
     previous_path = _local_peer_cert_cache_path(settings, peer_id)
     try:
         previous_pem = previous_path.read_bytes()
@@ -491,8 +504,8 @@ def _local_pair_peer(
             cert_path.unlink(missing_ok=True)
         else:
             cert_path.write_bytes(previous_pem)
-        raise RuntimeError("paired peer certificate fingerprint did not match discovery")
-    stored = _local_network.save_paired_peer(
+        raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
+    stored =_local_network.save_paired_peer(
         settings,
         {
             **peer,
