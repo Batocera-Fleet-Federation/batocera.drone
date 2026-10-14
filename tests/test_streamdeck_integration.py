@@ -252,7 +252,8 @@ class ActionTests(unittest.TestCase):
                                   restart_frontend=lambda: True)
         retroarch = SimpleNamespace(availability=lambda c: {'available': bool(c.active_game), 'reason': 'No game'},
                                     send=lambda command: {'status': 'ok', 'command': command},
-                                    load_latest=lambda c: {'status': 'ok', 'command': 'LOAD_STATE_SLOT'})
+                                    load_latest=lambda c: {'status': 'ok', 'command': 'LOAD_STATE_SLOT'},
+                                    save_latest=lambda c: {'status': 'ok', 'command': 'SAVE_STATE_SLOT'})
         return BuiltInActionRegistry(control, retroarch, FakeRuntime(active)), runner
 
     def test_initial_ten_actions_and_implementations(self):
@@ -265,7 +266,7 @@ class ActionTests(unittest.TestCase):
         self.assertEqual([call[1] for call in runner.calls],
                          [['--emukill'], ['--reboot'], ['--shutdown'], ['setSystemVolume', '+5'],
                           ['setSystemVolume', '-5'], ['setSystemVolume', 'mute-toggle']])
-        self.assertEqual(registry.execute('save-state')['command'], 'SAVE_STATE')
+        self.assertEqual(registry.execute('save-state')['command'], 'SAVE_STATE_SLOT')
 
     def test_availability_unknown_failure_and_confirmation(self):
         registry, runner = self.registry()
@@ -919,3 +920,55 @@ class RetroArchLoadLatestTests(unittest.TestCase):
 
         self.assertEqual(result['status'], 'error')
         self.assertIn('failed to load state', result['error'])
+
+    def _fake_retroarch(self, slot_reply):
+        received = []
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.bind(('127.0.0.1', 0))
+        server.settimeout(5)
+        port = server.getsockname()[1]
+        self.addCleanup(server.close)
+
+        def serve():
+            while True:
+                try:
+                    data, addr = server.recvfrom(4096)
+                except OSError:
+                    return
+                received.append(data)
+                if data.startswith(b'GET_STATUS'):
+                    server.sendto(b'GET_STATUS PLAYING fbneo,dino', addr)
+                else:
+                    server.sendto(slot_reply, addr)
+                    return
+
+        threading.Thread(target=serve, daemon=True).start()
+        proc = self.root / 'proc' / str(4000 + len(received) + port % 1000)
+        proc.mkdir(parents=True)
+        config = self.root / f'cfg-{port}.cfg'
+        config.write_text(f'network_cmd_enable = "true"\nnetwork_cmd_port = "{port}"\n')
+        (proc / 'cmdline').write_bytes(f'/usr/bin/retroarch\0--config\0{config}\0'.encode())
+        return RetroArchControl(proc_root=self.root / 'proc', saves_root=self.root / 'saves'), received
+
+    def test_save_latest_overwrites_the_newest_slot(self):
+        self._state('dino.state', age=300)
+        self._state('dino.state1', age=100)
+        control, received = self._fake_retroarch(b'SAVE_STATE_SLOT 1')
+
+        result = control.save_latest(self.context)
+
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(received[-1], b'SAVE_STATE_SLOT 1\n')
+
+    def test_save_latest_creates_slot_zero_when_no_save_exists(self):
+        control, received = self._fake_retroarch(b'SAVE_STATE_SLOT 0')
+
+        result = control.save_latest(self.context)
+
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(received[-1], b'SAVE_STATE_SLOT 0\n')
+
+    def test_save_latest_is_unavailable_without_a_running_game(self):
+        control = RetroArchControl(saves_root=self.root / 'saves')
+
+        self.assertEqual(control.save_latest(ActionContext())['status'], 'unavailable')

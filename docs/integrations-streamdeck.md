@@ -236,7 +236,7 @@ confirmation_required, compatibility, `availability(context)`, `validate`,
 | `volume-down` | Audio | `batocera-audio setSystemVolume -5`, fallback `amixer ... 5%-` | tool present |
 | `mute-toggle` | Audio | `batocera-audio setSystemVolume mute-toggle`, fallback `amixer ... toggle` | tool present |
 | `pause-toggle` | Game | RetroArch UDP `PAUSE_TOGGLE` | RetroArch running with `network_cmd_enable=true` and content loaded |
-| `save-state` | State | RetroArch UDP `SAVE_STATE` | same |
+| `save-state` | State | RetroArch UDP `SAVE_STATE_SLOT <n>` for the newest `<game>.state[N]` (overwritten), or slot 0 when none exists | same |
 | `load-state` | State | RetroArch UDP `LOAD_STATE_SLOT <n>` for the newest `<game>.state[N]` in the system's saves folder | same |
 
 Pause/save/load read the active RetroArch process's own config files for
