@@ -2697,6 +2697,71 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_198_pair_by_address_peer_403_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-198-pair-by-address-peer-403-uat",
+      "name": "Issue #198 pair-by-address peer 403 is a 502 gateway error, never an unhandled 500",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_198_pair_by_address_peer_403_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_198_pair_error_mapping_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-198-pair-error-mapping-boundaries",
+      "name": "Issue #198 pair-by-address and discovered-peer pair map malformed peer failures to 502",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_198_pair_error_mapping_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
