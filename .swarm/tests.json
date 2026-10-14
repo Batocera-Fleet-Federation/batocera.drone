@@ -4395,6 +4395,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_237_real_thread_lifecycle_storm.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-237-real-thread-lifecycle-storm",
+      "name": "Issue #237 real-thread overlapping start/stop storm leaves no orphaned workers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_237_real_thread_lifecycle_storm.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
