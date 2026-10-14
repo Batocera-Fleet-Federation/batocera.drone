@@ -1575,7 +1575,16 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "NetworkModeUpdateRequest": _object({"mode": _enum(["local_network"]), "local_network_enabled": _boolean()}),
         "LocalPeer": local_peer,
-        "PairingInfo": _object({"code": _string(), "expires_at": _string(fmt="date-time"), "ttl_seconds": _integer()}),
+        "PairingInfo": _object(
+            {
+                "code": _string(),
+                "expires_at": _string(fmt="date-time"),
+                "ttl_seconds": _integer(),
+                "certificate_fingerprint": _string(
+                    description="SHA-256 of this Drone's certificate; the other Drone's operator confirms it before sending the code"
+                ),
+            }
+        ),
         "LocalNetworkStatusResponse": _object(
             {
                 "mode": _string(),
@@ -1591,11 +1600,24 @@ def _schemas() -> Dict[str, Schema]:
             ("mode", "active", "pairing", "peers", "paired_count", "discovered_count", "downloads", "activity"),
         ),
         "PairingCodeResponse": _object({"pairing": _ref("PairingInfo")}, ("pairing",)),
-        "LocalPeerPairRequest": _object({"pairing_code": _string()}, ("pairing_code",)),
+        "LocalPeerPairRequest": _object(
+            {
+                "pairing_code": _string(),
+                "certificate_fingerprint": _string(
+                    description="Fingerprint read from the target Drone's pairing screen; required for https peers not already paired, "
+                    "and the pairing code is only sent to a server presenting this certificate"
+                ),
+            },
+            ("pairing_code",),
+        ),
         "LocalPeerPairByAddressRequest": _object(
             {
                 "address": _string(description="Peer address: host[:port] or http(s)://host[:port]; e.g. a tailnet IP"),
                 "pairing_code": _string(),
+                "certificate_fingerprint": _string(
+                    description="Fingerprint read from the target Drone's pairing screen; required for https peers not already paired, "
+                    "and the pairing code is only sent to a server presenting this certificate"
+                ),
             },
             ("address", "pairing_code"),
         ),

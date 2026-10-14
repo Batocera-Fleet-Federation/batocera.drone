@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 
 from app.web import handlers_network
 
+FINGERPRINT = "ab" * 32
+
 
 def _http_error(code: int, body: dict) -> HTTPError:
     return HTTPError(
@@ -29,7 +31,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
     def test_peer_403_becomes_502_with_peer_message(self) -> None:
         error = _http_error(403, {"error": "invalid or expired pairing code"})
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=error):
-            result = self.handler._pair_peer_or_reply(self.peer, "not-a-code")
+            result = self.handler._pair_peer_or_reply(self.peer, "not-a-code", FINGERPRINT)
 
         self.assertIsNone(result)
         status, payload = self.handler._send_json.call_args.args
@@ -46,7 +48,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
             fp=io.BytesIO(b"<html>not json</html>"),
         )
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=error):
-            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x"))
+            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
 
         status, payload = self.handler._send_json.call_args.args
         self.assertEqual(status, 502)
@@ -54,7 +56,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
 
     def test_unreachable_peer_becomes_502(self) -> None:
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=URLError("timed out")):
-            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x"))
+            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
 
         status, payload = self.handler._send_json.call_args.args
         self.assertEqual(status, 502)
@@ -63,7 +65,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
     def test_successful_pairing_is_returned_without_a_response(self) -> None:
         paired = {"drone_id": "peer-a", "certificate_path": ""}
         with mock.patch.object(handlers_network, "_local_pair_peer", return_value=paired):
-            self.assertEqual(self.handler._pair_peer_or_reply(self.peer, "CODE"), paired)
+            self.assertEqual(self.handler._pair_peer_or_reply(self.peer, "CODE", FINGERPRINT), paired)
         self.handler._send_json.assert_not_called()
 
 
