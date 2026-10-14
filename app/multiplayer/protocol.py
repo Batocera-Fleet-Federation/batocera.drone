@@ -435,11 +435,12 @@ class ProtocolMixin:
                 raise m.MultiplayerError("session_not_starting", "That session is not starting.", 409)
             port = payload.get("port")
             wave = payload.get("wave")
+            offer_id = m.new_message_id()  # identifies this exact offer for automatic consent
             plan = {
                 "port": m.clean_int(port, "port", 1, 65535) if port not in (None, "") else 0,
                 "secret": str(payload.get("secret") or "")[:64] if str(payload.get("secret") or "").isalnum() else "",
                 "received_at": m.now_iso(), "expires_at": (m.now() + LAUNCH_CONFIRM_WINDOW).isoformat(), "consumed": False,
-                "version": session["version"],
+                "version": session["version"], "offer_id": offer_id,
                 "wave": wave if isinstance(wave, int) and not isinstance(wave, bool) and 0 < wave < 2 ** 31 else 0,
             }
             self.store.set_local(session_id, pending_launch=plan, launch_status="awaiting_confirmation", recovery_response=None)
@@ -447,13 +448,21 @@ class ProtocolMixin:
         self.audit(EVENT_INVITATION, "Multiplayer game ready to start", f"{session['host_name']} started {title}. Confirm to launch it here.",
                    {"session_id": session_id, "game": title}, bell=True)
         if config["privacy"]["local_launch_authorization"] == "auto" and self.launcher.active_game() is None:
-            self._spawn(lambda: self._auto_confirm(session_id), f"multiplayer-auto-launch-{session_id[:8]}")
+            self._spawn(lambda: self._auto_confirm(session_id, offer_id), f"multiplayer-auto-launch-{session_id[:8]}")
             return {"status": "launching"}
         return {"status": "awaiting_confirmation"}
 
-    def _auto_confirm(self, session_id: str) -> None:
+    def _auto_confirm(self, session_id: str, offer_id: str = "") -> None:
+        """Automatic consent covers only the offer that scheduled it, and only while the policy is still ``auto``."""
         try:
-            self.confirm_launch(session_id, replace_running_game=False)
+            with self.session_lock(session_id):
+                session = self.store.get(session_id)
+                plan = ((session or {}).get("local") or {}).get("pending_launch")
+                if (not offer_id or not isinstance(plan, dict) or plan.get("consumed") or plan.get("offer_id") != offer_id
+                        or self.cfg.get()["privacy"]["local_launch_authorization"] != "auto"
+                        or self.launcher.active_game() is not None):
+                    return  # revoked or replaced: the offer waits for explicit local confirmation
+                self.confirm_launch(session_id, replace_running_game=False)
         except m.MultiplayerError:
             pass
 
