@@ -3190,6 +3190,75 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-213-announcement-boundaries",
+      "name": "Issue #213 paired LAN routes reject sparse-field and cached-route poisoning",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_announcement_boundaries.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_213_announcement_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-213-pairing-trust-uat",
+      "name": "Issue #213 real TLS and HTTP pairing confidentiality, identity leaf compatibility, and pin preservation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_pairing_trust_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "app/transfer/drone_tls.py",
+          "app/web/server_tls.py",
+          "tests/adversarial/test_issue_213_pairing_trust_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
