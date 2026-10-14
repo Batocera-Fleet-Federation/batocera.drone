@@ -5,12 +5,15 @@ per-peer SSL trust store, performs authenticated GETs against a peer, resolves p
 addresses/ports, runs the local-network pairing handshake, and probes peer health.
 """
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -300,12 +303,101 @@ def _peer_post_json(
     return parsed if isinstance(parsed, dict) else {}
 
 
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _fingerprint_key(value: object) -> str:
+    """Canonical form of a certificate fingerprint (hex only, lower case)."""
+    return re.sub(r"[^0-9a-f]", "", str(value or "").lower())
+
+
+class _PinnedFingerprintContext(ssl.SSLContext):
+    """Client context that refuses a server whose certificate is not the expected one.
+
+    The check runs right after the handshake on the very connection the request
+    uses, so no byte (pairing code, certificate, identity) is written to a host
+    that cannot prove possession of the key behind ``expected_fingerprint``.
+    """
+
+    expected_fingerprint = ""
+
+    def wrap_socket(self, sock, *args, **kwargs):  # type: ignore[override]
+        wrapped = super().wrap_socket(sock, *args, **kwargs)
+        try:
+            der = wrapped.getpeercert(binary_form=True)
+        except (ValueError, OSError):
+            der = None
+        observed = hashlib.sha256(der).hexdigest() if der else ""
+        if not observed or not hmac.compare_digest(observed, self.expected_fingerprint):
+            try:
+                wrapped.close()
+            except OSError:
+                pass
+            raise ssl.SSLError("server certificate does not match the expected fingerprint")
+        return wrapped
+
+
+def _pinned_pairing_context(expected_fingerprint: str) -> ssl.SSLContext:
+    context = _PinnedFingerprintContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.expected_fingerprint = _fingerprint_key(expected_fingerprint)
+    return context
+
+
+_PEM_CERTIFICATE_RE = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
+
+
+def _presented_chain_pem(host: str, port: int) -> list[str]:
+    """PEM certificates the server presents (no request is sent, nothing is trusted yet)."""
+    target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    completed = subprocess.run(
+        ["openssl", "s_client", "-connect", target, "-showcerts"],
+        input=b"", capture_output=True, timeout=15, check=False,
+    )
+    return _PEM_CERTIFICATE_RE.findall(completed.stdout.decode("utf-8", "replace"))
+
+
+def _pairing_tls_context(address: str, expected_fingerprint: str) -> ssl.SSLContext:
+    """TLS context that only talks to a server proven to hold ``expected_fingerprint``.
+
+    The operator-confirmed fingerprint is the Drone identity certificate, but
+    the HTTPS listener usually presents a leaf signed by that identity. A leaf
+    is accepted only when the chain it presents contains a certificate with the
+    expected fingerprint *and* the live handshake verifies against exactly that
+    certificate, so possession of the identity's signing authority is proven
+    before the pairing code is written.
+    """
+    expected = _fingerprint_key(expected_fingerprint)
+    parsed = urlparse(address)
+    host, port = parsed.hostname or "", parsed.port or 443
+    probe = ssl._create_unverified_context()
+    with socket.create_connection((host, port), timeout=10) as raw:
+        with probe.wrap_socket(raw, server_hostname=host or None) as tls:
+            leaf_der = tls.getpeercert(binary_form=True) or b""
+    if leaf_der and hmac.compare_digest(hashlib.sha256(leaf_der).hexdigest(), expected):
+        return _pinned_pairing_context(expected)
+    for pem in _presented_chain_pem(host, port):
+        try:
+            der = ssl.PEM_cert_to_DER_cert(pem)
+        except ValueError:
+            continue
+        if hmac.compare_digest(hashlib.sha256(der).hexdigest(), expected):
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.load_verify_locations(cadata=pem)
+            return context
+    raise ssl.SSLError("server certificate does not match the expected fingerprint")
+
+
 def _local_pair_peer(
     settings: Settings,
     peer: dict,
     pairing_code: str,
     *,
     tailnet_auto_pair: bool = False,
+    confirmed_fingerprint: str = "",
 ) -> dict:
     if not _identity_swarm_networking_allowed():
         raise PermissionError("peer pairing is held pending Drone identity verification")
@@ -315,6 +407,18 @@ def _local_pair_peer(
     address = _peer_address(peer)
     if not peer_id or not address:
         raise ValueError("discovered peer has no reachable address")
+    # The trust anchor for the server certificate must not come from the
+    # (unauthenticated) discovery announcement that supplied the address: it is
+    # the fingerprint pinned for an already-paired peer, else the one the
+    # operator confirmed against the target Drone's own pairing screen.
+    pinned_record = _local_network.get_paired_peer(settings, peer_id) or {}
+    pinned_key = _fingerprint_key(pinned_record.get("certificate_fingerprint"))
+    confirmed_key = _fingerprint_key(confirmed_fingerprint)
+    if str(confirmed_fingerprint or "").strip() and not _SHA256_HEX_RE.fullmatch(confirmed_key):
+        raise ValueError("confirmed fingerprint must be a SHA-256 hex fingerprint")
+    if pinned_key and confirmed_key and pinned_key != confirmed_key:
+        raise ValueError("confirmed fingerprint does not match the certificate pinned for this peer")
+    anchor = pinned_key or confirmed_key
     certificate = DroneCertificateManager(settings).ensure_certificate()
     certificate_pem = str(certificate.get("public_certificate") or "")
     if not certificate_pem:
@@ -340,7 +444,18 @@ def _local_pair_peer(
         headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
         method="POST",
     )
-    context = ssl._create_unverified_context() if address.startswith("https://") else None
+    if not address.startswith("https://"):
+        context = None
+    elif anchor:
+        context = _pairing_tls_context(address, anchor)
+    elif tailnet_auto_pair:
+        # Tailnet auto-pair is authorized by the tailnet source address on the
+        # receiving side and carries no operator-typed secret.
+        context = ssl._create_unverified_context()
+    else:
+        # No trust anchor: this context refuses every server at the handshake,
+        # so the pairing code and certificate are never written.
+        context = _pinned_pairing_context("")
     if not _identity_swarm_networking_allowed():
         raise PermissionError("peer pairing is held pending Drone identity verification")
     with urlopen(request, timeout=10, context=context) as response:
@@ -352,11 +467,30 @@ def _local_pair_peer(
     if remote_id != peer_id:
         raise RuntimeError("paired peer identity did not match discovered peer")
     remote_pem = str(result.get("certificate_pem") or "")
+    if anchor:
+        # Check before writing: the cert cache file may be the live pin of an
+        # already-paired peer, which a rejected response must not overwrite.
+        try:
+            offered = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
+        except Exception as error:  # noqa: BLE001 - malformed PEM is a rejected pairing
+            raise RuntimeError("paired peer returned an unreadable certificate") from error
+        if offered != anchor:
+            raise RuntimeError("paired peer certificate fingerprint did not match discovery")
+    previous_path = _local_peer_cert_cache_path(settings, peer_id)
+    try:
+        previous_pem = previous_path.read_bytes()
+    except OSError:
+        previous_pem = None
     cert_path, fingerprint = _save_local_peer_certificate(settings, peer_id, remote_pem)
-    expected = str(peer.get("certificate_fingerprint") or "").strip().lower()
-    returned = str(result.get("certificate_fingerprint") or "").strip().lower()
-    if (expected and expected != fingerprint.lower()) or (returned and returned != fingerprint.lower()):
-        cert_path.unlink(missing_ok=True)
+    expected = anchor or _fingerprint_key(peer.get("certificate_fingerprint"))
+    returned = _fingerprint_key(result.get("certificate_fingerprint"))
+    observed = _fingerprint_key(fingerprint)
+    if (expected and expected != observed) or (returned and returned != observed):
+        # Put back whatever pin was live before this rejected response.
+        if previous_pem is None:
+            cert_path.unlink(missing_ok=True)
+        else:
+            cert_path.write_bytes(previous_pem)
         raise RuntimeError("paired peer certificate fingerprint did not match discovery")
     stored = _local_network.save_paired_peer(
         settings,

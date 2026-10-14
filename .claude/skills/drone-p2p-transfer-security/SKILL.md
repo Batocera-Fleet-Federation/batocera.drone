@@ -62,6 +62,17 @@ Peer candidates come from **direct pairing**, not a third-party directory:
 - **LAN discovery**: a lightweight multicast/broadcast announce (`transfer/local_network.py`)
   lets Drones on the same network find each other and pair with a short-lived rotating
   code.
+  - A multicast announcement is **unauthenticated**. `record_discovered_peer` never lets one
+    change an already-paired peer's address, ports, tailnet route, or fingerprint (only
+    `last_seen`); the discovered row mirrors the pinned record and keeps the claim as
+    `announced_*`. Only pairing and authenticated tailnet probes update those fields.
+  - The pairing code is only POSTed to a server whose certificate matches a trust anchor that did
+    **not** come from the announcement/peer-info: the fingerprint pinned for an existing paired
+    peer, or the one the operator typed from the target's pairing screen
+    (`certificate_fingerprint` on the pair requests; `pairing.certificate_fingerprint` in the
+    status payload). `_local_pair_peer` enforces it on the same TLS connection
+    (`_PinnedFingerprintContext`) and checks the returned cert before touching the pin file;
+    `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for https peers without one.
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.

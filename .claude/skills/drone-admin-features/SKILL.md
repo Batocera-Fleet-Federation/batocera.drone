@@ -358,7 +358,10 @@ write instead of one per job — otherwise O(N²) under the lock), and one
   OAuth client is deliberately *not* done (it would put a long-lived secret on
   every Drone); peer-shared keys are the supported path.
 - **Pairing card** — the rotating local pairing code
-  (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing.
+  (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing, shown with this
+  Drone's certificate fingerprint. The pair actions (`peers/{id}/pair`, `pair-by-address`) take the
+  *other* Drone's fingerprint as `certificate_fingerprint` (required for https peers not yet
+  paired) so the code is never sent to an announcement-chosen host (issue #213).
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.

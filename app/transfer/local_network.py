@@ -246,16 +246,35 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         suffix = "" if scheme == "https" and api_port == 443 else f":{api_port}"
         reachable_url = f"{scheme}://{source_ip}{suffix}"
     trusted_peer = None if identity_conflict else get_paired_peer(settings, peer_id)
+    # A multicast announcement is unauthenticated: anyone on the LAN can claim a
+    # paired peer's drone_id from their own IP. Its address, ports, tailnet
+    # route and certificate fingerprint therefore never overwrite what pairing
+    # (or an authenticated tailnet probe) established -- they are kept only as
+    # ``announced_*`` evidence and the discovered row mirrors the pinned record,
+    # so the admin pair action cannot be steered at an announcer-chosen host.
+    announced = {
+        "reachable_url": reachable_url,
+        "advertised_reachable_url": advertised_url,
+        "scheme": scheme,
+        "api_port": api_port,
+        "peer_mtls_port": peer_mtls_port,
+        "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
+    }
+    if trusted_peer:
+        # Mirror the paired record exactly, including fields it lacks: a legacy
+        # row without ports/scheme must keep resolving the way it always has,
+        # not adopt the announcer's values.
+        announced = {key: trusted_peer[key] for key in announced if trusted_peer.get(key) not in (None, "")}
+        existing = {key: value for key, value in existing.items() if key not in ("reachable_url", "advertised_reachable_url", "scheme", "api_port", "peer_mtls_port", "certificate_fingerprint")}
     # A peer can announce while its Tailnet daemon is still starting. Preserve
     # the last authenticated mesh route through that temporary empty value;
     # a stale route only fails over, while erasing it makes cross-network
     # recovery impossible once multicast discovery is no longer available.
-    tailnet_ip = str(
-        payload.get("tailnet_ip")
-        or existing.get("tailnet_ip")
-        or ((trusted_peer or {}).get("tailnet_ip"))
-        or ""
-    )
+    if trusted_peer:
+        # Never carry a pre-pairing (LAN-claimed) discovered route over.
+        tailnet_ip = str(trusted_peer.get("tailnet_ip") or "")
+    else:
+        tailnet_ip = str(payload.get("tailnet_ip") or existing.get("tailnet_ip") or "")
     peer = {
         **existing,
         "drone_id": storage_id if identity_conflict else peer_id,
@@ -264,12 +283,9 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "identity_conflict": identity_conflict,
         "name": str(payload.get("name") or peer_id),
         "hostname": str(payload.get("hostname") or ""),
-        "reachable_url": reachable_url,
-        "advertised_reachable_url": advertised_url,
-        "scheme": scheme,
-        "api_port": api_port,
-        "peer_mtls_port": peer_mtls_port,
-        "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
+        **announced,
+        "announced_reachable_url": reachable_url,
+        "announced_certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
         "tailnet_ip": tailnet_ip,
         "source": str(payload.get("source") or "Local Network"),
         "source_ip": str(source_ip or existing.get("source_ip") or ""),
@@ -279,22 +295,8 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     peers[storage_id] = peer
     _save_peer_map(settings, "local_discovered_peers", peers)
     if trusted_peer:
-        save_paired_peer(
-            settings,
-            {
-                **trusted_peer,
-                "name": peer["name"],
-                "hostname": peer["hostname"],
-                "reachable_url": peer["reachable_url"],
-                "advertised_reachable_url": peer["advertised_reachable_url"],
-                "scheme": peer["scheme"],
-                "api_port": peer["api_port"],
-                "peer_mtls_port": peer["peer_mtls_port"],
-                "tailnet_ip": peer["tailnet_ip"],
-                "source_ip": peer["source_ip"],
-                "last_seen": peer["last_seen"],
-            },
-        )
+        # Only liveness is taken from the announcement.
+        save_paired_peer(settings, {**trusted_peer, "last_seen": peer["last_seen"]})
     return peer
 
 

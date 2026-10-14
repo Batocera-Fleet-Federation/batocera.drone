@@ -12,8 +12,9 @@ Expected (issue + pair-by-address invariants):
 * Failed attempts do not persist a paired-peer row.
 * Fetch failures, self-collision, and unparseable addresses keep their existing
   502 / 409 / 400 mapping. Unauthenticated callers stay 401/403.
-* The discovered-peer pair route uses the same handshake, so a peer 403 there
-  is also 502, not 500.
+* Under #213, an unauthenticated discovered HTTP address must be rejected
+  before sending the code. The pair-by-address cases still cover peer 403
+  mapping after an operator explicitly chooses an address.
 """
 
 from __future__ import annotations
@@ -362,7 +363,7 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
         self.assertGreaterEqual(status, 400)
         self.assertLess(status, 500)
 
-    def test_discovered_peer_pair_route_maps_peer_403_to_502(self) -> None:
+    def test_discovered_http_peer_is_rejected_before_handshake(self) -> None:
         recorded = local_network.record_discovered_peer(
             self.settings,
             {
@@ -384,9 +385,13 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
             f"/v1/api/admin/local-network/peers/{quote(PEER_ID, safe='')}/pair",
             {"pairing_code": "not-a-code"},
         )
-        self._assert_upstream_reject(
-            status, payload, peer_http=403, detail="invalid or expired pairing code"
-        )
+        # Fresh-tester adjudication: #213 supersedes the old expectation that
+        # discovery may choose a cleartext destination for a pairing secret.
+        self.assertEqual(status, 400, payload)
+        self.assertIsInstance(payload.get("error"), str)
+        self.assertEqual(self.peer.server.pair_hits, 0)
+        self.assertEqual(self.peer.server.last_pair_body, b"")
+        self.assertNotIn(PEER_ID, self._paired_ids())
 
     def test_urlerror_from_helper_is_502_reachability_not_500(self) -> None:
         handler = handlers_network.HandlersNetworkMixin()

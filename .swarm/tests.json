@@ -3190,6 +3190,144 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-213-announcement-boundaries",
+      "name": "Issue #213 paired LAN routes reject sparse-field and cached-route poisoning",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_announcement_boundaries.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_213_announcement_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-213-pairing-trust-uat",
+      "name": "Issue #213 real TLS and HTTP pairing confidentiality, identity leaf compatibility, and pin preservation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_pairing_trust_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "app/transfer/drone_tls.py",
+          "app/web/server_tls.py",
+          "tests/adversarial/test_issue_213_pairing_trust_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-213-live-trust-boundaries",
+      "name": "Issue #213 live TLS key possession and stored-pin re-pairing boundaries",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_live_trust_boundaries.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_213_live_trust_boundaries.py",
+          "tests/adversarial/test_issue_213_pairing_trust_uat.py",
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "app/transfer/drone_tls.py",
+          "app/web/server_tls.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_213_pair_by_address_scheme_downgrade.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-213-pair-by-address-scheme-downgrade",
+      "name": "Issue #213 peer-info scheme must not downgrade pair-by-address to cleartext",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/security/test_issue_213_pair_by_address_scheme_downgrade.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
