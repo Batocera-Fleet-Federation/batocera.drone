@@ -339,14 +339,18 @@ def load_events(
                 ]
             except Exception:
                 legacy = []
+            imported = 0
             for entry in legacy:
                 if isinstance(entry, dict):
                     connection.execute(
                         "INSERT INTO app_events (namespace, payload, created_at) VALUES (?, ?, ?)",
                         (namespace, json.dumps(entry, sort_keys=True, default=str), _now()),
                     )
+                    imported += 1
             connection.commit()
-            if legacy:
+            # Only remove the legacy file once something was actually imported; a file
+            # of non-object JSON (numbers, strings, ...) must not vanish with no rows.
+            if imported:
                 try:
                     legacy_file.unlink(missing_ok=True)
                 except OSError:

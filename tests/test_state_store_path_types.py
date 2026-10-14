@@ -97,6 +97,15 @@ class StateStorePathTypeTests(unittest.TestCase):
         self.assertEqual(events, [{"a": 1}])
         self.assertFalse(legacy.exists())
 
+    def test_load_events_keeps_legacy_file_with_no_dict_entries(self):
+        legacy = self.root / "events.jsonl"
+        legacy.write_text('42\n"x"\n', encoding="utf-8")
+        events = state_store.load_events(
+            str(self.root / "e.sqlite3"), "ns", legacy_path=str(legacy)
+        )
+        self.assertEqual(events, [])
+        self.assertTrue(legacy.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
