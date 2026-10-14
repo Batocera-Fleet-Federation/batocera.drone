@@ -4886,6 +4886,39 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_stale_offer_compat_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-stale-offer-compat-uat",
+      "name": "Issue #240 infrastructure failure evidence and stale launch-offer acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_stale_offer_compat_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/compat_db.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
