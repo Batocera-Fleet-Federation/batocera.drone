@@ -705,6 +705,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_236_generation_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-236-generation-boundaries",
+      "name": "Issue #236 tailnet watchdog and bootstrap restart/stop promptness and generation boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_236_generation_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_191_discovery_infinite_port.py"
