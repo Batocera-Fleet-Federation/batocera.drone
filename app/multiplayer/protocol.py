@@ -200,6 +200,13 @@ class ProtocolMixin:
             return
         if player["status"] != m.P_INVITED:
             raise m.MultiplayerError("not_invited", "You must be invited again to join this session.", 409)
+        # Check consent on the authoritative host before changing membership.
+        # Checking only the response on the guest is too late: a stale invitation
+        # would leave a joined host player with no guest replica.
+        reviewed = payload.get("reviewed_session")
+        if reviewed is None:
+            raise m.MultiplayerError("invitation_review_required", "Review the current invitation before accepting it.", 409)
+        require_same_identity(sanitize_session(reviewed), s)
         compat = payload.get("compat") if isinstance(payload.get("compat"), dict) else {}
         classification = compat.get("classification")
         controllers = payload.get("controllers")
@@ -292,6 +299,8 @@ class ProtocolMixin:
         existing = self.store.invitation(snapshot["id"])
         if existing and existing["host_id"] != caller_id:
             raise m.MultiplayerError("session_exists", "That invitation id belongs to another host.", 409)
+        if existing and snapshot["version"] < existing["session"]["version"]:
+            return {"status": existing["status"], "reason": "stale"}
         # A new host message (not a replay) may ask again after the guest left, declined,
         # or let the invitation lapse. An invitation the guest accepted and is still in is left alone.
         renewing = bool(existing) and replay != "duplicate" and self._invitation_reopenable(existing, snapshot["id"])
@@ -372,6 +381,8 @@ class ProtocolMixin:
             return
         invitation = self.store.invitation(snapshot["id"])
         if not invitation or invitation["status"] != "pending" or invitation["host_id"] != caller_id:
+            return
+        if snapshot["host_id"] != caller_id or snapshot["version"] < invitation["session"]["version"]:
             return
         mine = snapshot["players"].get(self.me)
         if mine is None or mine["status"] != m.P_INVITED or snapshot["state"] not in m.PRE_START_STATES:
@@ -524,6 +535,7 @@ class ProtocolMixin:
         body = self.network.post_checked(host, "/respond", {
             "message_id": m.new_message_id(), "issued_at": m.now_iso(), "session_id": session_id, "action": "accept",
             "controllers": self.controller_count(), "compat": verdict["compat"],
+            "reviewed_session": replica_view(snapshot),
             "level": verdict["local"]["level"] if verdict["local"] else "none"})
         response = sanitize_session(body.get("session"))
         require_same_identity(snapshot, response)

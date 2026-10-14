@@ -442,17 +442,40 @@ class SessionMixin:
                 self.store.mutate(session_id, settle_lobby)
                 raise
 
+            changed = plan["mechanism"] != current["mechanism"]
+            digest = ""
+            if changed and plan["mechanism"] in (m.RETROARCH_NETPLAY, m.DOLPHIN_NETPLAY):
+                try:
+                    digest = self.library.content_hash(game)
+                    refreshed = self.assessor.assess(game, game_path=path,
+                        core_override=(current.get("local") or {}).get("core_override", ""))
+                    plan["config_fingerprint"] = next(a["config_fingerprint"] for a in refreshed
+                                                     if a["mechanism"] == plan["mechanism"])
+                except Exception:
+                    self.store.mutate(session_id, settle_lobby)
+                    raise
+
             def add(s: dict) -> None:
-                if plan["mechanism"] != s["mechanism"]:
+                if changed:
                     s["mechanism"], s["emulator"], s["stream_profile"] = plan["mechanism"], plan["emulator"], plan["stream_profile"]
                     s["max_players"] = min(s["max_players"], max(2, plan["max_players"]))
+                    s["game"].update(game_id=plan.get("game_id", ""), sha256=digest)
+                    s["players"][self.me]["ready"] = False
                     add_event(s, "mechanism", plan["reason"], self.me)
                 s["mechanism_reason"] = plan["reason"]
                 s["players"][peer_id] = self._invited_player(peer, reports.get(peer_id, {}))
                 add_event(s, "invited", f"{self.peer_name(peer)} was invited.", self.me)
                 settle_lobby(s)
             self.store.mutate(session_id, add)
-            self._deliver_invitation(session_id, peer)
+            if changed:
+                self.store.set_local(session_id, tested_config_fingerprint=plan["config_fingerprint"])
+                # Nobody has joined: ask every pending invitee to review the new
+                # game/emulator requirements, including those invited earlier.
+                for pid, player in self.store.require(session_id)["players"].items():
+                    if player["status"] == m.P_INVITED:
+                        self._deliver_invitation(session_id, self.paired_peer(pid))
+            else:
+                self._deliver_invitation(session_id, peer)
             self.publish(session_id)
             self._log(self.store.require(session_id), "invited", f"invited {self.peer_name(peer)}", actor)
             return self.session_view(self.store.require(session_id))

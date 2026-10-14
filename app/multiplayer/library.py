@@ -186,7 +186,7 @@ class LibraryMixin:
         path = self.library.absolute_path(game)
         assessments = self.assessor.assess(game, game_path=path)
         online = [self.paired_peer(item["device_id"]) for item in self.list_peers() if item["online"]]
-        reports = self.peer_reports(online, game)
+        reports = self.peer_reports(online, game, self.host_core(assessments))
         from .mechanism import choose, evaluate_candidates
         config = self.cfg.get()
         candidates = evaluate_candidates(assessments, list(reports.values()), streaming_enabled=config["streaming"]["enabled"] and config["privacy"]["remote_controller_authorization"] != "disabled")
