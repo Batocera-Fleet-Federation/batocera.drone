@@ -364,7 +364,9 @@ write instead of one per job — otherwise O(N²) under the lock), and one
   paired) so the code is never sent to an announcement-chosen host (issue #213). Failures reply
   from `_pair_peer_or_reply`: peer HTTP errors and unreachable peers are 502, but this Drone's own
   identity hold (bare `PermissionError` from `_local_pair_peer`, no errno) is 503, not "unreachable"
-  (issue #223); an OS-level `PermissionError` with an errno stays a 502 connection failure.
+  (issue #223); an OS-level `PermissionError` with an errno stays a 502 connection failure. A peer
+  that answers 200 without `status=paired` (or with a non-JSON / mismatched body) raises
+  `PeerPairingRejected` from `transfer/peer_connectivity.py` and is also a fixed-message 502 (issue #224).
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
