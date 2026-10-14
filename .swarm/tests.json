@@ -736,6 +736,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_236_restart_stress.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-236-restart-stress",
+      "name": "Issue #236 tailnet loop rapid restarts, failed start, in-flight iteration and concurrent stop",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_236_restart_stress.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_191_discovery_infinite_port.py"
