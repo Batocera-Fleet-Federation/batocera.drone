@@ -287,7 +287,9 @@ namespace of the state DB, works offline, tiny bundled seed in
 * After a session you press **It worked / It didn't**. That is recorded against the
   *tested configuration fingerprint* (mechanism, ROM fingerprint/name/size, emulator/core
   versions and inspected Batocera settings). This is a local user report, not an
-  exhaustive proof of BIOS, in-game settings or all emulator overrides.
+  exhaustive proof of BIOS, in-game settings or all emulator overrides. Before launching,
+  Drone reinspects the local configuration; if it changed since the lobby was reviewed,
+  create a new session. This check also runs when a queued launch worker starts.
   `VERIFIED_COMPATIBLE` is reported only while the current configuration matches a
   tested one with more successes than failures — one success is never universal proof.
 * Failed starts record a failure diagnostic automatically.
@@ -402,7 +404,9 @@ a raw configuration key.
 * **Restart recovery** (`recover()`): restores orphaned journals, fails sessions that
   were `STARTING`, resumes ones whose game is still running, finishes `STOPPING`.
 * **Cleanup failures**: adapter shutdown, game shutdown, relay cleanup and configuration
-  restoration are attempted independently. Failures appear in the session log; if game
+  restoration are attempted independently. Guest launch failures are saved before cleanup,
+  so a restoration outage cannot leave a consumed offer stuck as launching. Restart recovery
+  also attempts restoration when guest process shutdown fails. Failures appear in diagnostics; if game
   shutdown fails, close the remaining game locally. Housekeeping retries abandoned
   configuration journals up to three times, with exponential backoff starting at 30
   seconds between retries. The retry budget survives restarts of the guard and remains

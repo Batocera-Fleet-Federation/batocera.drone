@@ -81,3 +81,83 @@ class CleanupRecoveryTests(SwarmCase):
         self.h.tick()
         self.assertEqual(self.nodes["host"].conf_text, before)
         self.assertEqual(self.h.guard.pending(), {})
+
+
+class LaunchEvidenceRecoveryTests(SwarmCase):
+    def change_settings(self, name):
+        node = self.nodes[name]
+        text = node.conf_text + "snes.rewind=1\n"
+        node.settings.batocera_conf_file.write_text(text, encoding="utf-8")
+        node.probe.files[str(node.settings.batocera_conf_file)] = text
+        # Leave the detection memo intact: launch must explicitly reinspect.
+
+    def test_host_rejects_changed_settings_before_start(self):
+        sid = self.lobby()
+        self.change_settings("host")
+        self.assertEqual(self.code(self.h.start_session, sid), "configuration_changed")
+        self.assertEqual(self.nodes["host"].launcher.launched, [])
+        self.assertEqual(self.h.guard.pending(), {})
+
+    def test_queued_worker_rejects_changed_settings(self):
+        sid = self.lobby()
+        queued = []
+        self.h._spawn = lambda fn, name: queued.append(fn)
+        self.h.start_session(sid)
+        self.change_settings("host")
+        for launch in list(queued):
+            launch()
+        self.assertEqual(self.h.store.require(sid)["state"], m.FAILED)
+        self.assertIn("settings changed", self.h.store.require(sid)["error"])
+        self.assertEqual(self.nodes["host"].launcher.launched, [])
+        self.assertEqual(self.h.guard.pending(), {})
+
+    def test_guest_rejects_changed_settings_before_applying_edits(self):
+        sid = self.lobby()
+        self.h.start_session(sid)
+        self.change_settings("guest")
+        self.g.confirm_launch(sid)
+        local = self.g.store.require(sid)["local"]
+        self.assertEqual(local["launch_status"], "failed")
+        self.assertIn("settings changed", local["launch_error"])
+        self.assertIsNone(local["pending_launch"])
+        self.assertEqual(self.nodes["guest"].launcher.launched, [])
+        self.assertEqual(self.g.guard.pending(), {})
+
+    def test_failed_guest_launch_preserves_error_and_recovers_journal(self):
+        import sqlite3
+        before = self.nodes["guest"].conf_text
+        sid = self.lobby()
+        self.h.start_session(sid)
+        self.nodes["guest"].launcher.fail_launch = "EmulationStation unavailable"
+        with mock.patch.object(self.g.guard, "restore", side_effect=sqlite3.OperationalError("database busy")):
+            self.g.confirm_launch(sid)
+        local = self.g.store.require(sid)["local"]
+        self.assertEqual(local["launch_status"], "failed")
+        self.assertIn("EmulationStation unavailable", local["launch_error"])
+        self.assertIsNone(local["pending_launch"])
+        self.assertIn("database busy", str(self.g.diagnostics(sid)["local"]["cleanup_errors"]))
+        self.assertIn(sid, self.g.guard.pending())
+        self.g.tick()
+        self.assertEqual(self.nodes["guest"].conf_text, before)
+        self.assertEqual(self.g.guard.pending(), {})
+
+    def test_restart_restores_guest_settings_despite_shutdown_failure(self):
+        before = self.nodes["guest"].conf_text
+        sid = self.running()
+        self.g.store.set_local(sid, launch_status="launching")
+        with mock.patch.object(self.g.launcher, "exit_game", side_effect=OSError("shutdown unavailable")):
+            summary = self.g.recover()
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(self.nodes["guest"].conf_text, before)
+        self.assertEqual(self.g.guard.pending(), {})
+        local = self.g.store.require(sid)["local"]
+        self.assertEqual(local["launch_status"], "failed")
+        self.assertIn("shutdown unavailable", str(local["cleanup_errors"]))
+
+    def test_restart_records_guest_failure_when_journal_inventory_is_unavailable(self):
+        import sqlite3
+        sid = self.running()
+        self.g.store.set_local(sid, launch_status="launching")
+        with mock.patch.object(self.g.guard, "pending", side_effect=sqlite3.OperationalError("database busy")):
+            self.assertEqual(self.g.recover()["failed"], 1)
+        self.assertEqual(self.g.store.require(sid)["local"]["launch_status"], "failed")

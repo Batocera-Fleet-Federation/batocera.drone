@@ -74,6 +74,7 @@ class LifecycleMixin:
             if adapter is None:
                 raise m.MultiplayerError("unknown_adapter", "The session's multiplayer mechanism is not available on this Drone.", 409)
             self._require_adapter_enabled(adapter)
+            self._check_host_launch_configuration(session, adapter)
             if session["mechanism"] == m.REMOTE_STREAMING and (not self.cfg.get()["streaming"]["enabled"] or
                     self.cfg.get()["privacy"]["remote_controller_authorization"] == "disabled"):
                 raise m.MultiplayerError("streaming_disabled", "Remote streaming or remote controllers are disabled in Multiplayer settings.", 409)
@@ -109,6 +110,28 @@ class LifecycleMixin:
         return self.session_view(self.store.require(session_id))
 
     @staticmethod
+    def _check_launch_fingerprint(session: dict, fingerprint: str) -> None:
+        reviewed = (session.get("local") or {}).get("tested_config_fingerprint")
+        if reviewed and fingerprint != reviewed:
+            raise m.MultiplayerError(
+                "configuration_changed", "The inspected game or emulator settings changed since the lobby was reviewed. "
+                "Create a new session before launching.", 409)
+
+    def _check_host_launch_configuration(self, session: dict, adapter: Any) -> None:
+        # A lobby can outlive the detection cache. Reinspect before any temporary
+        # edits, including when the worker was queued after Start was approved.
+        adapter.refresh()
+        game = self.library.get(session["game"]["system"], session["game"]["unique_id"])
+        if not game:
+            raise m.MultiplayerError("game_file_missing", "The game's file is no longer on this machine.", 409)
+        assessments = self.assessor.assess(
+            game, game_path=self.library.absolute_path(game),
+            core_override=(session.get("local") or {}).get("core_override", ""))
+        fingerprint = next((a["config_fingerprint"] for a in assessments
+                            if a["mechanism"] == session["mechanism"]), "")
+        self._check_launch_fingerprint(session, fingerprint)
+
+    @staticmethod
     def _exists(path: str) -> bool:
         import os
         return os.path.exists(path)
@@ -123,6 +146,7 @@ class LifecycleMixin:
                 # Settings may have changed while this launch worker was queued.
                 self.require_enabled()
                 self._require_adapter_enabled(adapter)
+                self._check_host_launch_configuration(session, adapter)
                 local = session["local"]
                 path = local["game_path"]
                 if adapter.effective_automation() == MANUAL:
@@ -394,10 +418,13 @@ class LifecycleMixin:
                 plan = local.get("pending_launch")
                 if local.get("ended") or session["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED, m.READY) or not plan:
                     return  # removed, ended, or cancelled while the worker was queued
-                problems = self.validate_for_join(session)["problems"]
+                adapter = self.adapter_map[session["emulator"]["adapter"]]
+                adapter.refresh()
+                verdict = self.validate_for_join(session)
+                problems = verdict["problems"]
                 if problems:
                     raise m.MultiplayerError("cannot_launch", problems[0], 409)
-                adapter = self.adapter_map[session["emulator"]["adapter"]]
+                self._check_launch_fingerprint(session, verdict["tested_config_fingerprint"])
                 path = local.get("game_path", "")
                 if adapter.effective_automation() != MANUAL and adapter.guest_launches:
                     context = self.launch_context(session, m.GUEST_ROLE, port=plan.get("port") or 0, secret=plan.get("secret", ""))
@@ -425,26 +452,33 @@ class LifecycleMixin:
             self._guest_message(self.store.require(session_id), "launch_result", ok=True)
         except Exception as error:  # noqa: BLE001
             message = getattr(error, "message", None) or f"{type(error).__name__}: {error}"
-            if launched:
-                self._stop_owned_guest_game(session_id)
-            self.restore_if_enabled(session_id)
-            self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300))
+            self._fail_guest_launch(session_id, message, stop_game=launched)
             try:
                 self._guest_message(self.store.require(session_id), "launch_result", ok=False, error=message)
             except m.MultiplayerError:
                 pass
 
-    def _stop_owned_guest_game(self, session_id: str) -> None:
-        """Our own launch failed after the game started: close that game (never an unrelated one)."""
-        try:
-            with self.session_lock(session_id):
-                session = self.store.get(session_id)
-                path = ((session or {}).get("local") or {}).get("game_path", "")
-                active = self.launcher.active_game()
-                if path and active and same_rom(active.get("rom_path", ""), path):
-                    self.launcher.exit_game()
-        except Exception:  # noqa: BLE001 - cleanup must not mask the launch error
-            pass
+    def _fail_guest_launch(self, session_id: str, message: str, *, stop_game: bool) -> None:
+        with self.session_lock(session_id):
+            # Persist the original failure first. A restoration backend outage
+            # must leave a failed launch eligible for journal recovery.
+            self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300),
+                                 pending_launch=None)
+            errors = []
+            if stop_game:
+                try:
+                    session = self.store.require(session_id)
+                    if self._owns_host_game(session):
+                        self.launcher.exit_game()
+                except Exception as error:  # noqa: BLE001 - restoration is independent of process shutdown
+                    errors.append(f"Game shutdown (close the game locally if it remains running): {error}")
+            try:
+                result = self.restore_if_enabled(session_id)
+                errors.extend((result or {}).get("errors", []))
+            except Exception as error:  # noqa: BLE001 - retain journal and original launch failure for recovery
+                errors.append(f"Configuration restoration: {error}")
+            if errors:
+                self.store.set_local(session_id, cleanup_errors=errors)
 
     def _wait_for_host_port(self, address: str, port: int) -> None:
         waited = 0.0
@@ -542,7 +576,8 @@ class LifecycleMixin:
             if session is None or self.local_role(session) != m.GUEST_ROLE:
                 return
             restored = self.restore_if_enabled(session_id)
-            self.store.set_local(session_id, pending_launch=None, launch_status="", ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
+            launch_status = "failed" if (session.get("local") or {}).get("launch_status") == "failed" else ""
+            self.store.set_local(session_id, pending_launch=None, launch_status=launch_status, ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
                                  reopenable=bool(reopenable))
             if not (session.get("local") or {}).get("archived"):
                 self.store.archive(session, "left" if "left" in reason.lower() else "ended")
@@ -754,12 +789,19 @@ class LifecycleMixin:
         """After a Drone restart: restore orphaned settings, fail half-started sessions, resume live ones."""
         summary = {"restored": 0, "failed": 0, "resumed": 0, "ended": 0}
         try:
-            for session_id in list(self.guard.pending()):
+            pending = list(self.guard.pending())
+        except Exception:  # noqa: BLE001 - session bookkeeping can recover even when the journal backend is unavailable
+            pending = []
+        for session_id in pending:
+            try:
                 session = self.store.get(session_id)
                 if session is None or session["state"] in (m.COMPLETED, m.FAILED) or (session.get("local") or {}).get("ended"):
                     self.guard.restore(session_id)
                     summary["restored"] += 1
-            for session in self.store.active():
+            except Exception:  # noqa: BLE001 - another session must still be recovered
+                pass
+        for session in self.store.active():
+            try:
                 local, session_id = session.get("local") or {}, session["id"]
                 if local.get("ended"):
                     continue
@@ -778,13 +820,10 @@ class LifecycleMixin:
                         summary["ended"] += 1
                 else:
                     if local.get("launch_status") == "launching":
-                        if self._owns_host_game(session):  # the game this machine started; never a different foreground game
-                            self.launcher.exit_game()
-                        self.store.set_local(session_id, launch_status="failed", launch_error="The Drone restarted while launching.")
-                        self.restore_if_enabled(session_id)
+                        self._fail_guest_launch(session_id, "The Drone restarted while launching.", stop_game=True)
                         summary["failed"] += 1
-        except Exception:  # noqa: BLE001
-            pass
+            except Exception:  # noqa: BLE001 - isolate each session
+                pass
         return summary
 
     # ---------------------------------------------------- results, diagnostics
@@ -843,6 +882,6 @@ class LifecycleMixin:
                                         for path, spec in (journal or {}).get("files", {}).items()]},
             "active_game": self._active_summary(self.launcher.active_game() or {}) if self.launcher.active_game() else None,
             "local": {key: local.get(key) for key in ("role", "port", "host_launched", "launch_status", "launch_error", "reached_running",
-                                                      "host_unreachable_since", "retries", "publish_failed", "result_recorded")},
+                                                      "host_unreachable_since", "retries", "publish_failed", "result_recorded", "cleanup_errors")},
             "events": session.get("events", [])[-50:],
         }
