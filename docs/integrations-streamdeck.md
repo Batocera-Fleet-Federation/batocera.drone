@@ -237,7 +237,7 @@ confirmation_required, compatibility, `availability(context)`, `validate`,
 | `mute-toggle` | Audio | `batocera-audio setSystemVolume mute-toggle`, fallback `amixer ... toggle` | tool present |
 | `pause-toggle` | Game | RetroArch UDP `PAUSE_TOGGLE` | RetroArch running with `network_cmd_enable=true` and content loaded |
 | `save-state` | State | RetroArch UDP `SAVE_STATE` | same |
-| `load-state` | State | RetroArch UDP `LOAD_STATE` | same |
+| `load-state` | State | RetroArch UDP `LOAD_STATE_SLOT <n>` for the newest `<game>.state[N]` in the system's saves folder | same |
 
 Pause/save/load read the active RetroArch process's own config files for
 `network_cmd_enable`/`network_cmd_port` and verify `GET_STATUS` reports loaded
@@ -247,7 +247,7 @@ saved, or repair runs, it sets `network_cmd_enable = "true"` and
 `network_cmd_bind_address = "127.0.0.1"` in `system/configs/retroarch/retroarchcustom.cfg`,
 recording each prior value in `state/retroarch-network.json`. Disabling or removing the
 integration restores those values and removes only the keys it added. RetroArch reads these
-keys at launch, so a game that was already running needs a relaunch before the buttons work.
+keys at launch, so a game that was already running needs a relaunch before the buttons work. Load State picks the newest save by modification time (slot 0 is `<game>.state`, slot N is `<game>.stateN`) and loads that slot explicitly, so it works whichever slot RetroArch last saved to.
 Localhost-only binding keeps the command port off the LAN; other emulators report "unavailable" with a reason
 (no blind keystroke injection). Unknown IDs, unavailable actions, and unconfirmed
 dangerous actions return structured `error`/`unavailable`/`confirmation-required`

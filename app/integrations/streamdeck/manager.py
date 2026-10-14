@@ -117,7 +117,7 @@ class StreamDeckIntegration(Integration):
         self.retroarch_network = RetroArchNetworkConfig(self.paths, getattr(settings, "userdata_root", Path("/userdata")))
         es_api = EmulationStationApi()
         self.game_runtime = game_runtime or GameRuntime(es_api=es_api)
-        self.actions = BuiltInActionRegistry(control or BatoceraControl(self.runner, log=log_event), RetroArchControl(), self.game_runtime)
+        self.actions = BuiltInActionRegistry(control or BatoceraControl(self.runner, log=log_event), RetroArchControl(saves_root=getattr(settings, "saves_root", Path("/userdata/saves"))), self.game_runtime)
         self.launcher = launcher or GameLauncher(settings.roms_root, es_api)
         self.coordinator = LaunchGameCoordinator(self.game_runtime, self.launcher, self.actions,
                                                  lock_path=self.paths.launch_lock)

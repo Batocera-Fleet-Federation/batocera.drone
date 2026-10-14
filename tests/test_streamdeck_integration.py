@@ -1,6 +1,7 @@
 """Integration contracts, isolated lifecycle and game orchestration; no hardware required."""
 import json
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -250,7 +251,8 @@ class ActionTests(unittest.TestCase):
         control = BatoceraControl(runner, which=lambda name: '/usr/bin/' + name,
                                   restart_frontend=lambda: True)
         retroarch = SimpleNamespace(availability=lambda c: {'available': bool(c.active_game), 'reason': 'No game'},
-                                    send=lambda command: {'status': 'ok', 'command': command})
+                                    send=lambda command: {'status': 'ok', 'command': command},
+                                    load_latest=lambda c: {'status': 'ok', 'command': 'LOAD_STATE_SLOT'})
         return BuiltInActionRegistry(control, retroarch, FakeRuntime(active)), runner
 
     def test_initial_ten_actions_and_implementations(self):
@@ -807,3 +809,113 @@ class RetroArchNetworkConfigTests(TemporaryPaths):
 
         manager.disable()
         self.assertNotIn('network_cmd_enable', self.cfg.read_text(encoding='utf-8'))
+
+
+class RetroArchLoadLatestTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.saves = self.root / 'saves' / 'fbneo'
+        self.saves.mkdir(parents=True)
+        self.context = ActionContext(active_game={'system': 'fbneo', 'rom_path': '/roms/fbneo/dino.zip'},
+                                     system='fbneo', rom='/roms/fbneo/dino.zip')
+
+    def _state(self, name, age):
+        path = self.saves / name
+        path.write_bytes(b'state')
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+
+    def test_latest_state_picks_newest_slot_and_ignores_other_files(self):
+        self._state('dino.state', age=300)
+        self._state('dino.state1', age=100)
+        self._state('dino.state2', age=200)
+        self._state('dino.state.auto', age=1)
+        self._state('dino.state.png', age=1)
+        control = RetroArchControl(saves_root=self.root / 'saves')
+
+        self.assertEqual(control.latest_state(self.context), (1, ''))
+
+    def test_latest_state_treats_plain_state_as_slot_zero(self):
+        self._state('dino.state', age=5)
+        control = RetroArchControl(saves_root=self.root / 'saves')
+
+        self.assertEqual(control.latest_state(self.context), (0, ''))
+
+    def test_latest_state_reports_missing_save(self):
+        control = RetroArchControl(saves_root=self.root / 'saves')
+
+        slot, reason = control.latest_state(self.context)
+
+        self.assertIsNone(slot)
+        self.assertIn('No save state found', reason)
+
+    def test_load_latest_sends_the_newest_slot_and_reads_the_reply(self):
+        self._state('dino.state', age=300)
+        self._state('dino.state2', age=10)
+        received = []
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.bind(('127.0.0.1', 0))
+        server.settimeout(5)
+        port = server.getsockname()[1]
+        self.addCleanup(server.close)
+
+        def serve():
+            while True:
+                try:
+                    data, addr = server.recvfrom(4096)
+                except OSError:
+                    return
+                received.append(data)
+                if data.startswith(b'GET_STATUS'):
+                    server.sendto(b'GET_STATUS PLAYING fbneo,dino', addr)
+                else:
+                    server.sendto(b'LOAD_STATE_SLOT 2', addr)
+                    return
+
+        threading.Thread(target=serve, daemon=True).start()
+        proc = self.root / 'proc' / '4242'
+        proc.mkdir(parents=True)
+        config = self.root / 'retroarchcustom.cfg'
+        config.write_text(f'network_cmd_enable = "true"\nnetwork_cmd_port = "{port}"\n')
+        (proc / 'cmdline').write_bytes(f'/usr/bin/retroarch\0--config\0{config}\0'.encode())
+        control = RetroArchControl(proc_root=self.root / 'proc', saves_root=self.root / 'saves')
+
+        result = control.load_latest(self.context)
+
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(received, [b'GET_STATUS\n', b'LOAD_STATE_SLOT 2\n'])
+
+    def test_load_latest_surfaces_retroarch_error_reply(self):
+        self._state('dino.state', age=5)
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.bind(('127.0.0.1', 0))
+        server.settimeout(5)
+        port = server.getsockname()[1]
+        self.addCleanup(server.close)
+
+        def serve():
+            while True:
+                try:
+                    data, addr = server.recvfrom(4096)
+                except OSError:
+                    return
+                if data.startswith(b'GET_STATUS'):
+                    server.sendto(b'GET_STATUS PLAYING fbneo,dino', addr)
+                else:
+                    server.sendto(b'LOAD_STATE_SLOT ERROR failed to load state from dino.state', addr)
+                    return
+
+        threading.Thread(target=serve, daemon=True).start()
+        proc = self.root / 'proc' / '4243'
+        proc.mkdir(parents=True)
+        config = self.root / 'retroarchcustom.cfg'
+        config.write_text(f'network_cmd_enable = "true"\nnetwork_cmd_port = "{port}"\n')
+        (proc / 'cmdline').write_bytes(f'/usr/bin/retroarch\0--config\0{config}\0'.encode())
+        control = RetroArchControl(proc_root=self.root / 'proc', saves_root=self.root / 'saves')
+
+        result = control.load_latest(self.context)
+
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('failed to load state', result['error'])

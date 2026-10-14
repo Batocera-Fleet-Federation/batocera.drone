@@ -8,12 +8,13 @@ reports availability for the current ``ActionContext`` so unsupported actions
 are disabled/explained instead of silently doing nothing.
 """
 
+import re
 import shutil
 import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .game_runtime import GameRuntime
 from .logs import log_event
@@ -131,9 +132,11 @@ class RetroArchControl:
 
     PROCESS_NAMES = {"retroarch", "retroarch32"}
 
-    def __init__(self, proc_root: Path = Path("/proc"), host: str = "127.0.0.1") -> None:
+    def __init__(self, proc_root: Path = Path("/proc"), host: str = "127.0.0.1",
+                 saves_root: Path = Path("/userdata/saves")) -> None:
         self.proc_root = proc_root
         self.host = host
+        self.saves_root = saves_root
 
     def _retroarch_args(self) -> Optional[List[str]]:
         try:
@@ -182,6 +185,62 @@ class RetroArchControl:
             return _unavailable("No game is currently running.")
         port, reason = self.command_port()
         return _available() if port else _unavailable(reason)
+
+    def latest_state(self, context: ActionContext) -> Tuple[Optional[int], str]:
+        """(slot, reason) for the newest save state of the running game.
+
+        RetroArch writes slot 0 as ``<game>.state`` and slot N as ``<game>.stateN``, so
+        the newest file by modification time is the latest save, whatever slot was
+        selected when it was written. ``.state.auto`` and screenshots are not slots.
+        """
+        rom = context.rom or str((context.active_game or {}).get("rom_path") or "")
+        stem = Path(rom).stem
+        system = context.system or str((context.active_game or {}).get("system") or "")
+        if not stem or not system:
+            return None, "No game is currently running."
+        folder = self.saves_root / system
+        pattern = re.compile(rf"^{re.escape(stem)}\.state(\d*)$")
+        best: Optional[Tuple[float, int]] = None
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            match = pattern.match(entry.name)
+            if not match or not entry.is_file():
+                continue
+            candidate = (entry.stat().st_mtime, int(match.group(1) or 0))
+            if best is None or candidate > best:
+                best = candidate
+        if best is None:
+            return None, f"No save state found for {stem} in {folder}."
+        return best[1], ""
+
+    def load_latest(self, context: ActionContext) -> dict:
+        if not context.active_game:
+            return {"status": "unavailable", "error": "No game is currently running."}
+        slot, reason = self.latest_state(context)
+        if slot is None:
+            return {"status": "unavailable", "error": reason}
+        port, reason = self.command_port()
+        if not port:
+            return {"status": "unavailable", "error": reason}
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(1.0)
+                sock.connect((self.host, port))
+                sock.send(b"GET_STATUS\n")
+                if not sock.recv(4096).startswith((b"GET_STATUS PLAYING", b"GET_STATUS PAUSED")):
+                    return {"status": "unavailable", "error": "RetroArch reports no loaded content."}
+                # LOAD_STATE_SLOT answers only once the load has finished, so wait for it.
+                sock.settimeout(10.0)
+                sock.send(f"LOAD_STATE_SLOT {slot}\n".encode("ascii"))
+                reply = sock.recv(4096).decode("utf-8", "replace").strip()
+        except OSError as error:
+            return {"status": "error", "error": f"RetroArch did not answer its command interface: {error}"}
+        if reply.startswith("LOAD_STATE_SLOT ERROR"):
+            return {"status": "error", "error": reply.replace("LOAD_STATE_SLOT ERROR", "", 1).strip() or "RetroArch could not load the state."}
+        return {"status": "ok", "message": f"Loaded the latest save (slot {slot})."}
 
     def send(self, command: str) -> dict:
         port, reason = self.command_port()
@@ -304,7 +363,7 @@ class BuiltInActionRegistry:
                           lambda _c: retroarch.send("SAVE_STATE"), retroarch.availability,
                           compatibility=state_compat, default_label="SAVE"),
             BuiltInAction("load-state", "Load State", "Load the current state slot into the running game.", "State", "load",
-                          lambda _c: retroarch.send("LOAD_STATE"), retroarch.availability,
+                          lambda c: retroarch.load_latest(c), retroarch.availability,
                           compatibility=state_compat, default_label="LOAD"),
         ]
         for action in defaults:
