@@ -624,6 +624,8 @@ class HandlersNetworkMixin:
         The peer answering with an HTTP error (e.g. 403 for a wrong pairing code)
         or being unreachable is an upstream failure, not a server bug, so it must
         not escape as a generic 500. The peer's own error text is shown truncated.
+        A local identity hold (``PermissionError`` from ``_local_pair_peer``) is
+        this Drone's own state, so it replies 503 rather than "unreachable".
 
         The pairing code is a secret, so over HTTPS it is only sent to a server
         that proves the certificate the operator confirmed (the fingerprint
@@ -664,6 +666,12 @@ class HandlersNetworkMixin:
             message = f"That drone rejected the pairing request (HTTP {error.code})."
             self._send_json(502, {"error": f"{message} {detail}".rstrip()})
         except (URLError, OSError) as error:
+            if isinstance(error, PermissionError) and error.errno is None:
+                # The local identity hold raises a bare PermissionError(message);
+                # an OS-level EACCES/EPERM carries an errno and is still a
+                # connection failure. The hold is this Drone's state, not the peer's.
+                self._send_json(503, {"error": str(error)})
+                return None
             self._send_json(502, {"error": f"Could not reach that drone: {error}"})
         return None
 

@@ -62,6 +62,25 @@ class PairPeerErrorMappingTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("Could not reach that drone", payload["error"])
 
+    def test_identity_hold_becomes_503_not_unreachable(self) -> None:
+        hold = PermissionError("peer pairing is held pending Drone identity verification")
+        with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=hold):
+            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
+
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], str(hold))
+        self.assertNotIn("Could not reach", payload["error"])
+
+    def test_os_level_permission_error_is_still_a_connection_failure(self) -> None:
+        denied = PermissionError(13, "Permission denied")
+        with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=denied):
+            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
+
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 502)
+        self.assertIn("Could not reach that drone", payload["error"])
+
     def test_successful_pairing_is_returned_without_a_response(self) -> None:
         paired = {"drone_id": "peer-a", "certificate_path": ""}
         with mock.patch.object(handlers_network, "_local_pair_peer", return_value=paired):
