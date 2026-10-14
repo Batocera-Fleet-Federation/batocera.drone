@@ -3783,7 +3783,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-223-out-of-scope-peer-rejection-500",
-      "name": "Out of scope for #223: a non-paired peer answer escapes the pairing helper as an unhandled 500",
+      "name": "Formerly out of scope for #223, fixed by #224: a non-paired peer answer is a 502, not an unhandled 500",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -3800,6 +3800,102 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_224_pair_by_address_non_paired_200_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-224-pair-by-address-non-paired-200-uat",
+      "name": "Issue #224 pair-by-address peer 200 without status=paired is a 502 gateway error, never an unhandled 500",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_224_pair_by_address_non_paired_200_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_224_pair_rejection_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-224-pair-rejection-boundaries",
+      "name": "Issue #224 malformed peer 200 pairing answers and helper mapping stay 502",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_224_pair_rejection_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_224_out_of_scope_paired_payload_valueerror.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-224-out-of-scope-paired-payload-valueerror",
+      "name": "Out of scope for #224: a 200 with status=paired but no certificate_pem is a client 400",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_224_out_of_scope_paired_payload_valueerror.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
