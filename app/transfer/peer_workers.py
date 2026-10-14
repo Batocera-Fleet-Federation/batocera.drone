@@ -103,7 +103,10 @@ def _start_local_network_workers(settings: Settings) -> None:
     interval = max(10, int(os.environ.get("DRONE_LOCAL_HEALTH_INTERVAL_SECONDS", "30")))
 
     def health_loop() -> None:
-        while not _wait_for_generation_stop(stop, interval):
+        while not stop.is_set():
+            time.sleep(interval)
+            if stop.is_set():
+                return
             if not _local_network.is_local_mode(settings):
                 continue
             checks = []
