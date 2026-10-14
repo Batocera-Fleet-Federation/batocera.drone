@@ -5,6 +5,7 @@ Extracted from ``drone_api.py``. Network-mode get/update, and the local-network
 pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHandler``.
 """
 
+import json
 import os
 import socket
 import time
@@ -13,7 +14,7 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote
 
 try:
@@ -525,7 +526,9 @@ class HandlersNetworkMixin:
         if not peer:
             self._send_json(404, {"error": "discovered peer not found"})
             return
-        paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
+        paired = self._pair_peer_or_reply(peer, str(payload.get("pairing_code") or ""))
+        if paired is None:
+            return
         cert_path = Path(str(paired.get("certificate_path") or ""))
         if cert_path.exists():
             load_peer_cert_everywhere(self.server, cert_path)
@@ -572,11 +575,38 @@ class HandlersNetworkMixin:
             "tailnet_ip": str(info.get("tailnet_ip") or ""),
             "certificate_fingerprint": str(info.get("certificate_fingerprint") or ""),
         }
-        paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
+        paired = self._pair_peer_or_reply(peer, str(payload.get("pairing_code") or ""))
+        if paired is None:
+            return
         cert_path = Path(str(paired.get("certificate_path") or ""))
         if cert_path.exists():
             load_peer_cert_everywhere(self.server, cert_path)
         self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
+
+    def _pair_peer_or_reply(self, peer: dict, pairing_code: str) -> Optional[dict]:
+        """Run the pairing handshake; on a peer-side failure, send a 502 and return None.
+
+        The peer answering with an HTTP error (e.g. 403 for a wrong pairing code)
+        or being unreachable is an upstream failure, not a server bug, so it must
+        not escape as a generic 500. The peer's own error text is shown truncated.
+        """
+        try:
+            return _local_pair_peer(self.settings, peer, pairing_code)
+        except HTTPError as error:
+            detail = ""
+            try:
+                body = json.loads(error.read().decode("utf-8") or "{}")
+                if isinstance(body, dict):
+                    detail = str(body.get("error") or "")[:200]
+            except (OSError, ValueError, AttributeError):
+                detail = ""
+            finally:
+                error.close()
+            message = f"That drone rejected the pairing request (HTTP {error.code})."
+            self._send_json(502, {"error": f"{message} {detail}".rstrip()})
+        except (URLError, OSError) as error:
+            self._send_json(502, {"error": f"Could not reach that drone: {error}"})
+        return None
 
     @staticmethod
     def _swarm_peer_ui_url(peer: dict) -> str:
