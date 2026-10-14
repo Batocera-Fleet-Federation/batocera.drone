@@ -52,6 +52,24 @@ class FakeDataIdentityTests(unittest.TestCase):
         self.assertNotEqual(ids[0], ids[1])
         self.assertNotIn("02:42:ac:11:00:02", ids)
 
+    def test_fake_machine_id_without_root_never_returns_host_derived_id(self):
+        # Regression for #227: an unscoped call used to fall through to uuid.getnode().
+        with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002):
+            with self.assertRaises(TypeError):
+                device_identity._fake_machine_id()
+            with self.assertRaises(TypeError):
+                device_identity._fake_machine_id(None)
+        self.assertFalse((self.root / "system").exists())
+
+    def test_fake_machine_id_with_root_persists_under_userdata(self):
+        userdata = self.root / "scoped"
+        (userdata / "system" / "drone-app").mkdir(parents=True)
+        with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002):
+            value = device_identity._fake_machine_id(userdata)
+        self.assertNotEqual(value, "02:42:ac:11:00:02")
+        persisted = (userdata / "system" / "drone-app" / "device-id").read_text(encoding="utf-8").strip()
+        self.assertEqual(persisted, value)
+
 
 if __name__ == "__main__":
     unittest.main()
