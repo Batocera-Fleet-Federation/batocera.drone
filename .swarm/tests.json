@@ -5096,6 +5096,40 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_capacity_config_fidelity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-capacity-config-fidelity-uat",
+      "name": "Issue #240 lobby capacity after a mechanism switch and lossless temporary configuration restore",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_capacity_config_fidelity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/config_guard.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
