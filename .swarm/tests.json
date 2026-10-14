@@ -3896,6 +3896,131 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_227_fake_machine_id_unscoped_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-fake-machine-id-unscoped-uat",
+      "name": "Issue #227 unscoped _fake_machine_id fails closed and never returns uuid.getnode()",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_227_fake_machine_id_unscoped_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_227_fake_machine_id_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-fake-machine-id-boundaries",
+      "name": "Issue #227 malformed and non-path userdata_root values must not fall through to getnode",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_227_fake_machine_id_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_227_out_of_scope_empty_path_cwd.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-out-of-scope-empty-path-cwd",
+      "name": "Out of scope for #227: Path('') and Path('.') persist device-id under the process cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_227_out_of_scope_empty_path_cwd.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_227_out_of_scope_str_pathlike.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-out-of-scope-str-pathlike",
+      "name": "Out of scope for #227: str and PathLike pass _require_real_path then fail the Path join",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_227_out_of_scope_str_pathlike.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
