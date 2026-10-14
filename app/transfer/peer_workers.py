@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 from typing import Optional
 
 try:
@@ -28,6 +28,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 _LOCAL_NETWORK_STOP: Optional[Event] = None
 _LOCAL_NETWORK_DISCOVERY: Optional[Thread] = None
+# Serializes start/stop so overlapping callers cannot both read the same live
+# generation and then overwrite each other's stop event / discovery handle.
+# Re-entrant because a start retires the previous generation via stop.
+_LOCAL_NETWORK_LIFECYCLE_LOCK = RLock()
 
 
 def _wait_for_generation_stop(stop: Event, interval: float) -> bool:
@@ -43,20 +47,26 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
     closed before it can be joined.
     """
     global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
-    if _LOCAL_NETWORK_STOP is not None:
-        _LOCAL_NETWORK_STOP.set()
-    discovery = _LOCAL_NETWORK_DISCOVERY
-    if discovery is not None:
-        # Unblock recvfrom so join is not racing the 1s datagram timeout.
-        closer = getattr(discovery, "close_discovery_socket", None)
-        if callable(closer):
-            closer()
-        discovery.join(timeout)
-    _LOCAL_NETWORK_STOP = None
-    _LOCAL_NETWORK_DISCOVERY = None
+    with _LOCAL_NETWORK_LIFECYCLE_LOCK:
+        if _LOCAL_NETWORK_STOP is not None:
+            _LOCAL_NETWORK_STOP.set()
+        discovery = _LOCAL_NETWORK_DISCOVERY
+        if discovery is not None:
+            # Unblock recvfrom so join is not racing the 1s datagram timeout.
+            closer = getattr(discovery, "close_discovery_socket", None)
+            if callable(closer):
+                closer()
+            discovery.join(timeout)
+        _LOCAL_NETWORK_STOP = None
+        _LOCAL_NETWORK_DISCOVERY = None
 
 
 def _start_local_network_workers(settings: Settings) -> None:
+    with _LOCAL_NETWORK_LIFECYCLE_LOCK:
+        _start_local_network_generation(settings)
+
+
+def _start_local_network_generation(settings: Settings) -> None:
     global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
     # A live generation must be stopped before its stop event and discovery
     # handle are overwritten, otherwise its discovery thread is orphaned.
