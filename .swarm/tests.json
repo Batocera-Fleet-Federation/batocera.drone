@@ -4718,6 +4718,42 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_orchestration_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-orchestration-boundaries-uat",
+      "name": "Issue #240 gameplay address, unverified compatibility, launch verification, and restart cleanup",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_orchestration_boundaries_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/network.py",
+          "app/multiplayer/compat_db.py",
+          "app/multiplayer/matching.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
