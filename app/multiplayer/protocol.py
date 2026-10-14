@@ -409,7 +409,7 @@ class ProtocolMixin:
             # Back to the lobby (e.g. a retry): any earlier launch offer is void.
             self.store.set_local(session["id"], pending_launch=None, launch_status="", recovery_response=None)
             local = session.get("local") or {}
-            if local.get("ended") and local.get("reopenable") and mine is not None and mine["status"] == m.P_JOINED:
+            if local.get("ended") and local.get("reopenable") and not local.get("departed") and mine is not None and mine["status"] == m.P_JOINED:
                 # The host retried a failed session this guest had joined: reopen its lobby (launch still needs confirmation).
                 self.store.set_local(session["id"], ended=False, ended_at="", ended_reason="", reopenable=False, archived=False,
                                      launch_error="", game_launched=False, game_misses=0, host_unreachable_since="")
@@ -554,7 +554,7 @@ class ProtocolMixin:
                                             "rom_name": local_game["rom_name"] if local_game else "", "pending_launch": None,
                                             "tested_config_fingerprint": verdict["tested_config_fingerprint"],
                                             # A renewed invite after leave must not keep the departed replica closed.
-                                            "ended": False, "ended_at": "", "ended_reason": "", "reopenable": False,
+                                            "ended": False, "ended_at": "", "ended_reason": "", "reopenable": False, "departed": False,
                                             "archived": False, "launch_status": "", "launch_error": "",
                                             "game_launched": False, "game_misses": 0, "host_unreachable_since": ""})
         self.store.update_invitation(session_id, status="accepted")
@@ -596,5 +596,5 @@ class ProtocolMixin:
                 self._guest_message(session, "leave")
             except m.MultiplayerError:
                 pass  # leaving must work even when the host is gone
-            self.guest_cleanup(session_id, "You left the session.")
+            self.guest_cleanup(session_id, "You left the session.", departed=True)
             return self.session_view(self.store.require(session_id))

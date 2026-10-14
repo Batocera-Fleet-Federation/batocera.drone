@@ -655,18 +655,26 @@ class LifecycleMixin:
         for old in done[KEEP_COMPLETED:]:
             self.store.delete(old["id"])
 
-    def guest_cleanup(self, session_id: str, reason: str, *, reopenable: bool = False) -> None:
+    def guest_cleanup(self, session_id: str, reason: str, *, reopenable: bool = False, departed: bool = False) -> None:
         """A guest leaves/ends locally: settings restored, offers dropped. The running game is NOT closed.
 
         ``reopenable`` marks a host-side FAILED: if the host retries, the still-joined guest's lobby comes back.
+        ``departed`` is this machine's own decision to leave; it revokes reopening for good (until a fresh
+        invitation is accepted), and a later host snapshot can never turn an ended replica reopenable.
         """
         with self.session_lock(session_id):
             session = self.store.get(session_id)
             if session is None or self.local_role(session) != m.GUEST_ROLE:
                 return
             launch_status = "failed" if (session.get("local") or {}).get("launch_status") == "failed" else ""
-            self.store.set_local(session_id, pending_launch=None, launch_status=launch_status, ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
-                                 reopenable=bool(reopenable))
+            local = session.get("local") or {}
+            # Only a membership that was still locally authorized may be recovered by a host retry.
+            reopen = bool(reopenable) and not departed and not local.get("departed") and not local.get("ended")
+            if local.get("ended") and local.get("reopenable") and not departed:
+                reopen = bool(reopenable)  # already awaiting a retry: keep it so
+            self.store.set_local(session_id, pending_launch=None, launch_status=launch_status, ended=True,
+                                 ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
+                                 reopenable=reopen, departed=bool(departed or local.get("departed")))
             try:
                 restored = self.restore_if_enabled(session_id)
             except Exception as error:  # noqa: BLE001 - retain journal for housekeeping without reopening participation
@@ -891,7 +899,7 @@ class LifecycleMixin:
                         self._guest_message(session, "leave")
                     except m.MultiplayerError:
                         pass
-                    self.guest_cleanup(session_id, "You left the session because its game is no longer running here.")
+                    self.guest_cleanup(session_id, "You left the session because its game is no longer running here.", departed=True)
             else:
                 self.store.set_local(session_id, game_misses=0)
 
@@ -939,7 +947,7 @@ class LifecycleMixin:
                             # Reconcile immediately on restart, rather than wait
                             # for the normal two-miss game-exit debounce.
                             self.store.set_local(session_id, recovery_response={"action": "leave"})
-                            self.guest_cleanup(session_id, "The session game was not running after the Drone restarted.")
+                            self.guest_cleanup(session_id, "The session game was not running after the Drone restarted.", departed=True)
                             self._flush_guest_recovery_response(session_id)
                             summary["ended"] += 1
             except Exception:  # noqa: BLE001 - isolate each session
