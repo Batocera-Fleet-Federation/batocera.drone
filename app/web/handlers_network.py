@@ -594,7 +594,9 @@ class HandlersNetworkMixin:
             "drone_id": peer_id,
             "name": str(info.get("name") or peer_id),
             "hostname": str(info.get("hostname") or ""),
-            "scheme": str(info.get("scheme") or ("http" if dialed.startswith("http://") else "https")),
+            # The scheme and target of the pairing POST come from what the
+            # operator typed, never from the (untrusted) peer-info response.
+            "scheme": "http" if dialed.startswith("http://") else "https",
             "api_port": int(info.get("api_port") or 443),
             "peer_mtls_port": int(info.get("peer_mtls_port") or info.get("api_port") or 443),
             # The dialed address demonstrably routes from here (e.g. over the
