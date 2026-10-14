@@ -73,6 +73,7 @@ class LifecycleMixin:
             adapter = self.adapter_map.get(session["emulator"]["adapter"])
             if adapter is None:
                 raise m.MultiplayerError("unknown_adapter", "The session's multiplayer mechanism is not available on this Drone.", 409)
+            self._require_adapter_enabled(adapter)
             if session["mechanism"] == m.REMOTE_STREAMING and (not self.cfg.get()["streaming"]["enabled"] or
                     self.cfg.get()["privacy"]["remote_controller_authorization"] == "disabled"):
                 raise m.MultiplayerError("streaming_disabled", "Remote streaming or remote controllers are disabled in Multiplayer settings.", 409)
@@ -119,6 +120,9 @@ class LifecycleMixin:
                 if session["state"] != m.STARTING:
                     return  # cancelled before this worker acquired the session
                 adapter = self.adapter_map[session["emulator"]["adapter"]]
+                # Settings may have changed while this launch worker was queued.
+                self.require_enabled()
+                self._require_adapter_enabled(adapter)
                 local = session["local"]
                 path = local["game_path"]
                 if adapter.effective_automation() == MANUAL:
@@ -317,25 +321,36 @@ class LifecycleMixin:
         return pid is None or active.get("pid") == pid
 
     def cleanup_host_resources(self, session: dict, *, stop_game: bool) -> dict:
-        outcome: Dict[str, Any] = {}
+        outcome: Dict[str, Any] = {"errors": []}
+        def attempt(label, operation):
+            try:
+                return operation()
+            except Exception as error:  # noqa: BLE001 - each resource must get its own cleanup attempt
+                outcome["errors"].append(f"{label}: {getattr(error, 'message', None) or error}")
+                return None
+
         adapter = self.adapter_map.get(session.get("emulator", {}).get("adapter", ""))
         local = session.get("local") or {}
         context = {"role": m.HOST_ROLE, "port": local.get("port") or 0}
         if adapter is not None:
-            for hook in (adapter.stop_session, adapter.cleanup):
-                try:
-                    hook(session, context)
-                except Exception:  # noqa: BLE001
-                    pass
-        if stop_game and local.get("host_launched") and self._owns_host_game(session):
-            self.launcher.exit_game()
-            outcome["game_stopped"] = True
-        try:
-            self.network.relay.close_session(session["id"])
-        except Exception:  # noqa: BLE001
-            pass
-        outcome["config"] = self.restore_if_enabled(session["id"])
+            for label, hook in (("Adapter shutdown", adapter.stop_session), ("Adapter cleanup", adapter.cleanup)):
+                attempt(label, lambda hook=hook: hook(session, context))
+        def stop_owned_game():
+            if stop_game and local.get("host_launched") and self._owns_host_game(session):
+                self.launcher.exit_game()
+                outcome["game_stopped"] = True
+        attempt("Game shutdown (close the game locally if it remains running)", stop_owned_game)
+        attempt("Relay cleanup", lambda: self.network.relay.close_session(session["id"]))
+        outcome["config"] = attempt("Configuration restoration", lambda: self.restore_if_enabled(session["id"])) or {}
+        if outcome["errors"]:
+            self.store.set_local(session["id"], cleanup_errors=outcome["errors"])
+            self.store.mutate(session["id"], lambda s: add_event(
+                s, "cleanup_failed", "Cleanup needs attention: " + "; ".join(outcome["errors"]), self.me))
         return outcome
+
+    def _require_adapter_enabled(self, adapter: Any) -> None:
+        if adapter.id in self.cfg.get()["emulators"]["disabled_adapters"]:
+            raise m.MultiplayerError("adapter_disabled", f"{adapter.name} is disabled in Multiplayer settings.", 409)
 
     # ------------------------------------------------------------ guest launch
     def confirm_launch(self, session_id: str, replace_running_game: bool = False) -> dict:
@@ -355,6 +370,7 @@ class LifecycleMixin:
             adapter = self.adapter_map.get(session["emulator"]["adapter"])
             if adapter is None:
                 raise m.MultiplayerError("unknown_adapter", "This Drone cannot take part in that mechanism.", 409)
+            self._require_adapter_enabled(adapter)
             path = session["local"].get("game_path", "")
             automated = adapter.effective_automation() != MANUAL and adapter.guest_launches
             if automated:
@@ -540,6 +556,7 @@ class LifecycleMixin:
         try:
             self._expire_invitations()
             self.guard.sweep_watched()
+            self._retry_abandoned_configuration()
             for session in list(self.store.all()):
                 try:
                     self._tick_session(session)
@@ -547,6 +564,26 @@ class LifecycleMixin:
                     continue
         except Exception:  # noqa: BLE001
             return
+
+    def _retry_abandoned_configuration(self) -> None:
+        """Recover retained journals independently of whether their session is still active."""
+        if not self.cfg.get()["general"]["auto_restore_configuration"]:
+            return
+        for session_id in self.guard.pending():
+            try:
+                with self.session_lock(session_id):
+                    session = self.store.get(session_id)
+                    local = (session or {}).get("local") or {}
+                    if session and session["state"] not in (m.COMPLETED, m.FAILED) and not local.get("ended") and local.get("launch_status") != "failed":
+                        continue
+                    result = self.guard.retry_restore(session_id)
+                    if result is not None and session:
+                        errors = result.get("errors") or []
+                        message = ("Configuration restore retry failed: " + "; ".join(errors) if errors else
+                                   "Temporary emulator settings restored after cleanup retry.")
+                        self.store.mutate(session_id, lambda s: add_event(s, "restore_retry", message, self.me))
+            except Exception:  # noqa: BLE001 - one damaged journal cannot block the others
+                continue
 
     def _expire_invitations(self) -> None:
         for invitation in self.store.invitations():

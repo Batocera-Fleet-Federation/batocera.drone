@@ -401,6 +401,16 @@ a raw configuration key.
   retries failed publishes.
 * **Restart recovery** (`recover()`): restores orphaned journals, fails sessions that
   were `STARTING`, resumes ones whose game is still running, finishes `STOPPING`.
+* **Cleanup failures**: adapter shutdown, game shutdown, relay cleanup and configuration
+  restoration are attempted independently. Failures appear in the session log; if game
+  shutdown fails, close the remaining game locally. Housekeeping retries abandoned
+  configuration journals up to three times, with exponential backoff starting at 30
+  seconds between retries. The retry budget survives restarts of the guard and remains
+  in the journal on failure. Manual **Restore** remains available after the budget is
+  exhausted. Recovery also runs with multiplayer disabled, but respects the automatic
+  configuration restoration setting and leaves live-session settings alone.
+* Disabling an emulator adapter blocks new launches, including a host launch queued
+  before the setting changed. Existing sessions can still be ended and cleaned up.
 * A remote end never closes a guest's game; the guest is told the session is over and
   closes it when ready.
 

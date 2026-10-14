@@ -28,6 +28,8 @@ _INI_KEY = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
 _INI_SECTION = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
 MAX_CONFIG_BYTES = 4 * 1024 * 1024
 WATCH_TTL = timedelta(hours=1)
+RESTORE_RETRIES = 3
+RESTORE_RETRY_SECONDS = 30
 
 
 def scoped_key(system: str, rom_name: str, key: str) -> str:
@@ -279,6 +281,26 @@ class ConfigGuard:
 
     def restore(self, session_id: str) -> dict:
         with lock_for(self.settings, "config-files"):
+            return self._restore(session_id)
+
+    def retry_restore(self, session_id: str) -> Optional[dict]:
+        """Bounded housekeeping recovery; persist the budget in the retained journal.
+
+        Explicit Restore remains available after exhaustion. Live-session eligibility
+        is checked by the orchestrator while holding its session lock.
+        """
+        with lock_for(self.settings, "config-files"):
+            entry = self.pending(session_id).get(session_id)
+            if not entry:
+                return None
+            attempts = entry.get("restore_attempts", 0)
+            due = m.parse_time(entry.get("restore_retry_after"))
+            if attempts >= RESTORE_RETRIES or (due and due > m.now()):
+                return None
+            def reserve(journal):
+                journal[session_id].update(restore_attempts=attempts + 1,
+                    restore_retry_after=(m.now() + timedelta(seconds=RESTORE_RETRY_SECONDS * 2 ** attempts)).isoformat())
+            self._journal.update(reserve)  # a crash cannot reset the automatic retry budget
             return self._restore(session_id)
 
     def _restore(self, session_id: str) -> dict:

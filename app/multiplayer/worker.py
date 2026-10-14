@@ -24,8 +24,8 @@ def _loop(settings: Any, repository: Any, stop: threading.Event) -> None:
         try:
             if not Path(str(settings.userdata_root)).exists():
                 continue
-            if orchestrator.cfg.get()["general"]["enabled"] or orchestrator.store.active():
-                orchestrator.tick()
+            # Disabling multiplayer must not strand completed-session journals or generated credentials.
+            orchestrator.tick()
         except Exception:  # noqa: BLE001
             continue
 
