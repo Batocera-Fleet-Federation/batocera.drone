@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from . import models as m
 from .adapters.base import MANUAL
 from .core import EVENT_SESSION
-from .sessions import launch_pending, settle_live, settle_lobby
+from .sessions import launch_pending, occupied, settle_live, settle_lobby
 from .store import add_event
 
 try:
@@ -80,6 +80,10 @@ class LifecycleMixin:
         replace = m.clean_bool(replace_running_game, "replace_running_game")
         with self.session_lock(session_id):
             session = self.require_host(session_id)
+            if occupied(session) > session["max_players"] or any(
+                    p.get("slot") and p["slot"] > session["max_players"]
+                    for p in session["players"].values() if p["status"] not in (m.P_LEFT, m.P_REMOVED, m.P_DECLINED)):
+                raise m.MultiplayerError("session_full", "The lobby exceeds this mechanism's player capacity. Remove players or reassign slots before starting.", 409)
             if session["state"] != m.READY:
                 waiting = [p["name"] for k, p in session["players"].items() if p["status"] == m.P_JOINED and not p["ready"]]
                 if session["state"] in m.PRE_START_STATES:

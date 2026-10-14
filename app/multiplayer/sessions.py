@@ -88,7 +88,10 @@ def settle_live(session: dict) -> None:
 def next_free_slot(session: dict) -> int:
     taken = {player["slot"] for player in session["players"].values()
              if player.get("slot") and player["status"] not in (m.P_DECLINED, m.P_LEFT, m.P_REMOVED)}
-    return next(slot for slot in range(1, m.MAX_PLAYERS_LIMIT + 1) if slot not in taken)
+    slot = next((slot for slot in range(1, session["max_players"] + 1) if slot not in taken), None)
+    if slot is None:
+        raise m.MultiplayerError("session_full", "No player slot is available in this session.", 409)
+    return slot
 
 
 def occupied(session: dict) -> int:
@@ -438,6 +441,11 @@ class SessionMixin:
                         "mechanism_change", f"Adding {self.peer_name(peer)} would change the session from "
                         f"{m.MECHANISM_LABELS[current['mechanism']]} to {m.MECHANISM_LABELS[plan['mechanism']]}, but players have already joined. "
                         "Start a new session for this group instead.", 409)
+                capacity = min(current["max_players"], max(2, plan["max_players"]))
+                if occupied(current) + 1 > capacity:
+                    raise m.MultiplayerError(
+                        "session_full", f"{plan['label']} supports at most {capacity} players for this game. "
+                        "Remove pending invitations before inviting this player.", 409)
             except m.MultiplayerError:
                 self.store.mutate(session_id, settle_lobby)
                 raise

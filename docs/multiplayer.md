@@ -174,6 +174,12 @@ joined (`mechanism_change`, HTTP 409).
 Before anyone joins, a mechanism change refreshes all pending invitations and the
 host's configuration evidence. Game-detail recommendations ask peers about the
 host's selected RetroArch core, even when their own default core differs.
+Pending invitations reserve player capacity. If adding a peer would select a
+mechanism with fewer seats than the resulting roster needs, Drone refuses the
+invite with `session_full` and preserves the existing mechanism and invitations.
+Remove pending players first, or create a session for a smaller group. Acceptance
+and launch also reject overfilled lobbies retained from an older installation;
+slot allocation never exceeds the published capacity.
 
 ## Host a game
 
@@ -339,6 +345,12 @@ does not own (`batocera.conf` per-ROM keys; PPSSPP `[Network]`):
 3. write atomically, re-read and verify; roll back on any mismatch;
 4. restore on end/failure/leave — a key the user changed in the meantime is left
    alone; an interrupted run is finished by `recover()` at the next start.
+
+Edits preserve unrelated bytes, including Unicode separators inside values and
+ROM names, CRLF line endings and an unterminated final line. New journal entries
+retain the exact original owned line so restoration also preserves its spacing
+and spelling, without replacing concurrent user edits elsewhere in the file.
+Older journals containing only values remain recoverable with value restoration.
 
 RetroArch also journals the expected join-password fields in configgen's generated
 `retroarchcustom.cfg` before launch, even if that file does not exist yet. This is a

@@ -74,7 +74,8 @@ class ConfigGuard:
         try:
             if path.stat().st_size > MAX_CONFIG_BYTES:
                 raise m.MultiplayerError("config_too_large", f"{path.name} is unexpectedly large; not editing it")
-            return path.read_text(encoding="utf-8", errors="surrogateescape")
+            with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+                return handle.read()
         except FileNotFoundError:
             return None
 
@@ -87,7 +88,7 @@ class ConfigGuard:
             pass
         fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -98,6 +99,41 @@ class ConfigGuard:
                 os.unlink(temporary)
 
     # ----------------------------------------------------------------- editing
+    @staticmethod
+    def _lines(text: str) -> List[str]:
+        # Only LF delimits configuration lines. Unicode separators, NEL and
+        # form feed are data; retain CRLF and an unterminated final line.
+        return re.findall(r"[^\n]*\n|[^\n]+$", text)
+
+    @staticmethod
+    def _ending(line: str) -> str:
+        return "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+
+    def _insert_line(self, lines: List[str], index: int, line: str) -> None:
+        ending = next((self._ending(item) for item in lines if self._ending(item)), "\n")
+        if index and not self._ending(lines[index - 1]):
+            lines[index - 1] += ending
+        lines.insert(index, line + ending)
+
+    def _original_line(self, kind: str, text: str, edit: dict) -> Optional[str]:
+        lines = self._lines(text)
+        index = self._kv_find(lines, edit["key"]) if kind == "kv" else self._ini_find(lines, edit)
+        return lines[index] if index is not None else None
+
+    def _restore_edit(self, kind: str, text: str, edit: dict) -> str:
+        # Older journals have only parsed values; new journals preserve the
+        # exact owned line too (spacing, key spelling, terminator).
+        if edit.get("original_line") is not None:
+            lines = self._lines(text)
+            index = self._kv_find(lines, edit["key"]) if kind == "kv" else self._ini_find(lines, edit)
+            if index is not None:
+                original = edit["original_line"]
+                if index < len(lines) - 1 and not self._ending(original):
+                    original += self._ending(lines[index]) or "\n"
+                lines[index] = original
+                return "".join(lines)
+        return self._set(kind, text, edit, edit["original"])
+
     @staticmethod
     def _kv_find(lines: List[str], key: str) -> Optional[int]:
         found = None
@@ -114,21 +150,21 @@ class ConfigGuard:
         return line.partition("=")[2].strip()
 
     def _kv_get(self, text: str, edit: dict) -> Optional[str]:
-        lines = text.splitlines()
+        lines = self._lines(text)
         index = self._kv_find(lines, edit["key"])
         return None if index is None else self._kv_value(lines[index])
 
     def _kv_set(self, text: str, edit: dict, value: Optional[str]) -> str:
-        lines = text.splitlines()
+        lines = self._lines(text)
         index = self._kv_find(lines, edit["key"])
         if value is None:
             if index is not None:
                 del lines[index]
         elif index is None:
-            lines.append(f"{edit['key']}={value}")
+            self._insert_line(lines, len(lines), f"{edit['key']}={value}")
         else:
-            lines[index] = f"{edit['key']}={value}"
-        return "\n".join(lines) + ("\n" if lines else "")
+            lines[index] = f"{edit['key']}={value}" + self._ending(lines[index])
+        return "".join(lines)
 
     @staticmethod
     def _ini_span(lines: List[str], section: str):
@@ -157,12 +193,12 @@ class ConfigGuard:
         return found
 
     def _ini_get(self, text: str, edit: dict) -> Optional[str]:
-        lines = text.splitlines()
+        lines = self._lines(text)
         index = self._ini_find(lines, edit)
         return None if index is None else self._kv_value(lines[index])
 
     def _ini_set(self, text: str, edit: dict, value: Optional[str]) -> str:
-        lines = text.splitlines()
+        lines = self._lines(text)
         span = self._ini_span(lines, edit["section"])
         if span is None:
             raise m.MultiplayerError("config_section_missing", f"[{edit['section']}] is not present in the emulator configuration")
@@ -171,10 +207,10 @@ class ConfigGuard:
             if index is not None:
                 del lines[index]
         elif index is None:
-            lines.insert(span[1], f"{edit['key']} = {value}")
+            self._insert_line(lines, span[1], f"{edit['key']} = {value}")
         else:
-            lines[index] = f"{lines[index].partition('=')[0].rstrip()} = {value}"
-        return "\n".join(lines) + ("\n" if lines else "")
+            lines[index] = f"{lines[index].partition('=')[0].rstrip()} = {value}" + self._ending(lines[index])
+        return "".join(lines)
 
     def _get(self, kind: str, text: str, edit: dict) -> Optional[str]:
         return self._kv_get(text, edit) if kind == "kv" else self._ini_get(text, edit)
@@ -232,13 +268,21 @@ class ConfigGuard:
             text = ""
         records = []
         for edit in clean_edits:
-            records.append({**edit, "original": self._get(kind, text, edit), "applied": edit["value"]})
+            records.append({**edit, "original": self._get(kind, text, edit), "applied": edit["value"],
+                            "original_line": self._original_line(kind, text, edit)})
+        updated = text
+        if not watch:
+            for edit in clean_edits:
+                updated = self._set(kind, updated, edit, edit["value"])
+        separator_added = bool(not watch and text and not text.endswith("\n") and
+                               len(self._lines(updated)) > len(self._lines(text)))
         backup = str(self._backup(session_id, target, text)) if existed else ""
 
         def journal(store: dict) -> None:
             entry = store.setdefault(session_id, {"session_id": session_id, "files": {}, "created_at": m.now_iso()})
             existing = entry["files"].get(str(target))
             if existing:
+                existing["separator_added"] = existing.get("separator_added", False) or separator_added
                 # A second apply to the same file keeps the first originals (the user's real values) and only
                 # moves the value we expect to find at restore time.
                 known = {(item["section"], item["key"]): item for item in existing["edits"]}
@@ -249,14 +293,15 @@ class ConfigGuard:
                     else:
                         previous["applied"] = item["applied"]
             else:
-                entry["files"][str(target)] = {"kind": kind, "backup": str(backup), "edits": records, "watch": watch}
+                # Track only a separator introduced by our writes. Watching a
+                # generated profile must not claim its generator's terminators.
+                tail = self._lines(text)[-1] if text and not text.endswith("\n") and not watch else None
+                entry["files"][str(target)] = {"kind": kind, "backup": str(backup), "edits": records, "watch": watch,
+                                              "unterminated_tail": tail, "separator_added": separator_added}
         self._journal.update(journal)  # write-ahead: recoverable even if the file write dies half way
         if watch:
             return {"file": target.name, "keys": [edit["key"] for edit in clean_edits], "watching": True}
         try:
-            updated = text
-            for edit in clean_edits:
-                updated = self._set(kind, updated, edit, edit["value"])
             self._atomic_write(target, updated)
             check = self._read(target) or ""
             for edit in clean_edits:
@@ -271,7 +316,8 @@ class ConfigGuard:
         self.backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         backup = self.backup_dir / f"{session_id}-{target.name}.bak"
         if not backup.exists():
-            backup.write_text(text, encoding="utf-8", errors="surrogateescape")
+            with backup.open("w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+                handle.write(text)
             os.chmod(backup, 0o600)
         return backup
 
@@ -335,8 +381,13 @@ class ConfigGuard:
                             if spec.get("watch") and current is None:
                                 unmatched.setdefault(path_text, {"kind": kind, "edits": []})["edits"].append(edit)
                             continue
-                        updated = self._set(kind, updated, edit, edit["original"])
+                        updated = self._restore_edit(kind, updated, edit)
                         result["restored"] += 1
+                    tail = spec.get("unterminated_tail")
+                    lines = self._lines(updated)
+                    if spec.get("separator_added") and tail is not None and lines and lines[-1] in (tail + "\n", tail + "\r\n"):
+                        lines[-1] = tail  # remove only the separator we needed to append session keys
+                        updated = "".join(lines)
                     if updated != text:
                         self._atomic_write(target, updated)
                     backup = Path(spec.get("backup") or "")
@@ -383,7 +434,7 @@ class ConfigGuard:
                     updated = text or ""
                     for edit in spec["edits"]:
                         if text is not None and self._get(spec["kind"], updated, edit) == edit["applied"]:
-                            updated = self._set(spec["kind"], updated, edit, edit["original"])
+                            updated = self._restore_edit(spec["kind"], updated, edit)
                         else:
                             waiting.append(edit)
                     if text is not None and updated != text:

@@ -16,7 +16,7 @@ from . import models as m
 from .adapters.base import CONTENT_HOST_ONLY
 from .core import EVENT_INVITATION, EVENT_SESSION
 from .matching import MAX_MATCH_QUERIES, level_note, level_satisfies
-from .sessions import launch_pending, next_free_slot, settle_live, settle_lobby
+from .sessions import launch_pending, next_free_slot, occupied, settle_live, settle_lobby
 from .store import add_event, replica_view, sanitize_session, require_same_identity
 
 try:
@@ -207,10 +207,15 @@ class ProtocolMixin:
         if reviewed is None:
             raise m.MultiplayerError("invitation_review_required", "Review the current invitation before accepting it.", 409)
         require_same_identity(sanitize_session(reviewed), s)
+        if occupied(s) > s["max_players"]:
+            raise m.MultiplayerError("session_full", "The lobby exceeds this mechanism's capacity. Ask the host to remove players.", 409)
+        slot = player.get("slot")
+        if slot is None or slot > s["max_players"]:
+            slot = next_free_slot(s)
         compat = payload.get("compat") if isinstance(payload.get("compat"), dict) else {}
         classification = compat.get("classification")
         controllers = payload.get("controllers")
-        player.update(status=m.P_JOINED, joined_at=m.now_iso(), slot=player.get("slot") or next_free_slot(s), error="", ready=False,
+        player.update(status=m.P_JOINED, joined_at=m.now_iso(), slot=slot, error="", ready=False,
                       controllers=controllers if isinstance(controllers, int) and not isinstance(controllers, bool) and 0 <= controllers <= 64 else None,
                       compat={"classification": classification if classification in m.COMPATIBILITY_CLASSES else m.UNKNOWN,
                               "reasons": [m.clean_text(reason, 300) for reason in (compat.get("reasons") or [])[:6]]
