@@ -453,17 +453,14 @@ class LifecycleMixin:
         except Exception as error:  # noqa: BLE001
             message = getattr(error, "message", None) or f"{type(error).__name__}: {error}"
             self._fail_guest_launch(session_id, message, stop_game=launched)
-            try:
-                self._guest_message(self.store.require(session_id), "launch_result", ok=False, error=message)
-            except m.MultiplayerError:
-                pass
 
     def _fail_guest_launch(self, session_id: str, message: str, *, stop_game: bool) -> None:
         with self.session_lock(session_id):
             # Persist the original failure first. A restoration backend outage
             # must leave a failed launch eligible for journal recovery.
             self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300),
-                                 pending_launch=None)
+                                 pending_launch=None,
+                                 recovery_response={"action": "launch_result", "ok": False, "error": m.clean_text(message, 300)})
             errors = []
             if stop_game:
                 try:
@@ -479,6 +476,26 @@ class LifecycleMixin:
                 errors.append(f"Configuration restoration: {error}")
             if errors:
                 self.store.set_local(session_id, cleanup_errors=errors)
+        self._flush_guest_recovery_response(session_id)
+
+    def _flush_guest_recovery_response(self, session_id: str) -> None:
+        """Retry a saved recovery decision over the usual authenticated guest channel.
+
+        Cleanup stands locally even if the host is offline. Keep the decision in
+        the session so housekeeping (including after another restart) can deliver it.
+        """
+        session = self.store.get(session_id)
+        response = (session.get("local") or {}).get("recovery_response") if session else None
+        if not response or self.local_role(session) != m.GUEST_ROLE:
+            return
+        try:
+            self._guest_message(session, **response)
+        except Exception:  # noqa: BLE001 - peer delivery must never prevent local cleanup
+            return
+        with self.session_lock(session_id):
+            current = self.store.get(session_id)
+            if current and (current.get("local") or {}).get("recovery_response") == response:
+                self.store.set_local(session_id, recovery_response=None)
 
     def _wait_for_host_port(self, address: str, port: int) -> None:
         waited = 0.0
@@ -575,10 +592,15 @@ class LifecycleMixin:
             session = self.store.get(session_id)
             if session is None or self.local_role(session) != m.GUEST_ROLE:
                 return
-            restored = self.restore_if_enabled(session_id)
             launch_status = "failed" if (session.get("local") or {}).get("launch_status") == "failed" else ""
             self.store.set_local(session_id, pending_launch=None, launch_status=launch_status, ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
                                  reopenable=bool(reopenable))
+            try:
+                restored = self.restore_if_enabled(session_id)
+            except Exception as error:  # noqa: BLE001 - retain journal for housekeeping without reopening participation
+                restored = {"errors": [f"Configuration restoration: {error}"]}
+            if restored.get("errors"):
+                self.store.set_local(session_id, cleanup_errors=restored["errors"])
             if not (session.get("local") or {}).get("archived"):
                 self.store.archive(session, "left" if "left" in reason.lower() else "ended")
                 self.store.set_local(session_id, archived=True)
@@ -630,6 +652,10 @@ class LifecycleMixin:
         local = session.get("local") or {}
         session_id = session["id"]
         now = m.now()
+        if self.local_role(session) == m.GUEST_ROLE and local.get("recovery_response"):
+            self._flush_guest_recovery_response(session_id)
+            session = self.store.require(session_id)
+            local = session.get("local") or {}
         if session["state"] == m.COMPLETED or local.get("ended"):
             ended = m.parse_time(local.get("ended_at"))
             if local.get("ended") and ended and now - ended > ENDED_REPLICA_TTL:
@@ -822,6 +848,16 @@ class LifecycleMixin:
                     if local.get("launch_status") == "launching":
                         self._fail_guest_launch(session_id, "The Drone restarted while launching.", stop_game=True)
                         summary["failed"] += 1
+                    elif local.get("launch_status") == "running" and self.guest_launches_game(session):
+                        if self.session_game_running(session):
+                            summary["resumed"] += 1
+                        else:
+                            # Reconcile immediately on restart, rather than wait
+                            # for the normal two-miss game-exit debounce.
+                            self.store.set_local(session_id, recovery_response={"action": "leave"})
+                            self.guest_cleanup(session_id, "The session game was not running after the Drone restarted.")
+                            self._flush_guest_recovery_response(session_id)
+                            summary["ended"] += 1
             except Exception:  # noqa: BLE001 - isolate each session
                 pass
         return summary

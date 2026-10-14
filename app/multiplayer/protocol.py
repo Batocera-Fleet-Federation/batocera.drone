@@ -344,7 +344,7 @@ class ProtocolMixin:
             self.guest_cleanup(session["id"], reason, reopenable=session["state"] == m.FAILED and not removed and mine is not None)
         elif session["state"] in m.PRE_START_STATES:
             # Back to the lobby (e.g. a retry): any earlier launch offer is void.
-            self.store.set_local(session["id"], pending_launch=None, launch_status="")
+            self.store.set_local(session["id"], pending_launch=None, launch_status="", recovery_response=None)
             local = session.get("local") or {}
             if local.get("ended") and local.get("reopenable") and mine is not None and mine["status"] == m.P_JOINED:
                 # The host retried a failed session this guest had joined: reopen its lobby (launch still needs confirmation).
@@ -377,7 +377,7 @@ class ProtocolMixin:
                 "received_at": m.now_iso(), "expires_at": (m.now() + LAUNCH_CONFIRM_WINDOW).isoformat(), "consumed": False,
                 "version": session["version"],
             }
-            self.store.set_local(session_id, pending_launch=plan, launch_status="awaiting_confirmation")
+            self.store.set_local(session_id, pending_launch=plan, launch_status="awaiting_confirmation", recovery_response=None)
         title = session["game"]["title"]
         self.audit(EVENT_INVITATION, "Multiplayer game ready to start", f"{session['host_name']} started {title}. Confirm to launch it here.",
                    {"session_id": session_id, "game": title}, bell=True)

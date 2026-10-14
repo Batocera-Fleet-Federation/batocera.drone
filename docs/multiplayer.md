@@ -403,6 +403,10 @@ a raw configuration key.
   retries failed publishes.
 * **Restart recovery** (`recover()`): restores orphaned journals, fails sessions that
   were `STARTING`, resumes ones whose game is still running, finishes `STOPPING`.
+  A guest whose automated session game has exited leaves and restores its settings
+  immediately. An interrupted guest launch reports failure to the host immediately;
+  undelivered recovery reports are retained locally and retried by housekeeping.
+  Manual and streaming participation is not inferred from a local emulator process.
 * **Cleanup failures**: adapter shutdown, game shutdown, relay cleanup and configuration
   restoration are attempted independently. Guest launch failures are saved before cleanup,
   so a restoration outage cannot leave a consumed offer stuck as launching. Restart recovery

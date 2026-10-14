@@ -161,3 +161,78 @@ class LaunchEvidenceRecoveryTests(SwarmCase):
         with mock.patch.object(self.g.guard, "pending", side_effect=sqlite3.OperationalError("database busy")):
             self.assertEqual(self.g.recover()["failed"], 1)
         self.assertEqual(self.g.store.require(sid)["local"]["launch_status"], "failed")
+
+
+class RestartParticipationTests(SwarmCase):
+    def test_guest_restart_with_missing_game_leaves_and_restores_immediately(self):
+        before = self.nodes["guest"].conf_text
+        sid = self.running()
+        self.g.launcher.active = {"rom_path": "/another-game.sfc", "pid": 99}
+        self.assertEqual(self.g.recover()["ended"], 1)
+        self.assertEqual(self.nodes["guest"].conf_text, before)
+        self.assertEqual(self.g.guard.pending(), {})
+        self.assertTrue(self.g.store.require(sid)["local"]["ended"])
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_LEFT)
+        self.assertEqual(self.g.launcher.active["pid"], 99)
+        self.assertIsNotNone(self.h.launcher.active)
+
+    def test_guest_restart_with_running_game_resumes_without_cleanup(self):
+        sid = self.running()
+        configured = self.nodes["guest"].conf_text
+        self.assertEqual(self.g.recover()["resumed"], 1)
+        self.assertEqual(self.nodes["guest"].conf_text, configured)
+        self.assertIn(sid, self.g.guard.pending())
+        self.assertEqual(self.g.launcher.exited, 0)
+        self.assertEqual(self.h.get_session(sid)["state"], m.RUNNING)
+
+    def test_interrupted_guest_launch_reports_failure_before_deadline(self):
+        sid = self.lobby()
+        self.h.start_session(sid)
+        self.g.store.set_local(sid, launch_status="launching")
+        self.assertEqual(self.g.recover()["failed"], 1)
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_FAILED)
+        self.assertEqual(self.h.get_session(sid)["state"], m.FAILED)
+        self.assertIn("restarted", self.g.store.require(sid)["local"]["launch_error"])
+        self.assertIsNone(self.g.store.require(sid)["local"]["recovery_response"])
+
+    def test_interrupted_launch_report_retries_after_host_returns(self):
+        from app.multiplayer.store import SessionStore
+        sid = self.lobby()
+        self.h.start_session(sid)
+        self.g.store.set_local(sid, launch_status="launching")
+        self.hub.offline.add("host")
+        self.g.recover()
+        self.assertTrue(self.g.store.require(sid)["local"]["recovery_response"])
+        self.g.store = SessionStore(self.g.settings)  # delivery intent survives rebuilding the store
+        self.hub.offline.clear()
+        self.g.tick()
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_FAILED)
+        self.assertEqual(self.h.get_session(sid)["state"], m.FAILED)
+        self.assertIsNone(self.g.store.require(sid)["local"]["recovery_response"])
+
+    def test_missing_game_cleanup_and_host_notification_survive_separate_outages(self):
+        import sqlite3
+        before = self.nodes["guest"].conf_text
+        sid = self.running()
+        self.g.launcher.active = None
+        self.hub.offline.add("host")
+        with mock.patch.object(self.g.guard, "restore", side_effect=sqlite3.OperationalError("journal busy")):
+            self.assertEqual(self.g.recover()["ended"], 1)
+        local = self.g.store.require(sid)["local"]
+        self.assertTrue(local["ended"])
+        self.assertEqual(local["recovery_response"]["action"], "leave")
+        self.assertIn(sid, self.g.guard.pending())
+        self.hub.offline.clear()
+        self.g.tick()
+        self.assertEqual(self.nodes["guest"].conf_text, before)
+        self.assertEqual(self.g.guard.pending(), {})
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_LEFT)
+        self.assertIsNotNone(self.h.launcher.active)
+
+    def test_restart_does_not_infer_manual_participation_from_a_local_process(self):
+        sid = self.running()
+        self.g.launcher.active = None
+        with mock.patch.object(self.g.adapter_map["retroarch"], "effective_automation", return_value="manual"):
+            self.assertEqual(self.g.recover()["ended"], 0)
+        self.assertFalse(self.g.store.require(sid)["local"].get("ended"))
+        self.assertIn(sid, self.g.guard.pending())
