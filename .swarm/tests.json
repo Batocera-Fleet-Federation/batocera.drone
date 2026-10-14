@@ -3116,11 +3116,43 @@
           "tests/test_streamdeck_content.py",
           "tests/test_unit.py",
           "ports-client/tests/test_http_client_integration.py",
+          "tests/test_integration_mock_server.py",
+          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_212_protected_harness_followups.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-212-protected-harness-followups",
+      "name": "Issue #212 out-of-scope follow-up: protected adversarial create_server harnesses still lack LAN worker stop",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
           "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
           "tests/adversarial/test_issue_152_media_keys_hold_uat.py",
           "tests/adversarial/test_issue_163_clone_auth_http_uat.py",
           "tests/adversarial/test_issue_165_held_identity_vpn_startup.py",
-          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py"
+          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py",
+          "tests/adversarial/test_issue_212_protected_harness_followups.py"
         ],
         "mounts": [],
         "servers": []
