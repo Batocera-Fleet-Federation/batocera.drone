@@ -3641,6 +3641,165 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_real_hold_gate_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-real-hold-gate-uat",
+      "name": "Issue #223 pair-by-address and discovered-peer pairing refuse a real identity hold with 503, not unreachable",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_223_real_hold_gate_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_hold_contract_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-hold-contract-boundaries",
+      "name": "Issue #223 discovered-peer pair documents the identity-hold 503 in OpenAPI",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/openapi_spec.py",
+          "tests/adversarial/test_issue_223_hold_contract_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_out_of_scope_peer_info_ungated.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-out-of-scope-peer-info-ungated",
+      "name": "Out of scope for #223: peer-info fetch is not gated by the identity hold",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_223_out_of_scope_peer_info_ungated.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_out_of_scope_discovered_pair_docs.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-out-of-scope-discovered-pair-docs",
+      "name": "Out of scope for #223: discovered-peer pair OpenAPI omits the 502 it returns",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/openapi_spec.py",
+          "tests/adversarial/test_issue_223_out_of_scope_discovered_pair_docs.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_out_of_scope_peer_rejection_500.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-out-of-scope-peer-rejection-500",
+      "name": "Out of scope for #223: a non-paired peer answer escapes the pairing helper as an unhandled 500",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_223_out_of_scope_peer_rejection_500.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
