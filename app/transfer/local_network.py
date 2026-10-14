@@ -483,63 +483,84 @@ def start_discovery_worker(
     """
 
     stop = stop_event or Event()
+    listener: list[Optional[socket.socket]] = [None]
 
     def run() -> None:
         sock: Optional[socket.socket] = None
         last_announce = 0.0
-        while not stop.is_set():
-            if not is_local_mode(settings):
-                if sock is not None:
-                    sock.close()
-                    sock = None
-                time.sleep(2)
-                continue
-            if sock is None:
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    if hasattr(socket, "SO_REUSEPORT"):
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-                    sock.bind(("", DISCOVERY_PORT))
-                    _join_multicast_group(sock)
-                    sock.settimeout(1.0)
-                except OSError:
+        try:
+            while not stop.is_set():
+                if not is_local_mode(settings):
                     if sock is not None:
                         sock.close()
-                    sock = None
-                    time.sleep(5)
+                        sock = None
+                        listener[0] = None
+                    stop.wait(2)
                     continue
-            now = time.monotonic()
-            if now - last_announce >= DISCOVERY_INTERVAL_SECONDS:
+                if sock is None:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                        listener[0] = sock
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        if hasattr(socket, "SO_REUSEPORT"):
+                            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                        sock.bind(("", DISCOVERY_PORT))
+                        _join_multicast_group(sock)
+                        sock.settimeout(1.0)
+                    except OSError:
+                        if sock is not None:
+                            sock.close()
+                        sock = None
+                        listener[0] = None
+                        stop.wait(5)
+                        continue
+                now = time.monotonic()
+                if now - last_announce >= DISCOVERY_INTERVAL_SECONDS:
+                    try:
+                        announce(settings, certificate_fingerprint())
+                    except OSError:
+                        pass
+                    last_announce = now
                 try:
-                    announce(settings, certificate_fingerprint())
-                except OSError:
-                    pass
-                last_announce = now
-            try:
-                raw, address = sock.recvfrom(65535)
-                payload = json.loads(raw.decode("utf-8"))
-                if not isinstance(payload, dict):
+                    raw, address = sock.recvfrom(65535)
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        continue
+                    peer = record_discovered_peer(settings, payload, address[0])
+                    if peer and on_discovery:
+                        on_discovery(peer)
+                except socket.timeout:
                     continue
-                peer = record_discovered_peer(settings, payload, address[0])
-                if peer and on_discovery:
-                    on_discovery(peer)
-            except socket.timeout:
-                continue
-            except (
-                OSError,
-                ValueError,
-                json.JSONDecodeError,
-                sqlite3.Error,
-                AttributeError,
-                TypeError,
-                OverflowError,
-                RecursionError,
-            ):
-                continue
-        if sock is not None:
-            sock.close()
+                except (
+                    OSError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    sqlite3.Error,
+                    AttributeError,
+                    TypeError,
+                    OverflowError,
+                    RecursionError,
+                ):
+                    continue
+        finally:
+            listener[0] = None
+            if sock is not None:
+                sock.close()
+
+    def close_discovery_socket() -> None:
+        current = listener[0]
+        if current is not None:
+            try:
+                current.close()
+            except OSError:
+                pass
+
+    def interrupt_on_stop() -> None:
+        stop.wait()
+        close_discovery_socket()
 
     thread = Thread(target=run, name="drone-local-discovery", daemon=True)
+    thread.close_discovery_socket = close_discovery_socket  # type: ignore[attr-defined]
+    Thread(target=interrupt_on_stop, name="drone-local-discovery-interrupt", daemon=True).start()
     thread.start()
     return thread
