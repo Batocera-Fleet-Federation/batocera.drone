@@ -3609,6 +3609,38 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_223_pair_by_address_hold_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-223-pair-by-address-hold-boundaries",
+      "name": "Issue #223 pair-by-address held identity is 503 at every gate and documented in OpenAPI",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_223_pair_by_address_hold_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
