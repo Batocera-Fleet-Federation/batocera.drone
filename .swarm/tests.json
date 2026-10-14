@@ -5023,6 +5023,44 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_mechanism_peer_compat_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-mechanism-peer-compat-uat",
+      "name": "Issue #240 peer-version mechanism selection, streaming fallback, and host-capability controls",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_mechanism_peer_compat_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/mechanism.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/adapters/retroarch.py",
+          "app/multiplayer/adapters/dolphin.py",
+          "app/multiplayer/adapters/ppsspp.py",
+          "app/multiplayer/adapters/switch.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
