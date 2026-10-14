@@ -391,6 +391,7 @@ class HttpRoutesTests(unittest.TestCase):
     def setUp(self):
         from app.drone_api import Settings, create_server
         from app.mock_data import seed_mock_userdata
+        from app.transfer.peer_workers import stop_local_network_workers
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -429,6 +430,8 @@ class HttpRoutesTests(unittest.TestCase):
             self.server.shutdown()
             self.server.server_close()
             thread.join(timeout=3)
+            # create_server() starts the LAN discovery listener against this test's state DB.
+            stop_local_network_workers()
         self.addCleanup(stop)
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/api/auth/login", method="POST",
                                          data=json.dumps({"username": "admin", "password": "changeme"}).encode(),

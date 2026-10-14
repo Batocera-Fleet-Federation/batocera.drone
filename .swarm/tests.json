@@ -3087,6 +3087,109 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_212_harness_teardown_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-212-harness-teardown-boundaries",
+      "name": "Issue #212 create_server harnesses must stop LAN workers before temp userdata removal",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/test_mcp_server.py",
+          "tests/test_media_keys.py",
+          "tests/test_streamdeck_content.py",
+          "tests/test_unit.py",
+          "ports-client/tests/test_http_client_integration.py",
+          "tests/test_integration_mock_server.py",
+          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_212_protected_harness_followups.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-212-protected-harness-followups",
+      "name": "Issue #212 out-of-scope follow-up: protected adversarial create_server harnesses still lack LAN worker stop",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py",
+          "tests/adversarial/test_issue_163_clone_auth_http_uat.py",
+          "tests/adversarial/test_issue_165_held_identity_vpn_startup.py",
+          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py",
+          "tests/adversarial/test_issue_212_protected_harness_followups.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_212_create_server_teardown_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-212-create-server-teardown-uat",
+      "name": "Issue #212 create_server HTTP shutdown is not a discovery join; stop then rmtree has no late WAL",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_212_create_server_teardown_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
