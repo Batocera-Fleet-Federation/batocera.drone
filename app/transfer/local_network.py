@@ -484,6 +484,25 @@ def start_discovery_worker(
 
     stop = stop_event or Event()
     listener: list[Optional[socket.socket]] = [None]
+    exited = Event()
+
+    def _close_socket(sock: Optional[socket.socket]) -> None:
+        if sock is None:
+            return
+        shutdown = getattr(sock, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _drop_socket(sock: Optional[socket.socket]) -> None:
+        listener[0] = None
+        _close_socket(sock)
 
     def run() -> None:
         sock: Optional[socket.socket] = None
@@ -491,10 +510,8 @@ def start_discovery_worker(
         try:
             while not stop.is_set():
                 if not is_local_mode(settings):
-                    if sock is not None:
-                        sock.close()
-                        sock = None
-                        listener[0] = None
+                    _drop_socket(sock)
+                    sock = None
                     stop.wait(2)
                     continue
                 if sock is None:
@@ -508,12 +525,13 @@ def start_discovery_worker(
                         _join_multicast_group(sock)
                         sock.settimeout(1.0)
                     except OSError:
-                        if sock is not None:
-                            sock.close()
+                        _drop_socket(sock)
                         sock = None
-                        listener[0] = None
                         stop.wait(5)
                         continue
+                    # Stop may have been signalled while bind ran; do not enter recvfrom.
+                    if stop.is_set():
+                        break
                 now = time.monotonic()
                 if now - last_announce >= DISCOVERY_INTERVAL_SECONDS:
                     try:
@@ -521,6 +539,8 @@ def start_discovery_worker(
                     except OSError:
                         pass
                     last_announce = now
+                if stop.is_set():
+                    break
                 try:
                     raw, address = sock.recvfrom(65535)
                     payload = json.loads(raw.decode("utf-8"))
@@ -531,8 +551,12 @@ def start_discovery_worker(
                         on_discovery(peer)
                 except socket.timeout:
                     continue
+                except OSError:
+                    # Closed from stop/interrupt, or the datagram socket is dead.
+                    _drop_socket(sock)
+                    sock = None
+                    continue
                 except (
-                    OSError,
                     ValueError,
                     json.JSONDecodeError,
                     sqlite3.Error,
@@ -543,21 +567,18 @@ def start_discovery_worker(
                 ):
                     continue
         finally:
-            listener[0] = None
-            if sock is not None:
-                sock.close()
+            _drop_socket(sock)
+            exited.set()
 
     def close_discovery_socket() -> None:
-        current = listener[0]
-        if current is not None:
-            try:
-                current.close()
-            except OSError:
-                pass
+        _close_socket(listener[0])
 
     def interrupt_on_stop() -> None:
         stop.wait()
-        close_discovery_socket()
+        # The worker may create the datagram socket after stop is first set.
+        # Keep interrupting until run() has entered its finally.
+        while not exited.wait(0.02):
+            close_discovery_socket()
 
     thread = Thread(target=run, name="drone-local-discovery", daemon=True)
     thread.close_discovery_socket = close_discovery_socket  # type: ignore[attr-defined]
