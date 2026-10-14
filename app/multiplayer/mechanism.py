@@ -17,12 +17,35 @@ CLASS_WEIGHT = {m.VERIFIED_COMPATIBLE: 5, m.LIKELY_COMPATIBLE: 4, m.EXPERIMENTAL
 MAX_LATENCY_WARN_MS = 120.0
 
 
+def version_conflicts(mechanism: str, host: dict, peer: dict, label: str) -> List[str]:
+    """Emulator/core version differences that make the peer's join-time validation refuse this mechanism.
+
+    Mirrors the adapters' own guest checks (RetroArch major.minor + core version, Dolphin exact version) so the
+    mismatch is known before a session is offered. Unreported versions are not treated as conflicts.
+    """
+    mine, theirs = host.get("emulator") or {}, (peer or {}).get("emulator") or {}
+    issues: List[str] = []
+    if mechanism == m.RETROARCH_NETPLAY:
+        a, b = mine.get("version", ""), theirs.get("version", "")
+        if a and b and a.split(".")[:2] != b.split(".")[:2]:
+            issues.append(f"{label}: RetroArch versions are incompatible (host {a}, {label} {b}).")
+        a, b = mine.get("core_version", ""), theirs.get("core_version", "")
+        if a and b and a != b:
+            issues.append(f"{label}: core versions differ (host {a}, {label} {b}).")
+    elif mechanism == m.DOLPHIN_NETPLAY:
+        a, b = mine.get("version", ""), theirs.get("version", "")
+        if a and b and a != b:
+            issues.append(f"{label}: the host and client are running incompatible Dolphin versions (host {a}, {label} {b}).")
+    return issues
+
+
 def evaluate_candidates(host_assessments: List[dict], peers: List[dict], *, streaming_enabled: bool = True) -> List[dict]:
     candidates = []
     for assessment in host_assessments:
         mechanism = assessment["mechanism"]
         blockers: List[str] = []
         warnings: List[str] = []
+        version_issues: List[str] = []
         if assessment["classification"] in (m.UNSUPPORTED, m.INCOMPATIBLE):
             blockers.extend(assessment["reasons"][:2] or [f"{assessment['adapter_name']} cannot run this game."])
         elif assessment["classification"] == m.REQUIRES_CONFIGURATION:
@@ -43,6 +66,8 @@ def evaluate_candidates(host_assessments: List[dict], peers: List[dict], *, stre
             if peer.get("reachable") is False:
                 warnings.append(f"{label} could not be reached to confirm compatibility.")
                 continue
+            if peer_assessment is not None and mechanism != m.REMOTE_STREAMING:
+                version_issues.extend(version_conflicts(mechanism, assessment, peer_assessment, str(label)))
             if mechanism == m.REMOTE_STREAMING:
                 if peer_assessment is None or peer_assessment.get("guest_ready") is False:
                     blockers.append(f"{label} does not have Moonlight installed.")
@@ -74,8 +99,20 @@ def evaluate_candidates(host_assessments: List[dict], peers: List[dict], *, stre
             "mechanism": mechanism, "label": m.MECHANISM_LABELS[mechanism], "adapter": assessment["adapter"],
             "adapter_name": assessment["adapter_name"], "classification": assessment["classification"],
             "automation": assessment["automation"], "usable": not blockers, "blockers": blockers[:6], "warnings": warnings[:6],
-            "max_players": assessment.get("max_players"), "assessment": assessment,
+            "max_players": assessment.get("max_players"), "assessment": assessment, "version_issues": version_issues[:4],
         })
+    # A version mismatch rules a native mechanism out only when another mechanism (streaming) can serve the group;
+    # otherwise it stays a warning and the guest is refused with the specific reason when it tries to join.
+    fallback = any(item["usable"] and not item["version_issues"] for item in candidates)
+    for item in candidates:
+        issues = item.pop("version_issues")
+        if not issues:
+            continue
+        if fallback:
+            item["blockers"] = (item["blockers"] + issues)[:6]
+            item["usable"] = False
+        else:
+            item["warnings"] = (item["warnings"] + issues)[:6]
     return candidates
 
 

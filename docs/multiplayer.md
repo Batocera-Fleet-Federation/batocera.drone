@@ -167,6 +167,8 @@ Mechanisms: `RETROARCH_NETPLAY`, `DOLPHIN_NETPLAY`, `PPSSPP_ADHOC`, `SWITCH_LDN`
 4. The reasoning is stored (`mechanism_reason`) and shown in the lobby, including
    which native options were ruled out and why.
 
+Peer emulator versions are compared up front (RetroArch major.minor and core version, Dolphin exact version). When another mechanism such as streaming can serve the group, a native mechanism whose version the peer cannot join is ruled out (also when forced); with no alternative it stays selectable with a warning and the guest is refused at join with the specific reason.
+
 Adding a player can never silently change the mechanism under players who already
 joined (`mechanism_change`, HTTP 409).
 
