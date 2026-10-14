@@ -41,7 +41,9 @@ from one giant `app/drone_api.py` into cohesive subpackages. `drone_api.py` is n
 `from app.drone_api import X` and the flat `python app/main.py` entrypoint both keep
 working. In flat-mode modules, import moved subpackages from their top-level package
 (for example, `from transfer import swarm_membership`); a bare module import will not
-find files nested under a subpackage. Layout:
+find files nested under a subpackage. Every `except ImportError` fallback must follow this
+(`from common.settings import Settings`, never `from settings import Settings`);
+`tests/test_module_import_modes.py` rejects bare nested-module names in any such fallback. Layout:
 
 - `common/` — settings, device_identity, hardware_identity + identity_provisioning (clone-safe identity), logging_setup, http_cache, fingerprint, auth,
   runtime_state (shared mutable Event/Lock singletons: `_ROM_METADATA_ACTIVE/_WAKE/_LOCK`,

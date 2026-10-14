@@ -22,7 +22,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 try:
     from .settings import Settings
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from settings import Settings  # type: ignore
+    from common.settings import Settings  # type: ignore
 
 try:
     from ..device import notifications as _notifications
