@@ -197,7 +197,10 @@ class RetroArchControl:
                     return {"status": "unavailable", "error": "RetroArch reports no loaded content."}
                 sock.send(command.encode("ascii") + b"\n")
         except OSError as error:
-            return {"status": "error", "error": f"RetroArch did not answer its command interface: {error}"}
+            # RetroArch reads network_cmd_* only at launch, so a game started before the
+            # Drone enabled the port keeps running without it until it is relaunched.
+            return {"status": "error", "error": "RetroArch did not answer its command interface "
+                    f"({error}). If the game was started before the Drone enabled it, relaunch the game."}
         return {"status": "ok", "message": f"Sent {command} to RetroArch."}
 
 

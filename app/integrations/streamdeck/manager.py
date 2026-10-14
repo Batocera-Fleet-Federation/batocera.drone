@@ -49,6 +49,7 @@ from .jobs import JobRegistry
 from .launch import LaunchGameCoordinator
 from .logs import log_event
 from .paths import CONTENT_DIRS, TOOLING_DIRS, StreamDeckPaths, atomic_write_json, lock_is_held, read_json
+from .retroarch_network import RetroArchNetworkConfig
 from .process import ProcessRunner
 from .scripts import ScriptStore
 
@@ -113,6 +114,7 @@ class StreamDeckIntegration(Integration):
         self.runner = runner or ProcessRunner()
         self.dependencies = dependencies or DependencyManager(self.paths, self.runner, self.python)
         self.config = ConfigStore(self.paths)
+        self.retroarch_network = RetroArchNetworkConfig(self.paths, getattr(settings, "userdata_root", Path("/userdata")))
         es_api = EmulationStationApi()
         self.game_runtime = game_runtime or GameRuntime(es_api=es_api)
         self.actions = BuiltInActionRegistry(control or BatoceraControl(self.runner, log=log_event), RetroArchControl(), self.game_runtime)
@@ -382,6 +384,7 @@ class StreamDeckIntegration(Integration):
         handle.progress("Creating configuration...")
         self.config.set_enabled(True)
         self._restart_failures = 0
+        retroarch = self._sync_retroarch_network()
         handle.progress("Starting Stream Deck service...")
         self.compile_runtime()
         if self.runtime_info()["running"]:
@@ -393,7 +396,22 @@ class StreamDeckIntegration(Integration):
         message = "Ready." if connected else "Ready. Waiting for a Stream Deck to be connected."
         handle.progress(message)
         log_event("integration-enabled", requested_by=requested_by, devices_connected=connected, usb_detected=len(detected))
-        return {"status": "ok", "message": message, "connected_devices": connected}
+        return {"status": "ok", "message": message, "connected_devices": connected, "retroarch_network": retroarch}
+
+    def _sync_retroarch_network(self) -> dict:
+        """Make sure RetroArch's localhost command port is on; never fail the caller over it."""
+        try:
+            return self.retroarch_network.ensure()
+        except OSError as error:
+            log_event("retroarch-network-failed", error=str(error))
+            return {"status": "error", "message": f"Could not enable RetroArch's command interface: {error}"}
+
+    def _restore_retroarch_network(self) -> dict:
+        try:
+            return self.retroarch_network.restore()
+        except OSError as error:
+            log_event("retroarch-network-restore-failed", error=str(error))
+            return {"status": "error", "message": f"Could not restore RetroArch's settings: {error}"}
 
     def _wait_for_runtime(self, *, expect_devices: bool, timeout: float = CONNECT_WAIT_SECONDS) -> int:
         deadline = time.monotonic() + timeout
@@ -415,8 +433,10 @@ class StreamDeckIntegration(Integration):
         try:
             self.config.set_enabled(False)
             self.stop_runtime()
+            retroarch = self._restore_retroarch_network()
             log_event("integration-disabled", requested_by=requested_by)
-            return {"status": "disabled", "message": "Stream Deck disabled. Profiles, images, and scripts were kept."}
+            return {"status": "disabled", "message": "Stream Deck disabled. Profiles, images, and scripts were kept.",
+                    "retroarch_network": retroarch}
         finally:
             self._lifecycle_lock.release()
 
@@ -449,6 +469,7 @@ class StreamDeckIntegration(Integration):
         self.compile_runtime(config)
         self._restart_failures = 0
         connected = 0
+        retroarch = self._sync_retroarch_network() if config["enabled"] else None
         if config["enabled"]:
             handle.progress("Starting Stream Deck service...")
             self.start_runtime()
@@ -457,7 +478,7 @@ class StreamDeckIntegration(Integration):
         handle.progress("Ready.")
         log_event("integration-repaired", reinstall=reinstall, requested_by=requested_by, devices_connected=connected)
         return {"status": "ok", "reinstalled": reinstall, "connected_devices": connected,
-                "config_warnings": self.config.last_warnings}
+                "config_warnings": self.config.last_warnings, "retroarch_network": retroarch}
 
     def remove(self, *, include_configuration: bool = False, requested_by: str = "") -> dict:
         self._acquire_lifecycle("An install or repair is in progress; try again when it finishes.")
@@ -467,6 +488,7 @@ class StreamDeckIntegration(Integration):
             if self.config.exists():
                 self.config.set_enabled(False)
             self.stop_runtime()
+            self._restore_retroarch_network()
             removed: List[str] = []
             if include_configuration:
                 existed = self.paths.remove_root(self.expected_root)
@@ -678,16 +700,17 @@ class StreamDeckIntegration(Integration):
         ]
         self.images.prune(image_references(config))
         log_event("configuration-apply", requested_by=requested_by, generation=document["generation"], problems=len(problems))
+        retroarch = self._sync_retroarch_network() if config["enabled"] else None
         if not config["enabled"]:
-            return {"status": "saved", "applied": False, "problems": problems,
+            return {"status": "saved", "applied": False, "problems": problems, "retroarch_network": retroarch,
                     "message": "Saved. Enable Stream Deck to push the configuration to the device."}
         if not self.runtime_info()["running"]:
-            return {"status": "saved", "applied": False, "problems": problems,
+            return {"status": "saved", "applied": False, "problems": problems, "retroarch_network": retroarch,
                     "message": "Saved. The runtime is not running; it will load this configuration when it starts."}
         result = self.send_command("reload", wait=8.0)
         applied = result.get("status") == "ok"
         return {"status": "applied" if applied else "saved", "applied": applied, "problems": problems,
-                "devices": result.get("devices"),
+                "devices": result.get("devices"), "retroarch_network": retroarch,
                 "message": "Applied to the Stream Deck." if applied else "Saved; the runtime did not confirm the update yet."}
 
     def send_command(self, operation: str, *, device_id: str = "", key: Optional[int] = None,

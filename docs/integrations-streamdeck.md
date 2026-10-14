@@ -241,7 +241,14 @@ confirmation_required, compatibility, `availability(context)`, `validate`,
 
 Pause/save/load read the active RetroArch process's own config files for
 `network_cmd_enable`/`network_cmd_port` and verify `GET_STATUS` reports loaded
-content before sending; other emulators report "unavailable" with a reason
+content before sending. Batocera ships with the command port off, so the Drone turns it
+on itself (`streamdeck/retroarch_network.py`): when the integration is enabled, a button is
+saved, or repair runs, it sets `network_cmd_enable = "true"` and
+`network_cmd_bind_address = "127.0.0.1"` in `system/configs/retroarch/retroarchcustom.cfg`,
+recording each prior value in `state/retroarch-network.json`. Disabling or removing the
+integration restores those values and removes only the keys it added. RetroArch reads these
+keys at launch, so a game that was already running needs a relaunch before the buttons work.
+Localhost-only binding keeps the command port off the LAN; other emulators report "unavailable" with a reason
 (no blind keystroke injection). Unknown IDs, unavailable actions, and unconfirmed
 dangerous actions return structured `error`/`unavailable`/`confirmation-required`
 results and are logged. To add an action: register another `BuiltInAction` in

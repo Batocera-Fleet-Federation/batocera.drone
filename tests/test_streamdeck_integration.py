@@ -736,3 +736,74 @@ class DependencyTests(TemporaryPaths):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RetroArchNetworkConfigTests(TemporaryPaths):
+    def setUp(self):
+        super().setUp()
+        from app.integrations.streamdeck.retroarch_network import RetroArchNetworkConfig
+
+        self.userdata = self.root / 'userdata'
+        self.cfg = self.userdata / 'system' / 'configs' / 'retroarch' / 'retroarchcustom.cfg'
+        self.cfg.parent.mkdir(parents=True)
+        self.network = RetroArchNetworkConfig(self.paths, self.userdata)
+
+    def test_ensure_adds_only_the_required_keys_and_keeps_other_lines(self):
+        self.cfg.write_text('video_driver = "gl"\nnetwork_cmd_port = "55355"\n', encoding='utf-8')
+
+        result = self.network.ensure()
+
+        self.assertEqual(result['status'], 'changed')
+        text = self.cfg.read_text(encoding='utf-8')
+        self.assertIn('video_driver = "gl"', text)
+        self.assertIn('network_cmd_port = "55355"', text)
+        self.assertIn('network_cmd_enable = "true"', text)
+        self.assertIn('network_cmd_bind_address = "127.0.0.1"', text)
+
+    def test_ensure_is_idempotent_and_does_not_rewrite_the_file(self):
+        self.cfg.write_text('network_cmd_enable = "true"\nnetwork_cmd_bind_address = "127.0.0.1"\n', encoding='utf-8')
+
+        self.assertEqual(self.network.ensure()['status'], 'ok')
+        self.assertEqual(self.network.ensure()['status'], 'ok')
+        self.assertFalse(self.network.state_path.exists())
+
+    def test_restore_puts_back_prior_values_and_removes_added_keys(self):
+        self.cfg.write_text('network_cmd_bind_address = "0.0.0.0"\nvideo_driver = "gl"\n', encoding='utf-8')
+        self.network.ensure()
+
+        self.network.restore()
+
+        text = self.cfg.read_text(encoding='utf-8')
+        self.assertIn('network_cmd_bind_address = "0.0.0.0"', text)
+        self.assertNotIn('network_cmd_enable', text)
+        self.assertIn('video_driver = "gl"', text)
+        self.assertFalse(self.network.state_path.exists())
+
+    def test_restore_second_time_is_a_no_op(self):
+        self.cfg.write_text('video_driver = "gl"\n', encoding='utf-8')
+        self.network.ensure()
+        self.network.restore()
+        before = self.cfg.read_text(encoding='utf-8')
+
+        self.assertEqual(self.network.restore()['status'], 'ok')
+        self.assertEqual(self.cfg.read_text(encoding='utf-8'), before)
+
+    def test_ensure_waits_for_retroarch_to_create_its_config(self):
+        result = self.network.ensure()
+
+        self.assertEqual(result['status'], 'pending')
+        self.assertFalse(self.cfg.exists())
+
+    def test_enable_and_disable_drive_the_retroarch_settings(self):
+        self.cfg.write_text('video_driver = "gl"\n', encoding='utf-8')
+        settings = SimpleNamespace(roms_root=self.root / 'roms', userdata_root=self.userdata)
+        manager = StreamDeckIntegration(settings, FakeRepository(self.root), paths=self.paths, runner=FakeRunner(),
+                                        game_runtime=FakeRuntime(None), launcher=FakeLauncher(),
+                                        usb_detector=lambda: [])
+
+        manager.config.set_enabled(True)
+        manager.apply()
+        self.assertIn('network_cmd_enable = "true"', self.cfg.read_text(encoding='utf-8'))
+
+        manager.disable()
+        self.assertNotIn('network_cmd_enable', self.cfg.read_text(encoding='utf-8'))
