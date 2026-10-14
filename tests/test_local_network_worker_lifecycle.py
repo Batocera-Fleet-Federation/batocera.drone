@@ -79,6 +79,19 @@ class LocalNetworkWorkerLifecycleTests(unittest.TestCase):
         discovery.join.assert_called_once_with(1.0)
         self.assertIsNone(peer_workers._LOCAL_NETWORK_DISCOVERY)
 
+    def test_running_flag_clears_after_direct_stop(self) -> None:
+        # create_server latches its start once per process; the live-generation
+        # check is what lets a later create_server restart after a teardown stop.
+        with mock.patch.object(peer_workers, "Thread"), \
+                mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
+                mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True}), \
+                mock.patch.object(local_network, "start_discovery_worker", return_value=mock.Mock()):
+            self.assertFalse(peer_workers.local_network_workers_running())
+            peer_workers._start_local_network_workers(mock.Mock())
+            self.assertTrue(peer_workers.local_network_workers_running())
+            peer_workers.stop_local_network_workers(timeout=1.0)
+        self.assertFalse(peer_workers.local_network_workers_running())
+
     def test_second_start_does_not_orphan_first_discovery_thread(self) -> None:
         first = mock.Mock()
         second = mock.Mock()
