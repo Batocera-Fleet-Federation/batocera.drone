@@ -118,8 +118,12 @@ class CompatibilityDatabase:
     # ------------------------------------------------------------------ writes
     def record_session_result(self, *, system: str, title_key: str, title: str, mechanism: str, config_fp: str,
                               emulator_version: str, success: bool, max_players: Optional[int] = None,
-                              failure: str = "") -> dict:
-        """Remember how a real session went. Counts per tested configuration, never global."""
+                              failure: str = "", gameplay_evidence: bool = True) -> dict:
+        """Remember a confirmed play result, or a diagnostic without compatibility weight.
+
+        Launcher/network/restart failures are orchestration diagnostics, not
+        observations of gameplay. Only confirmed play changes the evidence counts.
+        """
         key = record_key(system, title_key)
 
         def apply(doc: dict) -> dict:
@@ -136,21 +140,24 @@ class CompatibilityDatabase:
                 record["verifiedEmulatorVersions"] = []
                 record["lastValidated"] = None
                 record["source"] = "local"
-            evidence = record["mechanisms"].setdefault(mechanism, {"compatibility": m.UNKNOWN, "tested": {}})
-            tested = evidence["tested"].setdefault(config_fp, {"successes": 0, "failures": 0, "emulator_version": m.clean_version(emulator_version)})
-            tested["successes" if success else "failures"] += 1
-            tested["last"] = m.now_iso()
+            observed_at = m.now_iso()
+            if gameplay_evidence:
+                evidence = record["mechanisms"].setdefault(mechanism, {"compatibility": m.UNKNOWN, "tested": {}})
+                tested = evidence["tested"].setdefault(config_fp, {"successes": 0, "failures": 0, "emulator_version": m.clean_version(emulator_version)})
+                tested["successes" if success else "failures"] += 1
+                tested["last"] = observed_at
             if max_players:
                 record["maximumPlayers"] = max(int(record.get("maximumPlayers") or 0), int(max_players))
-            if success:
-                record["lastValidated"] = tested["last"]
+            if success and gameplay_evidence:
+                record["lastValidated"] = observed_at
                 version = m.clean_version(emulator_version)
                 if version and version not in record["verifiedEmulatorVersions"]:
                     record["verifiedEmulatorVersions"].append(version)
                     del record["verifiedEmulatorVersions"][:-10]
             elif failure:
                 issues = record["knownIssues"]
-                issues.append({"at": tested["last"], "config": config_fp, "detail": m.clean_text(failure, 300)})
+                issues.append({"at": observed_at, "config": config_fp, "detail": m.clean_text(failure, 300),
+                               "kind": "gameplay" if gameplay_evidence else "orchestration"})
                 del issues[:-MAX_ISSUES]
             if len(records) > MAX_RECORDS:
                 oldest = sorted(records, key=lambda name: records[name].get("lastValidated") or "")[: len(records) - MAX_RECORDS]

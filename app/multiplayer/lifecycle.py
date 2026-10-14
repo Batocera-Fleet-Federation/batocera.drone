@@ -332,7 +332,7 @@ class LifecycleMixin:
             self.compat.record_session_result(
                 system=session["game"]["system"], title_key=m.normalize_title(session["game"]["rom_name"]), title=session["game"]["title"],
                 mechanism=session["mechanism"], config_fp=(session.get("local") or {}).get("tested_config_fingerprint") or "unknown",
-                emulator_version=emulator.get("version", ""), success=False, failure=message)
+                emulator_version=emulator.get("version", ""), success=False, failure=message, gameplay_evidence=False)
         except Exception:  # noqa: BLE001 - diagnostics must not mask the real failure
             pass
 
@@ -377,6 +377,25 @@ class LifecycleMixin:
             raise m.MultiplayerError("adapter_disabled", f"{adapter.name} is disabled in Multiplayer settings.", 409)
 
     # ------------------------------------------------------------ guest launch
+    def _require_live_launch_host(self, session: dict, plan: dict) -> None:
+        """A persisted offer is consent to join a live host, not offline launch authority.
+
+        Recheck through the pinned peer channel both at confirmation and in the
+        queued worker. An unavailable host leaves an unconsumed offer retryable;
+        a known closed/lobby session voids it. Never infer this from an open game port.
+        """
+        try:
+            body = self.network.get(self.host_peer(session), f"/status?session={session['id']}", timeout=4.0)
+        except Exception as error:
+            raise m.MultiplayerError("host_unreachable", "Could not confirm that the host is still starting this session. Try again when it is reachable.", 409) from error
+        remote = body.get("session") if isinstance(body, dict) else None
+        if (not isinstance(remote, dict) or remote.get("known") is not True or
+                remote.get("state") not in m.LIVE_STATES or
+                remote.get("player_status") not in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_FAILED, m.P_UNREACHABLE) or
+                not isinstance(remote.get("version"), int) or remote["version"] < plan.get("version", 0)):
+            self.store.set_local(session["id"], pending_launch=None, launch_status="expired")
+            raise m.MultiplayerError("launch_expired", "The host is no longer starting this session for you. Ask it for a new launch offer.", 409)
+
     def confirm_launch(self, session_id: str, replace_running_game: bool = False) -> dict:
         self.require_enabled()
         replace = m.clean_bool(replace_running_game, "replace_running_game")
@@ -391,6 +410,7 @@ class LifecycleMixin:
             if expiry and expiry < m.now():
                 self.store.set_local(session_id, pending_launch=None, launch_status="expired")
                 raise m.MultiplayerError("launch_expired", "The launch offer expired. Ask the host to retry.", 409)
+            self._require_live_launch_host(session, plan)
             adapter = self.adapter_map.get(session["emulator"]["adapter"])
             if adapter is None:
                 raise m.MultiplayerError("unknown_adapter", "This Drone cannot take part in that mechanism.", 409)
@@ -418,6 +438,7 @@ class LifecycleMixin:
                 plan = local.get("pending_launch")
                 if local.get("ended") or session["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED, m.READY) or not plan:
                     return  # removed, ended, or cancelled while the worker was queued
+                self._require_live_launch_host(session, plan)
                 adapter = self.adapter_map[session["emulator"]["adapter"]]
                 adapter.refresh()
                 verdict = self.validate_for_join(session)

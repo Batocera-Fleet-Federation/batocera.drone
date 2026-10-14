@@ -292,7 +292,10 @@ namespace of the state DB, works offline, tiny bundled seed in
   create a new session. This check also runs when a queued launch worker starts.
   `VERIFIED_COMPATIBLE` is reported only while the current configuration matches a
   tested one with more successes than failures — one success is never universal proof.
-* Failed starts record a failure diagnostic automatically.
+* Failed starts record an orchestration diagnostic automatically, without changing
+  gameplay success/failure counts. A launcher outage, missed confirmation or Drone
+  restart does not establish that a game is incompatible. A user-confirmed **It
+  didn't** result after play still counts against that tested configuration.
 * Reports shared between Drones (`GET /peer/multiplayer/compatibility`, imported via
   *Multiplayer → compatibility import*) keep their `peer:<id>` attribution, never
   overwrite what this machine observed, and are capped below verified. The first local
@@ -395,6 +398,11 @@ a raw configuration key.
 * **Timeouts**: invitations (15 min), sessions (4 h default), launch confirmation
   window (5 min), launch deadline (120 s), bounded retries (3), bounded waits for the
   emulator to start/listen.
+* **Launch offers**: confirmation checks the host's current session and membership
+  over the existing pinned peer channel. Queued guest workers check again before
+  applying configuration or launching. A failed/ended host or a return to the lobby
+  voids the offer; an unreachable host blocks confirmation until it answers. A
+  guest restart can retain an unconfirmed offer while the host is still starting.
 * **Housekeeping** (`multiplayer/worker.py`, one daemon thread, 10 s sweep): expires
   invitations/sessions, probes silent players (→ `unreachable`, session `DEGRADED`,
   recoverable), ends a guest's session when the host stays unreachable for 2 minutes

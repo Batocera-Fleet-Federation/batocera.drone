@@ -89,7 +89,8 @@ class ProtocolMixin:
         if session_id:
             session = self.store.get(m.clean_session_id(session_id))
             if session and caller_id in session["players"] and not (session.get("local") or {}).get("ended"):
-                body["session"] = {"known": True, "state": session["state"], "version": session["version"]}
+                body["session"] = {"known": True, "state": session["state"], "version": session["version"],
+                                   "player_status": session["players"][caller_id]["status"]}
                 body["session_game_running"] = self.session_game_running(session)
                 self.store.set_local(session["id"], **self._seen_patch(session, caller_id))
         return body
