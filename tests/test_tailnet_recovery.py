@@ -79,7 +79,7 @@ class TailnetRecoveryTests(unittest.TestCase):
              mock.patch.object(peer_workers._local_network, "start_discovery_worker", side_effect=RuntimeError("stop setup")):
             with self.assertRaisesRegex(RuntimeError, "stop setup"):
                 peer_workers._start_local_network_workers(mock.Mock())
-        with mock.patch.object(peer_workers.time, "sleep", side_effect=[None, RuntimeError("stop loop")]), \
+        with mock.patch.object(peer_workers, "_wait_for_generation_stop", side_effect=[False, RuntimeError("stop loop")]), \
              mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True}), \
              mock.patch.object(peer_workers, "_repair_tailnet_data_path") as repair:
             with self.assertRaisesRegex(RuntimeError, "stop loop"):

@@ -30,11 +30,17 @@ _LOCAL_NETWORK_STOP: Optional[Event] = None
 _LOCAL_NETWORK_DISCOVERY: Optional[Thread] = None
 
 
-def stop_local_network_workers(timeout: float = 2.0) -> None:
-    """Signal the local-network workers to stop and join the discovery listener.
+def _wait_for_generation_stop(stop: Event, interval: float) -> bool:
+    """Wait for a worker generation to stop, returning ``True`` when it has."""
+    return stop.wait(interval)
 
-    The health loop sleeps between passes, so it is only signalled: once it wakes
-    it sees the event and returns before touching the state DB.
+
+def stop_local_network_workers(timeout: float = 2.0) -> None:
+    """Signal the current local-network generation to stop.
+
+    Worker loops wait on the generation event, so signalling it retires their
+    pending poll waits immediately.  Discovery additionally needs its socket
+    closed before it can be joined.
     """
     global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
     if _LOCAL_NETWORK_STOP is not None:
@@ -61,8 +67,7 @@ def _start_local_network_workers(settings: Settings) -> None:
 
     def tailnet_watchdog() -> None:
         interval = max(30, int(os.environ.get("DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS", "60")))
-        while True:
-            time.sleep(interval)
+        while not _wait_for_generation_stop(stop, interval):
             if not tailnet_status().get("running"):
                 ensure_tailnet_networking(settings)
             else:
@@ -77,8 +82,7 @@ def _start_local_network_workers(settings: Settings) -> None:
         # with no operator action. A separate thread keeps peer timeouts from
         # delaying the watchdog's data-path repair.
         interval = max(60, int(os.environ.get("DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS", "300")))
-        while True:
-            time.sleep(interval)
+        while not _wait_for_generation_stop(stop, interval):
             try:
                 status = tailnet_status()
                 if status.get("installed") and not status.get("enrolled"):

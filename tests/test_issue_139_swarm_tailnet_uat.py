@@ -113,7 +113,7 @@ class TailnetBootstrapRetryTests(unittest.TestCase):
 
     def _run_one_pass(self, status, bootstrap=None):
         bootstrap = bootstrap or mock.Mock(return_value=False)
-        with mock.patch.object(peer_workers.time, "sleep", side_effect=[None, RuntimeError("stop loop")]), \
+        with mock.patch.object(peer_workers, "_wait_for_generation_stop", side_effect=[False, RuntimeError("stop loop")]), \
                 mock.patch.object(peer_workers, "tailnet_status", return_value=status), \
                 mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm", bootstrap):
             with self.assertRaisesRegex(RuntimeError, "stop loop"):
@@ -132,7 +132,7 @@ class TailnetBootstrapRetryTests(unittest.TestCase):
 
     def test_bootstrap_failure_does_not_kill_the_retry_loop(self):
         bootstrap = mock.Mock(side_effect=OSError("peer exploded"))
-        with mock.patch.object(peer_workers.time, "sleep", side_effect=[None, None, RuntimeError("stop loop")]), \
+        with mock.patch.object(peer_workers, "_wait_for_generation_stop", side_effect=[False, False, RuntimeError("stop loop")]), \
                 mock.patch.object(peer_workers, "tailnet_status", return_value={"installed": True, "enrolled": False}), \
                 mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm", bootstrap):
             with self.assertRaisesRegex(RuntimeError, "stop loop"):
@@ -140,12 +140,12 @@ class TailnetBootstrapRetryTests(unittest.TestCase):
         self.assertEqual(bootstrap.call_count, 2)
 
     def test_interval_is_configurable_with_a_floor(self):
-        sleeps = []
+        waits = []
         with mock.patch.dict("os.environ", {"DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS": "5"}), \
-                mock.patch.object(peer_workers.time, "sleep", side_effect=lambda s: (sleeps.append(s), (_ for _ in ()).throw(RuntimeError("stop")))[0]):
+                mock.patch.object(peer_workers, "_wait_for_generation_stop", side_effect=lambda stop, interval: (waits.append(interval), (_ for _ in ()).throw(RuntimeError("stop")))[0]):
             with self.assertRaisesRegex(RuntimeError, "stop"):
                 self._retry_target()()
-        self.assertEqual(sleeps, [60])
+        self.assertEqual(waits, [60])
 
 
 class OfflineReasonTests(unittest.TestCase):
