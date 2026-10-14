@@ -292,8 +292,9 @@ class ProtocolMixin:
         existing = self.store.invitation(snapshot["id"])
         if existing and existing["host_id"] != caller_id:
             raise m.MultiplayerError("session_exists", "That invitation id belongs to another host.", 409)
-        # A fresh host message may renew an invitation that lapsed or was withdrawn; an accepted/declined one stays as the user left it.
-        renewing = bool(existing) and existing["status"] in ("expired", "cancelled") and replay != "duplicate"
+        # A new host message (not a replay) may ask again after the guest left, declined,
+        # or let the invitation lapse. An invitation the guest accepted and is still in is left alone.
+        renewing = bool(existing) and replay != "duplicate" and self._invitation_reopenable(existing, snapshot["id"])
         if replay == "duplicate" or (existing and existing["status"] != "pending" and not renewing):
             return {"status": (existing or {}).get("status", "pending"), "duplicate": True}
         pending = [item for item in self.store.invitations() if item["status"] == "pending"]
@@ -318,6 +319,25 @@ class ProtocolMixin:
             self._spawn(lambda: self._auto_accept(snapshot["id"]), f"multiplayer-auto-accept-{snapshot['id'][:8]}")
             status = "auto_accept_pending"
         return {"status": status}
+
+    def _invitation_reopenable(self, existing: dict, session_id: str) -> bool:
+        """Whether a fresh invite should become pending again for this machine.
+
+        ``expired`` and ``cancelled`` lapsed without a decision still standing.
+        ``declined`` was an answer to the previous ask; Invite Peer is a new ask.
+        ``accepted`` reopens only after this machine has left that membership.
+        Accepting the old invitation, with no new invite, does not rejoin.
+        """
+        status = existing.get("status")
+        if status in ("expired", "cancelled", "declined"):
+            return True
+        if status != "accepted":
+            return False
+        owned = self.store.get(session_id)
+        if owned is None or (owned.get("local") or {}).get("ended"):
+            return True
+        mine = (owned.get("players") or {}).get(self.me) or {}
+        return mine.get("status") in (m.P_LEFT, m.P_REMOVED, m.P_DECLINED)
 
     def _auto_accept(self, session_id: str) -> None:
         try:
@@ -515,7 +535,11 @@ class ProtocolMixin:
         replica = self.store.adopt_replica(response, invitation["host_id"],
                                            {"role": m.GUEST_ROLE, "game_path": str(path) if path else "",
                                             "rom_name": local_game["rom_name"] if local_game else "", "pending_launch": None,
-                                            "tested_config_fingerprint": verdict["tested_config_fingerprint"]})
+                                            "tested_config_fingerprint": verdict["tested_config_fingerprint"],
+                                            # A renewed invite after leave must not keep the departed replica closed.
+                                            "ended": False, "ended_at": "", "ended_reason": "", "reopenable": False,
+                                            "archived": False, "launch_status": "", "launch_error": "",
+                                            "game_launched": False, "game_misses": 0, "host_unreachable_since": ""})
         self.store.update_invitation(session_id, status="accepted")
         self.audit(EVENT_SESSION, "Joined a multiplayer session", f"Joined {replica['game']['title']} hosted by {replica['host_name']}.",
                    {"session_id": session_id, "host_id": invitation["host_id"]})

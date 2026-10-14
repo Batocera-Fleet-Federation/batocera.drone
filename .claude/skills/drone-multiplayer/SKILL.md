@@ -36,7 +36,9 @@ Decentralised multiplayer on the existing swarm. No hub, no account. Read
 2. Host is the single authority; guests only *request* (`respond`). Snapshots move forward by `version`; host
    mutations go through `SessionStore.mutate`. Never write session state around it.
 3. A guest never launches, and never has a running game closed, because a peer asked. `peer_launch` only stores a
-   pending offer. `game_running` + `replace_running_game` is the only way to replace a game, on the machine concerned.
+   pending offer. Replacing a *different* foreground game needs `replace_running_game` on this machine. The session
+   ROM already in the foreground is participation: confirm it without exiting that process. The host still asks
+   before relaunching its own already-open ROM, because Netplay settings are applied by launching again.
 4. The guest dials the address *it* already uses for the host (`NetworkService.host_address`), never one from a message,
    and writes per-game keys with **its own** ROM file name (`local.rom_name`).
 5. Acceptance responses must match the reviewed invitation (`require_same_identity`) and confirm local guest membership.
@@ -65,6 +67,12 @@ matrix and "Manual hardware validation" in sync with reality.
 
 * Name clash avoided on purpose: `peer_health()` (stored health checks) vs `peer_status()` (inbound endpoint).
 * `FAILED` may only move to `STOPPING`/`CONFIGURING`; retry therefore does two mutations (reset, then `settle_lobby`).
+  A failed host session stays retryable and still counts as active until the user ends it or hosts a different game.
+  That new `create_session` ends the failed one first (`STOPPING` → `COMPLETED`) so it no longer holds the only slot.
+  The same `client_request_id` still returns the failed session instead of replacing it.
+* A fresh invite (`message_id` not a replay) reopens `expired`, `cancelled`, `declined`, and `accepted` after the
+  guest has left (`ended` or left/removed/declined). Accepting the old invitation without that invite does not rejoin.
+  Do not reopen an `accepted` invitation while the guest is still in the lobby.
 * Lobby states are interchangeable via `settle_lobby`; `CREATED` is never re-entered.
 * Live roster health is `settle_live` (leave/remove are not `DEGRADED`). Launch offers are waves (`local.launch_wave`); a `launch_result` success must carry the current wave before the deadline.
 * Existing tests assert exact literals in `drone.js` (e.g. the `adminLinks` array) — add to such structures instead of editing the literal.
@@ -84,7 +92,9 @@ matrix and "Manual hardware validation" in sync with reality.
   Host process ownership includes the detected PID so ending cannot kill a later game at the same ROM path.
 - Server close joins its owned multiplayer housekeeping worker; each worker generation has its own stop event.
 - PPSSPP must inspect configgen preservation before applying ini edits/launching. Uninspected or overriding builds
-  remain manual. A Dolphin nogui binary alone cannot provide the GUI Netplay lobby.
+  remain manual. `host_capable` / `host_block` on the host assessment stop auto-selection (and a forced choice) when
+  `ppsspp.ini` has no `EnableAdhocServer` key; a guest with that build can still join a host that has the key.
+  `EnableAdhocServer = False` means the key exists. A Dolphin nogui binary alone cannot provide the GUI Netplay lobby.
 - Sunshine owns pairing, input and streams. Drone cannot revoke its pairings, enforce its gamepad slots or stop its
   existing streams; the UI must say so. Drone's privacy disable only blocks new streaming invitations/launches.
 - Unknown game capability needs the Advanced selection, not an automatic recommendation.

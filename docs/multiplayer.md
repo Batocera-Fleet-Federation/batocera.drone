@@ -129,7 +129,11 @@ sources, libretro core info) and cached for 30 s.
   versions"*) when versions differ. Game ID is read only from plain `.iso/.gcm`;
   other containers (RVZ/WIA/GCZ/WBFS) are matched as files with full SHA-256 equality.
 * **PPSSPP** — PSP titles differ widely; none is marked verified until a session
-  you confirm. The PRO ad hoc server port is 27312. Settings are global in PPSSPP, so
+  you confirm. Hosting needs the `EnableAdhocServer` key in `ppsspp.ini` (the build
+  can run the ad hoc server). A build that only has `EnableWlan` and `ProAdhocServer`
+  can join a host but is not auto-selected, and cannot be forced, as the host
+  mechanism. A stored value of `False` still counts: the key is present, and the
+  session turns the server on for the host. The PRO ad hoc server port is 27312. Settings are global in PPSSPP, so
   the `[Network]` keys change for the session and are restored afterwards **only if**
   installed configgen sources are readable and do not overwrite those networking
   keys. Otherwise Drone gives manual setup instructions and performs no launch/edit.
@@ -180,7 +184,10 @@ joined (`mechanism_change`, HTTP 409).
    taken slot swaps), remove players and watch connection state/latency. Set
    yourself ready.
 5. When everyone is ready, **Play Together**. If another game is running on the host,
-   Drone asks you to approve closing it first (`game_running`).
+   Drone asks you to approve closing it first (`game_running`), including when that
+   process is already this ROM: host Netplay settings are applied by launching again.
+   A failed start does not keep the only Host Game slot. **Retry** still recovers that
+   session until you host a different game or end it; hosting another game replaces it.
 6. Drone applies the session-scoped settings, launches, waits until the emulator is
    really up and listening, then asks each guest (in slot order) to launch.
 7. **End session** closes the game Drone started, restores settings and tells guests.
@@ -194,8 +201,12 @@ An invitation arrives in the bell and under **Multiplayer → Pending invitation
 have a matching copy, is the emulator/core installed with a compatible version, is
 the mechanism enabled? If not, you get the specific reason and nothing is sent.
 Accepting joins the lobby only — **no game starts**. When the host starts, you get a
-*Launch on this Drone* button; if a game is running here you must approve replacing
-it. A host can never launch, or close, anything on your Drone.
+*Launch on this Drone* button. If a *different* game is running here you must approve
+replacing it. If this session's game is already in the foreground, confirming keeps
+that process; Drone does not close it to launch it again. A host can never launch,
+or close, anything on your Drone. Leaving the lobby, or declining, does not block a
+later **Invite Peer**: that is a new invitation you accept or decline. Joining again
+without that new invitation does not restore membership.
 
 Optional, opt-in only: *Privacy → Launching a game here → Automatic* launches
 without asking **when no other game is running**. *Automatically accept
@@ -212,7 +223,7 @@ Peer endpoints (mTLS; caller = pinned certificate identity):
 | `POST /peer/multiplayer/respond` | guest → host | `accept`, `decline`, `leave`, `ready`, `not_ready`, `launch_result` |
 | `POST /peer/multiplayer/update` | host → guests | Newer session snapshot (version-gated) |
 | `POST /peer/multiplayer/launch` | host → guest | Launch *offer* (port + one-time session credential); needs local confirmation |
-| `GET /peer/multiplayer/status?session=` | any member | Liveness / state. The host recovers an unreachable player only when this reply shows the player still holds the session and (once live, for mechanisms that launch games) has its game running; an answering Drone alone is not participation. Ending a session also pushes a withdrawal to invitees who never joined, and a fresh host `invite` renews an expired/withdrawn (never declined/accepted) invitation. |
+| `GET /peer/multiplayer/status?session=` | any member | Liveness / state. The host recovers an unreachable player only when this reply shows the player still holds the session and (once live, for mechanisms that launch games) has its game running; an answering Drone alone is not participation. Ending a session also pushes a withdrawal to invitees who never joined. A fresh host `invite` (not a replay of the old message) renews an expired, withdrawn, or declined invitation, and an accepted one after the guest has left. It does not reopen an invitation the guest is still in, and accepting the previous invitation does not rejoin. |
 | `GET /peer/multiplayer/compatibility` | any → any | Locally confirmed compatibility reports (see below) |
 
 Rules enforced on every message: paired caller; `source_drone_id` (if present) must

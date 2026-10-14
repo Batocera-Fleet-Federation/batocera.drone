@@ -31,6 +31,10 @@ def evaluate_candidates(host_assessments: List[dict], peers: List[dict], *, stre
             blockers.append(assessment["readiness_message"])
         elif assessment["readiness"] == "unsupported_build":
             blockers.append(assessment["readiness_message"])
+        # Host-only gaps (a build that can join but cannot host) are not a guest problem.
+        # ``host_block`` is set by the adapter on the hosting machine's own assessment.
+        if assessment.get("host_capable") is False and assessment.get("host_block"):
+            blockers.append(str(assessment["host_block"]))
         if mechanism == m.REMOTE_STREAMING and not streaming_enabled:
             blockers.append("Remote streaming is turned off in Multiplayer settings.")
         for peer in peers:

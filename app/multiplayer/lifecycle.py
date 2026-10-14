@@ -48,11 +48,27 @@ class LifecycleMixin:
         return context
 
     def active_conflict(self, game_path: str, replace: bool) -> Optional[dict]:
-        """Another game is running and the user has not approved replacing it -> describe it."""
+        """Another game is running and the user has not approved replacing it -> describe it.
+
+        The host uses this even when the foreground ROM is the session game: Netplay
+        settings are applied by launching again, so that still needs approval.
+        """
         active = self.launcher.active_game()
         if not active:
             return None
         return None if replace else active
+
+    def _different_game_running(self, game_path: str) -> Optional[dict]:
+        """A foreground game that is not this session's ROM.
+
+        The session ROM already running is participation, not a conflict to kill.
+        """
+        active = self.launcher.active_game()
+        if not active:
+            return None
+        if game_path and same_rom(active.get("rom_path", ""), game_path):
+            return None
+        return active
 
     @staticmethod
     def _active_summary(active: dict) -> dict:
@@ -435,7 +451,7 @@ class LifecycleMixin:
             if automated:
                 if not path or not self._exists(path):
                     raise m.MultiplayerError("game_file_missing", "The game's file is missing on this machine.", 409)
-                conflict = self.active_conflict(path, replace)
+                conflict = None if replace else self._different_game_running(path)
                 if conflict:
                     raise m.MultiplayerError("game_running", "A game is running here. Approve replacing it to continue.", 409,
                                              {"running": self._active_summary(conflict)})
@@ -472,18 +488,20 @@ class LifecycleMixin:
                     if edits:
                         self.apply_edits(session_id, edits)
                     active = self.launcher.active_game()
-                    if active:
+                    already = bool(active and path and same_rom(active.get("rom_path", ""), path))
+                    if active and not already:
                         if not local.get("replace_running_game"):
                             raise m.MultiplayerError("game_running", "A game is running here and replacing it was not approved.", 409)
                         self.launcher.exit_game()
                         if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
                             raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
-                    launched = True  # even a failing launch call may already have started the game
-                    adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
-                    started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
-                    if not started:
-                        raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
-                    self.store.set_local(session_id, launched_pid=started.get("pid"))
+                    if not already:
+                        launched = True  # even a failing launch call may already have started the game
+                        adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
+                        started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
+                        if not started:
+                            raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
+                        self.store.set_local(session_id, launched_pid=started.get("pid"))
                 wave = (plan or {}).get("wave")
                 self.store.set_local(session_id, launch_status="running", game_launched=True, pending_launch=None)
             self._guest_message(self.store.require(session_id), "launch_result", ok=True, wave=wave)

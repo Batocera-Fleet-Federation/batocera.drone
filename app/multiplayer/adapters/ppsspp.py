@@ -96,6 +96,12 @@ class PPSSPPAdapter(EmulatorAdapter):
         extra = {"emulator": {"adapter": self.id, "name": "ppsspp", "core": "", "version": self.detect_version(), "core_version": ""},
                  "max_players": min(players, 4) if players else None}
         feature = self.detect_features()[m.PPSSPP_ADHOC]
+        # The key's presence is what the installed build can do. A join-only build
+        # (no EnableAdhocServer key) must not be offered as the host mechanism.
+        # Guests of a host that does have the key can still join.
+        extra["host_capable"] = bool(feature.get("available") and feature.get("builtin_server"))
+        if feature.get("available") and not feature.get("builtin_server"):
+            extra["host_block"] = feature.get("reason") or "This PPSSPP build has no built-in ad hoc server, so it cannot host."
         if not self.detect_installed():
             return self.assessment(m.PPSSPP_ADHOC, m.UNSUPPORTED, ["PPSSPP is not installed."], **extra)
         if not feature["available"]:

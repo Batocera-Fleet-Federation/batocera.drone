@@ -264,7 +264,10 @@ class SessionMixin:
             for existing in active:
                 if (existing.get("local") or {}).get("client_request_id") == request_id:
                     return self.session_view(existing)  # idempotent retry of the same request
-        if len(active) >= config["general"]["max_simultaneous_sessions"]:
+        # A failed start stays retryable until the user hosts a different game or ends it.
+        # Hosting another game replaces it so an abandoned failure cannot hold the only slot.
+        self._release_replaced_failed_sessions()
+        if len(self.store.active()) >= config["general"]["max_simultaneous_sessions"]:
             raise m.MultiplayerError("too_many_sessions", "You already have the maximum number of multiplayer sessions open. End one first.", 409)
         forced = m.clean_mechanism(body.get("mechanism"), allow_empty=True)
         override = body.get("emulator_override") or {}
@@ -357,6 +360,17 @@ class SessionMixin:
             self._deliver_invitation(session_id, peer)
         self.publish(session_id)
         return self.session_view(self.store.require(session_id))
+
+    def _release_replaced_failed_sessions(self) -> None:
+        """End this machine's failed host sessions so a new game can take the slot.
+
+        ``retry_connection`` on a failed session still works until that replacement.
+        Live, lobby, and guest sessions are left alone.
+        """
+        for session in list(self.store.active()):
+            if session.get("state") != m.FAILED or self.local_role(session) != m.HOST_ROLE:
+                continue
+            self.end_session(session["id"], reason="Replaced by a new multiplayer session.")
 
     def _host_player(self) -> dict:
         return {"device_id": self.me, "name": self.my_name, "role": m.HOST_ROLE, "status": m.P_JOINED, "ready": False, "slot": 1,
