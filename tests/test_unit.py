@@ -367,14 +367,14 @@ class SettingsTests(unittest.TestCase):
                 legacy = {key: value for key, value in announcement.items() if key != "peer_mtls_port"}
                 legacy_discovered = local_network.record_discovered_peer(settings, legacy, "192.168.1.22")
                 self.assertEqual(legacy_discovered["peer_mtls_port"], 8443)
-                # An already-paired peer's re-announce also refreshes the stored
-                # paired record's peer_mtls_port, not just the discovered-peer cache.
+                # An already-paired peer's re-announce is unauthenticated, so it
+                # must not rewrite the stored paired record's ports (issue #213).
                 paired = local_network.save_paired_peer(settings, {**discovered, "certificate_fingerprint": "abc"})
                 self.assertEqual(paired["peer_mtls_port"], 8543)
                 local_network.record_discovered_peer(settings, {**announcement, "peer_mtls_port": 9000}, "192.168.1.22")
-                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["peer_mtls_port"], 9000)
+                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["peer_mtls_port"], 8543)
 
-    def test_tailnet_announce_refreshes_paired_peer_record(self) -> None:
+    def test_tailnet_announce_does_not_rewrite_paired_peer_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
@@ -393,7 +393,7 @@ class SettingsTests(unittest.TestCase):
                     },
                     "192.168.1.22",
                 )
-                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["tailnet_ip"], "100.64.0.9")
+                self.assertEqual(local_network.get_paired_peer(settings, "local-b").get("tailnet_ip", ""), "")
 
     def test_forgetting_tailnet_peer_suppresses_automatic_repair_until_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

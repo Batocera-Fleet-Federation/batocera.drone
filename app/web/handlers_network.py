@@ -481,7 +481,7 @@ class HandlersNetworkMixin:
         return {
             "mode": _network_mode(self.settings),
             "active": _local_network.is_local_mode(self.settings),
-            "pairing": _local_network.pairing_code(self.settings),
+            "pairing": self._pairing_card(),
             "peers": discovered,
             "paired_count": len(paired),
             "discovered_count": len(discovered),
@@ -512,7 +512,22 @@ class HandlersNetworkMixin:
         if not _local_network.is_local_mode(self.settings):
             self._send_json(409, {"error": "Enable Local Network mode before pairing"})
             return
-        self._send_json(200, {"pairing": _local_network.pairing_code(self.settings, rotate=True)})
+        self._send_json(200, {"pairing": self._pairing_card(rotate=True)})
+
+    def _pairing_card(self, rotate: bool = False) -> dict:
+        """The code plus this Drone's certificate fingerprint for its pairing screen.
+
+        The operator reads the fingerprint here and types it into the *other*
+        Drone's pair action, which is how that side learns it is about to hand
+        its pairing code to the right certificate (never to whatever a LAN
+        announcement claimed).
+        """
+        card = _local_network.pairing_code(self.settings, rotate=rotate)
+        try:
+            fingerprint = str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or "")
+        except Exception:  # noqa: BLE001 - the code is still useful without it
+            fingerprint = ""
+        return {**card, "certificate_fingerprint": fingerprint}
 
     def _handle_admin_local_peer_pair(self, peer_id: str, payload: dict) -> None:
         peer_id = unquote(peer_id)
@@ -526,7 +541,11 @@ class HandlersNetworkMixin:
         if not peer:
             self._send_json(404, {"error": "discovered peer not found"})
             return
-        paired = self._pair_peer_or_reply(peer, str(payload.get("pairing_code") or ""))
+        paired = self._pair_peer_or_reply(
+            peer,
+            str(payload.get("pairing_code") or ""),
+            str(payload.get("certificate_fingerprint") or ""),
+        )
         if paired is None:
             return
         cert_path = Path(str(paired.get("certificate_path") or ""))
@@ -575,7 +594,11 @@ class HandlersNetworkMixin:
             "tailnet_ip": str(info.get("tailnet_ip") or ""),
             "certificate_fingerprint": str(info.get("certificate_fingerprint") or ""),
         }
-        paired = self._pair_peer_or_reply(peer, str(payload.get("pairing_code") or ""))
+        paired = self._pair_peer_or_reply(
+            peer,
+            str(payload.get("pairing_code") or ""),
+            str(payload.get("certificate_fingerprint") or ""),
+        )
         if paired is None:
             return
         cert_path = Path(str(paired.get("certificate_path") or ""))
@@ -583,15 +606,39 @@ class HandlersNetworkMixin:
             load_peer_cert_everywhere(self.server, cert_path)
         self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
 
-    def _pair_peer_or_reply(self, peer: dict, pairing_code: str) -> Optional[dict]:
+    def _pair_peer_or_reply(self, peer: dict, pairing_code: str, confirmed_fingerprint: str = "") -> Optional[dict]:
         """Run the pairing handshake; on a peer-side failure, send a 502 and return None.
 
         The peer answering with an HTTP error (e.g. 403 for a wrong pairing code)
         or being unreachable is an upstream failure, not a server bug, so it must
         not escape as a generic 500. The peer's own error text is shown truncated.
+
+        The pairing code is a secret, so over HTTPS it is only sent to a server
+        that proves the certificate the operator confirmed (the fingerprint
+        shown on the target Drone's own pairing screen) or the one already
+        pinned for that peer. The fingerprint in a discovery announcement or
+        the peer-info response comes from the same untrusted source as the
+        address and is never a substitute.
         """
+        if pairing_code and not self._pairing_certificate_anchored(peer, confirmed_fingerprint):
+            self._send_json(
+                400,
+                {
+                    "error": (
+                        "Enter the certificate fingerprint shown on that Drone's pairing screen "
+                        "before sending it the pairing code."
+                    ),
+                    "certificate_fingerprint_required": True,
+                },
+            )
+            return None
         try:
-            return _local_pair_peer(self.settings, peer, pairing_code)
+            return _local_pair_peer(
+                self.settings,
+                peer,
+                pairing_code,
+                confirmed_fingerprint=confirmed_fingerprint,
+            )
         except HTTPError as error:
             detail = ""
             try:
@@ -607,6 +654,16 @@ class HandlersNetworkMixin:
         except (URLError, OSError) as error:
             self._send_json(502, {"error": f"Could not reach that drone: {error}"})
         return None
+
+    def _pairing_certificate_anchored(self, peer: dict, confirmed_fingerprint: str) -> bool:
+        address = _peer_address(peer) or ""
+        if not address.startswith("https://"):
+            return True  # cleartext address: nothing to pin, the operator typed it
+        if str(confirmed_fingerprint or "").strip():
+            return True
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
+        pinned = _local_network.get_paired_peer(self.settings, peer_id) or {}
+        return bool(str(pinned.get("certificate_fingerprint") or "").strip())
 
     @staticmethod
     def _swarm_peer_ui_url(peer: dict) -> str:
