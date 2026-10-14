@@ -103,3 +103,61 @@ class DeadlineOfferTests(SwarmCase):
             self.g.confirm_launch(self.sid)
         self.assertEqual(len(self.g.launcher.launched), 1)
         self.assertEqual(self.h.get_session(self.sid)["state"], m.RUNNING)
+
+    def test_late_success_and_health_probe_cannot_reopen_expired_start(self):
+        self.g.launcher.active = {"rom_path": self.g.store.require(self.sid)["local"]["game_path"]}
+        with mock.patch.object(m, "now", return_value=self.after_deadline):
+            self.g._guest_message(self.g.store.require(self.sid), "launch_result", ok=True)
+            self.h.evaluate_launch(self.sid, probe=True)
+        self.assertEqual(self.h.get_session(self.sid)["players"]["guest"]["status"], m.P_FAILED)
+
+    def test_roster_departure_keeps_remaining_running_player_healthy(self):
+        self.g.confirm_launch(self.sid)
+        self.g.leave_session(self.sid)
+        self.h.tick()
+        self.assertEqual(self.h.get_session(self.sid)["state"], m.RUNNING)
+        self.assertEqual(self.h.get_session(self.sid)["players"]["guest"]["status"], m.P_LEFT)
+
+    def test_offline_retries_preserve_budget_until_delivery(self):
+        with mock.patch.object(m, "now", return_value=self.after_deadline):
+            self.h.evaluate_launch(self.sid)
+            self.hub.offline.add("guest")
+            for _ in range(4):
+                self.h.retry_connection(self.sid, "guest")
+            self.assertEqual(self.h.store.require(self.sid)["local"]["retries"].get("guest", 0), 0)
+            self.hub.offline.clear()
+            self.h.retry_connection(self.sid, "guest")
+            self.assertEqual(self.h.store.require(self.sid)["local"]["retries"]["guest"], 1)
+            self.g.confirm_launch(self.sid)
+        self.assertEqual(self.h.get_session(self.sid)["state"], m.RUNNING)
+
+
+class LaunchDeliveryTests(SwarmCase):
+    def test_missed_offer_is_delivered_when_guest_returns_without_restart(self):
+        sid = self.lobby()
+        self.hub.offline.add("guest")
+        self.h.start_session(sid)
+        self.assertEqual(self.h.get_session(sid)["state"], m.STARTING)
+        self.assertEqual(self.h.launcher.exited, 0)
+        self.hub.offline.clear()
+        self.h.tick()
+        self.assertTrue(self.g.get_session(sid)["pending_launch"])
+        self.g.confirm_launch(sid)
+        self.assertEqual(self.h.get_session(sid)["state"], m.RUNNING)
+        self.h.tick()
+        self.assertFalse(self.g.get_session(sid)["pending_launch"])
+        self.assertEqual(len(self.g.launcher.launched), 1)
+
+    def test_unreachable_pending_guest_resumes_launching_without_claiming_game_running(self):
+        sid = self.lobby()
+        self.h.start_session(sid)
+        self.hub.offline.add("guest")
+        self.h._probe_player(sid, "guest")
+        self.h._probe_player(sid, "guest")
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_UNREACHABLE)
+        self.hub.offline.clear()
+        self.h._probe_player(sid, "guest")
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_LAUNCHING)
+        self.assertEqual(self.g.launcher.launched, [])
+        self.g.confirm_launch(sid)
+        self.assertEqual(self.h.get_session(sid)["state"], m.RUNNING)

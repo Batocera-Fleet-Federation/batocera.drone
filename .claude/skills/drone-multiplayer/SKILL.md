@@ -66,6 +66,7 @@ matrix and "Manual hardware validation" in sync with reality.
 * Name clash avoided on purpose: `peer_health()` (stored health checks) vs `peer_status()` (inbound endpoint).
 * `FAILED` may only move to `STOPPING`/`CONFIGURING`; retry therefore does two mutations (reset, then `settle_lobby`).
 * Lobby states are interchangeable via `settle_lobby`; `CREATED` is never re-entered.
+* Live roster health is `settle_live` (leave/remove are not `DEGRADED`). Launch offers are waves (`local.launch_wave`); a `launch_result` success must carry the current wave before the deadline.
 * Existing tests assert exact literals in `drone.js` (e.g. the `adminLinks` array) — add to such structures instead of editing the literal.
 * Python 3.9 compatible (dev machines), stdlib only; `Optional[...]`/`typing` not `X | Y`.
 * `notifications.LOCAL_ONLY_EVENT_TYPES` keeps `multiplayer_*` audit/bell rows out of SMTP digests and the 18 toggles.

@@ -16,7 +16,7 @@ from . import models as m
 from .adapters.base import CONTENT_HOST_ONLY
 from .core import EVENT_INVITATION, EVENT_SESSION
 from .matching import MAX_MATCH_QUERIES, level_note, level_satisfies
-from .sessions import next_free_slot, settle_lobby
+from .sessions import launch_pending, next_free_slot, settle_live, settle_lobby
 from .store import add_event, replica_view, sanitize_session, require_same_identity
 
 try:
@@ -98,7 +98,8 @@ class ProtocolMixin:
                                   bool(deadline and m.now() <= deadline))
                 body["session"] = {"known": True, "state": session["state"], "version": session["version"],
                                    "player_status": session["players"][caller_id]["status"],
-                                   "launch_allowed": launch_allowed}
+                                   "launch_allowed": launch_allowed,
+                                   "launch_status": (session.get("local") or {}).get("launch_status") or ""}
                 body["session_game_running"] = self.session_game_running(session)
                 self.store.set_local(session["id"], **self._seen_patch(session, caller_id))
         return body
@@ -126,7 +127,9 @@ class ProtocolMixin:
         except Exception:  # noqa: BLE001
             return None
         remote = body.get("session") if isinstance(body, dict) else None
-        if isinstance(remote, dict) and remote.get("known") and body.get("session_game_running") is True:
+        if (isinstance(remote, dict) and remote.get("known")
+                and body.get("session_game_running") is True
+                and remote.get("launch_status") == "running"):
             return payload
         return {**payload, "ok": False, "error": "Reported a successful launch but is not running this session's game."}
 
@@ -223,8 +226,8 @@ class ProtocolMixin:
         add_event(s, "left", f"{player['name']} left.", caller_id)
         if s["state"] in m.PRE_START_STATES:
             settle_lobby(s)
-        elif s["state"] == m.RUNNING:
-            s["state"] = m.DEGRADED
+        elif s["state"] in m.LIVE_STATES:
+            settle_live(s)
 
     def _respond_ready(self, s: dict, caller_id: str, payload: dict, ready: bool = True) -> None:
         if s["state"] not in m.PRE_START_STATES:
@@ -242,13 +245,28 @@ class ProtocolMixin:
         player = s["players"][caller_id]
         if s["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED):
             return
-        if player["status"] not in (m.P_JOINED, m.P_LAUNCHING, m.P_FAILED, m.P_UNREACHABLE, m.P_RUNNING):
-            return
         if payload.get("ok") is True:
+            if not self._launch_result_current(s, caller_id, payload):
+                return
             player.update(status=m.P_RUNNING, error="")
-        else:
-            player.update(status=m.P_FAILED, error=m.clean_text(payload.get("error") or "The launch failed.", 300))
-            add_event(s, "launch_failed", f"{player['name']}: {player['error']}", caller_id)
+            return
+        if player["status"] not in (m.P_JOINED, m.P_LAUNCHING, m.P_UNREACHABLE):
+            return
+        player.update(status=m.P_FAILED, error=m.clean_text(payload.get("error") or "The launch failed.", 300))
+        add_event(s, "launch_failed", f"{player['name']}: {player['error']}", caller_id)
+
+    @staticmethod
+    def _launch_result_current(session: dict, caller_id: str, payload: dict) -> bool:
+        """A success report is consent for this launch wave only, while the host still expects it."""
+        player = session["players"][caller_id]
+        if not launch_pending(session, player):
+            return False
+        local = session.get("local") or {}
+        wave = payload.get("wave")
+        if not isinstance(wave, int) or isinstance(wave, bool) or wave != local.get("launch_wave"):
+            return False
+        deadline = m.parse_time(local.get("launch_deadline"))
+        return not (deadline and m.now() > deadline)
 
     # --------------------------------------------------------------- guest: invite
     def peer_invite(self, caller_id: str, payload: Any) -> dict:
@@ -380,11 +398,13 @@ class ProtocolMixin:
             if session["state"] not in (m.READY, m.STARTING, m.RUNNING, m.DEGRADED):
                 raise m.MultiplayerError("session_not_starting", "That session is not starting.", 409)
             port = payload.get("port")
+            wave = payload.get("wave")
             plan = {
                 "port": m.clean_int(port, "port", 1, 65535) if port not in (None, "") else 0,
                 "secret": str(payload.get("secret") or "")[:64] if str(payload.get("secret") or "").isalnum() else "",
                 "received_at": m.now_iso(), "expires_at": (m.now() + LAUNCH_CONFIRM_WINDOW).isoformat(), "consumed": False,
                 "version": session["version"],
+                "wave": wave if isinstance(wave, int) and not isinstance(wave, bool) and 0 < wave < 2 ** 31 else 0,
             }
             self.store.set_local(session_id, pending_launch=plan, launch_status="awaiting_confirmation", recovery_response=None)
         title = session["game"]["title"]

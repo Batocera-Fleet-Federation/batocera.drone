@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from . import models as m
 from .adapters.base import MANUAL
 from .core import EVENT_SESSION
-from .sessions import settle_lobby
+from .sessions import launch_pending, settle_live, settle_lobby
 from .store import add_event
 
 try:
@@ -102,8 +102,13 @@ class LifecycleMixin:
                 s["error"] = ""
                 add_event(s, "starting", "The session is starting.", self.me)
             session = self.store.mutate(session_id, begin)
-            self.store.set_local(session_id, replace_running_game=replace, launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat(),
-                                 retries=dict((session.get("local") or {}).get("retries") or {}))
+            local = session.get("local") or {}
+            self.store.set_local(
+                session_id, replace_running_game=replace,
+                launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat(),
+                launch_wave=int(local.get("launch_wave") or 0) + 1,
+                offered_waves={},
+                retries=dict(local.get("retries") or {}))
         self.publish(session_id)
         self._log(session, "starting", "session starting", actor)
         self._spawn(lambda: self.run_start(session_id), f"multiplayer-start-{session_id[:8]}")
@@ -200,29 +205,43 @@ class LifecycleMixin:
         for player in guests:
             self._send_launch(session_id, player["device_id"])
 
-    def _send_launch(self, session_id: str, peer_id: str) -> None:
+    def _send_launch(self, session_id: str, peer_id: str) -> bool:
         session = self.store.require(session_id)
         if session["state"] not in (m.STARTING, m.DEGRADED):
-            return
+            return False
+        wave = int((session.get("local") or {}).get("launch_wave") or 0)
         error = ""
+        undelivered = False
         try:
             self.network.post_checked(self.paired_peer(peer_id), "/launch", {
                 "message_id": m.new_message_id(), "issued_at": m.now_iso(), "session_id": session_id,
-                "port": session["local"].get("port") or 0, "secret": session.get("secret", "")}, timeout=8.0)
+                "port": session["local"].get("port") or 0, "secret": session.get("secret", ""),
+                "wave": wave}, timeout=8.0)
         except m.MultiplayerError as failure:
             error = f"Could not reach this player to start the game: {failure.message}"
+            undelivered = failure.code == "peer_unreachable"
 
         def mark(s: dict) -> None:
             player = s["players"].get(peer_id)
             if player is None:
                 return
+            if undelivered:
+                # Transport miss: JOINED/LAUNCHING stay expected until the deadline;
+                # a retry of a failed player stays failed so a later retry can still target them.
+                player["error"] = error
+                return
             if error:
                 player.update(status=m.P_FAILED, error=error)
                 add_event(s, "launch_failed", f"{player['name']}: {error}", self.me)
-            elif player["status"] == m.P_JOINED:
-                # A fast guest may already have reported back (running/failed) while this call was in flight.
+                return
+            if player["status"] in (m.P_JOINED, m.P_FAILED, m.P_UNREACHABLE):
                 player.update(status=m.P_LAUNCHING, error="")
         self.store.mutate(session_id, mark)
+        if not undelivered and not error:
+            offered = dict((self.store.require(session_id).get("local") or {}).get("offered_waves") or {})
+            offered[peer_id] = wave
+            self.store.set_local(session_id, offered_waves=offered)
+        return not undelivered and not error
 
     def _finish_without_launch(self, session_id: str, host_running: bool = False) -> None:
         """Mechanisms with no Drone launch (manual steps, streaming guests): everyone follows the listed steps."""
@@ -250,7 +269,11 @@ class LifecycleMixin:
             except Exception:  # noqa: BLE001 - unverifiable now; the next sweep asks again
                 continue
             remote = body.get("session") if isinstance(body, dict) else None
-            if isinstance(remote, dict) and remote.get("known") and body.get("session_game_running") is True:
+            # Foreground ROM alone is not a Drone launch. Only a guest that actually
+            # confirmed and launched this wave can be promoted from a housekeeping probe.
+            if (isinstance(remote, dict) and remote.get("known")
+                    and body.get("session_game_running") is True
+                    and remote.get("launch_status") == "running"):
                 confirmed.add(pid)
         return confirmed
 
@@ -271,27 +294,17 @@ class LifecycleMixin:
                 for pid in confirmed:
                     if s["players"].get(pid, {}).get("status") in (m.P_JOINED, m.P_LAUNCHING):
                         s["players"][pid].update(status=m.P_RUNNING, error="")
-                guests = [p for k, p in s["players"].items() if k != s["host_id"]
-                          and p["status"] in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_FAILED, m.P_UNREACHABLE)]
-                pending = [p for p in guests if p["status"] in (m.P_JOINED, m.P_LAUNCHING)]
                 if overdue:
-                    for player in pending:
+                    closed = False
+                    for player in list(s["players"].values()):
+                        if player["device_id"] == s["host_id"] or not launch_pending(s, player):
+                            continue
                         player.update(status=m.P_FAILED, error="Did not confirm the launch in time.")
                         add_event(s, "launch_failed", f"{player['name']} did not confirm the launch in time.", self.me)
-                    pending = []
-                running = [p for p in guests if p["status"] == m.P_RUNNING]
-                if pending:
-                    return
-                if running and len(running) == len(guests):
-                    s["state"] = m.RUNNING
-                    add_event(s, "running", "Games launched on all participating machines. Confirm gameplay connectivity in the emulator.", self.me)
-                elif running:
-                    if s["state"] != m.DEGRADED:
-                        s["state"] = m.DEGRADED
-                        add_event(s, "degraded", "Some players could not connect; the session continues without them.", self.me)
-                elif s["state"] == m.STARTING:
-                    s["state"] = m.FAILED
-                    s["error"] = "No other player was able to connect."
+                        closed = True
+                    if closed:
+                        s.setdefault("local", {})["launch_wave"] = int((s.get("local") or {}).get("launch_wave") or 0) + 1
+                settle_live(s)
             updated = self.store.mutate(session_id, evaluate)
             if updated["state"] == m.RUNNING or updated["state"] == m.DEGRADED:
                 self.store.set_local(session_id, reached_running=True)
@@ -471,8 +484,9 @@ class LifecycleMixin:
                     if not started:
                         raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
                     self.store.set_local(session_id, launched_pid=started.get("pid"))
+                wave = (plan or {}).get("wave")
                 self.store.set_local(session_id, launch_status="running", game_launched=True, pending_launch=None)
-            self._guest_message(self.store.require(session_id), "launch_result", ok=True)
+            self._guest_message(self.store.require(session_id), "launch_result", ok=True, wave=wave)
         except Exception as error:  # noqa: BLE001
             message = getattr(error, "message", None) or f"{type(error).__name__}: {error}"
             self._fail_guest_launch(session_id, message, stop_game=launched)
@@ -481,9 +495,11 @@ class LifecycleMixin:
         with self.session_lock(session_id):
             # Persist the original failure first. A restoration backend outage
             # must leave a failed launch eligible for journal recovery.
+            plan = (self.store.require(session_id).get("local") or {}).get("pending_launch") or {}
             self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300),
                                  pending_launch=None,
-                                 recovery_response={"action": "launch_result", "ok": False, "error": m.clean_text(message, 300)})
+                                 recovery_response={"action": "launch_result", "ok": False,
+                                                    "error": m.clean_text(message, 300), "wave": plan.get("wave")})
             errors = []
             if stop_game:
                 try:
@@ -536,26 +552,35 @@ class LifecycleMixin:
         peer_id = m.clean_peer_id(peer_id) if peer_id else ""
         with self.session_lock(session_id):
             session = self.require_host(session_id)
+            state = session["state"]
             retries = dict((session.get("local") or {}).get("retries") or {})
             key = peer_id or "session"
             if retries.get(key, 0) >= MAX_RETRIES:
                 raise m.MultiplayerError("retry_limit", f"Gave up after {MAX_RETRIES} retries. End the session and start a new one.", 409)
-            retries[key] = retries.get(key, 0) + 1
-            self.store.set_local(session_id, retries=retries)
-            state = session["state"]
             if state in m.PRE_START_STATES:
+                retries[key] = retries.get(key, 0) + 1
+                self.store.set_local(session_id, retries=retries)
                 for pid, player in session["players"].items():
                     if player["status"] == m.P_INVITED and (not peer_id or pid == peer_id):
                         self._deliver_invitation(session_id, self.paired_peer(pid))
             elif state in (m.STARTING, m.DEGRADED):
-                targets = [pid for pid, p in session["players"].items() if pid != self.me and p["status"] in (m.P_FAILED, m.P_UNREACHABLE)
-                           and (not peer_id or pid == peer_id)]
-                if not targets:
+                wanted = [pid for pid, p in session["players"].items() if pid != self.me and p["status"] in (m.P_FAILED, m.P_UNREACHABLE)
+                          and (not peer_id or pid == peer_id)]
+                if not wanted:
                     raise m.MultiplayerError("nothing_to_retry", "No player needs a retry.", 409)
-                self.store.set_local(session_id, launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat())
-                for pid in targets:
-                    self.store.mutate(session_id, lambda s, pid=pid: s["players"][pid].update(status=m.P_JOINED, error=""))
-                    self._send_launch(session_id, pid)
+                local = session.get("local") or {}
+                wave = int(local.get("launch_wave") or 0) + 1
+                offered = dict(local.get("offered_waves") or {})
+                for pid in wanted:
+                    offered.pop(pid, None)
+                self.store.set_local(session_id, launch_wave=wave, offered_waves=offered,
+                                     launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat())
+                delivered = False
+                for pid in wanted:
+                    delivered = self._send_launch(session_id, pid) or delivered
+                if delivered:
+                    retries[key] = retries.get(key, 0) + 1
+                    self.store.set_local(session_id, retries=retries)
                 self.evaluate_launch(session_id)
             elif state == m.FAILED:
                 def reset(s: dict) -> None:
@@ -568,6 +593,8 @@ class LifecycleMixin:
                         if player["status"] == m.P_JOINED:
                             player["ready"] = False  # everyone confirms again before the next attempt
                     add_event(s, "retry", "The host reset the session for another attempt.", self.me)
+                retries[key] = retries.get(key, 0) + 1
+                self.store.set_local(session_id, retries=retries)
                 self.store.mutate(session_id, reset)
                 self.store.mutate(session_id, settle_lobby)  # FAILED may only move to CONFIGURING first
                 self.store.set_local(session_id, host_launched=False)
@@ -698,8 +725,19 @@ class LifecycleMixin:
 
     def _tick_host(self, session: dict) -> None:
         session_id, local = session["id"], session.get("local") or {}
-        if session["state"] == m.STARTING:
+        deadline = m.parse_time(local.get("launch_deadline"))
+        wave = local.get("launch_wave")
+        offered = dict(local.get("offered_waves") or {})
+        if session["state"] in (m.STARTING, m.DEGRADED) and deadline and m.now() <= deadline:
+            for pid, player in list(session["players"].items()):
+                if pid == self.me or player["status"] not in (m.P_JOINED, m.P_LAUNCHING) or offered.get(pid) == wave:
+                    continue
+                self._send_launch(session_id, pid)
+                session = self.store.require(session_id)
+        if session["state"] in (m.STARTING, m.DEGRADED):
             self.evaluate_launch(session_id, probe=True)
+            session = self.store.require(session_id)
+            local = session.get("local") or {}
         if local.get("publish_failed"):
             self.publish(session_id)
         if session["state"] in m.PRE_START_STATES:
@@ -754,13 +792,11 @@ class LifecycleMixin:
             def recover(s: dict) -> None:
                 player = s["players"][peer_id]
                 if player["status"] == m.P_UNREACHABLE:
-                    player["status"] = m.P_RUNNING if s["state"] in m.LIVE_STATES else m.P_JOINED
+                    previous = s.setdefault("local", {}).setdefault("unreachable_from", {}).pop(peer_id, None)
+                    player["status"] = previous or (m.P_RUNNING if s["state"] in m.LIVE_STATES else m.P_JOINED)
                     player["error"] = ""
                     add_event(s, "reconnected", f"{player['name']} is reachable again.", self.me)
-                    if s["state"] == m.DEGRADED and not any(
-                            p["status"] in (m.P_FAILED, m.P_UNREACHABLE, m.P_LEFT, m.P_REMOVED) for k, p in s["players"].items() if k != s["host_id"]):
-                        s["state"] = m.RUNNING
-                        add_event(s, "running", "All players are connected again.", self.me)
+                    settle_live(s)
             self.store.mutate(session_id, recover)
             return
         misses[peer_id] = misses.get(peer_id, 0) + 1
@@ -769,6 +805,7 @@ class LifecycleMixin:
             def lost(s: dict) -> None:
                 player = s["players"][peer_id]
                 if player["status"] in (m.P_JOINED, m.P_RUNNING, m.P_LAUNCHING):
+                    s.setdefault("local", {}).setdefault("unreachable_from", {})[peer_id] = player["status"]
                     player.update(status=m.P_UNREACHABLE, error=reason)
                     add_event(s, "unreachable", f"Lost contact with {player['name']}.", self.me)
                     if s["state"] == m.RUNNING:
@@ -793,7 +830,9 @@ class LifecycleMixin:
         adapter = self.adapter_map.get((session.get("emulator") or {}).get("adapter", ""))
         launches = adapter is not None and adapter.guest_launches and adapter.effective_automation() != MANUAL
         in_session = body.get("session_game_running") is True  # an omitted flag is not confirmation
-        if (launches and session["state"] in m.LIVE_STATES and player.get("status") in (m.P_RUNNING, m.P_UNREACHABLE)
+        previous = ((session.get("local") or {}).get("unreachable_from") or {}).get(peer_id, m.P_RUNNING)
+        needs_game = player.get("status") == m.P_RUNNING or (player.get("status") == m.P_UNREACHABLE and previous == m.P_RUNNING)
+        if (launches and session["state"] in m.LIVE_STATES and needs_game
                 and not in_session):
             return "This Drone is online but is not running this session's game."
         return ""

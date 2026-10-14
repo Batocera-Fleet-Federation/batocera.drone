@@ -404,14 +404,25 @@ a raw configuration key.
   voids the offer; an unreachable host blocks confirmation until it answers. A
   guest restart can retain an unconfirmed offer while the host is still starting.
   Confirmation also requires the host to still expect that player within its
-  launch deadline. A failed or unreachable player needs a host retry and a fresh
-  offer, even when the session continues for other players.
+  launch deadline. Each start and delivered retry is a launch *wave*: a success
+  report must carry that wave, and a late report after the deadline or from an
+  earlier wave cannot revive a failed player. Recovery is a host retry that
+  opens a new wave and a fresh offer.
+  A transport miss while sending `/launch` is not a launch failure. The guest
+  stays expected until the deadline; housekeeping resends the current wave when
+  they return (local confirmation still required). A sole missed POST must not
+  abort an already-started host game. Retrying while a player is unreachable
+  does not spend the delivered-offer retry budget.
 * **Housekeeping** (`multiplayer/worker.py`, one daemon thread, 10 s sweep): expires
   invitations/sessions, probes silent players (→ `unreachable`, session `DEGRADED`,
   recoverable), ends a guest's session when the host stays unreachable for 2 minutes
   (**host migration is not assumed**: emulator sessions can't move hosts), ends the
   session when the host's game exits, makes a guest leave when its own game exits,
   retries failed publishes.
+  Reconnecting restores the player's previous participation state: a pending guest
+  still needs to launch, while a previously running guest must report the session
+  game running. `settle_live` treats leave/remove as roster changes: remaining
+  running players are a healthy `RUNNING` session.
 * **Restart recovery** (`recover()`): restores orphaned journals, fails sessions that
   were `STARTING`, resumes ones whose game is still running, finishes `STOPPING`.
   A guest whose automated session game has exited leaves and restores its settings

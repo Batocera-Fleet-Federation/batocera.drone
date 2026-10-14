@@ -43,6 +43,48 @@ def settle_lobby(session: dict) -> None:
         session["state"] = target
 
 
+_DEPARTED = (m.P_LEFT, m.P_REMOVED, m.P_DECLINED, m.P_INVITED)
+
+
+def launch_pending(session: dict, player: dict) -> bool:
+    """True while this guest is still expected to join the current start/retry wave."""
+    status = player.get("status")
+    if status in (m.P_JOINED, m.P_LAUNCHING):
+        return True
+    if status != m.P_UNREACHABLE:
+        return False
+    previous = ((session.get("local") or {}).get("unreachable_from") or {}).get(player.get("device_id"))
+    return previous in (m.P_JOINED, m.P_LAUNCHING)
+
+
+def settle_live(session: dict) -> None:
+    """RUNNING when every remaining participant is running; DEGRADED only for unexpected gaps.
+
+    Left/removed/declined players are roster changes, not health failures. Guests still
+    expected to launch keep STARTING/DEGRADED until the launch deadline fails them.
+    """
+    if session["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED):
+        return
+    guests = [player for key, player in session["players"].items()
+              if key != session["host_id"] and player["status"] not in _DEPARTED]
+    pending = [player for player in guests if launch_pending(session, player)]
+    running = [player for player in guests if player["status"] == m.P_RUNNING]
+    if pending:
+        return
+    host_id = session.get("host_id") or ""
+    if running and len(running) == len(guests):
+        if session["state"] != m.RUNNING:
+            session["state"] = m.RUNNING
+            add_event(session, "running", "Games launched on all participating machines. Confirm gameplay connectivity in the emulator.", host_id)
+    elif running:
+        if session["state"] != m.DEGRADED:
+            session["state"] = m.DEGRADED
+            add_event(session, "degraded", "Some players could not connect; the session continues without them.", host_id)
+    elif session["state"] == m.STARTING:
+        session["state"] = m.FAILED
+        session["error"] = "No other player was able to connect."
+
+
 def next_free_slot(session: dict) -> int:
     taken = {player["slot"] for player in session["players"].values()
              if player.get("slot") and player["status"] not in (m.P_DECLINED, m.P_LEFT, m.P_REMOVED)}
@@ -481,7 +523,7 @@ class SessionMixin:
                 player.update(status=m.P_REMOVED, ready=False, slot=None)
                 add_event(s, "removed", f"{player['name']} was removed by the host.", self.me)
                 if s["state"] in m.LIVE_STATES:
-                    s["state"] = m.DEGRADED if any(p["status"] == m.P_RUNNING for k, p in s["players"].items() if k != s["host_id"]) else s["state"]
+                    settle_live(s)
                 else:
                     settle_lobby(s)
             session = self.store.mutate(session_id, apply)
