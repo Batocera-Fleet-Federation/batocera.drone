@@ -5326,6 +5326,70 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_243_cross_test_harness_restart_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-243-cross-test-harness-restart-uat",
+      "name": "Issue #243 next harness create_server starts LAN workers on fresh userdata",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_243_cross_test_harness_restart_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_243_hold_release_and_retry_cycles.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-243-hold-release-and-retry-cycles",
+      "name": "Issue #243 LAN worker restart after hold-release, failed restart, and signalled generation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_243_hold_release_and_retry_cycles.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
