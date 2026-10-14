@@ -459,12 +459,15 @@ class LifecycleMixin:
                 if conflict:
                     raise m.MultiplayerError("game_running", "A game is running here. Approve replacing it to continue.", 409,
                                              {"running": self._active_summary(conflict)})
-            self.store.set_local(session_id, pending_launch={**plan, "consumed": True}, launch_status="launching",
-                                 replace_running_game=replace)
-        self._spawn(lambda: self.run_guest_launch(session_id), f"multiplayer-launch-{session_id[:8]}")
+            # The queued worker is bound to this exact confirmation: a replacement offer, a retry or a
+            # reset creates a plan without this token, so an old worker can never execute it.
+            confirmation = m.new_message_id()
+            self.store.set_local(session_id, pending_launch={**plan, "consumed": True, "confirmation": confirmation},
+                                 launch_status="launching", replace_running_game=replace)
+        self._spawn(lambda: self.run_guest_launch(session_id, confirmation), f"multiplayer-launch-{session_id[:8]}")
         return {"status": "launching"}
 
-    def run_guest_launch(self, session_id: str) -> None:
+    def run_guest_launch(self, session_id: str, confirmation: str = "") -> None:
         launched = False
         try:
             with self.session_lock(session_id):
@@ -473,6 +476,8 @@ class LifecycleMixin:
                 plan = local.get("pending_launch")
                 if local.get("ended") or session["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED, m.READY) or not plan:
                     return  # removed, ended, or cancelled while the worker was queued
+                if not confirmation or plan.get("consumed") is not True or plan.get("confirmation") != confirmation:
+                    return  # the offer this worker was confirmed for was voided or replaced: no consent for the current one
                 self._require_live_launch_host(session, plan)
                 adapter = self.adapter_map[session["emulator"]["adapter"]]
                 adapter.refresh()
