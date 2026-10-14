@@ -241,7 +241,7 @@ class Settings:
             http_only=_env_bool(False, "HTTP_ONLY", "DRONE_APP_HTTP_ONLY"),
             use_fake_data=use_fake_data,
             fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
-            device_id=configured_device_id or (_fake_machine_id() if use_fake_data else _machine_id(userdata_root)),
+            device_id=configured_device_id or (_fake_machine_id(userdata_root) if use_fake_data else _machine_id(userdata_root)),
             rom_metadata_poll_seconds=max(0, int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))),
             hostname_override=(os.environ.get("HOSTNAME_OVERRIDE") or "").strip() or None,
             public_ip_override=(os.environ.get("DRONE_PUBLIC_IP_OVERRIDE") or "").strip() or None,
