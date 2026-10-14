@@ -143,16 +143,21 @@ def _legacy_file_path(value: object) -> Optional[Path]:
     return Path(value)
 
 
+# Miss sentinel: a legacy file holding a valid JSON ``null`` is a real document, so
+# ``None`` cannot double as "absent or unreadable".
+_LEGACY_MISSING = object()
+
+
 def _read_legacy_json(path: Optional[PathLike[str] | str]) -> Any:
     path = _legacy_file_path(path)
     if path is None:
-        return None
+        return _LEGACY_MISSING
     try:
         if path.exists() and path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return None
-    return None
+        return _LEGACY_MISSING
+    return _LEGACY_MISSING
 
 
 def load_payload(
@@ -174,7 +179,7 @@ def load_payload(
         except Exception:
             return fallback
     legacy = _read_legacy_json(legacy_path)
-    if legacy is not None:
+    if legacy is not _LEGACY_MISSING:
         save_payload(db_path, namespace, legacy, state_key=state_key)
         try:
             Path(legacy_path).unlink(missing_ok=True)  # type: ignore[arg-type]

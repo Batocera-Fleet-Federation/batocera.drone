@@ -88,6 +88,27 @@ class StateStorePathTypeTests(unittest.TestCase):
         )
         self.assertEqual(result, {"fallback": True})
 
+    def test_load_payload_migrates_json_null_legacy_file(self):
+        legacy = self.root / "null.json"
+        legacy.write_text("null", encoding="utf-8")
+        db = self.root / "n.sqlite3"
+        result = state_store.load_payload(str(db), "ns", {"fallback": True}, legacy_path=str(legacy))
+        self.assertIsNone(result)
+        self.assertFalse(legacy.exists())
+        # The null document was persisted, so it wins over the fallback on the next load.
+        self.assertIsNone(state_store.load_payload(str(db), "ns", {"fallback": True}))
+
+    def test_load_payload_keeps_unreadable_or_absent_legacy_file(self):
+        bad = self.root / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        for legacy in (bad, self.root / "absent.json"):
+            with self.subTest(legacy=legacy.name):
+                result = state_store.load_payload(
+                    self.root / "u.sqlite3", "ns", {"fallback": True}, legacy_path=legacy
+                )
+                self.assertEqual(result, {"fallback": True})
+        self.assertTrue(bad.exists())
+
     def test_load_events_migrates_str_legacy_path(self):
         legacy = self.root / "events.jsonl"
         legacy.write_text('{"a": 1}\n', encoding="utf-8")
