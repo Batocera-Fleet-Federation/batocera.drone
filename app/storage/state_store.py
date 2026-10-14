@@ -47,6 +47,15 @@ def _require_filesystem_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path")
     if not isinstance(value, (str, os.PathLike)):
         raise TypeError(f"{label} must be a filesystem path")
+    try:
+        raw = os.fspath(value)
+    except TypeError:
+        raise TypeError(f"{label} must be a filesystem path") from None
+    if isinstance(raw, bytes):
+        raw = os.fsdecode(raw)
+    # '' (or whitespace) would otherwise become Path('.') and fail inside SQLite.
+    if not raw.strip():
+        raise ValueError(f"{label} must not be empty")
 
 
 def database_path(userdata_root: PathLike[str] | str) -> Path:
@@ -69,6 +78,8 @@ def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
 def open_database(path: PathLike[str] | str) -> sqlite3.Connection:
     _require_filesystem_path(path, "database path")
     path = Path(path)
+    if path == Path("."):  # Path('') normalizes to '.', a directory, never a database file
+        raise ValueError("database path must name a file")
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path), timeout=30)
     try:

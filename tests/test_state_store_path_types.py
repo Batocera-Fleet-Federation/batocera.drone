@@ -45,6 +45,22 @@ class StateStorePathTypeTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             state_store.database_path_for_legacy_file(None)
 
+    def test_empty_and_whitespace_paths_are_rejected(self):
+        for bad in ("", "   ", "\t\n", Path("")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    state_store.open_database(bad)
+        with self.assertRaises(ValueError):
+            state_store.database_path_for_legacy_file("")
+        with self.assertRaises(ValueError):
+            state_store.database_path("  ")
+
+    def test_empty_database_path_creates_no_files(self):
+        before = set(os.listdir(os.getcwd()))
+        with self.assertRaises(ValueError):
+            state_store.open_database("")
+        self.assertEqual(set(os.listdir(os.getcwd())), before)
+
     def _legacy_json(self, name="legacy.json"):
         legacy = self.root / name
         legacy.write_text('{"migrated": true}', encoding="utf-8")
