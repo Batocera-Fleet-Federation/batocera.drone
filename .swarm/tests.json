@@ -3366,6 +3366,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_217_journal_type_adversarial.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-217-journal-type-adversarial",
+      "name": "Issue #217 journal type boundaries: mock and non-mapping journals never echo a device id, dict subclasses still resume",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_217_journal_type_adversarial.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_213_pair_by_address_scheme_downgrade.py"
