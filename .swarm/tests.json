@@ -2959,6 +2959,70 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_210_double_start_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-210-double-start-uat",
+      "name": "Issue #210 second start must not orphan the first discovery thread",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_210_double_start_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_210_restart_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-210-restart-boundaries",
+      "name": "Issue #210 restart join ordering, in-flight save, and malformed stop timeout",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_210_restart_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
