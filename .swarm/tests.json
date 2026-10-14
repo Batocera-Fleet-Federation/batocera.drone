@@ -674,6 +674,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_236_tailnet_worker_generation_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-236-tailnet-worker-generation-uat",
+      "name": "Issue #236 tailnet watchdog and bootstrap generation lifecycle acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_236_tailnet_worker_generation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_191_discovery_infinite_port.py"
