@@ -4987,6 +4987,42 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_invite_retry_capacity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-invite-retry-capacity-uat",
+      "name": "Issue #240 re-invite after leave/decline, retry of a live session game, and host-capability honesty",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_invite_retry_capacity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/adapters/ppsspp.py",
+          "app/multiplayer/adapters/dolphin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
