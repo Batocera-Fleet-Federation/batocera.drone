@@ -290,6 +290,8 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
         "certificate_fingerprint": stored_fingerprint,
         "certificate_path": str(cert_path),
     }
+    if peer["scheme"] == "https":
+        peer["paired_over_tls"] = True
     if not existing:
         peer["pairing_source"] = "swarm"
     elif existing.get("pairing_source"):

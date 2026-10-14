@@ -154,6 +154,8 @@ class HandlersPeerMixin:
                 "certificate_fingerprint": fingerprint,
                 "certificate_path": str(cert_path),
                 "source_ip": source_ip,
+                # Pairing is code-authorised, so an https pairing pins the peer to TLS.
+                "paired_over_tls": scheme == "https",
             },
         )
         try:

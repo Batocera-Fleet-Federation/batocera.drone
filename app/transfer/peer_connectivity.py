@@ -455,6 +455,10 @@ def _local_pair_peer(
         method="POST",
     )
     if not address.startswith("https://"):
+        if _peer_requires_tls(pinned_record):
+            # The pairing code must never travel in cleartext to a peer that
+            # was paired over TLS.
+            raise PeerPairingRejected("refusing to pair with a TLS-pinned Drone over plaintext http")
         context = None
     elif anchor:
         context = _pairing_tls_context(address, anchor)
@@ -524,6 +528,7 @@ def _local_pair_peer(
             "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
             "certificate_fingerprint": fingerprint,
             "certificate_path": str(cert_path),
+            "paired_over_tls": address.startswith("https://"),
             "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
         },
     )
@@ -622,6 +627,13 @@ def _url_host(value: object) -> str:
 
 
 def _peer_address(peer: dict) -> Optional[str]:
+    address = _peer_address_unchecked(peer)
+    if address and _peer_requires_tls(peer) and not address.lower().startswith("https://"):
+        return None
+    return address
+
+
+def _peer_address_unchecked(peer: dict) -> Optional[str]:
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
     port = _peer_api_port(peer)
     # reachable_url/public_reachable_url are pre-baked strings built (and kept
@@ -687,6 +699,16 @@ def _peer_route_kind(address: str) -> str:
     return "ip"
 
 
+def _peer_requires_tls(peer: dict) -> bool:
+    """True for a peer that was paired over TLS and so must never be dialed in cleartext.
+
+    ``paired_over_tls`` is written only by ``_local_pair_peer`` from the scheme the
+    operator actually paired over; announcements cannot set or clear it. Peers
+    paired over plain http (``http_only`` fleets) keep their http routes.
+    """
+    return bool(dict(peer or {}).get("paired_over_tls"))
+
+
 def _peer_address_candidates(
     peer: dict,
     *,
@@ -747,6 +769,9 @@ def _peer_address_candidates(
     normalized_peer_id = str(
         peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
     ).strip()
+    if _peer_requires_tls(peer):
+        # Never offer a cleartext route for a peer that was paired over TLS.
+        candidates = [value for value in candidates if value.lower().startswith("https://")]
     if settings is not None and normalized_peer_id:
         try:
             cached = _load_peer_route(_state_database_path(settings.userdata_root), normalized_peer_id)
