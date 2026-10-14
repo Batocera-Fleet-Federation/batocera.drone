@@ -47,6 +47,9 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
 
 def _start_local_network_workers(settings: Settings) -> None:
     global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
+    # A live generation must be stopped before its stop event and discovery
+    # handle are overwritten, otherwise its discovery thread is orphaned.
+    stop_local_network_workers()
     stop = Event()
     _LOCAL_NETWORK_STOP = stop
     Thread(target=ensure_tailnet_networking, args=(settings,), name="drone-tailnet-networking", daemon=True).start()
