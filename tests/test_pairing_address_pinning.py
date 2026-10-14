@@ -167,6 +167,7 @@ class LocalPairPeerPinTests(unittest.TestCase):
             "fingerprint": "cc" * 32,
         }
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response), \
+                mock.patch.object(peer_connectivity, "_pairing_tls_context"), \
                 mock.patch.object(peer_connectivity, "DroneCertificateManager", fake_manager), \
                 mock.patch.object(peer_connectivity, "_certificate_pem_fingerprint", return_value="ee" * 32):
             with self.assertRaises(RuntimeError):

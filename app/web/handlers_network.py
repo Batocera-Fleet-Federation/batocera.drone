@@ -7,6 +7,7 @@ pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHa
 
 import json
 import os
+import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -541,6 +542,15 @@ class HandlersNetworkMixin:
         if not peer:
             self._send_json(404, {"error": "discovered peer not found"})
             return
+        # A discovered row's scheme/address comes from an unauthenticated
+        # announcement, so it cannot be allowed to pick cleartext for a secret.
+        # (An operator-typed http:// address goes through pair-by-address.)
+        if not (_peer_address(peer) or "").startswith("https://") and not self._pinned_fingerprint(peer):
+            self._send_json(
+                400,
+                {"error": "Discovered Drones are only paired over HTTPS; use Pair by address for an http:// Drone."},
+            )
+            return
         paired = self._pair_peer_or_reply(
             peer,
             str(payload.get("pairing_code") or ""),
@@ -659,11 +669,17 @@ class HandlersNetworkMixin:
         address = _peer_address(peer) or ""
         if not address.startswith("https://"):
             return True  # cleartext address: nothing to pin, the operator typed it
-        if str(confirmed_fingerprint or "").strip():
-            return True
+        confirmed = str(confirmed_fingerprint or "").strip()
+        if confirmed:
+            # Malformed input must not count as an anchor: it normalizes to
+            # nothing and would leave the connection unverified.
+            return bool(re.fullmatch(r"(?:[0-9a-fA-F]{2}[:\s-]?){31}[0-9a-fA-F]{2}", confirmed))
+        return bool(self._pinned_fingerprint(peer))
+
+    def _pinned_fingerprint(self, peer: dict) -> str:
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
         pinned = _local_network.get_paired_peer(self.settings, peer_id) or {}
-        return bool(str(pinned.get("certificate_fingerprint") or "").strip())
+        return str(pinned.get("certificate_fingerprint") or "").strip()
 
     @staticmethod
     def _swarm_peer_ui_url(peer: dict) -> str:

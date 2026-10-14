@@ -261,16 +261,18 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
     }
     if trusted_peer:
-        for key in tuple(announced):
-            pinned_value = trusted_peer.get(key)
-            if pinned_value not in (None, ""):
-                announced[key] = pinned_value
+        # Mirror the paired record exactly, including fields it lacks: a legacy
+        # row without ports/scheme must keep resolving the way it always has,
+        # not adopt the announcer's values.
+        announced = {key: trusted_peer[key] for key in announced if trusted_peer.get(key) not in (None, "")}
+        existing = {key: value for key, value in existing.items() if key not in ("reachable_url", "advertised_reachable_url", "scheme", "api_port", "peer_mtls_port", "certificate_fingerprint")}
     # A peer can announce while its Tailnet daemon is still starting. Preserve
     # the last authenticated mesh route through that temporary empty value;
     # a stale route only fails over, while erasing it makes cross-network
     # recovery impossible once multicast discovery is no longer available.
     if trusted_peer:
-        tailnet_ip = str(trusted_peer.get("tailnet_ip") or existing.get("tailnet_ip") or "")
+        # Never carry a pre-pairing (LAN-claimed) discovered route over.
+        tailnet_ip = str(trusted_peer.get("tailnet_ip") or "")
     else:
         tailnet_ip = str(payload.get("tailnet_ip") or existing.get("tailnet_ip") or "")
     peer = {
