@@ -5061,6 +5061,41 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_stale_invite_identity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-stale-invite-identity-uat",
+      "name": "Issue #240 invitation identity after mechanism change, ghost membership, and host-core recommendation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_stale_invite_identity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/mechanism.py",
+          "app/multiplayer/library.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
