@@ -3259,6 +3259,43 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-213-live-trust-boundaries",
+      "name": "Issue #213 live TLS key possession and stored-pin re-pairing boundaries",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_213_live_trust_boundaries.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_213_live_trust_boundaries.py",
+          "tests/adversarial/test_issue_213_pairing_trust_uat.py",
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "app/transfer/drone_tls.py",
+          "app/web/server_tls.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
