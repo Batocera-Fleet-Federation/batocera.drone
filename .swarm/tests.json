@@ -3397,6 +3397,163 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_220_empty_database_path_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-220-empty-database-path-uat",
+      "name": "Issue #220 empty state_database_file never reaches SQLite and does not derive the legacy database",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_220_empty_database_path_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_220_empty_path_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-220-empty-path-boundaries",
+      "name": "Issue #220 empty and whitespace paths are ValueError on every guarded helper before sqlite3.connect",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_220_empty_path_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_220_credential_store_blank_path_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-220-credential-store-blank-path-uat",
+      "name": "Issue #220 blank state database path fails closed in DroneCredentialStore without touching legacy credentials",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_220_credential_store_blank_path_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_220_blank_path_connect_spy.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-220-blank-path-connect-spy",
+      "name": "Issue #220 every blank database path form is rejected before sqlite3.connect, with positive controls",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_220_blank_path_connect_spy.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_220_out_of_scope_directory_db_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-220-out-of-scope-directory-db-path",
+      "name": "Out-of-scope #220 evidence: directory-shaped database and legacy paths reach SQLite or derive a parent database",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_220_out_of_scope_directory_db_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_213_pair_by_address_scheme_downgrade.py"
