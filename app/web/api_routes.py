@@ -156,6 +156,10 @@ class ApiRoutesMixin:
                 self._handle_peer_tailnet_config()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "multiplayer":
+                self._handle_peer_multiplayer(parts[2:], {}, query_params, "GET")
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -401,6 +405,11 @@ class ApiRoutesMixin:
 
             if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            # Multiplayer (web UI API; see handlers_multiplayer).
+            if len(parts) >= 2 and parts[0] == "admin" and parts[1] == "multiplayer":
+                self._handle_admin_multiplayer_get(parts[2:], query_params)
                 return
 
             # Admin -> Integrations (local-only optional extensions; see handlers_integrations).
@@ -777,6 +786,11 @@ class ApiRoutesMixin:
                 self._handle_peer_smtp_mail(payload)
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "multiplayer":
+                payload = self._read_json_body()
+                self._handle_peer_multiplayer(parts[2:], payload, {}, "POST")
+                return
+
             # Public to the session gate, but gated by its own bearer token:
             # remote MCP clients (Claude/Codex) authenticate with
             # ``Authorization: Bearer`` and never carry a browser cookie.
@@ -811,6 +825,10 @@ class ApiRoutesMixin:
 
             if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "multiplayer":
+                self._handle_admin_multiplayer_post(parts[2:])
                 return
 
             if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "integrations":

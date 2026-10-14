@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Bundled multiplayer compatibility knowledge. Intentionally tiny: records are added only from tested capabilities or confirmed sessions. System entries describe what the emulator mechanism technically supports, never that a specific game works.",
+  "systems": {
+    "snes": {"typical_max_players": 2},
+    "nes": {"typical_max_players": 2},
+    "megadrive": {"typical_max_players": 2},
+    "mastersystem": {"typical_max_players": 2},
+    "segacd": {"typical_max_players": 2},
+    "sega32x": {"typical_max_players": 2},
+    "neogeo": {"typical_max_players": 2},
+    "pcengine": {"typical_max_players": 2},
+    "gamecube": {"typical_max_players": 4},
+    "wii": {"typical_max_players": 4},
+    "psp": {"typical_max_players": 4}
+  },
+  "games": []
+}

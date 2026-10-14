@@ -1329,6 +1329,22 @@ except ImportError:
 
 
 try:
+    from .multiplayer.worker import start_multiplayer_worker as _start_multiplayer_worker
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from multiplayer.worker import start_multiplayer_worker as _start_multiplayer_worker  # type: ignore
+
+
+try:
+    from .web.handlers_multiplayer import HandlersMultiplayerMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_multiplayer import HandlersMultiplayerMixin  # type: ignore
+
+
+try:
     from .common import identity_provisioning as _identity
 except ImportError:
     if __package__ not in (None, ""):
@@ -1344,7 +1360,7 @@ except ImportError:
     from web.mcp_server import McpServerMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersIntegrationsMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersIntegrationsMixin, HandlersMultiplayerMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1957,6 +1973,16 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     _drop_log_lock = Lock()
     _drop_log_last: Dict[str, float] = {}
     _DROP_LOG_INTERVAL_SECONDS = 60.0
+
+    def server_close(self):
+        if getattr(self, "_owns_multiplayer_worker", False):
+            try:
+                from .multiplayer.worker import stop_multiplayer_worker
+            except ImportError:
+                from multiplayer.worker import stop_multiplayer_worker
+            stop_multiplayer_worker()
+            self._owns_multiplayer_worker = False
+        super().server_close()
 
     def handle_error(self, request, client_address):
         # The public HTTPS port is constantly probed by internet scanners sending
@@ -2742,6 +2768,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _AUTOMATION_POLLER_STARTED:
         _start_automation_poller(settings)
         _AUTOMATION_POLLER_STARTED = True
+    if swarm_enabled:
+        # Multiplayer crash recovery + session housekeeping (idempotent; see multiplayer/worker.py).
+        server._owns_multiplayer_worker = _start_multiplayer_worker(settings, repository) is not None
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:

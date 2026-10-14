@@ -7,6 +7,7 @@ const assetsMenuBtn = document.getElementById("assetsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
+const multiplayerMenuBtn = document.getElementById("multiplayerMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
 const notificationsBellWrap = document.getElementById("notificationsBellWrap");
@@ -379,6 +380,7 @@ function setLoading(isLoading, text = "Loading...") {
 }
 function applyAdminVisibility() {
   const adminLinks = [adminMenuBtn, controlsMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap].filter(Boolean);
+  if (multiplayerMenuBtn) adminLinks.push(multiplayerMenuBtn);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
     startNotificationsPoll();
@@ -14619,6 +14621,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderMediaKeysPage();
+    } else if (hash === "#multiplayer" || hash.startsWith("#multiplayer/")) {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderMultiplayerPage();
     } else if (
       (hash.startsWith("#admin/integration") && !hash.startsWith("#admin/integrations"))
       || ["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"].includes(hash)
@@ -14742,6 +14750,13 @@ swarmMenuBtn.addEventListener("click", (event) => {
   if (!adminEnabled) return;
   setHash("#admin/swarm");
 });
+if (multiplayerMenuBtn) {
+  multiplayerMenuBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (!adminEnabled) return;
+    setHash("#multiplayer");
+  });
+}
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;

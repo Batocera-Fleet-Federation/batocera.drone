@@ -95,7 +95,11 @@ validate_local_app() {
     "$WORK_DIR/app/integrations/__init__.py" \
     "$WORK_DIR/app/integrations/registry.py" \
     "$WORK_DIR/app/integrations/streamdeck/manager.py" \
-    "$WORK_DIR/app/integrations/media_keys/manager.py"; do
+    "$WORK_DIR/app/integrations/media_keys/manager.py" \
+    "$WORK_DIR/app/web/static/js/multiplayer.js" \
+    "$WORK_DIR/app/web/handlers_multiplayer.py" \
+    "$WORK_DIR/app/multiplayer/__init__.py" \
+    "$WORK_DIR/app/multiplayer/orchestrator.py"; do
     if [ ! -s "$required_file" ]; then
       echo "[drone-service] Local Drone app validation failed: missing or empty ${required_file}"
       return 1

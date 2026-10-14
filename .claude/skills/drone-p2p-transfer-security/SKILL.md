@@ -308,6 +308,21 @@ verify requester is a paired, mTLS-authenticated peer
 stream file
 ```
 
+## Peer Coordination Endpoints That Are Not Transfers (Multiplayer)
+
+`/peer/multiplayer/*` (see the `drone-multiplayer` skill) follows the same mTLS rules but
+carries session coordination instead of files. Extra rules for control-plane endpoints:
+
+- Identity is the pinned certificate (`_peer_requester_device_id`); a body field such as
+  `source_drone_id` may only *agree* with it.
+- Every message has a random `message_id` and `issued_at`; replays inside the window are
+  reported as duplicates and never re-applied; stale/future timestamps are refused.
+- Peer-supplied JSON is rebuilt field by field (bounded, enumerated, validated) before it is
+  stored or used in a file name, setting or process argument.
+- A peer may *propose* (invite, launch offer); it may never cause a game to start or close
+  on this machine without that machine's own user confirming.
+- Secrets sent over the channel (a session password) are never logged or returned to browsers.
+
 ## Path Safety Rules
 
 Before serving any local file:

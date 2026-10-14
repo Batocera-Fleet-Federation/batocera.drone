@@ -91,6 +91,14 @@ def _reset_database(settings: Any) -> Dict[str, int]:
     return removed
 
 
+def _reset_multiplayer(settings: Any) -> None:
+    try:
+        from ..multiplayer.identity_reset import reset_multiplayer_identity_state
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from multiplayer.identity_reset import reset_multiplayer_identity_state  # type: ignore
+    reset_multiplayer_identity_state(settings)
+
+
 def _clear_pinned_peer_certificates(settings: Any) -> int:
     """Remove every pinned peer certificate; raises if any cannot be removed.
 
@@ -224,6 +232,9 @@ def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
     # Kernel exports survive a Drone process restart. Retain ownership records
     # until every client is unexported and the Drone bind mounts are gone.
     nfs_export_manager.revoke_exports_for_identity_change(settings)
+    # Multiplayer sessions/invitations/allow-list/imported reports name the source Drone's peers
+    # (and may hold emulator settings to put back). Best effort; the SQLite reset below is the gate.
+    _guarded("multiplayer", lambda: _reset_multiplayer(settings))
     removed = _reset_database(settings)
     pins = _clear_pinned_peer_certificates(settings)
     incomplete = _revoke_shared_credentials(settings)

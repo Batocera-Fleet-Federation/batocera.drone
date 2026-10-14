@@ -2019,6 +2019,25 @@ def _schemas() -> Dict[str, Schema]:
         "IntegrationCard": _object({"id": _string(), "name": _string(), "description": _string(), "icon": _string(), "configure_route": _string(), "capabilities": _array(_string()), "documentation": _string(), "installed": _boolean(), "enabled": _boolean(), "health": _enum(["disabled", "healthy", "installing", "waiting", "degraded", "error"]), "health_message": _string(), "version": _string(), "metrics": _array(_object({"label": _string(), "value": freeform}))}, ("id", "name", "installed", "enabled", "health"), description="One optional integration's card on Admin -> Integrations."),
         "IntegrationsResponse": _object({"integrations": _array(_ref("IntegrationCard")), "scope": _enum(["local-only"])}, ("integrations", "scope"), description="Optional integrations for this local machine (never another Drone)."),
         "StreamDeckJob": _object({"id": _string(), "kind": _string(), "status": _enum(["running", "completed", "failed", "cancelled"]), "message": _string(), "steps": _array(_string()), "result": freeform, "error": _string(), "cancellable": _boolean(), "started_at": _string(fmt="date-time"), "finished_at": _string(fmt="date-time", nullable=True)}, ("id", "kind", "status"), description="Background job (install/repair progress, script test, Test Action / Test Game Launch)."),
+        "MultiplayerPlayer": _object({"device_id": _string(), "name": _string(), "role": _enum(["host", "guest"]), "status": _enum(["invited", "joined", "declined", "left", "removed", "launching", "running", "failed", "unreachable"]), "ready": _boolean(), "slot": _integer(nullable=True), "latency_ms": _number(nullable=True), "route": _string(), "controllers": _integer(nullable=True), "compat": freeform, "error": _string()}, ("device_id", "status"), description="One participant in a multiplayer session."),
+        "MultiplayerSession": _object({"id": _string(), "version": _integer(), "state": _enum(["CREATED", "DISCOVERING", "INVITING", "CONFIGURING", "WAITING_FOR_PLAYERS", "READY", "STARTING", "RUNNING", "DEGRADED", "FAILED", "STOPPING", "COMPLETED"]), "host_id": _string(), "host_name": _string(), "game": freeform, "mechanism": _string(), "mechanism_label": _string(), "mechanism_reason": _string(), "emulator": freeform, "max_players": _integer(), "players": _object(additional_properties=_ref("MultiplayerPlayer")), "events": _array(freeform), "error": _string(), "manual_steps": _array(_string()), "my_steps": _array(_string()), "actions": _array(_string()), "is_host": _boolean(), "local_role": _string(), "pending_launch": _boolean(), "created_at": _string(), "updated_at": _string(), "expires_at": _string()}, ("id", "version", "state", "host_id", "players"), description="A multiplayer session as this Drone sees it. The join credential is never included."),
+        "MultiplayerSessionList": _object({"sessions": _array(_ref("MultiplayerSession"))}, ("sessions",), description="Active (or all) multiplayer sessions on this Drone."),
+        "MultiplayerOverview": _object({"enabled": _boolean(), "me": freeform, "peers": _array(freeform), "online_peers": _integer(), "sessions": _array(_ref("MultiplayerSession")), "invitations": _array(freeform), "recent": _array(freeform), "adapters": _array(freeform), "mechanisms": _array(freeform), "network": freeform, "settings": freeform}, ("enabled", "peers", "sessions"), description="Multiplayer dashboard."),
+        "MultiplayerAdaptersResponse": _object({"adapters": _array(freeform)}, ("adapters",), description="Emulator adapters with detected capabilities, readiness and limitations."),
+        "MultiplayerAdapter": _object({"id": _string(), "name": _string(), "tier": _enum(["implemented", "experimental", "detect_only"]), "automation": _enum(["full", "assisted", "manual"]), "installed": _boolean(), "version": _string(), "systems": _array(_string()), "mechanisms": _array(_string()), "features": freeform, "limitations": _array(_string()), "readiness": freeform}, ("id", "name"), description="One emulator adapter's capabilities."),
+        "MultiplayerPeersResponse": _object({"peers": _array(freeform)}, ("peers",), description="Paired swarm members with reachability."),
+        "MultiplayerSystemsResponse": _object({"systems": _array(freeform)}, ("systems",), description="Library systems with the adapters usable for them."),
+        "MultiplayerGamesResponse": _object({"system": _string(), "total": _integer(), "offset": _integer(), "limit": _integer(), "truncated": _boolean(), "games": _array(freeform), "filters": freeform}, ("games", "total"), description="Multiplayer game browser page."),
+        "MultiplayerSharedGamesResponse": _object({"games": _array(freeform)}, ("games",), description="Local multiplayer games that online peers also own."),
+        "MultiplayerGameDetail": _object({"game": freeform, "assessments": _array(freeform), "peers": _array(freeform), "recommendation": freeform, "image": _string(), "size": _integer()}, ("game", "assessments"), description="One game's per-mechanism compatibility, peer copies and the recommended mechanism."),
+        "MultiplayerDiagnostics": _object({"session": _ref("MultiplayerSession"), "adapter": freeform, "problems": _array(_string()), "connectivity": _array(freeform), "configuration": freeform, "active_game": freeform, "local": freeform, "events": _array(freeform)}, ("session",), description="Session diagnostics (no secrets)."),
+        "MultiplayerInvitationsResponse": _object({"invitations": _array(freeform)}, ("invitations",), description="Invitations received by this Drone."),
+        "MultiplayerHistoryResponse": _object({"history": _array(freeform)}, ("history",), description="Recently finished multiplayer sessions."),
+        "MultiplayerSettings": _object({"general": freeform, "networking": freeform, "emulators": freeform, "streaming": freeform, "privacy": freeform}, ("general", "networking", "emulators", "streaming", "privacy"), description="Multiplayer settings."),
+        "MultiplayerCompatibilityResponse": _object({"records": _array(freeform)}, ("records",), description="Multiplayer compatibility records known to this Drone."),
+        "MultiplayerGenericResponse": freeform,
+        "MultiplayerRequest": _object({"system": _string(), "game_id": _string(), "peers": _array(_string()), "mechanism": _string(), "max_players": _integer(), "emulator_override": freeform, "client_request_id": _string(), "peer_id": _string(), "slot": _integer(), "ready": _boolean(), "replace_running_game": _boolean(), "success": _boolean(), "note": _string(), "session_id": _string()}, description="Bounded action body; only the fields relevant to the endpoint are read."),
+        "MultiplayerPeerMessage": _object({"message_id": _string(), "issued_at": _string(fmt="date-time"), "session_id": _string(), "action": _string(), "session": freeform, "reviewed_session": freeform, "queries": _array(freeform)}, ("message_id", "issued_at"), description="Authenticated Drone-to-Drone coordination message (replay-protected). Accept requires reviewed_session: the invitation snapshot validated by the guest; the host checks its identity before joining."),
         "MediaKeysStatusResponse": _object({"id": _string(), "enabled": _boolean(), "installed": _boolean(), "health": _string(), "health_message": _string(), "hotkeygen_running": _boolean(), "overrides_applied": _boolean(), "keyboards": _array(freeform), "bindings": _array(freeform), "builtins": _array(freeform), "paths": freeform, "scope": _enum(["local-only"])}, ("enabled", "bindings"), description="Media Keys status: detected keyboards, hotkeygen state, and the five managed key bindings."),
         "MediaKeysBindingRequest": _object({"action_type": _enum(["builtin", "script", "none"]), "action_id": _string(), "script_id": _string(), "hold_seconds": _integer(minimum=0), "confirm": _boolean("Test only: confirm a reboot/shutdown")}, description="A typed reference to a built-in or script -- never a command."),
         "MediaKeysBindingResponse": _object({"status": _string(), "error": _string(), "binding": freeform}, ("status",)),
@@ -2539,6 +2558,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, parameters=[_query_param("compact", _boolean(), "Omit the duplicate `downloads` list"), _query_param("queued_limit", _integer(), "Return at most this many queued rows (queued_total keeps the full count)")], tags=["admin", "downloads"])},
             **_integration_paths(),
+            **_multiplayer_paths(),
             "/admin/downloads/{job_id}/cancel": {
                 "post": _operation("Cancel a download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
@@ -3102,6 +3122,79 @@ def _integration_paths() -> Dict[str, Schema]:
         f"{mk}/scripts/{{script_id}}/delete": mpost("Delete an unassigned script", "StreamDeckLifecycleResponse", parameters=[_path_param("script_id")]),
     })
     return paths
+
+
+def _multiplayer_paths() -> Dict[str, Schema]:
+    """Multiplayer: the browser API (admin) and the peer coordination API (mTLS)."""
+    mp = "/admin/multiplayer"
+    tags = ["admin", "multiplayer"]
+    errors = ("400", "401", "403", "404", "409", "415", "429", "500", "502")
+
+    def get(summary: str, schema: str, **kwargs: Any) -> Schema:
+        return {"get": _operation(summary, {"200": _json_response(schema)}, tags=tags, **kwargs)}
+
+    def post(summary: str, schema: str, code: str = "200", request: str = "MultiplayerRequest", **kwargs: Any) -> Schema:
+        return {"post": _operation(summary, {code: _json_response(schema)}, tags=tags, error_codes=errors,
+                                   request_body=_json_request(request, required=False), **kwargs)}
+
+    sid = [_path_param("session_id")]
+    peer_tags = ["peer", "multiplayer"]
+    peer_security = [{"mutualTLS": []}]
+
+    def peer_post(summary: str) -> Schema:
+        return {"post": _operation(summary, {"200": _json_response("MultiplayerGenericResponse")}, request_body=_json_request("MultiplayerPeerMessage"),
+                                   tags=peer_tags, security=peer_security, error_codes=("400", "403", "404", "409", "429", "500"))}
+
+    return {
+        mp: get("Multiplayer dashboard", "MultiplayerOverview"),
+        f"{mp}/adapters": get("Emulator adapters and their detected capabilities", "MultiplayerAdaptersResponse"),
+        f"{mp}/adapters/refresh": post("Re-run emulator detection", "MultiplayerAdaptersResponse"),
+        f"{mp}/adapters/{{adapter_id}}": get("One adapter's capabilities", "MultiplayerAdapter", parameters=[_path_param("adapter_id")]),
+        f"{mp}/peers": get("Paired peers with reachability", "MultiplayerPeersResponse"),
+        f"{mp}/games/systems": get("Systems with multiplayer adapters", "MultiplayerSystemsResponse"),
+        f"{mp}/games/shared": get("Multiplayer games that online peers also own", "MultiplayerSharedGamesResponse"),
+        f"{mp}/games": get("Browse multiplayer candidates of one system", "MultiplayerGamesResponse", parameters=[
+            _query_param("system", _string(), "Required system"), _query_param("q", _string()), _query_param("mechanism", _string()),
+            _query_param("players", _integer()), _query_param("status", _enum(["ready", "configuration", "untested", "unsupported"])),
+            _query_param("peer", _string(), "Only games this peer owns compatibly"), _query_param("include_peers", _boolean()),
+            _query_param("limit", _integer(default=50)), _query_param("offset", _integer(default=0))]),
+        f"{mp}/games/{{system}}/{{game_id}}": get("A game's multiplayer compatibility and recommendation", "MultiplayerGameDetail",
+                                                     parameters=[_path_param("system"), _path_param("game_id")]),
+        f"{mp}/sessions": {**get("Active multiplayer sessions", "MultiplayerSessionList", parameters=[_query_param("ended", _boolean())]),
+                           **post("Create a session (host)", "MultiplayerSession", code="201")},
+        f"{mp}/sessions/{{session_id}}": get("A session's state", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/diagnostics": get("Session diagnostics", "MultiplayerDiagnostics", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/invite": post("Invite a paired peer (host)", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/assign-slot": post("Assign a player slot (host)", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/remove-player": post("Remove a player (host)", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/ready": post("Set this player's readiness", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/start": post("Start the session (host); may need approval to replace a running game", "MultiplayerSession", code="202", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/launch": post("Confirm launching the game on this machine (guest)", "MultiplayerGenericResponse", code="202", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/retry": post("Retry failed invitations or launches (host)", "MultiplayerSession", code="202", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/leave": post("Leave the session", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/end": post("End the session and clean up (host)", "MultiplayerSession", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/result": post("Record whether the session really worked", "MultiplayerGenericResponse", parameters=sid),
+        f"{mp}/sessions/{{session_id}}/restore-config": post("Restore emulator settings changed for this session", "MultiplayerGenericResponse", parameters=sid),
+        f"{mp}/invitations": get("Invitations received", "MultiplayerInvitationsResponse", parameters=[_query_param("all", _boolean())]),
+        f"{mp}/invitations/{{session_id}}/accept": post("Accept an invitation", "MultiplayerSession", parameters=sid),
+        f"{mp}/invitations/{{session_id}}/decline": post("Decline an invitation", "MultiplayerGenericResponse", parameters=sid),
+        f"{mp}/join": post("Join a session you were invited to", "MultiplayerSession"),
+        f"{mp}/history": get("Recent sessions", "MultiplayerHistoryResponse"),
+        f"{mp}/settings": {**get("Multiplayer settings", "MultiplayerSettings"), **post("Update multiplayer settings", "MultiplayerSettings", request="MultiplayerSettings")},
+        f"{mp}/connectivity/test": post("Test connectivity and latency to a peer", "MultiplayerGenericResponse"),
+        f"{mp}/compatibility": get("Compatibility records", "MultiplayerCompatibilityResponse"),
+        f"{mp}/compatibility/import": post("Import a paired peer's shared compatibility reports (never elevated to verified)", "MultiplayerGenericResponse"),
+        "/peer/multiplayer/invite": peer_post("Invite this Drone to a session (explicit acceptance required)"),
+        "/peer/multiplayer/update": peer_post("Host pushes a newer session snapshot"),
+        "/peer/multiplayer/respond": peer_post("Guest responds to the host (accept, decline, leave, ready, launch_result)"),
+        "/peer/multiplayer/launch": peer_post("Host offers the launch; the guest must confirm locally"),
+        "/peer/multiplayer/match": peer_post("Ask whether this Drone owns a game and how it can play it"),
+        "/peer/multiplayer/status": {"get": _operation("Liveness and session status for a member", {"200": _json_response("MultiplayerGenericResponse")},
+                                                       parameters=[_query_param("session", _string())], tags=peer_tags, security=peer_security,
+                                                       error_codes=("403", "404", "429", "500"))},
+        "/peer/multiplayer/compatibility": {"get": _operation("Locally confirmed multiplayer compatibility reports", {"200": _json_response("MultiplayerCompatibilityResponse")},
+                                                              tags=peer_tags, security=peer_security, error_codes=("403", "404", "429", "500"))},
+    }
 
 
 def _artwork_search_params() -> Iterable[Schema]:

@@ -56,6 +56,11 @@ ASSET_EVENT_TYPES = ("asset_downloaded", "asset_uploaded")
 # already emailed so the digest never picks them up.
 BATCH_EVENT_TYPES = ("asset_transfer_started", "asset_transfer_finished")
 
+# Multiplayer invitations and session events (see multiplayer/core.py). Local-only like the batch
+# entries: no SMTP toggle, never emailed in the digest.
+MULTIPLAYER_EVENT_TYPES = ("multiplayer_invitation", "multiplayer_session")
+LOCAL_ONLY_EVENT_TYPES = BATCH_EVENT_TYPES + MULTIPLAYER_EVENT_TYPES
+
 EVENT_TYPE_LABELS = {
     "vpn_connected": "VPN connected",
     "vpn_disconnected": "VPN disconnected",
@@ -91,7 +96,7 @@ def record_event(
     callers should not depend on the return value for anything but an
     optional log line; this must never raise.
     """
-    if event_type not in EVENT_TYPES and event_type not in BATCH_EVENT_TYPES:
+    if event_type not in EVENT_TYPES and event_type not in LOCAL_ONLY_EVENT_TYPES:
         _LOG.warning("record_event called with unknown event_type=%r", event_type)
     return _insert(
         settings,
@@ -100,7 +105,7 @@ def record_event(
         message,
         details,
         notify=True,
-        digest=event_type not in BATCH_EVENT_TYPES,
+        digest=event_type not in LOCAL_ONLY_EVENT_TYPES,
     )
 
 
@@ -116,7 +121,7 @@ def record_audit_event(
     Per-asset transfers use this: the digest still counts each one, while the
     bell gets a single started/finished pair per batch. Never raises.
     """
-    return _insert(settings, event_type, title, message, details, notify=False, digest=True)
+    return _insert(settings, event_type, title, message, details, notify=False, digest=event_type not in LOCAL_ONLY_EVENT_TYPES)
 
 
 def _insert(
