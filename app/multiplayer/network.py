@@ -109,9 +109,13 @@ class NetworkService:
 
     def host_address(self, peer: dict, preferred: str = "auto") -> str:
         """The address *this* Drone uses to reach ``peer`` -- what an emulator client should dial."""
-        addresses = self.candidates(peer)
+        # Gameplay dials an address chosen for gameplay, not the control-plane route order: a known LAN address
+        # first, then the tailnet, then a public address (unless the user explicitly prefers the tailnet or LAN).
+        scopes = ["lan", "tailnet", "public", "unknown"]
         if preferred in ("lan", "tailnet"):
-            addresses = sorted(addresses, key=lambda value: route_scope(value) != preferred)
+            scopes.remove(preferred)
+            scopes.insert(0, preferred)
+        addresses = sorted(self.candidates(peer), key=lambda value: scopes.index(route_scope(value)))
         for address in addresses:
             host = valid_host(urlparse(address).hostname or "")
             if not host:

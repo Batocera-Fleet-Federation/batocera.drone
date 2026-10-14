@@ -100,15 +100,19 @@ class CompatibilityDatabase:
             elif successes > failures and record.get("source", "local") in ("local", "builtin"):
                 if technical not in (m.UNSUPPORTED, m.INCOMPATIBLE):
                     result.update(classification=m.VERIFIED_COMPATIBLE, basis="confirmed-session")
-            elif successes > 0 and technical not in (m.UNSUPPORTED, m.INCOMPATIBLE):
-                result.update(classification=m.LIKELY_COMPATIBLE, basis="shared-report")
+            elif successes > 0:
+                # Another machine's report is attribution only: it never raises the local classification.
+                result["basis"] = "shared-report"
             return result
+        local_source = record.get("source", "local") in ("local", "builtin")
         if declared in m.COMPATIBILITY_CLASSES and declared != m.VERIFIED_COMPATIBLE:
-            # A declared class applies, but only evidence from this exact configuration can verify.
-            if declared in (m.INCOMPATIBLE, m.UNSUPPORTED) or technical in (m.UNKNOWN, m.EXPERIMENTAL, m.REQUIRES_CONFIGURATION):
+            # A declared class applies, but only evidence from this exact configuration can verify. Peer-declared
+            # records can only lower the class, never lift an untested game.
+            if declared in (m.INCOMPATIBLE, m.UNSUPPORTED) or (
+                    local_source and technical in (m.UNKNOWN, m.EXPERIMENTAL, m.REQUIRES_CONFIGURATION)):
                 result.update(classification=declared, basis="record")
         elif declared == m.VERIFIED_COMPATIBLE and technical not in (m.UNSUPPORTED, m.INCOMPATIBLE):
-            result.update(classification=m.LIKELY_COMPATIBLE, basis="record-other-configuration")
+            result["basis"] = "record-other-configuration"
         return result
 
     # ------------------------------------------------------------------ writes

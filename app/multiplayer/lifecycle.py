@@ -208,7 +208,29 @@ class LifecycleMixin:
         self.publish(session_id)
 
     # ------------------------------------------------------- launch evaluation
-    def evaluate_launch(self, session_id: str) -> None:
+    def _confirmed_launching(self, session: dict) -> set:
+        """Launching guests whose own status shows they really run the session game (housekeeping probe)."""
+        confirmed = set()
+        if not self.guest_launches_game(session):
+            return confirmed
+        for pid, player in session["players"].items():
+            if pid == self.me or player["status"] not in (m.P_JOINED, m.P_LAUNCHING):
+                continue
+            try:
+                body = self.network.get(self.paired_peer(pid), f"/status?session={session['id']}", timeout=4.0)
+            except Exception:  # noqa: BLE001 - unverifiable now; the next sweep asks again
+                continue
+            remote = body.get("session") if isinstance(body, dict) else None
+            if isinstance(remote, dict) and remote.get("known") and body.get("session_game_running") is True:
+                confirmed.add(pid)
+        return confirmed
+
+    def evaluate_launch(self, session_id: str, probe: bool = False) -> None:
+        confirmed: set = set()
+        if probe:
+            current = self.store.get(session_id)
+            if current and self.local_role(current) == m.HOST_ROLE and current["state"] in (m.STARTING, m.DEGRADED):
+                confirmed = self._confirmed_launching(current)
         with self.session_lock(session_id):
             session = self.store.get(session_id)
             if not session or self.local_role(session) != m.HOST_ROLE or session["state"] not in (m.STARTING, m.DEGRADED):
@@ -217,6 +239,9 @@ class LifecycleMixin:
             overdue = bool(deadline and deadline < m.now())
 
             def evaluate(s: dict) -> None:
+                for pid in confirmed:
+                    if s["players"].get(pid, {}).get("status") in (m.P_JOINED, m.P_LAUNCHING):
+                        s["players"][pid].update(status=m.P_RUNNING, error="")
                 guests = [p for k, p in s["players"].items() if k != s["host_id"]
                           and p["status"] in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_FAILED, m.P_UNREACHABLE)]
                 pending = [p for p in guests if p["status"] in (m.P_JOINED, m.P_LAUNCHING)]
@@ -375,8 +400,10 @@ class LifecycleMixin:
                             raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
                     adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
                     launched = True
-                    if not self.launcher.wait_for_start(path, HOST_START_TIMEOUT):
+                    started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
+                    if not started:
                         raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
+                    self.store.set_local(session_id, launched_pid=started.get("pid"))
                 self.store.set_local(session_id, launch_status="running", game_launched=True, pending_launch=None)
             self._guest_message(self.store.require(session_id), "launch_result", ok=True)
         except Exception as error:  # noqa: BLE001
@@ -549,7 +576,7 @@ class LifecycleMixin:
     def _tick_host(self, session: dict) -> None:
         session_id, local = session["id"], session.get("local") or {}
         if session["state"] == m.STARTING:
-            self.evaluate_launch(session_id)
+            self.evaluate_launch(session_id, probe=True)
         if local.get("publish_failed"):
             self.publish(session_id)
         if session["state"] in m.PRE_START_STATES:
@@ -642,7 +669,7 @@ class LifecycleMixin:
         player = session["players"].get(peer_id) or {}
         adapter = self.adapter_map.get((session.get("emulator") or {}).get("adapter", ""))
         launches = adapter is not None and adapter.guest_launches and adapter.effective_automation() != MANUAL
-        in_session = body.get("session_game_running", body.get("game_running"))
+        in_session = body.get("session_game_running") is True  # an omitted flag is not confirmation
         if (launches and session["state"] in m.LIVE_STATES and player.get("status") in (m.P_RUNNING, m.P_UNREACHABLE)
                 and not in_session):
             return "This Drone is online but is not running this session's game."
@@ -712,6 +739,8 @@ class LifecycleMixin:
                         summary["ended"] += 1
                 else:
                     if local.get("launch_status") == "launching":
+                        if self._owns_host_game(session):  # the game this machine started; never a different foreground game
+                            self.launcher.exit_game()
                         self.store.set_local(session_id, launch_status="failed", launch_error="The Drone restarted while launching.")
                         self.restore_if_enabled(session_id)
                         summary["failed"] += 1
