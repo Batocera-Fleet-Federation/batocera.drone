@@ -4684,6 +4684,40 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_session_truth_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-session-truth-uat",
+      "name": "Issue #240 invitation lifetime, session-game truth, and unknown-mechanism preference",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_session_truth_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/mechanism.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
