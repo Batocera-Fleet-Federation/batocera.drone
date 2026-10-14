@@ -61,8 +61,12 @@ def _start_local_network_workers(settings: Settings) -> None:
 
     def tailnet_watchdog() -> None:
         interval = max(30, int(os.environ.get("DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS", "60")))
-        while True:
+        # Checked after every wake so a restart or shutdown ends this generation's
+        # loop instead of stacking another watchdog beside the new one.
+        while not stop.is_set():
             time.sleep(interval)
+            if stop.is_set():
+                return
             if not tailnet_status().get("running"):
                 ensure_tailnet_networking(settings)
             else:
@@ -77,8 +81,10 @@ def _start_local_network_workers(settings: Settings) -> None:
         # with no operator action. A separate thread keeps peer timeouts from
         # delaying the watchdog's data-path repair.
         interval = max(60, int(os.environ.get("DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS", "300")))
-        while True:
+        while not stop.is_set():
             time.sleep(interval)
+            if stop.is_set():
+                return
             try:
                 status = tailnet_status()
                 if status.get("installed") and not status.get("enrolled"):

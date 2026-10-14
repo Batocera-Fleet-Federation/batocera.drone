@@ -1,6 +1,7 @@
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -99,6 +100,40 @@ class LocalNetworkWorkerLifecycleTests(unittest.TestCase):
         self.assertTrue(second_stop.is_set())
         second.join.assert_called_once_with(1.0)
         self.assertIsNone(peer_workers._LOCAL_NETWORK_DISCOVERY)
+
+    def test_restart_does_not_stack_or_leak_tailnet_loops(self) -> None:
+        # Other tests can leave same-named daemon threads behind, so only count this test's threads.
+        existing = set(threading.enumerate())
+
+        def alive(name: str) -> int:
+            return sum(1 for t in threading.enumerate() if t.name == name and t.is_alive() and t not in existing)
+
+        def wait_for_count(name: str, expected: int) -> None:
+            deadline = time.monotonic() + 5
+            while alive(name) != expected and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+        names = ("drone-tailnet-watchdog", "drone-tailnet-bootstrap-retry")
+        discovery = mock.Mock()
+        real_sleep = time.sleep
+        # Real Thread targets; sleeps are shortened so the loops wake and must notice their stop.
+        with mock.patch.object(peer_workers.time, "sleep", side_effect=lambda s: real_sleep(0.01)), \
+                mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
+                mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm"), \
+                mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True}), \
+                mock.patch.object(peer_workers, "_repair_tailnet_data_path"), \
+                mock.patch.object(local_network, "start_discovery_worker", return_value=discovery):
+            peer_workers._start_local_network_workers(mock.Mock())
+            for name in names:
+                self.assertEqual(alive(name), 1)
+            peer_workers._start_local_network_workers(mock.Mock())
+            for name in names:
+                wait_for_count(name, 1)
+                self.assertEqual(alive(name), 1, name)
+            peer_workers.stop_local_network_workers(timeout=1.0)
+            for name in names:
+                wait_for_count(name, 0)
+                self.assertEqual(alive(name), 0, name)
 
 
 if __name__ == "__main__":

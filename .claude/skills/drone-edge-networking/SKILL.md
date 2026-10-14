@@ -121,6 +121,10 @@ Rules:
   Tailscale daemon (`ensure_tailnet_networking`, `tailnet_status`,
   `tailnet_rotate_auth_key`) — a separate concern from this package's pure address
   detection.
+- The tailnet watchdog and bootstrap-retry threads (`transfer/peer_workers.py`) belong
+  to a local-network generation. They check that generation's stop event after each
+  sleep and exit, so a restart or stop never stacks a second copy. Keep that check
+  if you change their loops.
 
 ## Settings
 
