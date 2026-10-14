@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 try:
     from .gamelist import _first_metadata_value, _looks_like_placeholder_image
 except ImportError:  # pragma: no cover - supports direct module execution in legacy paths
-    from gamelist import _first_metadata_value, _looks_like_placeholder_image  # type: ignore
+    from roms.gamelist import _first_metadata_value, _looks_like_placeholder_image  # type: ignore
 
 
 LAUNCHBOX_API_BASE = "https://gamesdb-api.launchbox-app.com/api"
