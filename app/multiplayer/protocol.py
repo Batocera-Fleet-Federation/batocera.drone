@@ -10,7 +10,7 @@ Peer-supplied data is rebuilt field by field before it is stored.
 
 import re
 from datetime import timedelta
-from typing import Any, List
+from typing import Any, List, Optional
 
 from . import models as m
 from .adapters.base import CONTENT_HOST_ONLY
@@ -18,6 +18,11 @@ from .core import EVENT_INVITATION, EVENT_SESSION
 from .matching import MAX_MATCH_QUERIES, level_note, level_satisfies
 from .sessions import next_free_slot, settle_lobby
 from .store import add_event, replica_view, sanitize_session, require_same_identity
+
+try:
+    from ..integrations.streamdeck.game_runtime import same_rom
+except ImportError:  # pragma: no cover - flat execution
+    from integrations.streamdeck.game_runtime import same_rom  # type: ignore
 
 ACTIONS = ("accept", "decline", "leave", "ready", "not_ready", "launch_result")
 MAX_PENDING_INVITATIONS = 20
@@ -85,8 +90,36 @@ class ProtocolMixin:
             session = self.store.get(m.clean_session_id(session_id))
             if session and caller_id in session["players"] and not (session.get("local") or {}).get("ended"):
                 body["session"] = {"known": True, "state": session["state"], "version": session["version"]}
+                body["session_game_running"] = self.session_game_running(session)
                 self.store.set_local(session["id"], **self._seen_patch(session, caller_id))
         return body
+
+    def session_game_running(self, session: dict) -> bool:
+        """The foreground game on this machine is this session's game (not merely *some* game)."""
+        path = (session.get("local") or {}).get("game_path", "")
+        active = self.launcher.active_game()
+        return bool(path and active and same_rom(active.get("rom_path", ""), path))
+
+    def guest_launches_game(self, session: dict) -> bool:
+        adapter = self.adapter_map.get((session.get("emulator") or {}).get("adapter", ""))
+        return adapter is not None and adapter.guest_launches and adapter.effective_automation() != "manual"
+
+    def _verified_launch_payload(self, session: dict, caller_id: str, payload: dict) -> Optional[dict]:
+        """A launch success report is untrusted until the reporter really runs the session game.
+
+        Returns the payload to apply (downgraded to a failure when the guest says it is not running the game),
+        or ``None`` when that could not be checked right now (the report is then not applied).
+        """
+        if payload.get("ok") is not True or not self.guest_launches_game(session):
+            return payload
+        try:
+            body = self.network.get(self.paired_peer(caller_id), f"/status?session={session['id']}", timeout=4.0)
+        except Exception:  # noqa: BLE001
+            return None
+        remote = body.get("session") if isinstance(body, dict) else None
+        if isinstance(remote, dict) and remote.get("known") and body.get("session_game_running") is True:
+            return payload
+        return {**payload, "ok": False, "error": "Reported a successful launch but is not running this session's game."}
 
     def check_message_light(self, caller_id: str) -> None:
         self.paired_peer(m.clean_peer_id(caller_id, "caller"))
@@ -110,6 +143,13 @@ class ProtocolMixin:
         action = str(payload.get("action") or "")
         if action not in ACTIONS:
             raise m.MultiplayerError("invalid_action", f"action must be one of: {', '.join(ACTIONS)}")
+        if action == "launch_result" and replay != "duplicate":
+            # Ask the reporter about itself outside the session lock (a bounded network call).
+            known = self.store.get(session_id)
+            if known is not None and self.local_role(known) == m.HOST_ROLE and caller_id in known["players"]:
+                payload = self._verified_launch_payload(known, caller_id, payload)
+                if payload is None:
+                    return {"session": replica_view(known), "applied": False, "reason": "unverified"}
         with self.session_lock(session_id):
             session = self.store.get(session_id)
             if session is None or self.local_role(session) != m.HOST_ROLE:
@@ -119,6 +159,10 @@ class ProtocolMixin:
                 raise m.MultiplayerError("not_a_member", "You are not a member of that session.", 403)
             if replay == "duplicate":
                 return {"session": replica_view(session), "duplicate": True}
+            if action == "accept" and player["status"] == m.P_INVITED:
+                expires = self.invitation_expiry(session, caller_id)
+                if expires and expires < m.now():
+                    raise m.MultiplayerError("invitation_expired", "This invitation has expired. Ask the host to invite you again.", 409)
             handler = getattr(self, f"_respond_{action}")
             updated = self.store.mutate(session_id, lambda s: handler(s, caller_id, payload))
             self.store.set_local(session_id, **self._seen_patch(updated, caller_id))

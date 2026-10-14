@@ -552,6 +552,8 @@ class LifecycleMixin:
             self.evaluate_launch(session_id)
         if local.get("publish_failed"):
             self.publish(session_id)
+        if session["state"] in m.PRE_START_STATES:
+            self._expire_unanswered_invitations(session)
         silent = [pid for pid, p in session["players"].items() if pid != self.me and p["status"] in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_UNREACHABLE)
                   and (m.parse_time((local.get("last_seen") or {}).get(pid)) or m.parse_time(p.get("joined_at")) or m.now()) < m.now() - SILENT_AFTER]
         for pid in silent:
@@ -564,6 +566,23 @@ class LifecycleMixin:
                 self.store.set_local(session_id, host_game_misses=misses)
                 if misses >= 2:
                     self.end_session(session_id, reason="The host's game exited.", stop_game=False)
+
+    def _expire_unanswered_invitations(self, session: dict) -> None:
+        """Invitees who never answered within the invitation lifetime leave the lobby (they can be invited again)."""
+        lapsed = [pid for pid, p in session["players"].items() if p["status"] == m.P_INVITED
+                  and (self.invitation_expiry(session, pid) or m.now()) < m.now()]
+        if not lapsed:
+            return
+
+        def expire(s: dict) -> None:
+            for pid in lapsed:
+                player = s["players"][pid]
+                if player["status"] == m.P_INVITED:
+                    player.update(status=m.P_REMOVED, ready=False, slot=None, error="The invitation expired before it was answered.")
+                    add_event(s, "invitation_expired", f"{player['name']}'s invitation expired.", self.me)
+            settle_lobby(s)
+        self.store.mutate(session["id"], expire)
+        self.publish(session["id"])
 
     def _probe_player(self, session_id: str, peer_id: str) -> None:
         misses_key = "misses"
@@ -623,9 +642,10 @@ class LifecycleMixin:
         player = session["players"].get(peer_id) or {}
         adapter = self.adapter_map.get((session.get("emulator") or {}).get("adapter", ""))
         launches = adapter is not None and adapter.guest_launches and adapter.effective_automation() != MANUAL
+        in_session = body.get("session_game_running", body.get("game_running"))
         if (launches and session["state"] in m.LIVE_STATES and player.get("status") in (m.P_RUNNING, m.P_UNREACHABLE)
-                and not body.get("game_running")):
-            return "This Drone is online but its game is not running."
+                and not in_session):
+            return "This Drone is online but is not running this session's game."
         return ""
 
     def _tick_guest(self, session: dict) -> None:
@@ -651,8 +671,8 @@ class LifecycleMixin:
                 self.guest_cleanup(session_id, "The host became unavailable; this emulator session cannot continue without it.")
                 return
         mine = session["players"].get(self.me) or {}
-        if mine.get("status") == m.P_RUNNING and local.get("game_launched"):
-            if self.launcher.active_game() is None:
+        if mine.get("status") == m.P_RUNNING and local.get("game_launched") and self.guest_launches_game(session):
+            if not self.session_game_running(session):
                 misses = int(local.get("game_misses") or 0) + 1
                 self.store.set_local(session_id, game_misses=misses)
                 if misses >= 2:
@@ -660,7 +680,7 @@ class LifecycleMixin:
                         self._guest_message(session, "leave")
                     except m.MultiplayerError:
                         pass
-                    self.guest_cleanup(session_id, "You left the session because your game exited.")
+                    self.guest_cleanup(session_id, "You left the session because its game is no longer running here.")
             else:
                 self.store.set_local(session_id, game_misses=0)
 

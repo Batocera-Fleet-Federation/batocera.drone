@@ -401,6 +401,16 @@ class SessionMixin:
             self._log(self.store.require(session_id), "invited", f"invited {self.peer_name(peer)}", actor)
             return self.session_view(self.store.require(session_id))
 
+    def invitation_expiry(self, session: dict, peer_id: str):
+        """When this peer's invitation lapses (the host enforces it; the guest's copy is advisory)."""
+        stored = m.parse_time(((session.get("local") or {}).get("invite_expires") or {}).get(peer_id))
+        if stored:
+            return stored
+        invited = m.parse_time((session["players"].get(peer_id) or {}).get("invited_at"))
+        if invited is None:
+            return None
+        return invited + timedelta(minutes=self.cfg.get()["general"]["invitation_ttl_minutes"])
+
     def _deliver_invitation(self, session_id: str, peer: dict) -> None:
         peer_id = str(peer.get("drone_id") or peer.get("device_id"))
         session = self.store.require(session_id)
@@ -412,6 +422,10 @@ class SessionMixin:
                                                 "invite_expires_at": expires.isoformat(), "session": replica_view(session)}, timeout=6.0)
         except Exception as failure:  # noqa: BLE001
             error = f"Could not deliver the invitation: {str(failure)[:160] or type(failure).__name__}"
+
+        issued = dict((self.store.require(session_id).get("local") or {}).get("invite_expires") or {})
+        issued[peer_id] = expires.isoformat()
+        self.store.set_local(session_id, invite_expires=issued)
 
         def mark(s: dict) -> None:
             player = s["players"].get(peer_id)

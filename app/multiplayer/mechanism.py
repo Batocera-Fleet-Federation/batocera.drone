@@ -99,11 +99,11 @@ def choose(candidates: List[dict], *, preferred: str = "", forced: str = "") -> 
     note = ""
     if preferred:
         wanted = by_name.get(preferred)
-        if wanted and wanted["usable"]:
+        if wanted and wanted in usable:
             return {"mechanism": preferred, "forced": False, "candidates": public,
                     "reason": f"{wanted['label']} is your preferred mechanism and passed all checks."}
         note = (f" Your preferred {m.MECHANISM_LABELS.get(preferred, preferred)} "
-                f"{'does not apply to this game' if wanted is None else 'is not usable: ' + wanted['blockers'][0]}.")
+                f"{'does not apply to this game' if wanted is None else ('has an unknown capability for this game; choose it under Advanced' if wanted['usable'] else 'is not usable: ' + wanted['blockers'][0])}.")
     native = [item for item in usable if item["mechanism"] != m.REMOTE_STREAMING]
     pool = native or usable
     order = {name: index for index, name in enumerate(m.MECHANISM_PRIORITY)}
