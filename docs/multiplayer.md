@@ -212,7 +212,7 @@ Peer endpoints (mTLS; caller = pinned certificate identity):
 | `POST /peer/multiplayer/respond` | guest → host | `accept`, `decline`, `leave`, `ready`, `not_ready`, `launch_result` |
 | `POST /peer/multiplayer/update` | host → guests | Newer session snapshot (version-gated) |
 | `POST /peer/multiplayer/launch` | host → guest | Launch *offer* (port + one-time session credential); needs local confirmation |
-| `GET /peer/multiplayer/status?session=` | any member | Liveness / state |
+| `GET /peer/multiplayer/status?session=` | any member | Liveness / state. The host recovers an unreachable player only when this reply shows the player still holds the session and (once live, for mechanisms that launch games) has its game running; an answering Drone alone is not participation. Ending a session also pushes a withdrawal to invitees who never joined, and a fresh host `invite` renews an expired/withdrawn (never declined/accepted) invitation. |
 | `GET /peer/multiplayer/compatibility` | any → any | Locally confirmed compatibility reports (see below) |
 
 Rules enforced on every message: paired caller; `source_drone_id` (if present) must

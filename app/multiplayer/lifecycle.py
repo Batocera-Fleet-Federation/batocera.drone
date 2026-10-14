@@ -567,9 +567,12 @@ class LifecycleMixin:
 
     def _probe_player(self, session_id: str, peer_id: str) -> None:
         misses_key = "misses"
+        reason = "Lost contact with this player."
         try:
-            self.network.get(self.paired_peer(peer_id), f"/status?session={session_id}", timeout=4.0)
-            alive = True
+            body = self.network.get(self.paired_peer(peer_id), f"/status?session={session_id}", timeout=4.0)
+            reason = self._participation_gap(self.store.require(session_id), peer_id, body)
+            alive = not reason
+            reason = reason or "Lost contact with this player."
         except Exception:  # noqa: BLE001
             alive = False
         session = self.store.require(session_id)
@@ -597,7 +600,7 @@ class LifecycleMixin:
             def lost(s: dict) -> None:
                 player = s["players"][peer_id]
                 if player["status"] in (m.P_JOINED, m.P_RUNNING, m.P_LAUNCHING):
-                    player.update(status=m.P_UNREACHABLE, error="Lost contact with this player.")
+                    player.update(status=m.P_UNREACHABLE, error=reason)
                     add_event(s, "unreachable", f"Lost contact with {player['name']}.", self.me)
                     if s["state"] == m.RUNNING:
                         s["state"] = m.DEGRADED
@@ -606,6 +609,24 @@ class LifecycleMixin:
                         settle_lobby(s)
             self.store.mutate(session_id, lost)
             self.publish(session_id)
+
+    def _participation_gap(self, session: dict, peer_id: str, body: Any) -> str:
+        """Why a responding Drone is not (any longer) a participant; "" when its status backs the session.
+
+        Answering the coordination API only proves the Drone is up: it must still hold the session and,
+        once the game is live, have its native emulator running (when this mechanism launches it for guests).
+        """
+        body = body if isinstance(body, dict) else {}
+        remote = body.get("session") or {}
+        if not remote.get("known") or remote.get("state") in (m.STOPPING, m.COMPLETED, m.FAILED):
+            return "This Drone is online but no longer has the session."
+        player = session["players"].get(peer_id) or {}
+        adapter = self.adapter_map.get((session.get("emulator") or {}).get("adapter", ""))
+        launches = adapter is not None and adapter.guest_launches and adapter.effective_automation() != MANUAL
+        if (launches and session["state"] in m.LIVE_STATES and player.get("status") in (m.P_RUNNING, m.P_UNREACHABLE)
+                and not body.get("game_running")):
+            return "This Drone is online but its game is not running."
+        return ""
 
     def _tick_guest(self, session: dict) -> None:
         session_id, local = session["id"], session.get("local") or {}

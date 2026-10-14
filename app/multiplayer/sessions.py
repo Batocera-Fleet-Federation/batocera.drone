@@ -79,8 +79,8 @@ class SessionMixin:
                 if player["status"] == m.P_REMOVED:
                     if peer_id in notified:
                         continue  # told once already
-                elif not player.get("joined_at"):
-                    continue  # still only invited: no replica to update
+                elif not player.get("joined_at") and session["state"] not in (m.STOPPING, m.COMPLETED, m.FAILED):
+                    continue  # still only invited: no replica to update (until the session ends: then withdraw the invitation)
                 try:
                     peer = self.paired_peer(peer_id)
                     self.network.post(peer, "/update", {"message_id": m.new_message_id(), "issued_at": m.now_iso(),

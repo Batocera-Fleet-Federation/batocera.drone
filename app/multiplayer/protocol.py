@@ -83,7 +83,7 @@ class ProtocolMixin:
                 "game_running": self.launcher.active_game() is not None}
         if session_id:
             session = self.store.get(m.clean_session_id(session_id))
-            if session and caller_id in session["players"]:
+            if session and caller_id in session["players"] and not (session.get("local") or {}).get("ended"):
                 body["session"] = {"known": True, "state": session["state"], "version": session["version"]}
                 self.store.set_local(session["id"], **self._seen_patch(session, caller_id))
         return body
@@ -221,10 +221,12 @@ class ProtocolMixin:
         existing = self.store.invitation(snapshot["id"])
         if existing and existing["host_id"] != caller_id:
             raise m.MultiplayerError("session_exists", "That invitation id belongs to another host.", 409)
-        if replay == "duplicate" or (existing and existing["status"] != "pending"):
+        # A fresh host message may renew an invitation that lapsed or was withdrawn; an accepted/declined one stays as the user left it.
+        renewing = bool(existing) and existing["status"] in ("expired", "cancelled") and replay != "duplicate"
+        if replay == "duplicate" or (existing and existing["status"] != "pending" and not renewing):
             return {"status": (existing or {}).get("status", "pending"), "duplicate": True}
         pending = [item for item in self.store.invitations() if item["status"] == "pending"]
-        if not existing and len(pending) >= MAX_PENDING_INVITATIONS:
+        if (not existing or renewing) and len(pending) >= MAX_PENDING_INVITATIONS:
             raise m.MultiplayerError("too_many_invitations", "Too many pending invitations.", 429)
         ttl = timedelta(minutes=config["general"]["invitation_ttl_minutes"])
         asked = m.parse_time(payload.get("invite_expires_at")) or (m.now() + ttl)
