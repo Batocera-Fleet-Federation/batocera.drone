@@ -163,6 +163,45 @@ class ModuleImportModeTests(unittest.TestCase):
                         offenders.append(f"{path.name}:{node.lineno} imports {name!r} bare")
         self.assertEqual(offenders, [], "bare sibling imports in transfer/:\n" + "\n".join(offenders))
 
+    def test_except_importerror_fallbacks_never_import_nested_modules_bare(self):
+        """Every ``except ImportError`` fallback resolves nested modules via their package.
+
+        Only the relative import is exercised in package mode, so a fallback that names a
+        nested file as a top-level module (``from settings import X`` for ``common/settings.py``)
+        stays latent until a direct/flat load hits it. Top-level ``app/`` files (e.g.
+        ``app_version``, ``drone_api``) are legitimately bare in flat mode; any *nested*
+        module name must be imported as ``from <pkg> import X`` / ``from <pkg>.<mod> import X``.
+        """
+        top_level = {path.stem for path in APP_DIR.glob("*.py") if path.name != "__init__.py"}
+        packages = {
+            path.name for path in APP_DIR.iterdir()
+            if path.is_dir() and (path / "__init__.py").exists()
+        }
+        nested = set()
+        for package in packages:
+            for path in (APP_DIR / package).rglob("*.py"):
+                if path.name != "__init__.py":
+                    nested.add(path.stem)
+        nested -= top_level | packages
+        offenders = []
+        for path in sorted(APP_DIR.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                for handler in node.handlers:
+                    if not (isinstance(handler.type, ast.Name) and handler.type.id == "ImportError"):
+                        continue
+                    for sub in ast.walk(handler):
+                        if isinstance(sub, ast.ImportFrom) and sub.level == 0 and sub.module:
+                            if sub.module.split(".")[0] in nested:
+                                offenders.append(f"{path.relative_to(APP_DIR)}:{sub.lineno} from {sub.module}")
+                        elif isinstance(sub, ast.Import):
+                            for alias in sub.names:
+                                if alias.name.split(".")[0] in nested:
+                                    offenders.append(f"{path.relative_to(APP_DIR)}:{sub.lineno} import {alias.name}")
+        self.assertEqual(offenders, [], "bare nested-module fallbacks:\n" + "\n".join(offenders))
+
 
 if __name__ == "__main__":
     unittest.main()

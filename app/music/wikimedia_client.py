@@ -25,7 +25,7 @@ from urllib.request import Request, urlopen
 try:
     from .musicbrainz_client import MUSICBRAINZ_USER_AGENT as _USER_AGENT
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from musicbrainz_client import MUSICBRAINZ_USER_AGENT as _USER_AGENT  # type: ignore
+    from music.musicbrainz_client import MUSICBRAINZ_USER_AGENT as _USER_AGENT  # type: ignore
 
 WIKIMEDIA_COMMONS_API_BASE = "https://commons.wikimedia.org/w/api.php"
 

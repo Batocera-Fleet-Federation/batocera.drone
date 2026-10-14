@@ -2828,6 +2828,74 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_202_nested_import_fallback_runtime.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-202-nested-import-fallback-runtime",
+      "name": "Issue #202 named nested-module ImportError fallbacks resolve under PYTHONPATH=app",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/self_update.py",
+          "app/music/coverart_client.py",
+          "app/music/wikimedia_client.py",
+          "app/roms/scrapers.py",
+          "tests/adversarial/test_issue_202_nested_import_fallback_runtime.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_202_nested_import_fallback_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-202-nested-import-fallback-boundaries",
+      "name": "Issue #202 named-site dual-import contract and repo-wide bare nested fallback scan",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/self_update.py",
+          "app/music/coverart_client.py",
+          "app/music/wikimedia_client.py",
+          "app/roms/scrapers.py",
+          "tests/adversarial/test_issue_202_nested_import_fallback_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
