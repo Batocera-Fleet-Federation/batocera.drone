@@ -5229,6 +5229,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_execution_revocation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-execution-revocation",
+      "name": "Issue #240 launch execution respects revoked automatic consent and multiplayer disable",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_execution_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
