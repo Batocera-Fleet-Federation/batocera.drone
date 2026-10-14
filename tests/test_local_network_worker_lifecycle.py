@@ -37,6 +37,28 @@ class LocalNetworkWorkerLifecycleTests(unittest.TestCase):
         discovery.join.assert_called_once_with(1.0)
         self.assertIsNone(peer_workers._LOCAL_NETWORK_DISCOVERY)
 
+    def test_second_start_does_not_orphan_first_discovery_thread(self) -> None:
+        first = mock.Mock()
+        second = mock.Mock()
+        with mock.patch.object(peer_workers, "Thread"), \
+                mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
+                mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm"), \
+                mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True}), \
+                mock.patch.object(peer_workers, "_repair_tailnet_data_path"), \
+                mock.patch.object(local_network, "start_discovery_worker", side_effect=[first, second]) as start:
+            peer_workers._start_local_network_workers(mock.Mock())
+            first_stop = start.call_args.kwargs["stop_event"]
+            peer_workers._start_local_network_workers(mock.Mock())
+            self.assertEqual(start.call_count, 2)
+            self.assertTrue(first_stop.is_set())
+            first.join.assert_called_once()
+            second_stop = start.call_args.kwargs["stop_event"]
+            self.assertFalse(second_stop.is_set())
+            peer_workers.stop_local_network_workers(timeout=1.0)
+        self.assertTrue(second_stop.is_set())
+        second.join.assert_called_once_with(1.0)
+        self.assertIsNone(peer_workers._LOCAL_NETWORK_DISCOVERY)
+
 
 if __name__ == "__main__":
     unittest.main()
