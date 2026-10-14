@@ -115,20 +115,25 @@ class NetworkService:
         if preferred in ("lan", "tailnet"):
             scopes.remove(preferred)
             scopes.insert(0, preferred)
-        addresses = sorted(self.candidates(peer), key=lambda value: scopes.index(route_scope(value)))
-        for address in addresses:
+        ranked = []
+        for position, address in enumerate(self.candidates(peer)):
             host = valid_host(urlparse(address).hostname or "")
             if not host:
                 continue
             try:
                 ipaddress.ip_address(host)
-                return host
+                resolved = host
             except ValueError:
-                try:  # emulators generally want an IP; fall back to the name if it will not resolve
-                    return socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+                try:  # emulators generally want an IP; judge a name by where it actually points
+                    resolved = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
                 except OSError:
-                    return host
-        return ""
+                    resolved = ""
+            if resolved:
+                rank = scopes.index(route_scope(resolved))
+            else:  # a name that will not resolve is the last resort, behind any usable address
+                rank = len(scopes) + scopes.index(route_scope(address))
+            ranked.append((rank, position, resolved or host))
+        return min(ranked)[2] if ranked else ""
 
     def post(self, peer: dict, endpoint: str, payload: dict, *, timeout: float = 5.0) -> dict:
         body, _address = self._post(peer, f"{PEER_API}{endpoint}", payload, self.settings, peer_id=self.peer_id(peer),

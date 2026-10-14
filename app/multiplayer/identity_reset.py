@@ -23,7 +23,7 @@ def reset_multiplayer_identity_state(settings: Any) -> Dict[str, int]:
     for session_id in list(guard.pending()):
         guard.restore(session_id)
         result["restored_sessions"] += 1
-    for key, empty in (("sessions", dict), ("invitations", dict), ("history", list), ("replay", dict)):
+    for key, empty in (("sessions", dict), ("invitations", dict), ("history", list), ("replay", dict), ("config_watch", dict)):
         Document(settings, key, empty).save(empty())
         result["documents_cleared"] += 1
     store = MultiplayerSettings(settings)

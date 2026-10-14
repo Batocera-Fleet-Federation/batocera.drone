@@ -453,9 +453,12 @@ class SessionMixin:
                     raise m.MultiplayerError("not_a_player", "That Drone is not a player in this session.", 404)
                 holder = next((p for p in s["players"].values() if p.get("slot") == slot and p["device_id"] != peer_id
                                and p["status"] not in (m.P_DECLINED, m.P_LEFT, m.P_REMOVED)), None)
-                if holder:  # swap rather than refuse
-                    holder["slot"] = player.get("slot")
+                previous = player.get("slot")
+                if holder:  # swap rather than refuse; an unplaced player leaves the holder the next free slot
+                    holder["slot"] = None
                 player["slot"] = slot
+                if holder:
+                    holder["slot"] = previous if previous is not None else next_free_slot(s)
                 add_event(s, "slot", f"{player['name']} is now player {slot}.", self.me)
             self.store.mutate(session_id, apply)
             self.publish(session_id)

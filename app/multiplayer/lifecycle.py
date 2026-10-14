@@ -136,8 +136,9 @@ class LifecycleMixin:
                     self.launcher.exit_game()
                     if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
                         raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
-                adapter.launch(session, m.HOST_ROLE, context, self.launcher)
+                # Recorded before the launch call: a launch that starts the game and then fails must still be cleaned up.
                 self.store.set_local(session_id, port=port, host_launched=True)
+                adapter.launch(session, m.HOST_ROLE, context, self.launcher)
                 started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
                 if not started:
                     raise m.MultiplayerError("host_launch_timeout", "The game did not start on this machine.", 409)
@@ -398,8 +399,8 @@ class LifecycleMixin:
                         self.launcher.exit_game()
                         if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
                             raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
+                    launched = True  # even a failing launch call may already have started the game
                     adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
-                    launched = True
                     started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
                     if not started:
                         raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
@@ -538,6 +539,7 @@ class LifecycleMixin:
         """Periodic housekeeping (called by the worker): expiry, liveness, health. Never raises."""
         try:
             self._expire_invitations()
+            self.guard.sweep_watched()
             for session in list(self.store.all()):
                 try:
                     self._tick_session(session)

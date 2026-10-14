@@ -95,14 +95,14 @@ class CompatibilityDatabase:
             successes, failures = int(tested.get("successes", 0)), int(tested.get("failures", 0))
             result["evidence"] = {"config": config_fp, "successes": successes, "failures": failures,
                                   "last": tested.get("last"), "source": record.get("source", "local")}
-            if failures > successes:
+            if record.get("source", "local") not in ("local", "builtin"):
+                # Another machine's report is attribution only: it never raises or lowers the local classification.
+                if successes or failures:
+                    result["basis"] = "shared-report"
+            elif failures > successes:
                 result.update(classification=m.INCOMPATIBLE, basis="failed-sessions")
-            elif successes > failures and record.get("source", "local") in ("local", "builtin"):
-                if technical not in (m.UNSUPPORTED, m.INCOMPATIBLE):
-                    result.update(classification=m.VERIFIED_COMPATIBLE, basis="confirmed-session")
-            elif successes > 0:
-                # Another machine's report is attribution only: it never raises the local classification.
-                result["basis"] = "shared-report"
+            elif successes > failures and technical not in (m.UNSUPPORTED, m.INCOMPATIBLE):
+                result.update(classification=m.VERIFIED_COMPATIBLE, basis="confirmed-session")
             return result
         local_source = record.get("source", "local") in ("local", "builtin")
         if declared in m.COMPATIBILITY_CLASSES and declared != m.VERIFIED_COMPATIBLE:

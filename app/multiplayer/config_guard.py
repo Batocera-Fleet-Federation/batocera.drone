@@ -15,6 +15,7 @@ import os
 import re
 import stat
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,7 @@ _KV_KEY = re.compile(r'^[A-Za-z0-9_.\-]+(\["[^"\\\x00-\x1f=]{1,255}"\])?(\.[A-Za
 _INI_KEY = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
 _INI_SECTION = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
 MAX_CONFIG_BYTES = 4 * 1024 * 1024
+WATCH_TTL = timedelta(hours=1)
 
 
 def scoped_key(system: str, rom_name: str, key: str) -> str:
@@ -47,6 +49,7 @@ class ConfigGuard:
     def __init__(self, settings: Any, *, backup_dir: Optional[Path] = None) -> None:
         self.settings = settings
         self._journal = Document(settings, "config_journal", dict)
+        self._watch = Document(settings, "config_watch", dict)
         self.userdata_root = Path(os.path.abspath(str(settings.userdata_root)))
         self.backup_dir = Path(backup_dir) if backup_dir else self.userdata_root / "system" / "drone-app" / "multiplayer-backups"
 
@@ -244,7 +247,7 @@ class ConfigGuard:
                     else:
                         previous["applied"] = item["applied"]
             else:
-                entry["files"][str(target)] = {"kind": kind, "backup": str(backup), "edits": records}
+                entry["files"][str(target)] = {"kind": kind, "backup": str(backup), "edits": records, "watch": watch}
         self._journal.update(journal)  # write-ahead: recoverable even if the file write dies half way
         if watch:
             return {"file": target.name, "keys": [edit["key"] for edit in clean_edits], "watching": True}
@@ -279,38 +282,97 @@ class ConfigGuard:
             return self._restore(session_id)
 
     def _restore(self, session_id: str) -> dict:
-        """Put originals back. Returns ``{"restored": n, "left_alone": n, "errors": [...]}``; keeps the journal on error."""
+        """Put originals back. Returns ``{"restored": n, "left_alone": n, "errors": [...]}``; keeps the journal on error.
+
+        Generated-file values we only watched (never wrote) that were not there yet are remembered briefly, so a
+        profile configgen writes after this restore still loses the join credential (see ``sweep_watched``).
+        """
         session_id = m.clean_session_id(session_id)
         entry = self._journal.load().get(session_id)
         result = {"restored": 0, "left_alone": 0, "errors": []}
-        if not entry:
-            return result
-        for path_text, spec in list(entry["files"].items()):
-            target, kind = Path(path_text), spec["kind"]
-            try:
-                target = self._confine(target)
-                text = self._read(target)
-                if text is None:
-                    result["left_alone"] += len(spec["edits"])
+        unmatched: Dict[str, dict] = {}
+        if entry:
+            for path_text, spec in list(entry["files"].items()):
+                target, kind = Path(path_text), spec["kind"]
+                try:
+                    target = self._confine(target)
+                    text = self._read(target)
+                    if text is None:
+                        result["left_alone"] += len(spec["edits"])
+                        if spec.get("watch"):
+                            unmatched[path_text] = {"kind": kind, "edits": list(spec["edits"])}
+                        backup = Path(spec.get("backup") or "")
+                        if backup.name and backup.parent == self.backup_dir:
+                            backup.unlink(missing_ok=True)
+                        continue
+                    updated = text
+                    for edit in spec["edits"]:
+                        current = self._get(kind, updated, edit)
+                        if current != edit["applied"]:
+                            result["left_alone"] += 1  # the user (or Batocera) changed it since: not ours to revert
+                            if spec.get("watch") and current is None:
+                                unmatched.setdefault(path_text, {"kind": kind, "edits": []})["edits"].append(edit)
+                            continue
+                        updated = self._set(kind, updated, edit, edit["original"])
+                        result["restored"] += 1
+                    if updated != text:
+                        self._atomic_write(target, updated)
                     backup = Path(spec.get("backup") or "")
                     if backup.name and backup.parent == self.backup_dir:
                         backup.unlink(missing_ok=True)
-                    continue
-                updated = text
-                for edit in spec["edits"]:
-                    current = self._get(kind, updated, edit)
-                    if current != edit["applied"]:
-                        result["left_alone"] += 1  # the user (or Batocera) changed it since: not ours to revert
-                        continue
-                    updated = self._set(kind, updated, edit, edit["original"])
-                    result["restored"] += 1
-                if updated != text:
-                    self._atomic_write(target, updated)
-                backup = Path(spec.get("backup") or "")
-                if backup.name and backup.parent == self.backup_dir:
-                    backup.unlink(missing_ok=True)
-            except (OSError, m.MultiplayerError) as error:
-                result["errors"].append(f"{Path(path_text).name}: {getattr(error, 'message', None) or error}")
-        if not result["errors"]:
-            self._journal.update(lambda store: store.pop(session_id, None))
+                except (OSError, m.MultiplayerError) as error:
+                    result["errors"].append(f"{Path(path_text).name}: {getattr(error, 'message', None) or error}")
+            if not result["errors"]:
+                self._journal.update(lambda store: store.pop(session_id, None))
+        if unmatched and not result["errors"]:
+            self._remember_watched(session_id, unmatched)
+        result["errors"].extend(self._sweep(session_id))
         return result
+
+    def _remember_watched(self, session_id: str, files: Dict[str, dict]) -> None:
+        def add(store: dict) -> None:
+            entry = store.setdefault(session_id, {"created_at": m.now_iso(), "files": {}})
+            entry["created_at"] = m.now_iso()
+            for path_text, spec in files.items():
+                known = entry["files"].setdefault(path_text, {"kind": spec["kind"], "edits": []})
+                keys = {(item["section"], item["key"]) for item in known["edits"]}
+                known["edits"].extend(item for item in spec["edits"] if (item["section"], item["key"]) not in keys)
+        self._watch.update(add)
+
+    def sweep_watched(self) -> List[str]:
+        """Remove credentials a generated profile received after its session was restored. Returns errors."""
+        with lock_for(self.settings, "config-files"):
+            return self._sweep(None)
+
+    def _sweep(self, session_id: Optional[str]) -> List[str]:
+        errors: List[str] = []
+        watched = self._watch.load()
+        for owner, entry in list(watched.items()):
+            if session_id not in (None, owner):
+                continue
+            created = m.parse_time(entry.get("created_at"))
+            expired = created is None or m.now() - created > WATCH_TTL
+            pending_files = {}
+            for path_text, spec in entry.get("files", {}).items():
+                try:
+                    target = self._confine(Path(path_text))
+                    text = self._read(target)
+                    waiting = []
+                    updated = text or ""
+                    for edit in spec["edits"]:
+                        if text is not None and self._get(spec["kind"], updated, edit) == edit["applied"]:
+                            updated = self._set(spec["kind"], updated, edit, edit["original"])
+                        else:
+                            waiting.append(edit)
+                    if text is not None and updated != text:
+                        self._atomic_write(target, updated)
+                    if waiting:
+                        pending_files[path_text] = {"kind": spec["kind"], "edits": waiting}
+                except (OSError, m.MultiplayerError) as error:
+                    errors.append(f"{Path(path_text).name}: {getattr(error, 'message', None) or error}")
+                    pending_files[path_text] = spec
+            if expired or not pending_files:
+                self._watch.update(lambda store, owner=owner: store.pop(owner, None))
+            else:
+                self._watch.update(lambda store, owner=owner, files=pending_files: store.get(owner, {}).update(files=files))
+        return errors
