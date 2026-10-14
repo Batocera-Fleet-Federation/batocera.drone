@@ -14,6 +14,7 @@ from pathlib import Path
 
 from app.drone_api import Settings, create_server
 from app.mock_data import seed_mock_userdata
+from app.transfer.peer_workers import stop_local_network_workers
 from client.config import ClientConfig
 from client.endpoints import (
     config_backups,
@@ -81,6 +82,8 @@ class DroneApiClientIntegrationTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
+        # create_server() starts the LAN discovery listener against this test's state DB.
+        stop_local_network_workers()
         os.environ.clear()
         os.environ.update(self._old_env)
         self._tmp.cleanup()

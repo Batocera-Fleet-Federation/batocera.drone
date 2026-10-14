@@ -19,6 +19,7 @@ from urllib.error import URLError
 
 import app.drone_api as drone_api
 from app.transfer import local_network
+from app.transfer.peer_workers import stop_local_network_workers
 from app.mock_data import seed_mock_userdata
 from app.storage.state_store import (
     database_path,
@@ -4931,6 +4932,9 @@ class CreateServerHttpRedirectTests(unittest.TestCase):
             os.environ.pop(stale_key, None)
 
     def tearDown(self) -> None:
+        # create_server() starts the LAN discovery listener against this test's state DB;
+        # stop it before the temp dir is removed so a late announce can't write into it.
+        stop_local_network_workers()
         os.environ.clear()
         os.environ.update(self._old_env)
         self._tmp.cleanup()
@@ -5246,6 +5250,9 @@ class CreateServerCastListenerTests(unittest.TestCase):
             os.environ.pop(stale_key, None)
 
     def tearDown(self) -> None:
+        # create_server() starts the LAN discovery listener against this test's state DB;
+        # stop it before the temp dir is removed so a late announce can't write into it.
+        stop_local_network_workers()
         os.environ.clear()
         os.environ.update(self._old_env)
         self._tmp.cleanup()

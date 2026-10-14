@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
 from app.drone_api import Settings, create_server
+from app.transfer.peer_workers import stop_local_network_workers
 
 
 class McpUiTests(unittest.TestCase):
@@ -59,6 +60,9 @@ class McpServerTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
+        # create_server() starts the LAN discovery listener against this test's state DB;
+        # stop it before the temp dir is removed so a late announce can't write into it.
+        stop_local_network_workers()
         os.environ.clear()
         os.environ.update(self._old_env)
         self._tmp.cleanup()

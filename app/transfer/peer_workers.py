@@ -39,8 +39,13 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
     global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
     if _LOCAL_NETWORK_STOP is not None:
         _LOCAL_NETWORK_STOP.set()
-    if _LOCAL_NETWORK_DISCOVERY is not None:
-        _LOCAL_NETWORK_DISCOVERY.join(timeout)
+    discovery = _LOCAL_NETWORK_DISCOVERY
+    if discovery is not None:
+        # Unblock recvfrom so join is not racing the 1s datagram timeout.
+        closer = getattr(discovery, "close_discovery_socket", None)
+        if callable(closer):
+            closer()
+        discovery.join(timeout)
     _LOCAL_NETWORK_STOP = None
     _LOCAL_NETWORK_DISCOVERY = None
 
