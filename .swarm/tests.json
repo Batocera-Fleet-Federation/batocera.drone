@@ -4919,6 +4919,40 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_deadline_version_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-deadline-version-uat",
+      "name": "Issue #240 launch-deadline offers, version evidence, and host-loss acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_deadline_version_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/adapters/retroarch.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
