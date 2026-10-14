@@ -1,3 +1,4 @@
+import socket
 import tempfile
 import threading
 import unittest
@@ -20,6 +21,46 @@ class LocalNetworkWorkerLifecycleTests(unittest.TestCase):
             stop.set()
             worker.join(timeout=10)
         self.assertFalse(worker.is_alive())
+
+    def test_discovery_worker_survives_non_object_json_datagrams(self) -> None:
+        stop = threading.Event()
+        packets = [b"[]", b"null", b'"peer"', b"42", b"[1, 2]", b"{}"]
+        recorded: list = []
+
+        class FakeSocket:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def setsockopt(self, *args) -> None:
+                pass
+
+            def bind(self, *args) -> None:
+                pass
+
+            def settimeout(self, *args) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def recvfrom(self, size: int):
+                if packets:
+                    return packets.pop(0), ("192.0.2.10", 5000)
+                stop.set()
+                raise socket.timeout()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(local_network, "is_local_mode", return_value=True), \
+                mock.patch.object(local_network, "_join_multicast_group"), \
+                mock.patch.object(local_network, "announce"), \
+                mock.patch.object(local_network.socket, "socket", FakeSocket), \
+                mock.patch.object(local_network, "record_discovered_peer",
+                                  side_effect=lambda *a, **k: recorded.append(a[1]) or None):
+            settings = mock.Mock(state_database_file=Path(tmp) / "state.sqlite3")
+            worker = local_network.start_discovery_worker(settings, lambda: "", stop_event=stop)
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(recorded, [{}])
 
     def test_stop_local_network_workers_signals_and_joins_discovery(self) -> None:
         discovery = mock.Mock()
