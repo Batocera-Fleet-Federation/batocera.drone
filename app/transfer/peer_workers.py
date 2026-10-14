@@ -61,6 +61,17 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
         _LOCAL_NETWORK_DISCOVERY = None
 
 
+def local_network_workers_running() -> bool:
+    """Return whether a local-network generation is currently live.
+
+    Callers that latch "workers were started" must check this too: a stop
+    issued directly on this module clears the live generation, and the latch
+    alone would then skip the restart.
+    """
+    with _LOCAL_NETWORK_LIFECYCLE_LOCK:
+        return _LOCAL_NETWORK_STOP is not None and not _LOCAL_NETWORK_STOP.is_set()
+
+
 def _start_local_network_workers(settings: Settings) -> None:
     with _LOCAL_NETWORK_LIFECYCLE_LOCK:
         _start_local_network_generation(settings)

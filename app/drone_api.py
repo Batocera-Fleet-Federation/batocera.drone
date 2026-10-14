@@ -673,11 +673,11 @@ except ImportError:
 
 
 try:
-    from .transfer.peer_workers import _start_local_network_workers
+    from .transfer.peer_workers import _start_local_network_workers, local_network_workers_running
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from transfer.peer_workers import _start_local_network_workers  # type: ignore
+    from transfer.peer_workers import _start_local_network_workers, local_network_workers_running  # type: ignore
 
 
 try:
@@ -2762,7 +2762,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if peer_mtls_server is not None:
         peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
 
-    if not _LOCAL_NETWORK_WORKERS_STARTED and swarm_enabled:
+    # Restart when a stop (e.g. harness teardown) cleared the live generation,
+    # even though the once-per-process latch is still set.
+    if swarm_enabled and not (_LOCAL_NETWORK_WORKERS_STARTED and local_network_workers_running()):
         _start_local_network_workers(settings)
         _LOCAL_NETWORK_WORKERS_STARTED = True
     if not _AUTOMATION_POLLER_STARTED:
