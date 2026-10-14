@@ -5390,6 +5390,72 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_246_announcement_downgrade_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-246-announcement-downgrade-boundaries",
+      "name": "Issue #246 unauthenticated LAN announce cannot downgrade TLS-paired peers to plaintext",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transport/lan.py",
+          "tests/adversarial/test_issue_246_announcement_downgrade_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_246_plaintext_traffic_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-246-plaintext-traffic-uat",
+      "name": "Issue #246 live plaintext listener receives no health, download, or pairing traffic after spoofed announce",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/peer_download.py",
+          "tests/adversarial/test_issue_246_plaintext_traffic_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
