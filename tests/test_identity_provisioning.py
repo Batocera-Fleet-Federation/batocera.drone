@@ -1182,8 +1182,10 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
     def test_choose_device_id_rejects_mock_journal_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
-            with self.assertRaises(identity.IdentityError):
-                identity._choose_device_id(settings, mock.MagicMock())
+            for journal in (mock.MagicMock(), mock.MagicMock(spec=dict)):
+                with self.subTest(journal=type(journal)):
+                    with self.assertRaises(identity.IdentityError):
+                        identity._choose_device_id(settings, journal)
 
     def test_retire_device_id_rejects_mock_root(self) -> None:
         with self.assertRaises(TypeError):
