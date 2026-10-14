@@ -4754,6 +4754,42 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_lobby_dial_cleanup_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-lobby-dial-cleanup-uat",
+      "name": "Issue #240 slot assignment, gameplay dial, peer-report classification, and partial-launch cleanup",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_lobby_dial_cleanup_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/network.py",
+          "app/multiplayer/compat_db.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/config_guard.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
