@@ -89,8 +89,16 @@ class ProtocolMixin:
         if session_id:
             session = self.store.get(m.clean_session_id(session_id))
             if session and caller_id in session["players"] and not (session.get("local") or {}).get("ended"):
+                deadline = m.parse_time((session.get("local") or {}).get("launch_deadline"))
+                # Use the host's clock: a live session may continue after one
+                # guest's start attempt has expired, even before the next sweep.
+                launch_allowed = (self.local_role(session) == m.HOST_ROLE and
+                                  session["state"] in m.LIVE_STATES and
+                                  session["players"][caller_id]["status"] in (m.P_JOINED, m.P_LAUNCHING) and
+                                  bool(deadline and m.now() <= deadline))
                 body["session"] = {"known": True, "state": session["state"], "version": session["version"],
-                                   "player_status": session["players"][caller_id]["status"]}
+                                   "player_status": session["players"][caller_id]["status"],
+                                   "launch_allowed": launch_allowed}
                 body["session_game_running"] = self.session_game_running(session)
                 self.store.set_local(session["id"], **self._seen_patch(session, caller_id))
         return body

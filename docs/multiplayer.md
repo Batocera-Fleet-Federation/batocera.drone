@@ -403,6 +403,9 @@ a raw configuration key.
   applying configuration or launching. A failed/ended host or a return to the lobby
   voids the offer; an unreachable host blocks confirmation until it answers. A
   guest restart can retain an unconfirmed offer while the host is still starting.
+  Confirmation also requires the host to still expect that player within its
+  launch deadline. A failed or unreachable player needs a host retry and a fresh
+  offer, even when the session continues for other players.
 * **Housekeeping** (`multiplayer/worker.py`, one daemon thread, 10 s sweep): expires
   invitations/sessions, probes silent players (→ `unreachable`, session `DEGRADED`,
   recoverable), ends a guest's session when the host stays unreachable for 2 minutes

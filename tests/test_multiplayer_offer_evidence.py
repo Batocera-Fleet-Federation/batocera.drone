@@ -1,4 +1,7 @@
 """Fresh launch authorization and diagnostic-only failures on a simulated swarm."""
+from datetime import timedelta
+from unittest import mock
+
 from app.multiplayer import models as m
 from test_multiplayer_orchestrator import SwarmCase
 
@@ -52,3 +55,51 @@ class OfferEvidenceTests(SwarmCase):
         self.assertEqual(verdict["classification"], m.VERIFIED_COMPATIBLE)
         self.assertEqual(verdict["evidence"]["failures"], 0)
         self.assertEqual(self.h.compat.get("snes", title_key)["knownIssues"][-1]["kind"], "orchestration")
+
+
+class DeadlineOfferTests(SwarmCase):
+    names = ("host", "guest", "other")
+
+    def setUp(self):
+        super().setUp()
+        for node in self.nodes.values():
+            node.repo.games["snes"][0]["players"] = "1-4"
+            node.orch.library.invalidate()
+        self.sid = self.create(peers=("guest", "other"), max_players=4)["id"]
+        for name in ("guest", "other"):
+            orch = self.nodes[name].orch
+            orch.accept_invitation(self.sid)
+            orch.set_ready(self.sid, True)
+        self.h.set_ready(self.sid, True)
+        self.h.start_session(self.sid)
+        self.nodes["other"].orch.confirm_launch(self.sid)
+        self.after_deadline = m.parse_time(self.h.store.require(self.sid)["local"]["launch_deadline"]) + timedelta(seconds=1)
+
+    def test_host_deadline_blocks_confirmation_before_housekeeping(self):
+        before = self.nodes["guest"].conf_text
+        with mock.patch.object(m, "now", return_value=self.after_deadline):
+            self.assertEqual(self.code(self.g.confirm_launch, self.sid), "launch_expired")
+        self.assertEqual(self.h.get_session(self.sid)["players"]["guest"]["status"], m.P_LAUNCHING)
+        self.assertEqual(self.g.launcher.launched, [])
+        self.assertEqual(self.nodes["guest"].conf_text, before)
+        self.assertEqual(self.g.guard.pending(), {})
+
+    def test_queued_launch_cannot_outlive_host_deadline(self):
+        queued = []
+        self.g._spawn = lambda fn, name: queued.append(fn)
+        self.g.confirm_launch(self.sid)
+        with mock.patch.object(m, "now", return_value=self.after_deadline):
+            queued[0]()
+        self.assertEqual(self.g.launcher.launched, [])
+        self.assertEqual(self.g.guard.pending(), {})
+        self.assertIsNone(self.g.store.require(self.sid)["local"]["pending_launch"])
+
+    def test_expired_player_can_launch_from_explicit_host_retry(self):
+        with mock.patch.object(m, "now", return_value=self.after_deadline):
+            self.h.evaluate_launch(self.sid)
+            self.assertEqual(self.h.get_session(self.sid)["state"], m.DEGRADED)
+            self.assertEqual(self.code(self.g.confirm_launch, self.sid), "launch_expired")
+            self.h.retry_connection(self.sid, "guest")
+            self.g.confirm_launch(self.sid)
+        self.assertEqual(len(self.g.launcher.launched), 1)
+        self.assertEqual(self.h.get_session(self.sid)["state"], m.RUNNING)

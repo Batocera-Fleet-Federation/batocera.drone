@@ -382,7 +382,8 @@ class LifecycleMixin:
 
         Recheck through the pinned peer channel both at confirmation and in the
         queued worker. An unavailable host leaves an unconsumed offer retryable;
-        a known closed/lobby session voids it. Never infer this from an open game port.
+        a closed/lobby session or an expired player start attempt voids it.
+        Never infer launch permission from an open game port or a live session alone.
         """
         try:
             body = self.network.get(self.host_peer(session), f"/status?session={session['id']}", timeout=4.0)
@@ -391,7 +392,8 @@ class LifecycleMixin:
         remote = body.get("session") if isinstance(body, dict) else None
         if (not isinstance(remote, dict) or remote.get("known") is not True or
                 remote.get("state") not in m.LIVE_STATES or
-                remote.get("player_status") not in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_FAILED, m.P_UNREACHABLE) or
+                remote.get("player_status") not in (m.P_JOINED, m.P_LAUNCHING) or
+                remote.get("launch_allowed") is not True or
                 not isinstance(remote.get("version"), int) or remote["version"] < plan.get("version", 0)):
             self.store.set_local(session["id"], pending_launch=None, launch_status="expired")
             raise m.MultiplayerError("launch_expired", "The host is no longer starting this session for you. Ask it for a new launch offer.", 409)
