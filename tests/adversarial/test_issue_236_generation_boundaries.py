@@ -165,25 +165,26 @@ class TailnetGenerationBoundariesTests(unittest.TestCase):
     def test_interval_floors_are_applied_to_tailnet_loops(self) -> None:
         # DRONE_* intervals below the floor are clamped: watchdog 30 s, bootstrap 60 s.
         recorded: dict[str, list[float]] = {WATCHDOG: [], BOOTSTRAP: []}
-        real_sleep = self._real_sleep
+        # The loops wait on the generation event, not time.sleep. Record the floored
+        # interval they request, then wake after a short real wait so they keep running.
+        real_wait = peer_workers._wait_for_generation_stop
 
-        def record_first_sleep(seconds: float) -> None:
-            # Only the first requested interval per loop is recorded; the loop then keeps
-            # running on a short real sleep until the test stops the generation.
+        def record_first_wait(stop: threading.Event, interval: float) -> bool:
+            # Only the first requested interval per loop is recorded.
             name = threading.current_thread().name
             if name in recorded and not recorded[name]:
-                recorded[name].append(seconds)
-            real_sleep(0.01)
+                recorded[name].append(interval)
+            return real_wait(stop, 0.01)
 
         self._patched_workers()
         with mock.patch.dict(os.environ, {
             "DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS": "0",
             "DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS": "1",
-        }), mock.patch.object(peer_workers.time, "sleep", side_effect=record_first_sleep):
+        }), mock.patch.object(peer_workers, "_wait_for_generation_stop", side_effect=record_first_wait):
             peer_workers._start_local_network_workers(mock.Mock())
             deadline = time.monotonic() + 5.0
             while not (recorded[WATCHDOG] and recorded[BOOTSTRAP]) and time.monotonic() < deadline:
-                real_sleep(0.01)
+                self._real_sleep(0.01)
             peer_workers.stop_local_network_workers(timeout=1.0)
             for name in TAILNET_LOOPS:
                 self.assertEqual(len(self._settle(name, 0, within=5.0)), 0, name)

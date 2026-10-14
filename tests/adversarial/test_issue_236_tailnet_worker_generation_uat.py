@@ -65,8 +65,12 @@ class TailnetWorkerGenerationUAT(unittest.TestCase):
     def test_restart_and_stop_retire_watchdog_and_bootstrap_generations(self) -> None:
         """A restarted or stopped generation cannot leave either retry loop alive."""
         discovery = mock.Mock()
+        # The loops wait on the generation event, so shorten that wait (keeping its
+        # stop semantics) to cross the wake boundary without a 60 s / 300 s interval.
+        real_wait = peer_workers._wait_for_generation_stop
         with mock.patch.object(peer_workers, "Thread", side_effect=self._thread_factory), \
-                mock.patch.object(peer_workers.time, "sleep", side_effect=lambda _: self._real_sleep(0.005)), \
+                mock.patch.object(peer_workers, "_wait_for_generation_stop",
+                                  side_effect=lambda stop, _interval: real_wait(stop, 0.005)), \
                 mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
                 mock.patch.object(peer_workers, "tailnet_status", return_value={
                     "running": True, "installed": True, "enrolled": False,
