@@ -62,6 +62,10 @@ def _complete_install_members(members=(), *, version="v0.1.245"):
         "app/integrations/registry.py": b"class IntegrationRegistry:\n    pass\n",
         "app/integrations/streamdeck/manager.py": b"class StreamDeckManager:\n    pass\n",
         "app/integrations/media_keys/manager.py": b"class MediaKeysIntegration:\n    pass\n",
+        "app/web/static/js/multiplayer.js": b"function renderMultiplayerPage() {}\n",
+        "app/web/handlers_multiplayer.py": b"# multiplayer handlers\n",
+        "app/multiplayer/__init__.py": b"# multiplayer\n",
+        "app/multiplayer/orchestrator.py": b"class MultiplayerOrchestrator:\n    pass\n",
         "content/batocera-swarm-mascot.jpg": b"jpg-bytes",
         "content/drone.png": b"png-bytes",
     }

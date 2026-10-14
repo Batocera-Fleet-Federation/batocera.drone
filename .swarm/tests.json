@@ -4426,6 +4426,842 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_consent_session_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-consent-session-uat",
+      "name": "Issue #240 multiplayer consent, readiness, and session lifecycle acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/orchestrator.py",
+          "app/web/handlers_multiplayer.py",
+          "tests/adversarial/test_issue_240_consent_session_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_protocol_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-protocol-boundaries",
+      "name": "Issue #240 untrusted peer input, membership, replay, and launch-payload boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/store.py",
+          "tests/adversarial/test_issue_240_protocol_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_matching_honesty.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-matching-honesty",
+      "name": "Issue #240 matching honesty, capacity, streaming, and Tailscale LAN boundaries",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/matching.py",
+          "app/multiplayer/mechanism.py",
+          "tests/adversarial/test_issue_240_matching_honesty.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_frontend_recovery_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-frontend-recovery-uat",
+      "name": "Issue #240 multiplayer UI contract, clone reset, worker generation, and local-only events",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/multiplayer.js",
+          "app/multiplayer/identity_reset.py",
+          "app/multiplayer/worker.py",
+          "tests/adversarial/test_issue_240_frontend_recovery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_http_surface_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-http-surface-uat",
+      "name": "Issue #240 multiplayer HTTP auth, peer identity, and dashboard surface acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/handlers_multiplayer.py",
+          "tests/adversarial/test_issue_240_http_surface_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_retry_recovery_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-retry-recovery-uat",
+      "name": "Issue #240 failed-launch retry, reconnect and owned-process cleanup acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_retry_recovery_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/orchestrator.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_content_evidence_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-content-evidence-uat",
+      "name": "Issue #240 confirmed compatibility is bound to full ROM content",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_content_evidence_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/orchestrator.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_participation_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-participation-uat",
+      "name": "Issue #240 invitation withdrawal, renewal and truthful reconnect participation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_participation_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_session_truth_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-session-truth-uat",
+      "name": "Issue #240 invitation lifetime, session-game truth, and unknown-mechanism preference",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_session_truth_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/mechanism.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_orchestration_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-orchestration-boundaries-uat",
+      "name": "Issue #240 gameplay address, unverified compatibility, launch verification, and restart cleanup",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_orchestration_boundaries_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/network.py",
+          "app/multiplayer/compat_db.py",
+          "app/multiplayer/matching.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_lobby_dial_cleanup_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-lobby-dial-cleanup-uat",
+      "name": "Issue #240 slot assignment, gameplay dial, peer-report classification, and partial-launch cleanup",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_lobby_dial_cleanup_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/network.py",
+          "app/multiplayer/compat_db.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/config_guard.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_cleanup_error_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-cleanup-error-uat",
+      "name": "Issue #240 disabled adapter and transient cleanup failure acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_cleanup_error_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_launch_evidence_recovery_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-launch-evidence-recovery-uat",
+      "name": "Issue #240 launch-time configuration evidence and guest recovery fault isolation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_launch_evidence_recovery_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_restart_participation_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-restart-participation-uat",
+      "name": "Issue #240 guest restart recovery, host notification, and configuration restoration",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_restart_participation_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_stale_offer_compat_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-stale-offer-compat-uat",
+      "name": "Issue #240 infrastructure failure evidence and stale launch-offer acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_stale_offer_compat_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/compat_db.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_deadline_version_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-deadline-version-uat",
+      "name": "Issue #240 launch-deadline offers, version evidence, and host-loss acceptance",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_deadline_version_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/adapters/retroarch.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_stale_result_reconnect_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-stale-result-reconnect-uat",
+      "name": "Issue #240 stale launch reports, reconnect before deadline, and remaining-player health",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_stale_result_reconnect_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/sessions.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_invite_retry_capacity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-invite-retry-capacity-uat",
+      "name": "Issue #240 re-invite after leave/decline, retry of a live session game, and host-capability honesty",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_invite_retry_capacity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/adapters/ppsspp.py",
+          "app/multiplayer/adapters/dolphin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_mechanism_peer_compat_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-mechanism-peer-compat-uat",
+      "name": "Issue #240 peer-version mechanism selection, streaming fallback, and host-capability controls",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_mechanism_peer_compat_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/mechanism.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/adapters/retroarch.py",
+          "app/multiplayer/adapters/dolphin.py",
+          "app/multiplayer/adapters/ppsspp.py",
+          "app/multiplayer/adapters/switch.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_stale_invite_identity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-stale-invite-identity-uat",
+      "name": "Issue #240 invitation identity after mechanism change, ghost membership, and host-core recommendation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_stale_invite_identity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/mechanism.py",
+          "app/multiplayer/library.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_capacity_config_fidelity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-240-capacity-config-fidelity-uat",
+      "name": "Issue #240 lobby capacity after a mechanism switch and lossless temporary configuration restore",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_capacity_config_fidelity_uat.py",
+          "tests/multiplayer_support.py",
+          "app/multiplayer/sessions.py",
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/config_guard.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_departure_consent.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-departure-consent",
+      "name": "Issue #240 explicit guest departure revokes host retry and launch authority",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_departure_consent.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_launch_offer_binding.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-launch-offer-binding",
+      "name": "Issue #240 queued guest workers require consent for the exact launch offer",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_launch_offer_binding.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_auto_launch_revocation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-auto-launch-revocation",
+      "name": "Issue #240 queued automatic launch respects revoked local consent",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_auto_launch_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_execution_revocation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-execution-revocation",
+      "name": "Issue #240 launch execution respects revoked automatic consent and multiplayer disable",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_execution_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1

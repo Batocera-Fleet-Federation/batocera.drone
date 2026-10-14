@@ -83,6 +83,13 @@ find files nested under a subpackage. Every `except ImportError` fallback must f
   bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
   **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/identity/
   es_collections/network_share/theme), **plus `static/` + `templates/`**
+- `multiplayer/` — unified multiplayer over the swarm (see the Multiplayer section below):
+  `models` (states/mechanisms/validators), `store` (versioned sessions, replay window),
+  `config_guard` (journaled temporary emulator settings), `adapters/` (RetroArch, Dolphin,
+  PPSSPP, Switch, generic LAN, streaming, detect-only emulators), `matching`, `mechanism`,
+  `compat_db`, `network`, `launcher`, `settings_store`, `worker`, `identity_reset`, and the
+  `MultiplayerOrchestrator` (`orchestrator.py`, composed from `core`/`sessions`/`protocol`/
+  `lifecycle`/`library` mixins). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
   (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported
@@ -272,6 +279,40 @@ misbehaving) until v0.1.256 — hotplug detection is sysfs-signature based; see 
 skill's Gotchas. Design reference:
 `docs/integrations-streamdeck.md`; skill: `drone-integrations-streamdeck`.
 
+## Multiplayer (`app/multiplayer/`) — decentralised session orchestration
+
+Any paired Drone can host; **the host is the only authority** and guests hold version-gated
+replicas (`SessionStore.apply_replica`). Coordination is `/v1/api/peer/multiplayer/{match,invite,
+respond,update,launch,status,compatibility}` over the existing pinned-cert mTLS channel; the caller
+identity is the certificate (`_peer_requester_device_id`), never a body field. Browser API is
+`/v1/api/admin/multiplayer/...` (mutations need a real login + same-origin + JSON, like Integrations).
+Gameplay traffic is the emulator's own transport, never the HTTPS API. Invariants to keep:
+
+- **Never fabricate support.** Adapters detect from real evidence (binaries, version output, the emulator's own
+  config keys, `configgen` sources, libretro info) and lower `effective_automation()` when evidence is missing;
+  no code path returns `VERIFIED_COMPATIBLE` except `CompatibilityDatabase.evaluate` after a user-confirmed
+  session on the same tested configuration fingerprint. Distinguish simulated tests from real validation.
+- **Peer data is untrusted:** snapshots are rebuilt by `sanitize_session`; emulator names are plain tokens
+  (`clean_token`); hosts/addresses go through `valid_host`; ROM names are checked in `scoped_key`; a guest uses
+  its **own** file name/path (`local.rom_name`/`game_path`); a joined guest rejects changes to game/emulator/core/mechanism.
+- **Consent is local:** an invitation never launches anything; a launch offer needs this machine's confirmation
+  (unless the user opted into `auto`, which still never replaces a running game); replacing a running game needs
+  an explicit `replace_running_game`; a remote end never closes a guest's game.
+- Selected RetroArch/Dolphin ROMs require full SHA-256 equality at join (`GameLibrary.content_hash`);
+  browser matching uses cached sampled fingerprints only. Hashing is bounded/cached, never library-wide.
+  Evidence fingerprints include content/revision and inspected settings; imported reports cannot become local proof.
+- Launch/configuration and cleanup serialise on the session lock; the HTTP server owns and joins its multiplayer
+  housekeeping worker on close. Never reuse an old worker's stop event or launch after a cancelled offer.
+- **Config changes only via `ConfigGuard`** (journal → atomic write → verify → restore; confined to userdata, no
+  symlinks). Adapters return edit dicts, they never write files. Launch only via `GameLauncher` (EmulationStation API).
+- Per-peer state lives in the `multiplayer` app_state namespace and is cleared by
+  `multiplayer/identity_reset.py` from `transfer/swarm_reset.py` — keep that in sync when adding state.
+- New emulator = new module in `multiplayer/adapters/` + one line in `build_adapters` (see `docs/multiplayer.md`).
+- Tests use `tests/multiplayer_support.py` (fake machine/swarm/launcher). Release/staging gates require
+  `multiplayer.js`, `handlers_multiplayer.py` and `multiplayer/{__init__,orchestrator}.py`.
+
+Skill: `drone-multiplayer`. Depth: `docs/multiplayer.md`.
+
 ## Conventions
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a
@@ -300,5 +341,7 @@ the stop/write/overlay-save/start EmulationStation restart pattern, the
 privileged-worker request/result file dance, and how to find ground truth in
 the upstream batocera-emulationstation source), `bff-ui-theme-functionality`,
 `drone-integrations-streamdeck` (the shared optional-integration boundary and Stream
-Deck local-only lifecycle/action/game/security invariants).
+Deck local-only lifecycle/action/game/security invariants), `drone-multiplayer`
+(session state machine, host-authority protocol, adapter contract, config guard, matching and
+compatibility rules, honest-validation rules).
 Consult the matching skill before non-trivial work.

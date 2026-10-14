@@ -129,6 +129,10 @@ jobs:
             app/integrations/registry.py \
             app/integrations/streamdeck/manager.py \
             app/integrations/media_keys/manager.py \
+            app/web/static/js/multiplayer.js \
+            app/web/handlers_multiplayer.py \
+            app/multiplayer/__init__.py \
+            app/multiplayer/orchestrator.py \
             content/batocera-swarm-mascot.jpg \
             content/drone.png; do
             test -s "$required_file"

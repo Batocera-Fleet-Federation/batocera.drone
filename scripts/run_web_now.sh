@@ -109,6 +109,10 @@ INTEGRATIONS_INIT_PATH="$APP_DIR/integrations/__init__.py"
 INTEGRATIONS_REGISTRY_PATH="$APP_DIR/integrations/registry.py"
 STREAMDECK_MANAGER_PATH="$APP_DIR/integrations/streamdeck/manager.py"
 MEDIA_KEYS_MANAGER_PATH="$APP_DIR/integrations/media_keys/manager.py"
+MULTIPLAYER_JS_PATH="$STATIC_DIR/js/multiplayer.js"
+MULTIPLAYER_HANDLER_PATH="$APP_DIR/web/handlers_multiplayer.py"
+MULTIPLAYER_INIT_PATH="$APP_DIR/multiplayer/__init__.py"
+MULTIPLAYER_ORCHESTRATOR_PATH="$APP_DIR/multiplayer/orchestrator.py"
 CONTENT_DIR="$APP_ROOT/content"
 API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
@@ -311,6 +315,10 @@ validate_staged_payload() {
     "$INTEGRATIONS_REGISTRY_PATH" \
     "$STREAMDECK_MANAGER_PATH" \
     "$MEDIA_KEYS_MANAGER_PATH" \
+    "$MULTIPLAYER_JS_PATH" \
+    "$MULTIPLAYER_HANDLER_PATH" \
+    "$MULTIPLAYER_INIT_PATH" \
+    "$MULTIPLAYER_ORCHESTRATOR_PATH" \
     "$CONTENT_DIR/batocera-swarm-mascot.jpg" \
     "$CONTENT_DIR/drone.png"; do
     if [[ ! -s "$required_file" ]]; then
@@ -443,7 +451,11 @@ if [[ "$using_stage" != "1" ]]; then
     "$INTEGRATIONS_INIT_PATH" \
     "$INTEGRATIONS_REGISTRY_PATH" \
     "$STREAMDECK_MANAGER_PATH" \
-    "$MEDIA_KEYS_MANAGER_PATH"; do
+    "$MEDIA_KEYS_MANAGER_PATH" \
+    "$MULTIPLAYER_JS_PATH" \
+    "$MULTIPLAYER_HANDLER_PATH" \
+    "$MULTIPLAYER_INIT_PATH" \
+    "$MULTIPLAYER_ORCHESTRATOR_PATH"; do
     if [[ ! -s "$required_file" ]]; then
       echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
       exit 1

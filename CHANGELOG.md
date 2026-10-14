@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Add Multiplayer: a top-level page (dashboard, game browser, session lobby, settings) and a decentralised
+  orchestrator (`app/multiplayer/`) that lets paired Drones play together. Any trusted peer can host; sessions
+  are an explicit state machine coordinated over the existing pinned-certificate mTLS peer channel
+  (`/v1/api/peer/multiplayer/*`) with versioned snapshots, replay protection, expiry, health checks and restart
+  recovery. Emulator adapters (RetroArch Netplay automated when the installed launcher exposes the `netplay.*`
+  keys; Dolphin, PPSSPP ad hoc, Switch LAN/LDN and generic LAN assisted/manual; Sunshine+Moonlight streaming as the
+  fallback; ten more emulators detection-only) report only what the installed build provides. Game matching reuses
+  the ROM cache and cached fingerprints, with cached full SHA-256 verification for selected RetroArch/Dolphin ROMs; compatibility is graded (never "verified" without a confirmed session on that
+  exact configuration). Session settings are applied through a journaled, restorable config guard, guests must confirm
+  launches locally, and a running game is never closed without the local user's approval. Clone provisioning clears
+  multiplayer state. Tested against a simulated swarm only; see `docs/multiplayer.md` for status and the manual
+  hardware checklist.
+
 - Add automatic clone detection and identity provisioning. A Drone now binds its identity to hashed
   hardware identifiers (`common/hardware_identity.py`, `common/identity_provisioning.py`) and, when a
   disk image boots on different hardware, retires the inherited key/certificate, clears inherited swarm
