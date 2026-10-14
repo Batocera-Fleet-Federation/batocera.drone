@@ -7,7 +7,9 @@ The request dispatcher then answers a generic HTTP 500. This is the same unhandl
 class as #198, which mapped the peer's HTTP rejection. It is not the identity hold, so it
 is reported as out of scope.
 
-The assertion pins the current behaviour as evidence and is kept in its own suite.
+Adjudicated under issue #224, which requires this case to answer 502 rather than escape as
+an unhandled 500. The test originally pinned the escaping RuntimeError as evidence of the
+defect; it now asserts the required mapping so it stays a regression guard.
 """
 
 from __future__ import annotations
@@ -43,16 +45,17 @@ class PeerRejectionEscapesHandlerTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_non_paired_peer_answer_raises_out_of_the_pairing_helper(self) -> None:
-        """Observed: RuntimeError is not converted to a reply; the handler sends nothing."""
+    def test_non_paired_peer_answer_is_mapped_to_502_not_raised(self) -> None:
+        """Issue #224: a 200 without status=paired is a gateway error reply, not an escaping exception."""
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({"status": "queued"}).encode("utf-8")
         peer = {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
-            with self.assertRaises(RuntimeError):
-                self.handler._pair_peer_or_reply(peer, "x", "")
+            self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", ""))
 
-        self.handler._send_json.assert_not_called()
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 502)
+        self.assertNotIn("queued", json.dumps(payload))
 
 
 if __name__ == "__main__":

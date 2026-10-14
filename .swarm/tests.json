@@ -3783,7 +3783,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-223-out-of-scope-peer-rejection-500",
-      "name": "Out of scope for #223: a non-paired peer answer escapes the pairing helper as an unhandled 500",
+      "name": "Formerly out of scope for #223, fixed by #224: a non-paired peer answer is a 502, not an unhandled 500",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
