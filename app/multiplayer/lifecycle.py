@@ -1,0 +1,714 @@
+"""Session lifecycle: start, launch coordination, health, termination, recovery.
+
+Launch ordering (native mechanisms): the host applies its session-scoped
+configuration, exits the current game only when its user approved the
+replacement, launches, waits until the emulator is really up and listening, and
+only then asks each guest -- in player-slot order -- to launch. A guest never
+launches on a peer's say-so: the request creates a pending offer that this
+machine's own user confirms (or, only if they opted in, auto-confirms when no
+other game is running). Games running locally are never closed on a remote
+request.
+"""
+
+from datetime import timedelta
+from typing import Any, Dict, Optional
+
+from . import models as m
+from .adapters.base import MANUAL
+from .core import EVENT_SESSION
+from .sessions import settle_lobby
+from .store import add_event
+
+try:
+    from ..integrations.streamdeck.game_runtime import same_rom
+except ImportError:  # pragma: no cover - flat execution
+    from integrations.streamdeck.game_runtime import same_rom  # type: ignore
+
+LAUNCH_DEADLINE = timedelta(seconds=120)
+HOST_START_TIMEOUT = 45.0
+HOST_READY_TIMEOUT = 20.0
+GUEST_HOST_WAIT = 30.0
+EXIT_TIMEOUT = 15.0
+MAX_RETRIES = 3
+SILENT_AFTER = timedelta(seconds=60)
+HOST_LOST_AFTER = timedelta(seconds=120)
+KEEP_COMPLETED = 20
+ENDED_REPLICA_TTL = timedelta(hours=1)
+
+
+class LifecycleMixin:
+    # ---------------------------------------------------------------- context
+    def launch_context(self, session: dict, role: str, *, port: int = 0, secret: str = "") -> dict:
+        local = session.get("local") or {}
+        context = self.public_context(session, role)
+        # The per-game key must name *this* machine's file: matching content may carry a different file name.
+        context.update(game_path=local.get("game_path", ""), rom_name=local.get("rom_name") or session["game"]["rom_name"],
+                       system=session["game"]["system"],
+                       port=port or local.get("port") or 0, secret=secret or session.get("secret", ""))
+        return context
+
+    def active_conflict(self, game_path: str, replace: bool) -> Optional[dict]:
+        """Another game is running and the user has not approved replacing it -> describe it."""
+        active = self.launcher.active_game()
+        if not active:
+            return None
+        return None if replace else active
+
+    @staticmethod
+    def _active_summary(active: dict) -> dict:
+        return {"name": active.get("name", ""), "system": active.get("system", ""), "emulator": active.get("emulator", "")}
+
+    # ------------------------------------------------------------------ start
+    def start_session(self, session_id: str, replace_running_game: bool = False, actor: str = "") -> dict:
+        self.require_enabled()
+        replace = m.clean_bool(replace_running_game, "replace_running_game")
+        with self.session_lock(session_id):
+            session = self.require_host(session_id)
+            if session["state"] != m.READY:
+                waiting = [p["name"] for k, p in session["players"].items() if p["status"] == m.P_JOINED and not p["ready"]]
+                if session["state"] in m.PRE_START_STATES:
+                    detail = f" Waiting for: {', '.join(waiting)}." if waiting else " At least one other player must join."
+                    raise m.MultiplayerError("players_not_ready", "Everyone must join and be ready before the session can start." + detail, 409)
+                raise m.MultiplayerError("session_started", f"The session is {session['state'].lower()}.", 409)
+            adapter = self.adapter_map.get(session["emulator"]["adapter"])
+            if adapter is None:
+                raise m.MultiplayerError("unknown_adapter", "The session's multiplayer mechanism is not available on this Drone.", 409)
+            if session["mechanism"] == m.REMOTE_STREAMING and (not self.cfg.get()["streaming"]["enabled"] or
+                    self.cfg.get()["privacy"]["remote_controller_authorization"] == "disabled"):
+                raise m.MultiplayerError("streaming_disabled", "Remote streaming or remote controllers are disabled in Multiplayer settings.", 409)
+            problems = adapter.validate_configuration(session, m.HOST_ROLE)
+            if problems:
+                raise m.MultiplayerError("cannot_start", problems[0], 409, {"problems": problems})
+            path = session["local"].get("game_path", "")
+            if not path or not self._exists(path):
+                raise m.MultiplayerError("game_file_missing", "The game's file is no longer on this machine.", 409)
+            if session["mechanism"] in (m.RETROARCH_NETPLAY, m.DOLPHIN_NETPLAY):
+                game = self.library.get(session["game"]["system"], session["game"]["unique_id"])
+                if not game or self.library.content_hash(game) != session["game"].get("sha256"):
+                    raise m.MultiplayerError("content_changed", "The selected ROM changed. Create a new session before launching.", 409)
+            if adapter.effective_automation() != MANUAL:
+                conflict = self.active_conflict(path, replace)
+                if conflict:
+                    raise m.MultiplayerError("game_running", "Another game is running on this machine. Approve replacing it to continue.", 409,
+                                             {"running": self._active_summary(conflict)})
+
+            def begin(s: dict) -> None:
+                for key, player in s["players"].items():
+                    if player["status"] == m.P_INVITED:
+                        player.update(status=m.P_REMOVED, error="The invitation was withdrawn because the session started.")
+                s["state"] = m.STARTING
+                s["error"] = ""
+                add_event(s, "starting", "The session is starting.", self.me)
+            session = self.store.mutate(session_id, begin)
+            self.store.set_local(session_id, replace_running_game=replace, launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat(),
+                                 retries=dict((session.get("local") or {}).get("retries") or {}))
+        self.publish(session_id)
+        self._log(session, "starting", "session starting", actor)
+        self._spawn(lambda: self.run_start(session_id), f"multiplayer-start-{session_id[:8]}")
+        return self.session_view(self.store.require(session_id))
+
+    @staticmethod
+    def _exists(path: str) -> bool:
+        import os
+        return os.path.exists(path)
+
+    def run_start(self, session_id: str) -> None:
+        try:
+            with self.session_lock(session_id):
+                session = self.store.require(session_id)
+                if session["state"] != m.STARTING:
+                    return  # cancelled before this worker acquired the session
+                adapter = self.adapter_map[session["emulator"]["adapter"]]
+                local = session["local"]
+                path = local["game_path"]
+                if adapter.effective_automation() == MANUAL:
+                    self._finish_without_launch(session_id)
+                    return
+                port = adapter.session_port(self, session)
+                context = self.launch_context(session, m.HOST_ROLE, port=port)
+                edits = adapter.configure_networking(session, m.HOST_ROLE, context) + adapter.configure_controllers(session, m.HOST_ROLE, context)
+                if edits:
+                    self.apply_edits(session_id, edits)
+                active = self.launcher.active_game()
+                if active:
+                    if not local.get("replace_running_game"):
+                        raise m.MultiplayerError("game_running", "Another game started on this machine before the session could launch.", 409)
+                    self.launcher.exit_game()
+                    if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
+                        raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
+                adapter.launch(session, m.HOST_ROLE, context, self.launcher)
+                self.store.set_local(session_id, port=port, host_launched=True)
+                started = self.launcher.wait_for_start(path, HOST_START_TIMEOUT)
+                if not started:
+                    raise m.MultiplayerError("host_launch_timeout", "The game did not start on this machine.", 409)
+                self.store.set_local(session_id, launched_pid=started.get("pid"))
+                self._await_health(adapter, session_id)
+                if not adapter.guest_launches:
+                    self._finish_without_launch(session_id, host_running=True)
+                    return
+                self.store.mutate(session_id, lambda s: s["players"][self.me].update(status=m.P_RUNNING))
+            self._send_launches(session_id)
+            self.evaluate_launch(session_id)
+        except Exception as error:  # noqa: BLE001 - any failure must end in a clean FAILED state, not a stuck STARTING one
+            self.fail_session(session_id, getattr(error, "message", None) or f"{type(error).__name__}: {error}")
+
+    def _await_health(self, adapter: Any, session_id: str) -> None:
+        waited = 0.0
+        while waited < HOST_READY_TIMEOUT:
+            session = self.store.require(session_id)
+            health = adapter.check_session_health(session, {"role": m.HOST_ROLE, "port": session["local"].get("port") or 0})
+            if health.get("ok"):
+                return
+            self._sleep(1.0)
+            waited += 1.0
+        detail = health.get("detail") or "The host's multiplayer service did not become ready."
+        raise m.MultiplayerError("host_not_ready", detail, 409)
+
+    def _send_launches(self, session_id: str) -> None:
+        session = self.store.require(session_id)
+        guests = sorted((p for k, p in session["players"].items() if k != self.me and p["status"] == m.P_JOINED),
+                        key=lambda p: p.get("slot") or 99)
+        for player in guests:
+            self._send_launch(session_id, player["device_id"])
+
+    def _send_launch(self, session_id: str, peer_id: str) -> None:
+        session = self.store.require(session_id)
+        if session["state"] not in (m.STARTING, m.DEGRADED):
+            return
+        error = ""
+        try:
+            self.network.post_checked(self.paired_peer(peer_id), "/launch", {
+                "message_id": m.new_message_id(), "issued_at": m.now_iso(), "session_id": session_id,
+                "port": session["local"].get("port") or 0, "secret": session.get("secret", "")}, timeout=8.0)
+        except m.MultiplayerError as failure:
+            error = f"Could not reach this player to start the game: {failure.message}"
+
+        def mark(s: dict) -> None:
+            player = s["players"].get(peer_id)
+            if player is None:
+                return
+            if error:
+                player.update(status=m.P_FAILED, error=error)
+                add_event(s, "launch_failed", f"{player['name']}: {error}", self.me)
+            elif player["status"] == m.P_JOINED:
+                # A fast guest may already have reported back (running/failed) while this call was in flight.
+                player.update(status=m.P_LAUNCHING, error="")
+        self.store.mutate(session_id, mark)
+
+    def _finish_without_launch(self, session_id: str, host_running: bool = False) -> None:
+        """Mechanisms with no Drone launch (manual steps, streaming guests): everyone follows the listed steps."""
+        def done(s: dict) -> None:
+            for key, player in s["players"].items():
+                if player["status"] in (m.P_JOINED, m.P_LAUNCHING):
+                    player["status"] = m.P_RUNNING
+            s["state"] = m.RUNNING
+            add_event(s, "running", "Session is running. Follow the listed steps on each machine.", self.me)
+        self.store.mutate(session_id, done)
+        self.store.set_local(session_id, reached_running=True)
+        self.publish(session_id)
+
+    # ------------------------------------------------------- launch evaluation
+    def evaluate_launch(self, session_id: str) -> None:
+        with self.session_lock(session_id):
+            session = self.store.get(session_id)
+            if not session or self.local_role(session) != m.HOST_ROLE or session["state"] not in (m.STARTING, m.DEGRADED):
+                return
+            deadline = m.parse_time(session["local"].get("launch_deadline"))
+            overdue = bool(deadline and deadline < m.now())
+
+            def evaluate(s: dict) -> None:
+                guests = [p for k, p in s["players"].items() if k != s["host_id"]
+                          and p["status"] in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_FAILED, m.P_UNREACHABLE)]
+                pending = [p for p in guests if p["status"] in (m.P_JOINED, m.P_LAUNCHING)]
+                if overdue:
+                    for player in pending:
+                        player.update(status=m.P_FAILED, error="Did not confirm the launch in time.")
+                        add_event(s, "launch_failed", f"{player['name']} did not confirm the launch in time.", self.me)
+                    pending = []
+                running = [p for p in guests if p["status"] == m.P_RUNNING]
+                if pending:
+                    return
+                if running and len(running) == len(guests):
+                    s["state"] = m.RUNNING
+                    add_event(s, "running", "Games launched on all participating machines. Confirm gameplay connectivity in the emulator.", self.me)
+                elif running:
+                    if s["state"] != m.DEGRADED:
+                        s["state"] = m.DEGRADED
+                        add_event(s, "degraded", "Some players could not connect; the session continues without them.", self.me)
+                elif s["state"] == m.STARTING:
+                    s["state"] = m.FAILED
+                    s["error"] = "No other player was able to connect."
+            updated = self.store.mutate(session_id, evaluate)
+            if updated["state"] == m.RUNNING or updated["state"] == m.DEGRADED:
+                self.store.set_local(session_id, reached_running=True)
+        updated = self.store.require(session_id)
+        if updated["state"] == m.FAILED:
+            self.fail_session(session_id, updated.get("error") or "The session failed to start.")
+        else:
+            self.publish(session_id)
+
+    def fail_session(self, session_id: str, message: str) -> None:
+        """Mark the session FAILED, roll back configuration, stop what we started, tell the guests."""
+        with self.session_lock(session_id):
+            session = self.store.get(session_id)
+            if session is None:
+                return
+            # Even if the session was ended while the start was still in flight, nothing it set up may survive.
+            self.cleanup_host_resources(session, stop_game=True)
+            if session["state"] in (m.COMPLETED, m.STOPPING):
+                return
+
+            def apply(s: dict) -> None:
+                s["state"] = m.FAILED
+                s["error"] = m.clean_text(message, 400)
+                s.pop("secret", None)
+                add_event(s, "failed", s["error"], self.me)
+            if session["state"] != m.FAILED or not session.get("error"):
+                self.store.mutate(session_id, apply)
+            else:
+                self.store.mutate(session_id, lambda s: s.pop("secret", None))
+        failed = self.store.require(session_id)
+        self._record_failure(failed, message)
+        self.publish(session_id)
+        self._log(failed, "failed", f"session failed: {message}")
+
+    def _record_failure(self, session: dict, message: str) -> None:
+        try:
+            emulator = session["emulator"]
+            self.compat.record_session_result(
+                system=session["game"]["system"], title_key=m.normalize_title(session["game"]["rom_name"]), title=session["game"]["title"],
+                mechanism=session["mechanism"], config_fp=(session.get("local") or {}).get("tested_config_fingerprint") or "unknown",
+                emulator_version=emulator.get("version", ""), success=False, failure=message)
+        except Exception:  # noqa: BLE001 - diagnostics must not mask the real failure
+            pass
+
+    def _owns_host_game(self, session: dict) -> bool:
+        local = session.get("local") or {}
+        active = self.launcher.active_game()
+        if not active or not same_rom(active.get("rom_path", ""), local.get("game_path", "")):
+            return False
+        pid = local.get("launched_pid")
+        return pid is None or active.get("pid") == pid
+
+    def cleanup_host_resources(self, session: dict, *, stop_game: bool) -> dict:
+        outcome: Dict[str, Any] = {}
+        adapter = self.adapter_map.get(session.get("emulator", {}).get("adapter", ""))
+        local = session.get("local") or {}
+        context = {"role": m.HOST_ROLE, "port": local.get("port") or 0}
+        if adapter is not None:
+            for hook in (adapter.stop_session, adapter.cleanup):
+                try:
+                    hook(session, context)
+                except Exception:  # noqa: BLE001
+                    pass
+        if stop_game and local.get("host_launched") and self._owns_host_game(session):
+            self.launcher.exit_game()
+            outcome["game_stopped"] = True
+        try:
+            self.network.relay.close_session(session["id"])
+        except Exception:  # noqa: BLE001
+            pass
+        outcome["config"] = self.restore_if_enabled(session["id"])
+        return outcome
+
+    # ------------------------------------------------------------ guest launch
+    def confirm_launch(self, session_id: str, replace_running_game: bool = False) -> dict:
+        self.require_enabled()
+        replace = m.clean_bool(replace_running_game, "replace_running_game")
+        with self.session_lock(session_id):
+            session = self.store.require(session_id)
+            if self.local_role(session) != m.GUEST_ROLE:
+                raise m.MultiplayerError("not_a_guest", "The host launches from Start Session.", 409)
+            plan = (session.get("local") or {}).get("pending_launch")
+            if not plan or plan.get("consumed"):
+                raise m.MultiplayerError("nothing_to_launch", "There is no launch waiting for you.", 409)
+            expiry = m.parse_time(plan.get("expires_at"))
+            if expiry and expiry < m.now():
+                self.store.set_local(session_id, pending_launch=None, launch_status="expired")
+                raise m.MultiplayerError("launch_expired", "The launch offer expired. Ask the host to retry.", 409)
+            adapter = self.adapter_map.get(session["emulator"]["adapter"])
+            if adapter is None:
+                raise m.MultiplayerError("unknown_adapter", "This Drone cannot take part in that mechanism.", 409)
+            path = session["local"].get("game_path", "")
+            automated = adapter.effective_automation() != MANUAL and adapter.guest_launches
+            if automated:
+                if not path or not self._exists(path):
+                    raise m.MultiplayerError("game_file_missing", "The game's file is missing on this machine.", 409)
+                conflict = self.active_conflict(path, replace)
+                if conflict:
+                    raise m.MultiplayerError("game_running", "A game is running here. Approve replacing it to continue.", 409,
+                                             {"running": self._active_summary(conflict)})
+            self.store.set_local(session_id, pending_launch={**plan, "consumed": True}, launch_status="launching",
+                                 replace_running_game=replace)
+        self._spawn(lambda: self.run_guest_launch(session_id), f"multiplayer-launch-{session_id[:8]}")
+        return {"status": "launching"}
+
+    def run_guest_launch(self, session_id: str) -> None:
+        try:
+            with self.session_lock(session_id):
+                session = self.store.require(session_id)
+                local = session["local"]
+                plan = local.get("pending_launch")
+                if local.get("ended") or session["state"] not in (m.STARTING, m.RUNNING, m.DEGRADED, m.READY) or not plan:
+                    return  # removed, ended, or cancelled while the worker was queued
+                problems = self.validate_for_join(session)["problems"]
+                if problems:
+                    raise m.MultiplayerError("cannot_launch", problems[0], 409)
+                adapter = self.adapter_map[session["emulator"]["adapter"]]
+                path = local.get("game_path", "")
+                if adapter.effective_automation() != MANUAL and adapter.guest_launches:
+                    context = self.launch_context(session, m.GUEST_ROLE, port=plan.get("port") or 0, secret=plan.get("secret", ""))
+                    if not context["host_address"]:
+                        raise m.MultiplayerError("host_address_unknown", "Could not work out an address for the host from your swarm connection.", 409)
+                    if context["port"] and adapter.awaits_host_port:
+                        self._wait_for_host_port(context["host_address"], context["port"])
+                    edits = adapter.configure_networking(session, m.GUEST_ROLE, context) + adapter.configure_controllers(session, m.GUEST_ROLE, context)
+                    if edits:
+                        self.apply_edits(session_id, edits)
+                    active = self.launcher.active_game()
+                    if active:
+                        if not local.get("replace_running_game"):
+                            raise m.MultiplayerError("game_running", "A game is running here and replacing it was not approved.", 409)
+                        self.launcher.exit_game()
+                        if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
+                            raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
+                    adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
+                    if not self.launcher.wait_for_start(path, HOST_START_TIMEOUT):
+                        raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
+                self.store.set_local(session_id, launch_status="running", game_launched=True, pending_launch=None)
+            self._guest_message(self.store.require(session_id), "launch_result", ok=True)
+        except Exception as error:  # noqa: BLE001
+            message = getattr(error, "message", None) or f"{type(error).__name__}: {error}"
+            self.restore_if_enabled(session_id)
+            self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300))
+            try:
+                self._guest_message(self.store.require(session_id), "launch_result", ok=False, error=message)
+            except m.MultiplayerError:
+                pass
+
+    def _wait_for_host_port(self, address: str, port: int) -> None:
+        waited = 0.0
+        while waited < GUEST_HOST_WAIT:
+            if self.probe.tcp_open(address, port, 1.5):
+                return
+            self._sleep(1.0)
+            waited += 1.0
+        raise m.MultiplayerError("host_unreachable", f"The host's game server at {address}:{port} did not answer. "
+                                 "Check that both machines share a LAN or tailnet.", 409)
+
+    # --------------------------------------------------------------- retry/end
+    def retry_connection(self, session_id: str, peer_id: str = "") -> dict:
+        self.require_enabled()
+        peer_id = m.clean_peer_id(peer_id) if peer_id else ""
+        with self.session_lock(session_id):
+            session = self.require_host(session_id)
+            retries = dict((session.get("local") or {}).get("retries") or {})
+            key = peer_id or "session"
+            if retries.get(key, 0) >= MAX_RETRIES:
+                raise m.MultiplayerError("retry_limit", f"Gave up after {MAX_RETRIES} retries. End the session and start a new one.", 409)
+            retries[key] = retries.get(key, 0) + 1
+            self.store.set_local(session_id, retries=retries)
+            state = session["state"]
+            if state in m.PRE_START_STATES:
+                for pid, player in session["players"].items():
+                    if player["status"] == m.P_INVITED and (not peer_id or pid == peer_id):
+                        self._deliver_invitation(session_id, self.paired_peer(pid))
+            elif state in (m.STARTING, m.DEGRADED):
+                targets = [pid for pid, p in session["players"].items() if pid != self.me and p["status"] in (m.P_FAILED, m.P_UNREACHABLE)
+                           and (not peer_id or pid == peer_id)]
+                if not targets:
+                    raise m.MultiplayerError("nothing_to_retry", "No player needs a retry.", 409)
+                self.store.set_local(session_id, launch_deadline=(m.now() + LAUNCH_DEADLINE).isoformat())
+                for pid in targets:
+                    self.store.mutate(session_id, lambda s, pid=pid: s["players"][pid].update(status=m.P_JOINED, error=""))
+                    self._send_launch(session_id, pid)
+                self.evaluate_launch(session_id)
+            elif state == m.FAILED:
+                def reset(s: dict) -> None:
+                    s["state"] = m.CONFIGURING
+                    s["error"] = ""
+                    s["secret"] = m.new_secret()
+                    for player in s["players"].values():
+                        if player["status"] in (m.P_FAILED, m.P_UNREACHABLE, m.P_RUNNING, m.P_LAUNCHING):
+                            player.update(status=m.P_JOINED, error="")
+                        if player["status"] == m.P_JOINED:
+                            player["ready"] = False  # everyone confirms again before the next attempt
+                    add_event(s, "retry", "The host reset the session for another attempt.", self.me)
+                self.store.mutate(session_id, reset)
+                self.store.mutate(session_id, settle_lobby)  # FAILED may only move to CONFIGURING first
+                self.store.set_local(session_id, host_launched=False)
+            else:
+                raise m.MultiplayerError("nothing_to_retry", "There is nothing to retry in this state.", 409)
+        self.publish(session_id)
+        return self.session_view(self.store.require(session_id))
+
+    def end_session(self, session_id: str, actor: str = "", reason: str = "", stop_game: bool = True) -> dict:
+        with self.session_lock(session_id):
+            session = self.require_host(session_id)
+            if session["state"] == m.COMPLETED:
+                return self.session_view(session)
+            if session["state"] != m.STOPPING:
+                session = self.store.mutate(session_id, lambda s: (s.update(state=m.STOPPING),
+                                                                   add_event(s, "stopping", reason or "The host ended the session.", self.me)))
+            self.publish(session_id)
+            outcome = self.cleanup_host_resources(session, stop_game=stop_game)
+            errors = (outcome.get("config") or {}).get("errors") or []
+
+            def finish(s: dict) -> None:
+                s["state"] = m.COMPLETED
+                s.pop("secret", None)
+                if errors:
+                    add_event(s, "restore_failed", "Some settings could not be restored automatically: " + "; ".join(errors[:3]), self.me)
+                add_event(s, "completed", reason or "Session ended.", self.me)
+            session = self.store.mutate(session_id, finish)
+            self.store.archive(session, "completed" if session["local"].get("reached_running") else "ended-early")
+            self._prune_completed()
+        self.publish(session_id)
+        self._log(session, "completed", reason or "session ended", actor)
+        return self.session_view(session)
+
+    def _prune_completed(self) -> None:
+        done = [s for s in self.store.all() if s["state"] == m.COMPLETED]
+        for old in done[KEEP_COMPLETED:]:
+            self.store.delete(old["id"])
+
+    def guest_cleanup(self, session_id: str, reason: str) -> None:
+        """A guest leaves/ends locally: settings restored, offers dropped. The running game is NOT closed."""
+        with self.session_lock(session_id):
+            session = self.store.get(session_id)
+            if session is None or self.local_role(session) != m.GUEST_ROLE:
+                return
+            restored = self.restore_if_enabled(session_id)
+            self.store.set_local(session_id, pending_launch=None, launch_status="", ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200))
+            if not (session.get("local") or {}).get("archived"):
+                self.store.archive(session, "left" if "left" in reason.lower() else "ended")
+                self.store.set_local(session_id, archived=True)
+            self.audit(EVENT_SESSION, "Multiplayer session ended", reason,
+                       {"session_id": session_id, "restore_errors": restored.get("errors", [])}, bell=True)
+
+    # ------------------------------------------------------------- tick/recover
+    def tick(self) -> None:
+        """Periodic housekeeping (called by the worker): expiry, liveness, health. Never raises."""
+        try:
+            self._expire_invitations()
+            for session in list(self.store.all()):
+                try:
+                    self._tick_session(session)
+                except Exception:  # noqa: BLE001 - one bad session must not stop the sweep
+                    continue
+        except Exception:  # noqa: BLE001
+            return
+
+    def _expire_invitations(self) -> None:
+        for invitation in self.store.invitations():
+            expiry = m.parse_time(invitation["expires_at"])
+            if invitation["status"] == "pending" and expiry and expiry < m.now():
+                self.store.update_invitation(invitation["session_id"], status="expired")
+
+    def _tick_session(self, session: dict) -> None:
+        local = session.get("local") or {}
+        session_id = session["id"]
+        now = m.now()
+        if session["state"] == m.COMPLETED or local.get("ended"):
+            ended = m.parse_time(local.get("ended_at"))
+            if local.get("ended") and ended and now - ended > ENDED_REPLICA_TTL:
+                self.store.delete(session_id)
+            return
+        expiry = m.parse_time(session.get("expires_at"))
+        if self.local_role(session) == m.HOST_ROLE:
+            if expiry and expiry < now:
+                self.end_session(session_id, reason="The session timed out.")
+                return
+            self._tick_host(session)
+        else:
+            if expiry and expiry < now:
+                self.guest_cleanup(session_id, "The session timed out.")
+                return
+            self._tick_guest(session)
+
+    def _tick_host(self, session: dict) -> None:
+        session_id, local = session["id"], session.get("local") or {}
+        if session["state"] == m.STARTING:
+            self.evaluate_launch(session_id)
+        if local.get("publish_failed"):
+            self.publish(session_id)
+        silent = [pid for pid, p in session["players"].items() if pid != self.me and p["status"] in (m.P_JOINED, m.P_LAUNCHING, m.P_RUNNING, m.P_UNREACHABLE)
+                  and (m.parse_time((local.get("last_seen") or {}).get(pid)) or m.parse_time(p.get("joined_at")) or m.now()) < m.now() - SILENT_AFTER]
+        for pid in silent:
+            self._probe_player(session_id, pid)
+        if session["state"] in (m.RUNNING, m.DEGRADED) and local.get("host_launched"):
+            if self._owns_host_game(session):
+                self.store.set_local(session_id, host_game_misses=0)
+            else:
+                misses = int(local.get("host_game_misses") or 0) + 1
+                self.store.set_local(session_id, host_game_misses=misses)
+                if misses >= 2:
+                    self.end_session(session_id, reason="The host's game exited.", stop_game=False)
+
+    def _probe_player(self, session_id: str, peer_id: str) -> None:
+        misses_key = "misses"
+        try:
+            self.network.get(self.paired_peer(peer_id), f"/status?session={session_id}", timeout=4.0)
+            alive = True
+        except Exception:  # noqa: BLE001
+            alive = False
+        session = self.store.require(session_id)
+        local = session.get("local") or {}
+        misses = dict(local.get(misses_key) or {})
+        if alive:
+            misses.pop(peer_id, None)
+            self.store.set_local(session_id, **{misses_key: misses}, **self._seen_patch(session, peer_id))
+
+            def recover(s: dict) -> None:
+                player = s["players"][peer_id]
+                if player["status"] == m.P_UNREACHABLE:
+                    player["status"] = m.P_RUNNING if s["state"] in m.LIVE_STATES else m.P_JOINED
+                    player["error"] = ""
+                    add_event(s, "reconnected", f"{player['name']} is reachable again.", self.me)
+            self.store.mutate(session_id, recover)
+            return
+        misses[peer_id] = misses.get(peer_id, 0) + 1
+        self.store.set_local(session_id, **{misses_key: misses})
+        if misses[peer_id] >= 2:
+            def lost(s: dict) -> None:
+                player = s["players"][peer_id]
+                if player["status"] in (m.P_JOINED, m.P_RUNNING, m.P_LAUNCHING):
+                    player.update(status=m.P_UNREACHABLE, error="Lost contact with this player.")
+                    add_event(s, "unreachable", f"Lost contact with {player['name']}.", self.me)
+                    if s["state"] == m.RUNNING:
+                        s["state"] = m.DEGRADED
+                    elif s["state"] in m.PRE_START_STATES:
+                        player["ready"] = False
+                        settle_lobby(s)
+            self.store.mutate(session_id, lost)
+            self.publish(session_id)
+
+    def _tick_guest(self, session: dict) -> None:
+        session_id, local = session["id"], session.get("local") or {}
+        pending = local.get("pending_launch")
+        expiry = m.parse_time((pending or {}).get("expires_at"))
+        if pending and not pending.get("consumed") and expiry and expiry < m.now():
+            self.store.set_local(session_id, pending_launch=None, launch_status="expired")
+        try:
+            status = self.network.get(self.host_peer(session), f"/status?session={session_id}", timeout=4.0)
+            remote = status.get("session") or {}
+            if not remote.get("known") or remote.get("state") in (m.STOPPING, m.COMPLETED, m.FAILED):
+                self.guest_cleanup(session_id, "The host ended or no longer knows this session.")
+                return
+            if local.get("host_unreachable_since"):
+                self.store.set_local(session_id, host_unreachable_since="")
+        except Exception:  # noqa: BLE001
+            since = m.parse_time(local.get("host_unreachable_since"))
+            if since is None:
+                self.store.set_local(session_id, host_unreachable_since=m.now_iso())
+            elif m.now() - since > HOST_LOST_AFTER:
+                self.guest_cleanup(session_id, "The host became unavailable; this emulator session cannot continue without it.")
+                return
+        mine = session["players"].get(self.me) or {}
+        if mine.get("status") == m.P_RUNNING and local.get("game_launched"):
+            if self.launcher.active_game() is None:
+                misses = int(local.get("game_misses") or 0) + 1
+                self.store.set_local(session_id, game_misses=misses)
+                if misses >= 2:
+                    try:
+                        self._guest_message(session, "leave")
+                    except m.MultiplayerError:
+                        pass
+                    self.guest_cleanup(session_id, "You left the session because your game exited.")
+            else:
+                self.store.set_local(session_id, game_misses=0)
+
+    def recover(self) -> dict:
+        """After a Drone restart: restore orphaned settings, fail half-started sessions, resume live ones."""
+        summary = {"restored": 0, "failed": 0, "resumed": 0, "ended": 0}
+        try:
+            for session_id in list(self.guard.pending()):
+                session = self.store.get(session_id)
+                if session is None or session["state"] in (m.COMPLETED, m.FAILED) or (session.get("local") or {}).get("ended"):
+                    self.guard.restore(session_id)
+                    summary["restored"] += 1
+            for session in self.store.active():
+                local, session_id = session.get("local") or {}, session["id"]
+                if local.get("ended"):
+                    continue
+                if self.local_role(session) == m.HOST_ROLE:
+                    if session["state"] == m.STARTING:
+                        self.fail_session(session_id, "The Drone restarted while the session was starting.")
+                        summary["failed"] += 1
+                    elif session["state"] in (m.RUNNING, m.DEGRADED):
+                        if local.get("host_launched") and not self._owns_host_game(session):
+                            self.end_session(session_id, reason="The game was not running after the Drone restarted.", stop_game=False)
+                            summary["ended"] += 1
+                        else:
+                            summary["resumed"] += 1
+                    elif session["state"] == m.STOPPING:
+                        self.end_session(session_id, reason="Finished stopping after a restart.")
+                        summary["ended"] += 1
+                else:
+                    if local.get("launch_status") == "launching":
+                        self.store.set_local(session_id, launch_status="failed", launch_error="The Drone restarted while launching.")
+                        self.restore_if_enabled(session_id)
+                        summary["failed"] += 1
+        except Exception:  # noqa: BLE001
+            pass
+        return summary
+
+    # ---------------------------------------------------- results, diagnostics
+    def record_result(self, session_id: str, success: Any, note: str = "") -> dict:
+        """The player confirms (or denies) that the session really worked; recorded per tested configuration."""
+        success = m.clean_bool(success, "success")
+        session = self.store.require(session_id)
+        local = session.get("local") or {}
+        ran = local.get("reached_running") if self.local_role(session) == m.HOST_ROLE else (local.get("game_launched") or local.get("launch_status") == "running")
+        if not ran:
+            raise m.MultiplayerError("never_ran", "The session never ran on this machine, so there is no result to record.", 409)
+        if local.get("result_recorded"):
+            raise m.MultiplayerError("already_recorded", "You already recorded a result for this session.", 409)
+        emulator = session["emulator"]
+        fingerprint = local.get("tested_config_fingerprint")
+        if not fingerprint:
+            raise m.MultiplayerError("configuration_unverified", "This session has no inspected local configuration to verify.", 409)
+        record = self.compat.record_session_result(
+            system=session["game"]["system"], title_key=m.normalize_title(session["game"]["rom_name"]), title=session["game"]["title"],
+            mechanism=session["mechanism"], config_fp=fingerprint, emulator_version=emulator.get("version", ""), success=success,
+            max_players=len([p for p in session["players"].values() if p["status"] in (m.P_RUNNING, m.P_LEFT)]) or None,
+            failure=note if not success else "")
+        self.store.set_local(session_id, result_recorded=True)
+        self._log(session, "result", f"result recorded: {'worked' if success else 'did not work'}")
+        return {"recorded": True, "config_fingerprint": fingerprint, "record": {key: record.get(key) for key in ("system", "gameId", "title", "lastValidated")}}
+
+    def restore_configuration(self, session_id: str) -> dict:
+        """Manual 'restore my settings' (also what to use when automatic restore is switched off)."""
+        session_id = m.clean_session_id(session_id)
+        session = self.store.get(session_id)
+        if session and session["state"] in m.LIVE_STATES:
+            raise m.MultiplayerError("session_live", "End the session before restoring its settings.", 409)
+        return self.guard.restore(session_id)
+
+    def diagnostics(self, session_id: str) -> dict:
+        session = self.store.require(session_id)
+        adapter = self.adapter_map.get(session.get("emulator", {}).get("adapter", ""))
+        peers = []
+        for pid, player in session["players"].items():
+            if pid == self.me:
+                continue
+            try:
+                result = self.network.test_peer(self.paired_peer(pid), samples=1)
+            except m.MultiplayerError as error:
+                result = {"peer_id": pid, "reachable": False, "error": error.message, "scope": "unknown", "latency_ms": None, "advice": []}
+            peers.append({**result, "name": player["name"], "status": player["status"]})
+        journal = self.guard.pending(session_id).get(session_id)
+        local = session.get("local") or {}
+        return {
+            "session": self.session_view(session),
+            "adapter": adapter.capabilities() if adapter else None,
+            "problems": adapter.validate_configuration(session, self.local_role(session)) if adapter else ["unknown mechanism"],
+            "connectivity": peers,
+            "configuration": {"pending_restore": bool(journal),
+                              "files": [{"file": path.rsplit("/", 1)[-1], "keys": [e["key"] for e in spec["edits"]]}
+                                        for path, spec in (journal or {}).get("files", {}).items()]},
+            "active_game": self._active_summary(self.launcher.active_game() or {}) if self.launcher.active_game() else None,
+            "local": {key: local.get(key) for key in ("role", "port", "host_launched", "launch_status", "launch_error", "reached_running",
+                                                      "host_unreachable_since", "retries", "publish_failed", "result_recorded")},
+            "events": session.get("events", [])[-50:],
+        }

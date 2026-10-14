@@ -55,6 +55,10 @@ def _complete_drone_members(members=(), *, prefix=""):
         "app/integrations/registry.py": b"registry",
         "app/integrations/streamdeck/manager.py": b"manager",
         "app/integrations/media_keys/manager.py": b"manager",
+        "app/web/static/js/multiplayer.js": b"multiplayer-js",
+        "app/web/handlers_multiplayer.py": b"multiplayer-handlers",
+        "app/multiplayer/__init__.py": b"multiplayer-init",
+        "app/multiplayer/orchestrator.py": b"multiplayer-orchestrator",
         "content/batocera-swarm-mascot.jpg": b"jpg",
         "content/drone.png": b"png",
     }
@@ -96,7 +100,7 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         result = self._run(archive)
         self.assertEqual(result["status"], "downloaded")
         self.assertTrue(result["restart_required"])
-        self.assertEqual(result["copied_files"], 16)
+        self.assertEqual(result["copied_files"], 20)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "app" / "pkg" / "mod.py").read_bytes(), b"p")
         self.assertEqual((self.work_dir / "content" / "theme.css").read_bytes(), b"c")
@@ -110,7 +114,7 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
             prefix="batocera.drone/",
         ))
         result = self._run(archive)
-        self.assertEqual(result["copied_files"], 15)
+        self.assertEqual(result["copied_files"], 19)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "content" / "x.css").read_bytes(), b"c")
 
@@ -166,6 +170,10 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
             "app/integrations/registry.py",
             "app/integrations/streamdeck/manager.py",
             "app/integrations/media_keys/manager.py",
+            "app/web/static/js/multiplayer.js",
+            "app/web/handlers_multiplayer.py",
+            "app/multiplayer/__init__.py",
+            "app/multiplayer/orchestrator.py",
         ):
             archive = _targz([(name, body) for name, body in members if name != missing])
             with self.subTest(missing=missing), self.assertRaises(ValueError) as ctx:

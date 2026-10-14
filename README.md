@@ -23,6 +23,7 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 - Scrape, upload, and crop artwork from the admin artwork page or an individual ROM artwork page.
 - Use admin tools for logs, configs, cleanup, system information, and troubleshooting.
 - Pair directly with other Drones to browse and copy ROMs, BIOS, artwork, saves, and movies peer-to-peer.
+- Play together: pick a game, invite paired peers, and Drone chooses and prepares the multiplayer mechanism the installed emulators really support (RetroArch Netplay first; see [Multiplayer](#multiplayer)).
 - Use the built-in API if you want to automate against your Batocera machine.
 
 ## Install On Batocera
@@ -118,6 +119,12 @@ Drone also tracks gameplay activity and connection speed purely locally. Gamepla
 Drone-owned durable state is stored in its local SQLite database: paired-peer and pairing-code state, discovered/health snapshots, upload cursors/fingerprints, credentials, small MD5 lookup results, peer certificate metadata, and processed action/audit history. Existing JSON or action-log state files are imported on first access and removed after successful migration. Normal Drone stdout/stderr logs remain rotating files controlled by `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, because log collection tails those streams directly.
 
 Local fake mode is opt-in with `USE_FAKE_DATA=true`. One visible nearby Drone is automatically shown as paired so asset requests can be exercised without completing the pairing flow; the remaining nearby Drones stay unpaired for pairing UI testing. A paired **Demo Arcade Cabinet** is used as a fallback when no nearby Drone has been discovered.
+
+## Multiplayer
+
+The **Multiplayer** page provides game discovery, invitations, readiness, lobbies and diagnostics over the existing pinned-certificate mTLS swarm, on LAN or Tailscale. Detected RetroArch launcher builds can configure and launch Netplay with temporary settings after local approval; Dolphin and other mechanisms expose supported manual or experimental steps. Selected RetroArch/Dolphin ROMs require full content equality. Sunshine/Moonlight is an optional streaming integration with external pairing, input and stream controls; Drone does not install it or manage its permissions. There is no central server or account.
+
+Support is reported honestly: RetroArch Netplay is the implemented, automated path; Dolphin, PPSSPP, Switch LAN play, generic LAN and Sunshine/Moonlight streaming are assisted or manual; other emulators are detection-only. Nothing is marked *verified* until a session you confirmed worked. The feature has been tested against a simulated swarm; real two-machine validation is still outstanding. See [docs/multiplayer.md](./docs/multiplayer.md) for the supported-emulator matrix, how to host and join, network and Tailscale notes, troubleshooting, the adapter development guide and the manual validation checklist.
 
 ## Drone-to-Drone Security
 

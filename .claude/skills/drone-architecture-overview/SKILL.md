@@ -153,6 +153,12 @@ any third-party package is installed. Runs as **root**, on-device
   running while enabled — the only process that imports its private
   StreamDeck/Pillow libraries (the Drone stays stdlib-only). Depth:
   `drone-integrations-streamdeck` skill.
+- **Multiplayer** (`app/multiplayer/`, the top-level Multiplayer page) — peer-hosted
+  game sessions over the same mTLS channel (`/peer/multiplayer/*`); the host is the
+  single authority, guests hold version-gated replicas, nothing launches without the
+  local user's confirmation, and gameplay traffic is the emulator's own transport.
+  One daemon thread (`multiplayer/worker.py`, 10 s sweep + restart recovery). Depth:
+  `drone-multiplayer` skill, `docs/multiplayer.md`.
 
 ## VPN: one subscription, the whole swarm
 
@@ -273,6 +279,7 @@ sharing" section docstrings cover the Tailscale-specific deviations inline.
 - **SQLite schemas/migrations** → `drone-db-management`
 - **Debugging a real, running Drone** → `drone-live-debugging`
 - **Admin -> Integrations / Stream Deck** → `drone-integrations-streamdeck`
+- **Multiplayer sessions / emulator adapters / temporary emulator settings** → `drone-multiplayer`
 
 ## Default bias
 
