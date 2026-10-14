@@ -5196,6 +5196,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_auto_launch_revocation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-240-auto-launch-revocation",
+      "name": "Issue #240 queued automatic launch respects revoked local consent",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/protocol.py",
+          "app/multiplayer/lifecycle.py",
+          "tests/multiplayer_support.py",
+          "tests/adversarial/security/test_issue_240_auto_launch_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
