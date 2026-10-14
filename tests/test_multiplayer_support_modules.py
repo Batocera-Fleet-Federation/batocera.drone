@@ -116,17 +116,13 @@ class NetworkTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         service = NetworkService(make_settings(tmp.name))
-        for _ in range(50):  # keep the whole probe window below 65535
-            busy = socket.socket()
-            busy.bind(("0.0.0.0", 0))
-            if busy.getsockname()[1] < 60000:
-                break
-            busy.close()
+        busy = socket.socket()
+        busy.bind(("0.0.0.0", 0))
         busy.listen(1)
         self.addCleanup(busy.close)
         port = busy.getsockname()[1]
-        chosen = service.allocate_port(port, port + 20, in_use={port + 1})  # the range is clamped at 65535
-        self.assertNotIn(chosen, (port, port + 1))
+        chosen = service.allocate_port(max(1024, port - 10), port, in_use={port - 1})  # ranges below the busy port never overflow 65535
+        self.assertNotIn(chosen, (port, port - 1))
         with self.assertRaises(m.MultiplayerError) as caught:
             service.allocate_port(port, port, in_use=set())
         self.assertEqual(caught.exception.code, "no_free_port")

@@ -344,6 +344,7 @@ class LifecycleMixin:
         return {"status": "launching"}
 
     def run_guest_launch(self, session_id: str) -> None:
+        launched = False
         try:
             with self.session_lock(session_id):
                 session = self.store.require(session_id)
@@ -373,18 +374,33 @@ class LifecycleMixin:
                         if not self.launcher.wait_for_exit(EXIT_TIMEOUT):
                             raise m.MultiplayerError("game_not_exited", "The running game did not exit in time.", 409)
                     adapter.launch(session, m.GUEST_ROLE, context, self.launcher)
+                    launched = True
                     if not self.launcher.wait_for_start(path, HOST_START_TIMEOUT):
                         raise m.MultiplayerError("launch_timeout", "The game did not start on this machine.", 409)
                 self.store.set_local(session_id, launch_status="running", game_launched=True, pending_launch=None)
             self._guest_message(self.store.require(session_id), "launch_result", ok=True)
         except Exception as error:  # noqa: BLE001
             message = getattr(error, "message", None) or f"{type(error).__name__}: {error}"
+            if launched:
+                self._stop_owned_guest_game(session_id)
             self.restore_if_enabled(session_id)
             self.store.set_local(session_id, launch_status="failed", launch_error=m.clean_text(message, 300))
             try:
                 self._guest_message(self.store.require(session_id), "launch_result", ok=False, error=message)
             except m.MultiplayerError:
                 pass
+
+    def _stop_owned_guest_game(self, session_id: str) -> None:
+        """Our own launch failed after the game started: close that game (never an unrelated one)."""
+        try:
+            with self.session_lock(session_id):
+                session = self.store.get(session_id)
+                path = ((session or {}).get("local") or {}).get("game_path", "")
+                active = self.launcher.active_game()
+                if path and active and same_rom(active.get("rom_path", ""), path):
+                    self.launcher.exit_game()
+        except Exception:  # noqa: BLE001 - cleanup must not mask the launch error
+            pass
 
     def _wait_for_host_port(self, address: str, port: int) -> None:
         waited = 0.0
@@ -472,14 +488,18 @@ class LifecycleMixin:
         for old in done[KEEP_COMPLETED:]:
             self.store.delete(old["id"])
 
-    def guest_cleanup(self, session_id: str, reason: str) -> None:
-        """A guest leaves/ends locally: settings restored, offers dropped. The running game is NOT closed."""
+    def guest_cleanup(self, session_id: str, reason: str, *, reopenable: bool = False) -> None:
+        """A guest leaves/ends locally: settings restored, offers dropped. The running game is NOT closed.
+
+        ``reopenable`` marks a host-side FAILED: if the host retries, the still-joined guest's lobby comes back.
+        """
         with self.session_lock(session_id):
             session = self.store.get(session_id)
             if session is None or self.local_role(session) != m.GUEST_ROLE:
                 return
             restored = self.restore_if_enabled(session_id)
-            self.store.set_local(session_id, pending_launch=None, launch_status="", ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200))
+            self.store.set_local(session_id, pending_launch=None, launch_status="", ended=True, ended_at=m.now_iso(), ended_reason=m.clean_text(reason, 200),
+                                 reopenable=bool(reopenable))
             if not (session.get("local") or {}).get("archived"):
                 self.store.archive(session, "left" if "left" in reason.lower() else "ended")
                 self.store.set_local(session_id, archived=True)
@@ -565,6 +585,10 @@ class LifecycleMixin:
                     player["status"] = m.P_RUNNING if s["state"] in m.LIVE_STATES else m.P_JOINED
                     player["error"] = ""
                     add_event(s, "reconnected", f"{player['name']} is reachable again.", self.me)
+                    if s["state"] == m.DEGRADED and not any(
+                            p["status"] in (m.P_FAILED, m.P_UNREACHABLE, m.P_LEFT, m.P_REMOVED) for k, p in s["players"].items() if k != s["host_id"]):
+                        s["state"] = m.RUNNING
+                        add_event(s, "running", "All players are connected again.", self.me)
             self.store.mutate(session_id, recover)
             return
         misses[peer_id] = misses.get(peer_id, 0) + 1
@@ -593,7 +617,8 @@ class LifecycleMixin:
             status = self.network.get(self.host_peer(session), f"/status?session={session_id}", timeout=4.0)
             remote = status.get("session") or {}
             if not remote.get("known") or remote.get("state") in (m.STOPPING, m.COMPLETED, m.FAILED):
-                self.guest_cleanup(session_id, "The host ended or no longer knows this session.")
+                self.guest_cleanup(session_id, "The host ended or no longer knows this session.",
+                                   reopenable=bool(remote.get("known")) and remote.get("state") == m.FAILED)
                 return
             if local.get("host_unreachable_since"):
                 self.store.set_local(session_id, host_unreachable_since="")

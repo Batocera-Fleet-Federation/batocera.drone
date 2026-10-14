@@ -197,7 +197,7 @@ class EmulatorAdapter:
             lines = [line for line in text.splitlines() if ".netplay." not in line and
                      not re.match(r'^\s*[^=]+\["[^"\n]+"\]\.(?:emulator|core)\s*=', line)]
             return m.config_fingerprint("\n".join(lines))
-        return m.config_fingerprint("v2", game.get("fingerprint"), game.get("rom_name"), game.get("size"),
+        return m.config_fingerprint("v3", game.get("fingerprint"), game.get("content_sha256"), game.get("rom_name"), game.get("size"),
                                     self._cached("settings-digest", settings_digest),
                                     *[emulator.get(key) for key in ("name", "core", "version", "core_version")])
 

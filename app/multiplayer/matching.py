@@ -69,6 +69,7 @@ class GameLibrary:
         self._cache: Dict[str, tuple] = {}
         self._lock = threading.Lock()
         self._hashes = Document(settings, "content_hashes", dict)
+        self._hash_view: Optional[tuple] = None
 
     def invalidate(self) -> None:
         with self._lock:
@@ -170,7 +171,23 @@ class GameLibrary:
             while len(entries) > 512:
                 entries.pop(next(iter(entries)))
         self._hashes.update(save)
+        self._hash_view = None
         return result
+
+    def cached_content_hash(self, game: dict) -> str:
+        """The full SHA-256 of this ROM if already computed for its *current* file state, else ``""``. Never hashes."""
+        try:
+            path = os.path.abspath(str(Path(self.repository.roms_root) / game["system"] / game["rom_path"]))
+            info = os.stat(path)
+        except (OSError, KeyError, TypeError):
+            return ""
+        now = time.monotonic()
+        view = self._hash_view
+        if view is None or now - view[0] > 5.0:
+            view = self._hash_view = (now, self._hashes.load())
+        entry = view[1].get(path)
+        stamp = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        return entry["sha256"] if isinstance(entry, dict) and entry.get("stamp") == stamp else ""
 
     def find_copy(self, query: dict) -> Optional[dict]:
         """Best local copy of ``query`` ({system, rom_name, title_key, fingerprint, size}), with its match level."""
@@ -188,10 +205,13 @@ class GameLibrary:
 class GameAssessor:
     """Per-game multiplayer assessment across every adapter, with recorded evidence applied."""
 
-    def __init__(self, adapters: List[Any], compat: CompatibilityDatabase, overrides_provider) -> None:
+    HASHED_MECHANISMS = (m.RETROARCH_NETPLAY, m.DOLPHIN_NETPLAY)
+
+    def __init__(self, adapters: List[Any], compat: CompatibilityDatabase, overrides_provider, cached_hash=None) -> None:
         self.adapters = adapters
         self.compat = compat
         self._overrides = overrides_provider
+        self._cached_hash = cached_hash
 
     def assess(self, game: dict, *, game_path: Optional[Path] = None, core_override: str = "") -> List[dict]:
         overrides = dict(self._overrides())
@@ -202,6 +222,7 @@ class GameAssessor:
         if game_path is not None:
             probe_game["path"] = game_path
         results: List[dict] = []
+        sha: Optional[str] = None
         for adapter in self.adapters:
             if adapter.id in disabled or not adapter.supports_system(game["system"]):
                 continue
@@ -213,7 +234,13 @@ class GameAssessor:
             if assessment is None:
                 continue
             emulator = assessment["emulator"]
-            fingerprint = m.config_fingerprint(assessment["mechanism"], adapter.validation_fingerprint(game, emulator))
+            evidence_game = game
+            if self._cached_hash is not None and assessment["mechanism"] in self.HASHED_MECHANISMS:
+                # Evidence for these mechanisms is bound to the full ROM content, not just the sampled fingerprint.
+                if sha is None:
+                    sha = self._cached_hash(game) or ""
+                evidence_game = {**game, "content_sha256": sha}
+            fingerprint = m.config_fingerprint(assessment["mechanism"], adapter.validation_fingerprint(evidence_game, emulator))
             verdict = self.compat.evaluate(game["system"], game["title_key"], assessment["mechanism"], fingerprint,
                                            assessment["classification"])
             assessment["technical_classification"] = assessment["classification"]

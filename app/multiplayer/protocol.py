@@ -295,10 +295,15 @@ class ProtocolMixin:
             reason = ("You were removed from the session by the host." if removed else
                       "The host ended the session." if session["state"] in (m.COMPLETED, m.STOPPING) else
                       session.get("error") or "The session failed.")
-            self.guest_cleanup(session["id"], reason)
+            self.guest_cleanup(session["id"], reason, reopenable=session["state"] == m.FAILED and not removed and mine is not None)
         elif session["state"] in m.PRE_START_STATES:
             # Back to the lobby (e.g. a retry): any earlier launch offer is void.
             self.store.set_local(session["id"], pending_launch=None, launch_status="")
+            local = session.get("local") or {}
+            if local.get("ended") and local.get("reopenable") and mine is not None and mine["status"] == m.P_JOINED:
+                # The host retried a failed session this guest had joined: reopen its lobby (launch still needs confirmation).
+                self.store.set_local(session["id"], ended=False, ended_at="", ended_reason="", reopenable=False, archived=False,
+                                     launch_error="", game_launched=False, game_misses=0, host_unreachable_since="")
 
     # ---------------------------------------------------------------- guest: launch
     def peer_launch(self, caller_id: str, payload: Any) -> dict:

@@ -283,6 +283,10 @@ class SessionMixin:
             try:
                 digest = self.library.content_hash(game)
                 self.store.mutate(session_id, lambda s: s["game"].update(sha256=digest))
+                # Evidence is bound to this exact content: refresh the tested-configuration fingerprint now that it is hashed.
+                refreshed = self.assessor.assess(game, game_path=path, core_override=core_override)
+                plan["config_fingerprint"] = next((a["config_fingerprint"] for a in refreshed if a["mechanism"] == plan["mechanism"]),
+                                                  plan["config_fingerprint"])
             except Exception:
                 self.store.delete(session_id)
                 raise

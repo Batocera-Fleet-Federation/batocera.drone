@@ -61,7 +61,8 @@ class OrchestratorBase:
         self.network = network or NetworkService(settings)
         self.launcher = launcher or GameLauncher()
         self.library = library or GameLibrary(settings, repository)
-        self.assessor = GameAssessor(self.adapters, self.compat, lambda: self.cfg.get()["emulators"])
+        self.assessor = GameAssessor(self.adapters, self.compat, lambda: self.cfg.get()["emulators"],
+                                     cached_hash=lambda game: self.library.cached_content_hash(game))
         self._paired_peers_fn = paired_peers or (lambda: _local_network.paired_peers(settings))
         self._peer_checks_fn = peer_checks or (lambda: _local_network.load_peer_checks(settings))
         self._spawn = spawn
