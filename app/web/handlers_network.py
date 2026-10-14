@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote
 
 try:
+    from ..common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed
     from ..device.device_control import _ensure_rom_write_access
     from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
@@ -48,6 +49,7 @@ try:
     )
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed  # type: ignore
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
@@ -103,6 +105,11 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
 # response reports ``truncated`` so the caller knows to run it again.
 SYNC_BULK_MAX_JOBS = max(1, int(os.environ.get("DRONE_SYNC_BULK_MAX_JOBS", "2000")))
 SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "10"))
+
+# Raised by ``_local_pair_peer`` when the identity-provisioning gate refuses an
+# outbound pairing attempt. Keep this exact text stable: it is an actionable
+# local-state response, rather than a diagnosis of the remote Drone.
+_PAIRING_IDENTITY_HOLD_MESSAGE = "peer pairing is held pending Drone identity verification"
 
 # The health fallback's own guaranteed budget, never taken from the summary's.
 # Liveness and inventory are different questions: /peer/health is ~150 bytes
@@ -625,7 +632,9 @@ class HandlersNetworkMixin:
         or being unreachable is an upstream failure, not a server bug, so it must
         not escape as a generic 500. The peer's own error text is shown truncated.
         A local identity hold (``PermissionError`` from ``_local_pair_peer``) is
-        this Drone's own state, so it replies 503 rather than "unreachable".
+        this Drone's own state, so it replies 503 rather than "unreachable". A
+        bare ``PermissionError`` is otherwise still a connection failure once
+        the identity hold has lifted.
 
         The pairing code is a secret, so over HTTPS it is only sent to a server
         that proves the certificate the operator confirmed (the fingerprint
@@ -666,10 +675,19 @@ class HandlersNetworkMixin:
             message = f"That drone rejected the pairing request (HTTP {error.code})."
             self._send_json(502, {"error": f"{message} {detail}".rstrip()})
         except (URLError, OSError) as error:
-            if isinstance(error, PermissionError) and error.errno is None:
-                # The local identity hold raises a bare PermissionError(message);
-                # an OS-level EACCES/EPERM carries an errno and is still a
-                # connection failure. The hold is this Drone's state, not the peer's.
+            if (
+                isinstance(error, PermissionError)
+                and error.errno is None
+                and (
+                    not _identity_swarm_networking_allowed()
+                    # Keep the direct helper contract recognizable for callers
+                    # that surface its documented hold exception unchanged.
+                    or str(error) == _PAIRING_IDENTITY_HOLD_MESSAGE
+                )
+            ):
+                # The identity gate raises this bare PermissionError. Check the
+                # current gate as well: arbitrary errno-less PermissionErrors
+                # from a network stack are 502 once identity is resolved.
                 self._send_json(503, {"error": str(error)})
                 return None
             self._send_json(502, {"error": f"Could not reach that drone: {error}"})
