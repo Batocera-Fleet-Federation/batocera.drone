@@ -462,7 +462,7 @@ class ProtocolMixin:
                         or self.cfg.get()["privacy"]["local_launch_authorization"] != "auto"
                         or self.launcher.active_game() is not None):
                     return  # revoked or replaced: the offer waits for explicit local confirmation
-                self.confirm_launch(session_id, replace_running_game=False)
+                self._confirm_launch(session_id, replace_running_game=False, automatic=True)
         except m.MultiplayerError:
             pass
 

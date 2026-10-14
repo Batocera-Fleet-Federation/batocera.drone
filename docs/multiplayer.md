@@ -223,6 +223,13 @@ Optional, opt-in only: *Privacy → Launching a game here → Automatic* launche
 without asking **when no other game is running**. *Automatically accept
 invitations* (off by default) only joins the lobby.
 
+Queued execution retains whether consent was automatic or explicit. Switching to
+confirmation-only revokes queued automatic consent; disabling multiplayer revokes
+both kinds. The offer then needs fresh local confirmation. Re-enabling a setting
+does not revive revoked consent. Policy writes and guest resource acquisition
+share a lock: a settings change waits for an execution already acquiring resources
+to finish, and cannot interrupt an emulator launch that has already begun.
+
 ## Invitations and the session protocol
 
 Peer endpoints (mTLS; caller = pinned certificate identity):

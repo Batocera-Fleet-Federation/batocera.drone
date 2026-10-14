@@ -185,6 +185,15 @@ _VALIDATORS = {
 class MultiplayerSettings:
     def __init__(self, settings: Any) -> None:
         self._doc = Document(settings, "settings", dict)
+        # Execution takes the session lock first, then this lock. Settings writes
+        # never take session locks, so revocation and resource acquisition serialize.
+        self.launch_lock = self._doc.lock
+
+    def launch_authority(self) -> dict:
+        """Local revocation generations, persisted but never accepted as settings input."""
+        stored = self._doc.load()
+        return {key: stored.get("_launch_authority", {}).get(key, 0)
+                for key in ("enabled", "automatic")}
 
     def get(self) -> dict:
         stored = self._doc.load()
@@ -198,6 +207,10 @@ class MultiplayerSettings:
         return merged
 
     def update(self, patch: Any) -> dict:
+        with self.launch_lock:
+            return self._update(patch)
+
+    def _update(self, patch: Any) -> dict:
         patch = require_dict(patch, "settings")
         unknown = sorted(set(patch) - set(DEFAULTS))
         if unknown:
@@ -209,10 +222,17 @@ class MultiplayerSettings:
             if bad:
                 raise MultiplayerError("invalid_setting", f"unknown setting: {section}.{bad[0]}")
             cleaned[section] = _VALIDATORS[section](values)
-        merged = self.get()
+        previous = self.get()
+        merged = _copy(previous)
         for section, values in cleaned.items():
             merged[section].update(values)
         if merged["networking"]["port_range_end"] < merged["networking"]["port_range_start"]:
             raise MultiplayerError("invalid_setting", "port_range_end must not be below port_range_start")
-        self._doc.save(merged)
+        authority = self.launch_authority()
+        if previous["general"]["enabled"] and not merged["general"]["enabled"]:
+            authority["enabled"] += 1
+        if (previous["privacy"]["local_launch_authorization"] == "auto" and
+                merged["privacy"]["local_launch_authorization"] != "auto"):
+            authority["automatic"] += 1
+        self._doc.save({**merged, "_launch_authority": authority})
         return merged

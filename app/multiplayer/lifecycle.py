@@ -432,9 +432,16 @@ class LifecycleMixin:
             raise m.MultiplayerError("launch_expired", "The host is no longer starting this session for you. Ask it for a new launch offer.", 409)
 
     def confirm_launch(self, session_id: str, replace_running_game: bool = False) -> dict:
+        return self._confirm_launch(session_id, replace_running_game, automatic=False)
+
+    def _confirm_launch(self, session_id: str, replace_running_game: bool = False, *, automatic: bool) -> dict:
         self.require_enabled()
         replace = m.clean_bool(replace_running_game, "replace_running_game")
-        with self.session_lock(session_id):
+        with self.session_lock(session_id), self.cfg.launch_lock:
+            config = self.require_enabled()
+            if automatic and (config["privacy"]["local_launch_authorization"] != "auto" or
+                              self.launcher.active_game() is not None):
+                return {"status": "awaiting_confirmation"}
             session = self.store.require(session_id)
             if self.local_role(session) != m.GUEST_ROLE:
                 raise m.MultiplayerError("not_a_guest", "The host launches from Start Session.", 409)
@@ -462,7 +469,9 @@ class LifecycleMixin:
             # The queued worker is bound to this exact confirmation: a replacement offer, a retry or a
             # reset creates a plan without this token, so an old worker can never execute it.
             confirmation = m.new_message_id()
-            self.store.set_local(session_id, pending_launch={**plan, "consumed": True, "confirmation": confirmation},
+            self.store.set_local(session_id, pending_launch={**plan, "consumed": True, "confirmation": confirmation,
+                                 "consent": "automatic" if automatic else "explicit",
+                                 "authority": self.cfg.launch_authority()},
                                  launch_status="launching", replace_running_game=replace)
         self._spawn(lambda: self.run_guest_launch(session_id, confirmation), f"multiplayer-launch-{session_id[:8]}")
         return {"status": "launching"}
@@ -470,7 +479,7 @@ class LifecycleMixin:
     def run_guest_launch(self, session_id: str, confirmation: str = "") -> None:
         launched = False
         try:
-            with self.session_lock(session_id):
+            with self.session_lock(session_id), self.cfg.launch_lock:
                 session = self.store.require(session_id)
                 local = session["local"]
                 plan = local.get("pending_launch")
@@ -478,6 +487,22 @@ class LifecycleMixin:
                     return  # removed, ended, or cancelled while the worker was queued
                 if not confirmation or plan.get("consumed") is not True or plan.get("confirmation") != confirmation:
                     return  # the offer this worker was confirmed for was voided or replaced: no consent for the current one
+                config = self.cfg.get()
+                authority = self.cfg.launch_authority()
+                reviewed = plan.get("authority") or {}
+                automatic = plan.get("consent") == "automatic"
+                if (not config["general"]["enabled"] or reviewed.get("enabled") != authority["enabled"] or
+                        plan.get("consent") not in ("automatic", "explicit") or
+                        (automatic and (config["privacy"]["local_launch_authorization"] != "auto" or
+                                        reviewed.get("automatic") != authority["automatic"] or
+                                        self.launcher.active_game() is not None))):
+                    # Cancel this token without failing the host session: the offer
+                    # remains available for fresh explicit consent when enabled.
+                    pending = {k: v for k, v in plan.items() if k not in ("confirmation", "consent", "authority")}
+                    pending["consumed"] = False
+                    self.store.set_local(session_id, pending_launch=pending, launch_status="awaiting_confirmation",
+                                         replace_running_game=False)
+                    return
                 self._require_live_launch_host(session, plan)
                 adapter = self.adapter_map[session["emulator"]["adapter"]]
                 adapter.refresh()
