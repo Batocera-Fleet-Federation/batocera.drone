@@ -22,6 +22,13 @@ implementation as correct:
   host core installed is not blocked solely because batocera.conf names another
   core.
 
+Revision note (dispute adjudication): the earlier setup invited two peers into a
+lobby whose live mechanism is REMOTE_STREAMING, i.e. three occupied seats against the
+published two-seat streaming capacity. Spec 2.3 ("maximum players based on the game's
+actual capabilities") and the capacity suite forbid that, so those four tests now reach
+the same stale-invitation conditions with host + one guest: the guest misses a withdrawal
+and the re-invite that follows a host RetroArch upgrade. The identity invariants are unchanged.
+
 Emulators and peer transport are simulated. Configuration files and SQLite are
 real temporary data. This does not validate real RetroArch or Sunshine gameplay.
 """
@@ -85,24 +92,46 @@ class StaleInviteIdentityUAT(unittest.TestCase):
     def _pending(self, orch):
         return orch.list_invitations()
 
+    def _stale_pair(self, guest_online_for_reinvite):
+        """Two seats only (host + guest), the most a streaming lobby may hold (spec 2.3).
+
+        The guest reviews a native invitation I1. The host withdraws it while the guest is
+        unreachable (the guest never hears), then upgrades RetroArch so native Netplay no
+        longer fits the pair, and invites the guest again: the live session is now
+        REMOTE_STREAMING. Optionally that refresh is not delivered, leaving the guest holding I1.
+        """
+        hub, nodes = make_swarm(self.tmp, ("host", "guest"), **STREAM)
+        for node in nodes.values():
+            node.repo.games["snes"][0]["players"] = "1-4"
+            node.orch.library.invalidate()
+        self.hub, self.nodes = hub, nodes
+        self.h, self.g = nodes["host"].orch, nodes["guest"].orch
+        sid = self.h.create_session({"system": "snes", "game_id": "g1", "peers": ["guest"], "max_players": 4, **CORE})["id"]
+        stale = self._pending(self.g)
+        self.assertEqual([item["mechanism"] for item in stale], [m.RETROARCH_NETPLAY])
+        hub.offline.add("guest")
+        self.h.remove_player(sid, "guest")
+        nodes["host"].probe.versions["/usr/bin/retroarch"] = "1.21.0"
+        self.h.adapter_map["retroarch"].refresh()
+        hub.offline.clear()
+        if not guest_online_for_reinvite:
+            # The guest still answers compatibility queries but refuses the refreshed invitation,
+            # so it keeps the stale native one it reviewed.
+            self.g.update_settings({"general": {"invitations_enabled": False}})
+        session = self.h.invite_peer(sid, "guest")
+        self.g.update_settings({"general": {"invitations_enabled": True}})
+        self.assertEqual(session["mechanism"], m.REMOTE_STREAMING, session["mechanism_reason"])
+        self.assertEqual(session["max_players"], 2)
+        self.assertEqual(session["players"]["guest"]["status"], m.P_INVITED)
+        return sid
+
     def test_pending_invitation_follows_a_pre_join_mechanism_change(self):
-        self._three()
-        sid = self.h.create_session({"system": "snes", "game_id": "g1", "max_players": 4, **CORE})["id"]
-        self.h.invite_peer(sid, "guest")
-        first = self._pending(self.g)
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0]["mechanism"], m.RETROARCH_NETPLAY)
-        session = self.h.invite_peer(sid, "mallory")
-        self.assertEqual(
-            session["mechanism"], m.REMOTE_STREAMING,
-            "mallory cannot join native Netplay; streaming is available and nobody has joined yet, "
-            "so Invite Players must switch the empty lobby: %s" % session["mechanism_reason"],
-        )
+        sid = self._stale_pair(guest_online_for_reinvite=True)
         pending = self._pending(self.g)
-        self.assertEqual(len(pending), 1, "the first invitee must still have a reviewable invitation")
+        self.assertEqual(len(pending), 1, "the guest must hold exactly one reviewable invitation")
         self.assertEqual(
             pending[0]["mechanism"], m.REMOTE_STREAMING,
-            "the invitation the first guest still holds must name the live mechanism, not the native "
+            "the invitation the guest still holds must name the live mechanism, not the native "
             "session that no longer exists: %s" % pending[0]["mechanism"],
         )
         joined = self.g.accept_invitation(sid)
@@ -113,12 +142,9 @@ class StaleInviteIdentityUAT(unittest.TestCase):
         self.assertEqual(self.nodes["host"].launcher.launched, [])
 
     def test_stale_accept_does_not_join_on_the_host_only(self):
-        self._three()
-        sid = self.h.create_session({"system": "snes", "game_id": "g1", "max_players": 4, **CORE})["id"]
-        self.h.invite_peer(sid, "guest")
-        self.h.invite_peer(sid, "mallory")
-        host_before = self.h.get_session(sid)["players"]["guest"]["status"]
-        self.assertEqual(host_before, m.P_INVITED)
+        sid = self._stale_pair(guest_online_for_reinvite=False)
+        self.assertEqual([item["mechanism"] for item in self._pending(self.g)], [m.RETROARCH_NETPLAY])
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_INVITED)
         try:
             self.g.accept_invitation(sid)
         except m.MultiplayerError:
@@ -134,12 +160,10 @@ class StaleInviteIdentityUAT(unittest.TestCase):
         else:
             self.assertEqual(host_status, m.P_JOINED)
             self.assertEqual(guest_local["players"]["guest"]["status"], m.P_JOINED)
+            self.assertEqual(guest_local["mechanism"], m.REMOTE_STREAMING)
 
     def test_failed_accept_does_not_cancel_invite_or_block_reinvite(self):
-        self._three()
-        sid = self.h.create_session({"system": "snes", "game_id": "g1", "max_players": 4, **CORE})["id"]
-        self.h.invite_peer(sid, "guest")
-        self.h.invite_peer(sid, "mallory")
+        sid = self._stale_pair(guest_online_for_reinvite=False)
         try:
             self.g.accept_invitation(sid)
         except m.MultiplayerError:
@@ -147,6 +171,7 @@ class StaleInviteIdentityUAT(unittest.TestCase):
         if self.g.store.get(sid) is not None:
             self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_JOINED)
             return
+        self.assertTrue(self._pending(self.g), "a refused accept must not cancel the guest's invitation")
         self.h.invite_peer(sid, "guest")
         pending = [item["mechanism"] for item in self._pending(self.g)]
         self.assertIn(
@@ -156,30 +181,31 @@ class StaleInviteIdentityUAT(unittest.TestCase):
         )
         joined = self.g.accept_invitation(sid)
         self.assertEqual(joined["players"]["guest"]["status"], m.P_JOINED)
+        self.assertEqual(self.h.get_session(sid)["players"]["guest"]["status"], m.P_JOINED)
 
     def test_host_is_not_stuck_waiting_for_a_guest_with_no_session(self):
-        self._three()
-        sid = self.h.create_session({"system": "snes", "game_id": "g1", "max_players": 4, **CORE})["id"]
-        self.h.invite_peer(sid, "guest")
-        self.h.invite_peer(sid, "mallory")
+        sid = self._stale_pair(guest_online_for_reinvite=False)
         try:
             self.g.accept_invitation(sid)
         except m.MultiplayerError:
             pass
-        self.mal.accept_invitation(sid)
-        self.mal.set_ready(sid, True)
         self.h.set_ready(sid, True)
         if self.g.store.get(sid) is None:
             self.assertNotEqual(
                 self.h.get_session(sid)["players"]["guest"]["status"], m.P_JOINED,
                 "Start must not wait for a guest who has no local session",
             )
-            self.h.remove_player(sid, "guest")
-        else:
-            self.g.set_ready(sid, True)
+            self.assertNotEqual(self.h.get_session(sid)["state"], m.READY)
+            self.assertEqual(self.code(self.h.start_session, sid), "players_not_ready")
+            self.assertEqual(self.nodes["host"].launcher.launched, [], "a refused start launches nothing")
+            # Recovery: the host re-invites, the guest reviews the live session and joins.
+            self.h.invite_peer(sid, "guest")
+            self.g.accept_invitation(sid)
+        self.g.set_ready(sid, True)
         self.assertEqual(self.h.get_session(sid)["state"], m.READY)
         self.h.start_session(sid)
         self.assertEqual(self.nodes["guest"].launcher.launched, [])
+        self.assertEqual(len(self.nodes["host"].launcher.launched), 1)
 
     def test_create_without_peers_then_invite_incompatible_guest_joins_streaming(self):
         hub, nodes = make_swarm(self.tmp + "-solo", **STREAM)

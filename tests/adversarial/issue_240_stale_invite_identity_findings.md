@@ -83,3 +83,13 @@ SQLite. This does not validate real RetroArch or Sunshine gameplay.
 ## Out of scope
 
 None from this pass. No unrelated existing suite was used as a #240 blocker.
+
+## Adjudication note (epoch 6)
+Four tests in `test_issue_240_stale_invite_identity_uat.py` invited two peers into a lobby whose live mechanism
+is REMOTE_STREAMING (three occupied seats vs. the published two-seat capacity). Spec 2.3 and the capacity suite
+(`test_issue_240_capacity_config_fidelity_uat.py`) correctly forbid that, so the setup was invalid, not the product.
+The tests were rewritten to reach the same stale-invitation conditions with host + one guest (the guest misses a
+withdrawal, the host upgrades RetroArch, the refreshed streaming invitation is not delivered). The identity
+invariants (no host-only join, failed accept keeps the invitation, re-invite delivers the live mechanism, host not
+stuck) are unchanged. `tests/test_multiplayer_invitation_identity.py` is not an adversarial file and still uses the
+over-capacity setup; the worker must rework it.
