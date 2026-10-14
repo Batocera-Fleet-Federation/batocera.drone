@@ -615,6 +615,10 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     Deliberately not derived from the NIC: cloned VMs and spoofed MACs would hand every
     clone the same "unique" id, so uniqueness must not depend on the hardware report.
     """
+    # Only a real journal mapping can carry a resumed id; anything else (a mock, a list, a
+    # string) must not be stringified into a device id.
+    if not isinstance(journal, dict):
+        raise IdentityError("the identity journal must be a mapping")
     if journal.get("new_device_id"):
         return str(journal["new_device_id"])
     _require_real_path(settings.userdata_root, "userdata_root")
