@@ -505,7 +505,7 @@ def _local_pair_peer(
         else:
             cert_path.write_bytes(previous_pem)
         raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
-    stored =_local_network.save_paired_peer(
+    stored = _local_network.save_paired_peer(
         settings,
         {
             **peer,
