@@ -122,7 +122,9 @@ def open_database(path: PathLike[str] | str) -> sqlite3.Connection:
     _require_filesystem_path(path, "database path")
     path = Path(_path_text(path, "database path"))
     _require_visible_database_filename(path, "database path")
-    if path == Path("."):  # Path('') normalizes to '.', a directory, never a database file
+    # '', '.', '/' and '..' name a directory (or the root) and an existing directory is never a
+    # database file; reject them here so sqlite3 never sees a directory and fails as OperationalError.
+    if path.name in ("", "..") or path == Path(path.anchor) or path.is_dir():
         raise ValueError("database path must name a file")
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path), timeout=30)
