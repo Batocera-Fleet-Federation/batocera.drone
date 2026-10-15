@@ -1,5 +1,6 @@
 """Clone detection, automatic identity provisioning, recovery, and swarm isolation."""
 
+import collections
 import hashlib
 import json
 import ast
