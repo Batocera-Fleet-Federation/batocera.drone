@@ -88,6 +88,25 @@ def database_path(userdata_root: PathLike[str] | str) -> Path:
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
 
 
+def _is_file_shaped(legacy: Path) -> bool:
+    """Return whether *legacy* has a final file name (not '', '.', '..' or a bare root)."""
+    return not (legacy.name in ("", "..") or not legacy.parts or legacy == legacy.anchor)
+
+
+def require_legacy_file_path(path: PathLike[str] | str) -> Path:
+    """Validate and return a legacy *file* path; reject mocks, blanks and directory shapes.
+
+    A legacy file must have a file name. '', '.', './', '/' and '..' normalize to a directory
+    (or the root): deriving a database from them would land beside the parent, and callers
+    that later unlink the legacy file would target the directory itself.
+    """
+    _require_filesystem_path(path, "path")
+    legacy = Path(path)
+    if not _is_file_shaped(legacy):
+        raise ValueError("path must name a file")
+    return legacy
+
+
 def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
@@ -95,13 +114,7 @@ def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
         resolved = Path(configured).resolve()
         _require_visible_database_filename(resolved, "database path")
         return resolved
-    _require_filesystem_path(path, "path")
-    legacy = Path(path)
-    # A legacy *file* path must have a file name. '', '.', './', '/' and '..' normalize to
-    # a directory (or the root), and resolving them would derive a database beside the parent.
-    if legacy.name in ("", "..") or not legacy.parts or legacy == legacy.anchor:
-        raise ValueError("path must name a file")
-    return legacy.resolve().parent / DATABASE_FILENAME
+    return require_legacy_file_path(path).resolve().parent / DATABASE_FILENAME
 
 
 def _path_text(value: PathLike[str] | str, label: str) -> str:
@@ -186,7 +199,9 @@ def _legacy_file_path(value: object) -> Optional[Path]:
     """
     if not value or _is_mock(value) or not isinstance(value, (str, os.PathLike)):
         return None
-    return Path(value)
+    legacy = Path(value)
+    # '.', '..' and a bare root are directories, never a legacy file to import or unlink.
+    return legacy if _is_file_shaped(legacy) else None
 
 
 # Miss sentinel: a legacy file holding a valid JSON ``null`` is a real document, so
@@ -228,7 +243,7 @@ def load_payload(
     if legacy is not _LEGACY_MISSING:
         save_payload(db_path, namespace, legacy, state_key=state_key)
         try:
-            Path(legacy_path).unlink(missing_ok=True)  # type: ignore[arg-type]
+            _legacy_file_path(legacy_path).unlink(missing_ok=True)  # type: ignore[union-attr]
         except OSError:
             pass
         return legacy

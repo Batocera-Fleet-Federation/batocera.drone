@@ -49,6 +49,7 @@ try:
     from ..storage.state_store import delete_expired_sessions as _delete_expired_sessions
     from ..storage.state_store import delete_session as _delete_session
     from ..storage.state_store import get_session as _get_session
+    from ..storage.state_store import require_legacy_file_path as _require_legacy_file_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage.state_store import touch_session as _touch_session
@@ -59,6 +60,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import delete_expired_sessions as _delete_expired_sessions  # type: ignore
     from storage.state_store import delete_session as _delete_session  # type: ignore
     from storage.state_store import get_session as _get_session  # type: ignore
+    from storage.state_store import require_legacy_file_path as _require_legacy_file_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage.state_store import touch_session as _touch_session  # type: ignore
@@ -94,7 +96,9 @@ class DroneCredentialStore:
         env_password: Optional[str] = None,
         state_database_file: Optional[Path] = None,
     ):
-        self.path = path
+        # The credentials *file* must be file-shaped even when a database is injected:
+        # update() unlinks it, and Path('') is Path('.'), i.e. the working directory.
+        self.path = _require_legacy_file_path(path)
         self.env_username = env_username
         self.env_password = env_password
         # ``is None``, not truthiness: a falsy injected value (e.g. ``MagicMock(spec=str)``)

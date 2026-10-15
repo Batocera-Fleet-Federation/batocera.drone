@@ -72,6 +72,26 @@ class StateStorePathTypeTests(unittest.TestCase):
             state_store.database_path_for_legacy_file(Path(""))
         self.assertFalse((self.root / state_store.DATABASE_FILENAME).exists())
 
+    def test_credential_store_rejects_blank_credentials_path_even_with_injected_database(self):
+        from app.common.auth import DroneCredentialStore
+
+        cwd = self.root / "work"
+        cwd.mkdir()
+        previous = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, previous)
+        database = self.root / "state.sqlite3"
+        for bad in ("", ".", Path(""), Path("."), "..", "/"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    DroneCredentialStore(bad, state_database_file=database)
+        self.assertFalse(database.exists())
+
+    def test_legacy_file_reader_ignores_directory_shaped_paths(self):
+        for bad in ("", ".", "..", "/", Path("")):
+            with self.subTest(bad=bad):
+                self.assertIsNone(state_store._legacy_file_path(bad))
+
     def test_format_only_paths_are_rejected_before_sqlite(self):
         # U+200B and U+FEFF are category Cf: str.strip() keeps them, so they must be blank here.
         for bad in ("​", "﻿", " ​⁠ ", Path("​")):
