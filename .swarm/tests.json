@@ -6126,6 +6126,99 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_json_decoder_mapping_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-json-decoder-mapping-uat",
+      "name": "Issue #254 journal.json decoded as UserDict/MappingProxyType must resume like a dict",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_json_decoder_mapping_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_layered_mapping_semantics.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-layered-mapping-semantics",
+      "name": "Issue #254 nested/layered real Mappings resume; AsyncMock Mapping hybrids still raise",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_layered_mapping_semantics.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_read_json_dict_gate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-read-json-dict-gate",
+      "name": "Out-of-scope #254 evidence: _read_json treats a UserDict-decoded journal as corrupt",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_read_json_dict_gate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
