@@ -72,6 +72,23 @@ class StateStorePathTypeTests(unittest.TestCase):
             state_store.database_path_for_legacy_file(Path(""))
         self.assertFalse((self.root / state_store.DATABASE_FILENAME).exists())
 
+    def test_format_only_paths_are_rejected_before_sqlite(self):
+        # U+200B and U+FEFF are category Cf: str.strip() keeps them, so they must be blank here.
+        for bad in ("​", "﻿", " ​⁠ ", Path("​")):
+            with self.subTest(bad=bad):
+                with mock.patch.object(state_store.sqlite3, "connect") as connect:
+                    with self.assertRaises(ValueError):
+                        state_store.open_database(bad)
+                    connect.assert_not_called()
+                with self.assertRaises(ValueError):
+                    state_store.database_path_for_legacy_file(bad)
+
+    def test_name_containing_format_character_is_still_a_valid_path(self):
+        target = self.root / "a​b.sqlite3"
+        connection = state_store.open_database(target)
+        self.addCleanup(connection.close)
+        self.assertTrue(target.is_file())
+
     def test_empty_database_path_creates_no_files(self):
         before = set(os.listdir(os.getcwd()))
         with self.assertRaises(ValueError):
