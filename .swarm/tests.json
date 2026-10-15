@@ -6842,6 +6842,103 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_263_blank_credentials_boundary_adversarial.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-263-blank-credentials-boundary",
+      "name": "Issue #263 blank credentials-path boundaries (formatting, bytes, env database, settings, symlink and dotted-name controls) fail closed",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/common/settings.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_263_blank_credentials_boundary_adversarial.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_263_out_of_scope_directory_legacy_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-263-out-of-scope-directory-legacy-path",
+      "name": "Out-of-scope #263 evidence: an existing directory named as the credentials path writes the database before unlink fails",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "tests/adversarial/test_issue_263_out_of_scope_directory_legacy_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_263_out_of_scope_blank_env_credentials_startup.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-263-out-of-scope-blank-env-credentials-startup",
+      "name": "Out-of-scope #263 evidence: a blank DRONE_CREDENTIALS_FILE is not treated as unset and the credential store refuses it at startup",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/common/settings.py",
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_263_out_of_scope_blank_env_credentials_startup.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
