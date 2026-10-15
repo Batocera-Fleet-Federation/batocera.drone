@@ -29,6 +29,7 @@ from app.common.settings import Settings
 from app.device import vpn_manager
 from app.storage.state_store import database_path, open_database
 from app.transfer.drone_tls import DroneCertificateManager
+from app.transfer.peer_workers import stop_local_network_workers
 from tests.test_hardware_identity import UUID_A, UUID_B, x86_tree
 
 
@@ -149,6 +150,7 @@ class VpnStartupProbe:
         self._flag_originals.clear()
 
     def close(self) -> None:
+        stop_local_network_workers()
         if self.server is not None:
             try:
                 self.server.server_close()
@@ -289,6 +291,7 @@ class HeldIdentityVpnStartupUAT(unittest.TestCase):
         self.addCleanup(identity.reset_runtime_state_for_tests)
         self.tmp = Path(tempfile.mkdtemp(prefix="issue-165-vpn-held-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(stop_local_network_workers)
         self.hw_a = x86_tree(self.tmp / "hw-a")
         self.hw_b = x86_tree(self.tmp / "hw-b", uuid=UUID_B, board="BOARDSERIAL02")
         self.disk = self.tmp / "disk"
@@ -432,6 +435,7 @@ class HeldIdentityDoesNotScheduleVpnThreads(unittest.TestCase):
         self.addCleanup(identity.reset_runtime_state_for_tests)
         self.tmp = Path(tempfile.mkdtemp(prefix="issue-165-vpn-starters-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(stop_local_network_workers)
 
     def test_held_create_server_does_not_construct_vpn_boot_threads(self) -> None:
         hw = x86_tree(self.tmp / "hw-a")

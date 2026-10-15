@@ -16,6 +16,8 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest import mock
 
+from app.transfer.peer_workers import stop_local_network_workers
+
 
 class MalformedHttpInputTests(unittest.TestCase):
     """HTTP-level: hostile bodies get structured 4xx errors and never change state."""
@@ -60,6 +62,7 @@ class MalformedHttpInputTests(unittest.TestCase):
             self.server.shutdown()
             self.server.server_close()
             thread.join(timeout=3)
+            stop_local_network_workers()
         self.addCleanup(stop)
 
         request = urllib.request.Request(
