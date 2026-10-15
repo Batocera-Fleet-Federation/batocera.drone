@@ -268,47 +268,49 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
     pinned = str(existing.get("certificate_fingerprint") or "").strip().lower()
     if pinned and pinned != fingerprint:
         return False
-    try:
-        from .peer_connectivity import _save_local_peer_certificate
-    except ImportError:  # pragma: no cover
-        from transfer.peer_connectivity import _save_local_peer_certificate  # type: ignore
-    cert_path, stored_fingerprint = _save_local_peer_certificate(settings, peer_id, pem)
-    if stored_fingerprint.lower() != fingerprint:
-        cert_path.unlink(missing_ok=True)
-        return False
     peer = {
         "drone_id": peer_id,
         "name": str(card.get("name") or peer_id),
         "hostname": str(card.get("hostname") or ""),
-        "reachable_url": str(card.get("reachable_url") or ""),
-        "advertised_reachable_url": str(card.get("advertised_reachable_url") or ""),
-        "scheme": str(card.get("scheme") or "https"),
+        "reachable_url": _local_network.normalize_peer_url(card.get("reachable_url")),
+        "advertised_reachable_url": _local_network.normalize_peer_url(card.get("advertised_reachable_url")),
+        "scheme": str(card.get("scheme") or "https").strip().lower(),
         "api_port": _port(card.get("api_port"), 443),
         "peer_mtls_port": _port(card.get("peer_mtls_port"), _port(card.get("api_port"), 443)),
         "tailnet_ip": str(card.get("tailnet_ip") or ""),
         "source_ip": str(card.get("source_ip") or ""),
-        "certificate_fingerprint": stored_fingerprint,
-        "certificate_path": str(cert_path),
+        "certificate_fingerprint": fingerprint,
     }
     if peer["scheme"] == "https":
         peer["paired_over_tls"] = True
     elif _local_network.peer_requires_tls(existing):
         # Gossip cannot move a TLS-paired peer to cleartext.
-        cert_path.unlink(missing_ok=True)
         return False
     if not existing:
         peer["pairing_source"] = "swarm"
     elif existing.get("pairing_source"):
         peer["pairing_source"] = existing.get("pairing_source")
     if peer["scheme"] not in {"http", "https"} or not peer["reachable_url"]:
-        cert_path.unlink(missing_ok=True)
         return False
+    for key in ("reachable_url", "advertised_reachable_url"):
+        route = peer[key]
+        if (card.get(key) and not route) or (route and not route.startswith(peer["scheme"] + "://")):
+            return False
+    # All rejection checks precede the write to the live certificate cache.
+    try:
+        from .peer_connectivity import _save_local_peer_certificate
+    except ImportError:  # pragma: no cover
+        from transfer.peer_connectivity import _save_local_peer_certificate  # type: ignore
+    cert_path, stored_fingerprint = _save_local_peer_certificate(settings, peer_id, pem)
+    peer["certificate_path"] = str(cert_path)
     state["clock"] = max(int(state.get("clock") or 0), int(record["epoch"]))
     state["records"][peer_id] = {
         "op": "add",
         "epoch": int(record["epoch"]),
         "origin": record["origin"],
-        "card": {**card, "certificate_fingerprint": stored_fingerprint, "certificate_pem": pem},
+        "card": {**card, "scheme": peer["scheme"], "reachable_url": peer["reachable_url"],
+                 "advertised_reachable_url": peer["advertised_reachable_url"],
+                 "certificate_fingerprint": stored_fingerprint, "certificate_pem": pem},
     }
     _local_network.save_paired_peer(settings, peer)
     _activate_certificate(cert_path)

@@ -159,7 +159,7 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     callers decide ``verify``/``cafile`` based on what trust material (if any) they
     have for the destination.
     """
-    if not url.startswith("https://"):
+    if urlparse(url).scheme != "https":
         return None
     if not _identity_swarm_networking_allowed():
         # Identity unresolved (clone suspected / recovery required): the inherited client
@@ -245,7 +245,7 @@ def _is_ssl_url_error(error: URLError) -> bool:
 
 def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False, timeout: float = PEER_CHECK_TIMEOUT_SECONDS) -> dict:
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=refresh_cert)
-    if url.startswith("https://") and peer_id and not cafile:
+    if urlparse(url).scheme == "https" and peer_id and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
     try:
@@ -273,7 +273,7 @@ def _peer_post_json(
 ) -> dict:
     """POST JSON to a cert-pinned peer endpoint."""
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=refresh_cert)
-    if url.startswith("https://") and peer_id and not cafile:
+    if urlparse(url).scheme == "https" and peer_id and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(
         url,
@@ -454,7 +454,7 @@ def _local_pair_peer(
         headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
         method="POST",
     )
-    if not address.startswith("https://"):
+    if urlparse(address).scheme != "https":
         if _peer_requires_tls(pinned_record):
             # The pairing code must never travel in cleartext to a peer that
             # was paired over TLS.
@@ -528,7 +528,7 @@ def _local_pair_peer(
             "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
             "certificate_fingerprint": fingerprint,
             "certificate_path": str(cert_path),
-            "paired_over_tls": address.startswith("https://"),
+            "paired_over_tls": urlparse(address).scheme == "https",
             "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
         },
     )
@@ -594,7 +594,7 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
         f"{base}/v1/api/peer/info",
         headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
     )
-    context = ssl._create_unverified_context() if base.startswith("https://") else None
+    context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
     with urlopen(request, timeout=timeout, context=context) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8")) if raw else {}
@@ -627,14 +627,14 @@ def _url_host(value: object) -> str:
 
 
 def _peer_address(peer: dict) -> Optional[str]:
-    address = _peer_address_unchecked(peer)
-    if address and _peer_requires_tls(peer) and not address.lower().startswith("https://"):
+    address = _local_network.normalize_peer_url(_peer_address_unchecked(peer)) or None
+    if address and _peer_requires_tls(peer) and urlparse(address).scheme != "https":
         return None
     return address
 
 
 def _peer_address_unchecked(peer: dict) -> Optional[str]:
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
     port = _peer_api_port(peer)
     # reachable_url/public_reachable_url are pre-baked strings built (and kept
     # refreshed by the LAN discovery beacon) using the admin/browser api_port.
@@ -726,11 +726,11 @@ def _peer_address_candidates(
     discovered: list[str] = []
 
     def add(address: object) -> None:
-        value = str(address or "").strip().rstrip("/")
+        value = _local_network.normalize_peer_url(address).rstrip("/")
         if value and value not in discovered:
             discovered.append(value)
 
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
     port = _peer_api_port(peer)
     port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
 
@@ -772,7 +772,7 @@ def _peer_address_candidates(
     ).strip()
     if _peer_requires_tls(peer):
         # Never offer a cleartext route for a peer that was paired over TLS.
-        candidates = [value for value in candidates if value.lower().startswith("https://")]
+        candidates = [value for value in candidates if urlparse(value).scheme == "https"]
     if settings is not None and normalized_peer_id:
         try:
             cached = _load_peer_route(_state_database_path(settings.userdata_root), normalized_peer_id)
@@ -1041,7 +1041,7 @@ def _peer_download_file_for_peer(
             attempt_timeout = min(attempt_timeout, PEER_CHECK_TIMEOUT_SECONDS)
         url = f"{address}{path}"
         cafile = _peer_trust_cafile(settings, peer_id=normalized_peer_id)
-        if url.startswith("https://") and normalized_peer_id and not cafile:
+        if urlparse(url).scheme == "https" and normalized_peer_id and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {normalized_peer_id}")
         request = Request(url, headers={"Accept": "application/octet-stream", "User-Agent": "batocera-drone-peer/1.0"})
         try:

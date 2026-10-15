@@ -177,7 +177,7 @@ def _download_rom_folder_from_peer(
                 }
 
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     manifest = _peer_get_json(manifest_url, settings, peer_id=peer_id, config=config)
     files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
@@ -390,7 +390,7 @@ def _download_rom_from_peer(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     bytes_written = 0
@@ -432,7 +432,7 @@ def _download_rom_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
-        if address.startswith("https://") and not cafile:
+        if urlparse(address).scheme == "https" and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
         context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
@@ -563,7 +563,7 @@ def _download_bios_from_peer(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     bytes_written = 0
@@ -606,7 +606,7 @@ def _download_bios_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
-        if address.startswith("https://") and not cafile:
+        if urlparse(address).scheme == "https" and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
         context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
@@ -735,7 +735,7 @@ def _download_movie_from_peer(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     bytes_written = 0
@@ -778,7 +778,7 @@ def _download_movie_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
-        if address.startswith("https://") and not cafile:
+        if urlparse(address).scheme == "https" and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
         context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
@@ -894,7 +894,7 @@ def _download_config_backup_from_peer(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     bytes_written = 0
@@ -937,7 +937,7 @@ def _download_config_backup_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
-        if address.startswith("https://") and not cafile:
+        if urlparse(address).scheme == "https" and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
         context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
@@ -1064,7 +1064,7 @@ def _download_save_from_peer(
     partial_target = target.with_name(f"{target.name}.part")
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     started_mono = time.monotonic()
@@ -1154,7 +1154,7 @@ def _download_artwork_from_peer(
     url = f"{address}/v1/api/peer/artwork/{quote(system, safe='')}/{quote(field, safe='')}/{quote(rom_rel, safe='/')}"
     system_dir = (settings.roms_root / system).resolve()
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if address.startswith("https://") and not cafile:
+    if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     started_dt = datetime.now(timezone.utc).replace(microsecond=0)

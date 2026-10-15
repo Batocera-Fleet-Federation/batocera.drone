@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 try:
     from ..common import identity_provisioning as _identity
@@ -303,6 +304,25 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
 _PEER_URL_KEYS = ("reachable_url", "advertised_reachable_url", "public_reachable_url")
 
 
+def normalize_peer_url(value: object) -> str:
+    """Return a canonical HTTP(S) route, or empty for an invalid URL.
+
+    Parse schemes exactly as urllib does so route policy and TLS selection agree.
+    """
+    value = str(value or "").strip()
+    if not value or any(char.isspace() or ord(char) < 32 for char in value):
+        return ""
+    try:
+        parsed = urlparse(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or (parsed.port is not None and parsed.port < 1)):
+            return ""
+        return parsed.geturl()
+    except ValueError:
+        return ""
+
+
 def peer_requires_tls(peer: Optional[dict]) -> bool:
     """True for a peer that must never be dialed or rewritten to cleartext.
 
@@ -344,6 +364,13 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
         # No writer (gossip, tailnet probe, discovery) may move a TLS-pinned
         # peer to cleartext; the requirement is sticky (see peer_requires_tls).
         peer = _without_cleartext_overrides(peer)
+    peer = dict(peer)
+    for key in ("scheme", "protocol"):
+        if key in peer:
+            peer[key] = str(peer[key] or "").strip().lower()
+    for key in _PEER_URL_KEYS:
+        if key in peer:
+            peer[key] = normalize_peer_url(peer[key])
     stored = {
         **previous,
         **peer,

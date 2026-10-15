@@ -1,5 +1,6 @@
 """A peer paired over TLS is never dialed over plaintext http (issue #246)."""
 
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,38 @@ class TlsPairedPeerPlaintextRefusalTests(unittest.TestCase):
         with mock.patch.dict("os.environ", env, clear=True):
             self.settings = Settings.from_env()
         local_network.set_mode(self.settings, local_network.MODE_LOCAL_NETWORK)
+
+    def test_https_scheme_casing_cannot_skip_missing_pin_checks(self) -> None:
+        for scheme in ("https", "HTTPS", "hTtPs"):
+            for method in ("GET", "POST"):
+                with self.subTest(scheme=scheme, method=method), \
+                        mock.patch.object(peer_connectivity, "urlopen") as opened:
+                    url = f"{scheme}://peer.local/peer/inventory"
+                    with self.assertRaises(ssl.SSLError):
+                        if method == "GET":
+                            peer_connectivity._peer_get_json(url, self.settings, peer_id="victim")
+                        else:
+                            peer_connectivity._peer_post_json(url, {}, self.settings, peer_id="victim")
+                    opened.assert_not_called()
+
+    def test_uppercase_https_uses_pinned_context(self) -> None:
+        pin = Path(self._tmp.name) / "pin.crt"
+        with mock.patch.object(peer_connectivity.ssl, "create_default_context") as create, \
+                mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True):
+            context = peer_connectivity._drone_client_ssl_context(
+                self.settings, "HTTPS://peer.local/peer/inventory", verify=True, cafile=pin,
+            )
+        self.assertIs(context, create.return_value)
+        create.assert_called_once_with(cafile=str(pin))
+
+    def test_persisted_and_legacy_routes_have_canonical_schemes(self) -> None:
+        peer = {"drone_id": "victim", "scheme": "HTTPS", "reachable_url": "hTtPs://peer.local",
+                "certificate_fingerprint": FINGERPRINT}
+        stored = local_network.save_paired_peer(self.settings, peer)
+        self.assertEqual(stored["scheme"], "https")
+        self.assertEqual(stored["reachable_url"], "https://peer.local")
+        self.assertEqual(peer_connectivity._peer_address_candidates(peer), ["https://peer.local"])
+        self.assertEqual(peer_connectivity._peer_address(peer), "https://peer.local")
 
     def test_spoofed_http_announcement_does_not_downgrade_paired_peer(self) -> None:
         local_network.save_paired_peer(
