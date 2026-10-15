@@ -6939,6 +6939,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_266_local_pairing_certificate_errors.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-266-local-pairing-certificate-errors",
+      "name": "Issue #266 local certificate access errors return a path-safe 500, distinct from identity hold",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_266_local_pairing_certificate_errors.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
