@@ -55,6 +55,23 @@ class StateStorePathTypeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             state_store.database_path("  ")
 
+    def test_legacy_file_helper_rejects_directory_shaped_paths(self):
+        # Path('') normalizes to '.', so these all name the working directory, not a legacy file.
+        for bad in ("", ".", "./", Path(""), Path("."), "..", "/"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    state_store.database_path_for_legacy_file(bad)
+
+    def test_legacy_file_helper_does_not_derive_database_beside_cwd_parent(self):
+        cwd = self.root / "work"
+        cwd.mkdir()
+        previous = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, previous)
+        with self.assertRaises(ValueError):
+            state_store.database_path_for_legacy_file(Path(""))
+        self.assertFalse((self.root / state_store.DATABASE_FILENAME).exists())
+
     def test_empty_database_path_creates_no_files(self):
         before = set(os.listdir(os.getcwd()))
         with self.assertRaises(ValueError):
