@@ -1016,7 +1016,19 @@ def tailnet_start_permitted(settings: Any, provider: Optional[HardwareIdentityPr
 
 def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> IdentityResult:
     hardware = provider.collect()
-    journal = _read_json(_journal_path(settings))
+    journal_path = _journal_path(settings)
+    journal = _read_json(journal_path)
+    if journal is _CORRUPT and journal_path.exists():
+        # Valid JSON non-objects are never equivalent to a missing journal.
+        # Preserve the legacy recovery for torn/invalid JSON while refusing arrays,
+        # strings, numbers, booleans, and null without minting an identity.
+        try:
+            decoded = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            decoded = _ABSENT
+        if decoded is not _ABSENT:
+            binding, _problem = _load_binding(settings)
+            return _enter_recovery(settings, "journal_unreadable", binding)
     if journal is _CORRUPT or (isinstance(journal, dict) and not _valid_journal(journal)):
         # The journal contains no trustworthy intent. It may be a torn provisioning write,
         # or simply a damaged file on the original machine. Re-derive the decision from the
