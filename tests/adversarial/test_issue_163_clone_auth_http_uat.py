@@ -28,6 +28,7 @@ from app.common.hardware_identity import HardwareIdentityProvider
 from app.common.settings import Settings
 from app.drone_api import create_server
 from app.storage.state_store import database_path, open_database
+from app.transfer.peer_workers import stop_local_network_workers
 from tests.test_hardware_identity import UUID_B, x86_tree
 
 
@@ -102,6 +103,7 @@ class HttpDrone:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        stop_local_network_workers()
 
     def request(self, method: str, path: str, body=None, headers=None, host: str = "127.0.0.1"):
         payload = None if body is None else json.dumps(body).encode("utf-8")
@@ -139,6 +141,7 @@ class CloneAuthHttpUAT(unittest.TestCase):
         self.addCleanup(identity.reset_runtime_state_for_tests)
         self.tmp = Path(tempfile.mkdtemp(prefix="issue-163-http-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(stop_local_network_workers)
         self.hw_a = x86_tree(self.tmp / "hw-a")
         self.hw_b = x86_tree(self.tmp / "hw-b", uuid=UUID_B, board="BOARDSERIAL02")
         self.disk_a = self.tmp / "disk-a"
