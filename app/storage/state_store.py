@@ -75,7 +75,7 @@ def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     legacy = Path(path)
     # A legacy *file* path must have a file name. '', '.', './', '/' and '..' normalize to
     # a directory (or the root), and resolving them would derive a database beside the parent.
-    if legacy.name in ("", ".."):
+    if legacy.name in ("", "..") or not legacy.parts or legacy == legacy.anchor:
         raise ValueError("path must name a file")
     return legacy.resolve().parent / DATABASE_FILENAME
 
