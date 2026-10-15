@@ -119,6 +119,14 @@ Every cleanup step must succeed before the clone becomes `READY`: a pinned peer 
 be deleted, an imported credential or stored enrollment key that cannot be revoked, or an inherited Tailscale node that can be neither cleared nor confirmed offline (`tailscale down` must succeed), fails the run
 instead of leaving a partly trusting clone, and the next start retries from the journal.
 
+**Journal type contract (fail closed).** A journal that decodes to anything other than a JSON
+object (or a real `Mapping` such as `UserDict`) is refused with `IdentityError`, never treated as
+a missing journal and never used to mint a fresh id. The run ends in `RECOVERY_REQUIRED`
+(swarm networking held, retried on the next start). Drone deliberately does not silently mint
+a new identity from an unreadable journal, because that could hand a clone a fresh id while the
+inherited key is still present. Mock objects are refused for the same reason. Tests that pin this
+live in `tests/adversarial/test_issue_217_*` and `tests/adversarial/test_issue_254_*`.
+
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the
 earlier attempt is reused only when the journal's recorded hardware still matches. If a disk
