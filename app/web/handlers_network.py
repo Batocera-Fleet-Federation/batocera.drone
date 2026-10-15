@@ -37,6 +37,9 @@ try:
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.peer_connectivity import (
         _fetch_peer_info,
+        PAIRING_IDENTITY_HOLD_MESSAGE,
+        PairingLocalError,
+        PeerIdentityHold,
         PeerPairingRejected,
         _local_pair_peer,
         _local_peer_cert_cache_path,
@@ -68,6 +71,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         _fetch_peer_info,
+        PAIRING_IDENTITY_HOLD_MESSAGE,
+        PairingLocalError,
+        PeerIdentityHold,
         PeerPairingRejected,
         _local_pair_peer,
         _local_peer_cert_cache_path,
@@ -111,7 +117,7 @@ SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECO
 # Raised by ``_local_pair_peer`` when the identity-provisioning gate refuses an
 # outbound pairing attempt. Keep this exact text stable: it is an actionable
 # local-state response, rather than a diagnosis of the remote Drone.
-_PAIRING_IDENTITY_HOLD_MESSAGE = "peer pairing is held pending Drone identity verification"
+_PAIRING_IDENTITY_HOLD_MESSAGE = PAIRING_IDENTITY_HOLD_MESSAGE
 
 # The health fallback's own guaranteed budget, never taken from the summary's.
 # Liveness and inventory are different questions: /peer/health is ~150 bytes
@@ -633,10 +639,13 @@ class HandlersNetworkMixin:
         The peer answering with an HTTP error (e.g. 403 for a wrong pairing code)
         or being unreachable is an upstream failure, not a server bug, so it must
         not escape as a generic 500. The peer's own error text is shown truncated.
-        A local identity hold (``PermissionError`` from ``_local_pair_peer``) is
-        this Drone's own state, so it replies 503 rather than "unreachable". A
-        bare ``PermissionError`` is otherwise still a connection failure once
-        the identity hold has lifted.
+        A local identity hold (``PeerIdentityHold`` from ``_local_pair_peer``) is
+        this Drone's own state, so it replies 503 rather than "unreachable"; a
+        bare errno-less ``PermissionError`` with the hold text is still treated
+        as the hold for callers that surface the older exception. A failure to
+        access this Drone's own certificate (``PairingLocalError``) is a local
+        fault and replies 500. Any other ``PermissionError`` is still a
+        connection failure.
 
         The pairing code is a secret, so over HTTPS it is only sent to a server
         that proves the certificate the operator confirmed (the fingerprint
@@ -680,7 +689,14 @@ class HandlersNetworkMixin:
             # A 200 that is not an accepted pairing is still the peer's answer,
             # not a server bug. The message is fixed, so no peer text is echoed.
             self._send_json(502, {"error": "That drone did not accept the pairing request."})
+        except PairingLocalError as error:
+            # This Drone's own certificate/key is unusable: a local fault, not
+            # an unreachable peer.
+            self._send_json(500, {"error": str(error)})
         except (URLError, OSError) as error:
+            if isinstance(error, PeerIdentityHold):
+                self._send_json(503, {"error": str(error)})
+                return None
             if (
                 isinstance(error, PermissionError)
                 and error.errno is None

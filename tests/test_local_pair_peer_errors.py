@@ -2,10 +2,12 @@
 
 import io
 import json
+import tempfile
 import unittest
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
+from app.common.settings import Settings
 from app.transfer import peer_connectivity
 from app.transfer.peer_connectivity import PeerPairingRejected
 from app.web import handlers_network
@@ -82,6 +84,33 @@ class PairPeerErrorMappingTests(unittest.TestCase):
         status, payload = self.handler._send_json.call_args.args
         self.assertEqual(status, 502)
         self.assertIn("Could not reach that drone", payload["error"])
+
+    def test_dedicated_identity_hold_type_becomes_503(self) -> None:
+        hold = handlers_network.PeerIdentityHold("some other hold wording")
+        with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=hold):
+            self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
+
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 503)
+        self.assertNotIn("Could not reach", payload["error"])
+
+    def test_local_certificate_access_failure_is_not_reported_as_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"USERDATA_ROOT": tmp, "DRONE_STATE_DATABASE_FILE": f"{tmp}/state.db", "DRONE_DEVICE_ID": "drone-self"}
+            with mock.patch.dict("os.environ", env, clear=True):
+                settings = Settings.from_env()
+            denied = PermissionError(13, "Permission denied", f"{tmp}/drone.key")
+            with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True), \
+                mock.patch.object(peer_connectivity._local_network, "is_local_mode", return_value=True), \
+                mock.patch.object(peer_connectivity.DroneCertificateManager, "ensure_certificate", side_effect=denied):
+                self.handler.settings = settings
+                self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
+
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 500)
+        self.assertNotIn("Could not reach", payload["error"])
+        self.assertIn("Permission denied", payload["error"])
+        self.assertNotIn("drone.key", payload["error"])
 
     def test_peer_200_without_paired_status_becomes_502(self) -> None:
         rejected = PeerPairingRejected("peer did not accept pairing request")

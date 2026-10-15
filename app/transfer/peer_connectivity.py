@@ -164,7 +164,7 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     if not _identity_swarm_networking_allowed():
         # Identity unresolved (clone suspected / recovery required): the inherited client
         # certificate must not be presented to any peer.
-        raise PermissionError("peer connections are held pending Drone identity verification")
+        raise PeerIdentityHold("peer connections are held pending Drone identity verification")
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
     if verify and cafile:
         # The pinned peer certificate was captured directly at pairing time; its
@@ -391,6 +391,27 @@ def _pairing_tls_context(address: str, expected_fingerprint: str) -> ssl.SSLCont
     raise ssl.SSLError("server certificate does not match the expected fingerprint")
 
 
+PAIRING_IDENTITY_HOLD_MESSAGE = "peer pairing is held pending Drone identity verification"
+
+
+class PeerIdentityHold(PermissionError):
+    """The identity-provisioning gate is holding outbound swarm networking.
+
+    A dedicated type (still a ``PermissionError`` for existing callers) so the
+    pair handlers can tell this Drone's own hold apart from an OS-level
+    permission failure without inspecting ``errno``.
+    """
+
+
+class PairingLocalError(RuntimeError):
+    """Pairing could not start because of a local fault, not the remote Drone.
+
+    Raised when this Drone's own certificate material cannot be read or
+    created (for example ``EACCES`` on the certificate or key). The message is
+    fixed-form and carries only the OS reason, never a filesystem path.
+    """
+
+
 class PeerPairingRejected(RuntimeError):
     """The peer answered the pairing POST, but the answer is not an accepted pairing.
 
@@ -410,7 +431,7 @@ def _local_pair_peer(
     confirmed_fingerprint: str = "",
 ) -> dict:
     if not _identity_swarm_networking_allowed():
-        raise PermissionError("peer pairing is held pending Drone identity verification")
+        raise PeerIdentityHold(PAIRING_IDENTITY_HOLD_MESSAGE)
     if not _local_network.is_local_mode(settings):
         raise ValueError("Drone is not in local network mode")
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
@@ -429,7 +450,12 @@ def _local_pair_peer(
     if pinned_key and confirmed_key and pinned_key != confirmed_key:
         raise ValueError("confirmed fingerprint does not match the certificate pinned for this peer")
     anchor = pinned_key or confirmed_key
-    certificate = DroneCertificateManager(settings).ensure_certificate()
+    try:
+        certificate = DroneCertificateManager(settings).ensure_certificate()
+    except OSError as error:
+        # Local certificate/key access failure: not a peer reachability problem.
+        reason = error.strerror or type(error).__name__
+        raise PairingLocalError(f"This Drone could not access its own certificate: {reason}") from error
     certificate_pem = str(certificate.get("public_certificate") or "")
     if not certificate_pem:
         raise RuntimeError("local Drone certificate is unavailable")
@@ -471,7 +497,7 @@ def _local_pair_peer(
         # so the pairing code and certificate are never written.
         context = _pinned_pairing_context("")
     if not _identity_swarm_networking_allowed():
-        raise PermissionError("peer pairing is held pending Drone identity verification")
+        raise PeerIdentityHold(PAIRING_IDENTITY_HOLD_MESSAGE)
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
     try:
