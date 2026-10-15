@@ -1188,6 +1188,14 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                     with self.assertRaises(identity.IdentityError):
                         identity._choose_device_id(settings, journal)
 
+    def test_choose_device_id_accepts_a_real_userdict_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            journal = collections.UserDict({"new_device_id": "02:11:22:33:44:55"})
+            self.assertEqual(
+                identity._choose_device_id(settings, journal), "02:11:22:33:44:55"
+            )
+
     def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")

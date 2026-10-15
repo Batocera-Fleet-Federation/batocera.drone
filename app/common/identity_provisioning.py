@@ -611,7 +611,7 @@ def _retire_device_id(settings: Any) -> None:
         pass
 
 
-def _choose_device_id(settings: Any, journal: dict) -> str:
+def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     """A fresh logical Drone id for a new identity (random, locally administered, MAC-shaped).
 
     Deliberately not derived from the NIC: cloned VMs and spoofed MACs would hand every
