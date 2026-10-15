@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 try:
     from ..common import identity_provisioning as _identity
@@ -300,14 +301,78 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     return peer
 
 
+_PEER_URL_KEYS = ("reachable_url", "advertised_reachable_url", "public_reachable_url")
+
+
+def normalize_peer_url(value: object) -> str:
+    """Return a canonical HTTP(S) route, or empty for an invalid URL.
+
+    Parse schemes exactly as urllib does so route policy and TLS selection agree.
+    """
+    value = str(value or "").strip()
+    if not value or any(char.isspace() or ord(char) < 32 for char in value):
+        return ""
+    try:
+        parsed = urlparse(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or (parsed.port is not None and parsed.port < 1)):
+            return ""
+        return parsed.geturl()
+    except ValueError:
+        return ""
+
+
+def peer_requires_tls(peer: Optional[dict]) -> bool:
+    """True for a peer that must never be dialed or rewritten to cleartext.
+
+    Either flagged ``paired_over_tls``, or a record written before that flag
+    existed: a pinned certificate fingerprint plus an https scheme/route.
+    Peers paired over plain http keep their http routes.
+    """
+    record = dict(peer or {})
+    if record.get("paired_over_tls"):
+        return True
+    if not str(record.get("certificate_fingerprint") or "").strip():
+        return False
+    if str(record.get("scheme") or record.get("protocol") or "").strip().lower() == "https":
+        return True
+    return any(str(record.get(key) or "").strip().lower().startswith("https://") for key in _PEER_URL_KEYS)
+
+
+def _without_cleartext_overrides(peer: dict) -> dict:
+    """Drop scheme/route fields that would move a TLS-pinned peer to http."""
+    cleaned = dict(peer)
+    for key in ("scheme", "protocol"):
+        if key in cleaned and str(cleaned[key] or "").strip().lower() != "https":
+            del cleaned[key]
+    for key in _PEER_URL_KEYS:
+        value = str(cleaned.get(key) or "").strip()
+        if key in cleaned and value and not value.lower().startswith("https://"):
+            del cleaned[key]
+    return cleaned
+
+
 def save_paired_peer(settings: Any, peer: dict) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
     if not peer_id or peer_id == str(settings.device_id):
         raise ValueError("invalid peer id")
     peers = _load_peer_map(settings, "local_paired_peers")
     is_new = peer_id not in peers
+    previous = dict(peers.get(peer_id) or {})
+    if peer_requires_tls(previous):
+        # No writer (gossip, tailnet probe, discovery) may move a TLS-pinned
+        # peer to cleartext; the requirement is sticky (see peer_requires_tls).
+        peer = _without_cleartext_overrides(peer)
+    peer = dict(peer)
+    for key in ("scheme", "protocol"):
+        if key in peer:
+            peer[key] = str(peer[key] or "").strip().lower()
+    for key in _PEER_URL_KEYS:
+        if key in peer:
+            peer[key] = normalize_peer_url(peer[key])
     stored = {
-        **dict(peers.get(peer_id) or {}),
+        **previous,
         **peer,
         "drone_id": peer_id,
         "device_id": peer_id,

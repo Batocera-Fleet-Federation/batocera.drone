@@ -239,6 +239,8 @@ Multicast announcements are unauthenticated too: they never rewrite a paired
 peer's address/fingerprint (only `last_seen`), and the pairing code is only
 sent over a connection pinned to the pinned or operator-confirmed fingerprint
 (`_local_pair_peer`, `certificate_fingerprint` on the pair requests).
+A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed over plaintext `http://`
+(filters in `_peer_address_candidates`/`_peer_address`, refusal in `_local_pair_peer`; set by `_local_pair_peer`, `_handle_peer_pair` and swarm gossip, never by announcements).
 Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
 runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
 (default 300) while a Drone is not enrolled.
