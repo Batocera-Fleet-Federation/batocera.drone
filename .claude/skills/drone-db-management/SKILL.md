@@ -725,7 +725,10 @@ but remains a mock, not a filesystem path, and must be rejected before SQLite
 is opened. The same guard (`state_store._require_filesystem_path`) also protects
 `open_database()` and `database_path_for_legacy_file()`, so any path handed
 straight to SQLite must be a real `str`/`os.PathLike`, never a mock.
-The guard also raises `ValueError` for an empty or whitespace-only path (`''`,
-`'  '`), and `open_database()` rejects `Path('')` (which normalizes to `.`), so a
-blank path can never reach `sqlite3.connect`. Callers must not use truthiness
+The guard also raises `ValueError` for an empty or blank path: whitespace-only
+(`''`, `'  '`) or made only of format characters such as U+200B / U+FEFF (`str.strip()`
+does not remove those, so `_is_blank_path_text` checks Unicode category `Cf` too).
+`open_database()` rejects `Path('')` (which normalizes to `.`), so a blank path can
+never reach `sqlite3.connect`. A name that merely contains a format character next to
+visible text is still a valid filename. Callers must not use truthiness
 fallbacks to paper over a blank path; pass `None` for "derive the default".

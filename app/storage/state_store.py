@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import unicodedata
 from os import PathLike
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,17 @@ def _is_mock(value: object) -> bool:
     return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
 
 
+def _is_blank_path_text(raw: str) -> bool:
+    """Return whether *raw* carries no visible name: only whitespace or format characters.
+
+    ``str.strip()`` ignores whitespace but not invisible format characters such as the
+    zero-width space (U+200B) or the byte-order mark (U+FEFF). A name made only of those
+    would still reach SQLite as an odd, invisible filename, so both count as blank here.
+    A name that merely *contains* such characters alongside visible text stays valid.
+    """
+    return all(char.isspace() or unicodedata.category(char) == "Cf" for char in raw)
+
+
 def _require_filesystem_path(value: object, label: str) -> None:
     """Reject unittest mocks and non-path values before SQLite can see them.
 
@@ -53,8 +65,8 @@ def _require_filesystem_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path") from None
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
-    # '' (or whitespace) would otherwise become Path('.') and fail inside SQLite.
-    if not raw.strip():
+    # '' (or whitespace/format-only, e.g. U+200B) would otherwise reach SQLite as a bogus name.
+    if _is_blank_path_text(raw):
         raise ValueError(f"{label} must not be empty")
 
 
