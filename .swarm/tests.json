@@ -5556,6 +5556,40 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_246_gossip_pin_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-246-gossip-pin-boundaries",
+      "name": "Issue #246 gossip preserves live pins and cannot bypass pinned TLS via URL casing",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/swarm_membership.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/security/test_issue_246_gossip_pin_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
