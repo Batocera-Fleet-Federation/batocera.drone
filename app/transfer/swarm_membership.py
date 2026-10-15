@@ -292,6 +292,10 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
     }
     if peer["scheme"] == "https":
         peer["paired_over_tls"] = True
+    elif _local_network.peer_requires_tls(existing):
+        # Gossip cannot move a TLS-paired peer to cleartext.
+        cert_path.unlink(missing_ok=True)
+        return False
     if not existing:
         peer["pairing_source"] = "swarm"
     elif existing.get("pairing_source"):

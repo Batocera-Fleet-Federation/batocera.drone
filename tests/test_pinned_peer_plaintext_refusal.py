@@ -95,6 +95,22 @@ class TlsPairedPeerPlaintextRefusalTests(unittest.TestCase):
                 peer_connectivity._local_pair_peer(self.settings, peer, "123456")
         opener.assert_not_called()
 
+    def test_save_paired_peer_ignores_cleartext_rewrite_of_legacy_tls_record(self) -> None:
+        # No paired_over_tls key: a record written before the flag existed.
+        local_network.save_paired_peer(
+            self.settings,
+            {"drone_id": "victim", "scheme": "https", "reachable_url": "https://192.168.1.20", "certificate_fingerprint": FINGERPRINT},
+        )
+        local_network.save_paired_peer(
+            self.settings,
+            {"drone_id": "victim", "scheme": "http", "reachable_url": "http://10.0.0.66:8080", "advertised_reachable_url": "http://10.0.0.66:8080"},
+        )
+        stored = local_network.get_paired_peer(self.settings, "victim")
+        self.assertEqual(stored["scheme"], "https")
+        self.assertEqual(stored["reachable_url"], "https://192.168.1.20")
+        self.assertNotIn("advertised_reachable_url", stored)
+        self.assertTrue(peer_connectivity._peer_requires_tls(stored))
+
 
 if __name__ == "__main__":
     unittest.main()

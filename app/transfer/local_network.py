@@ -300,14 +300,52 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     return peer
 
 
+_PEER_URL_KEYS = ("reachable_url", "advertised_reachable_url", "public_reachable_url")
+
+
+def peer_requires_tls(peer: Optional[dict]) -> bool:
+    """True for a peer that must never be dialed or rewritten to cleartext.
+
+    Either flagged ``paired_over_tls``, or a record written before that flag
+    existed: a pinned certificate fingerprint plus an https scheme/route.
+    Peers paired over plain http keep their http routes.
+    """
+    record = dict(peer or {})
+    if record.get("paired_over_tls"):
+        return True
+    if not str(record.get("certificate_fingerprint") or "").strip():
+        return False
+    if str(record.get("scheme") or record.get("protocol") or "").strip().lower() == "https":
+        return True
+    return any(str(record.get(key) or "").strip().lower().startswith("https://") for key in _PEER_URL_KEYS)
+
+
+def _without_cleartext_overrides(peer: dict) -> dict:
+    """Drop scheme/route fields that would move a TLS-pinned peer to http."""
+    cleaned = dict(peer)
+    for key in ("scheme", "protocol"):
+        if key in cleaned and str(cleaned[key] or "").strip().lower() != "https":
+            del cleaned[key]
+    for key in _PEER_URL_KEYS:
+        value = str(cleaned.get(key) or "").strip()
+        if key in cleaned and value and not value.lower().startswith("https://"):
+            del cleaned[key]
+    return cleaned
+
+
 def save_paired_peer(settings: Any, peer: dict) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
     if not peer_id or peer_id == str(settings.device_id):
         raise ValueError("invalid peer id")
     peers = _load_peer_map(settings, "local_paired_peers")
     is_new = peer_id not in peers
+    previous = dict(peers.get(peer_id) or {})
+    if peer_requires_tls(previous):
+        # No writer (gossip, tailnet probe, discovery) may move a TLS-pinned
+        # peer to cleartext; the requirement is sticky (see peer_requires_tls).
+        peer = _without_cleartext_overrides(peer)
     stored = {
-        **dict(peers.get(peer_id) or {}),
+        **previous,
         **peer,
         "drone_id": peer_id,
         "device_id": peer_id,

@@ -702,11 +702,12 @@ def _peer_route_kind(address: str) -> str:
 def _peer_requires_tls(peer: dict) -> bool:
     """True for a peer that was paired over TLS and so must never be dialed in cleartext.
 
-    ``paired_over_tls`` is written only by ``_local_pair_peer`` from the scheme the
-    operator actually paired over; announcements cannot set or clear it. Peers
-    paired over plain http (``http_only`` fleets) keep their http routes.
+    ``paired_over_tls`` is written from the scheme the operator actually paired
+    over; announcements cannot set or clear it, and records that predate the flag
+    (pinned fingerprint + https route) are treated the same. Peers paired over
+    plain http (``http_only`` fleets) keep their http routes.
     """
-    return bool(dict(peer or {}).get("paired_over_tls"))
+    return _local_network.peer_requires_tls(peer)
 
 
 def _peer_address_candidates(
