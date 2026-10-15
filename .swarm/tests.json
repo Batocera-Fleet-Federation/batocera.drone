@@ -6971,6 +6971,70 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_266_local_pairing_setup_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-266-local-pairing-setup-uat",
+      "name": "Issue #266 local EACCES during pairing setup (cache write, certificate, pre-contact) is a local fault, not an unreachable peer",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_266_local_pairing_setup_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_266_out_of_scope_hold_text_heuristic.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-266-out-of-scope-hold-text-heuristic",
+      "name": "Out-of-scope #266 evidence: errno-less PermissionError with identity-hold text is reported as a hold while the gate is open",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_266_out_of_scope_hold_text_heuristic.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
