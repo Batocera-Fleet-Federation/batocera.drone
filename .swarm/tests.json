@@ -5785,6 +5785,440 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_userdict_mapping_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-userdict-mapping-uat",
+      "name": "Issue #254 UserDict journal with a well-formed new_device_id must resume like a dict",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_userdict_mapping_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_real_mapping_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-real-mapping-boundaries",
+      "name": "Issue #254 real Mapping journals resume; mocks, duck-types and non-mappings still raise",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_real_mapping_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_journal_json_dump.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-journal-json-dump",
+      "name": "Out-of-scope #254 evidence: UserDict/ChainMap/MappingProxyType journals are not JSON-serializable via _record_journal",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_journal_json_dump.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_mock_mapping_masquerade.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-mock-mapping-masquerade",
+      "name": "Issue #254 a unittest mock that inherits Mapping must not resume a device id",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_mock_mapping_masquerade.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_mapping_dict_parity.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-mapping-dict-parity",
+      "name": "Issue #254 real Mapping journals match dict outcomes for every resumed-id value",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_mapping_dict_parity.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_class_spoof_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-class-spoof-boundaries",
+      "name": "Issue #254 non-Mapping objects spoofing __class__ as UserDict or dict are not journals",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_class_spoof_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_mapping_value_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-mapping-value-boundaries",
+      "name": "Issue #254 real Mapping journals reject bytes/invalid ids and coercible non-mappings like dict",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_mapping_value_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_provision_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-provision-path",
+      "name": "Out-of-scope #254 evidence: a UserDict journal fails in _provision's journal write before the id check",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_provision_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_message_check_agreement.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-message-check-agreement",
+      "name": "Issue #254 the 'must be a mapping' check agrees with real Mapping types; spec'd UserDict mocks stay refused",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_message_check_agreement.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_resumed_id_coercion.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-resumed-id-coercion",
+      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): str-subclass coercion and inconsistent Mapping KeyError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_resumed_id_coercion.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_virtual_mapping_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-virtual-mapping-contract",
+      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): a registered Mapping without get() escapes as AttributeError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_virtual_mapping_contract.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_json_decoder_mapping_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-json-decoder-mapping-uat",
+      "name": "Issue #254 journal.json decoded as UserDict/MappingProxyType must resume like a dict",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_json_decoder_mapping_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_layered_mapping_semantics.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-layered-mapping-semantics",
+      "name": "Issue #254 nested/layered real Mappings resume; AsyncMock Mapping hybrids still raise",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_layered_mapping_semantics.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_out_of_scope_read_json_dict_gate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-out-of-scope-read-json-dict-gate",
+      "name": "Out-of-scope #254 evidence: _read_json treats a UserDict-decoded journal as corrupt",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_out_of_scope_read_json_dict_gate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
