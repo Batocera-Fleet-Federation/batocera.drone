@@ -73,6 +73,11 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     status payload). `_local_pair_peer` enforces it on the same TLS connection
     (`_PinnedFingerprintContext`) and checks the returned cert before touching the pin file;
     `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for https peers without one.
+  - **No plaintext for TLS-paired peers (#246):** `_local_pair_peer` records
+    `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers).
+    For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
+    `_local_pair_peer` refuses an http address. Peers paired over plain http (`http_only`
+    fleets, which still pin the cert) keep their http routes.
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.

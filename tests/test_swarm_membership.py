@@ -247,6 +247,36 @@ class SwarmMembershipTests(unittest.TestCase):
         self.assertEqual(current["certificate_fingerprint"], pinned)
         self.assertNotEqual(current.get("name"), "replaced")
 
+    def test_rejected_gossip_routes_preserve_live_certificate_and_roster(self) -> None:
+        drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c")}
+        local = drones["drone-a"]
+        self._approve(local, drones["drone-b"])
+        self._approve(local, drones["drone-c"])
+        original = local_network.get_paired_peer(local, "drone-c")
+        certificate = Path(original["certificate_path"])
+        original_bytes = certificate.read_bytes()
+        for overrides in (
+            {"scheme": "http", "reachable_url": "http://attacker.local"},
+            {"scheme": "ftp", "reachable_url": "ftp://attacker.local"},
+            {"scheme": "https", "reachable_url": ""},
+            {"scheme": "https", "reachable_url": "http://attacker.local"},
+            {"scheme": "https", "advertised_reachable_url": "http://attacker.local"},
+            {"scheme": "https", "reachable_url": "https://peer.local:invalid"},
+        ):
+            with self.subTest(overrides=overrides):
+                card = {"scheme": "https", "reachable_url": "https://peer.local",
+                        "certificate_pem": original_bytes.decode(),
+                        "certificate_fingerprint": original["certificate_fingerprint"], **overrides}
+                swarm_membership.handle_membership_request(local, {
+                    "hop": 3, "records": [{"peer_id": "drone-c", "op": "add", "epoch": 1_000_000,
+                                            "origin": "drone-b", "card": card}],
+                }, "drone-b")
+                self.assertEqual(local_network.get_paired_peer(local, "drone-c"), original)
+                self.assertEqual(certificate.read_bytes(), original_bytes)
+                exported = swarm_membership.membership_view(local)
+                records = exported["records"]
+                self.assertFalse(any(record["epoch"] == 1_000_000 for record in records))
+
     def test_stale_add_does_not_beat_a_removal(self) -> None:
         drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c")}
         self._approve(drones["drone-a"], drones["drone-b"])
