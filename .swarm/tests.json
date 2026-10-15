@@ -6281,6 +6281,68 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_255_non_object_journal_clone_reprovision.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-255-non-object-journal-clone-reprovision",
+      "name": "Issue #255 a non-object journal on a clone reprovisions like torn JSON (hardware verdict wins)",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_255_non_object_journal_clone_reprovision.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_255_non_object_journal_fail_closed.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-255-non-object-journal-fail-closed",
+      "name": "Issue #255 padded, undecodable and migration-state non-object journals fail closed without minting",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_255_non_object_journal_fail_closed.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
