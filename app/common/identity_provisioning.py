@@ -26,6 +26,7 @@ Provisioning is journaled (``identity/journal.json``) so an interrupted run resu
 rather than resurrecting the inherited identity. Stdlib only.
 """
 
+import collections.abc
 import dataclasses
 import hashlib
 import json
@@ -610,17 +611,18 @@ def _retire_device_id(settings: Any) -> None:
         pass
 
 
-def _choose_device_id(settings: Any, journal: dict) -> str:
+def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     """A fresh logical Drone id for a new identity (random, locally administered, MAC-shaped).
 
     Deliberately not derived from the NIC: cloned VMs and spoofed MACs would hand every
     clone the same "unique" id, so uniqueness must not depend on the hardware report.
     """
-    # A journal is JSON-decoded as a dict.  ``isinstance`` is deliberately not
-    # sufficient here: unittest mocks with ``spec=dict`` spoof it by overriding
-    # ``__class__``.  Check the actual type hierarchy so genuine dict subclasses
-    # remain supported while a mock cannot supply a resumed id.
-    if dict not in type(journal).__mro__:
+    # A journal is JSON-decoded as a dict, but any real Mapping (dict subclass, UserDict)
+    # reads the same.  ``isinstance`` is deliberately not sufficient here: unittest mocks
+    # with ``spec=dict`` spoof it by overriding ``__class__``.  Check the actual type so
+    # genuine Mapping implementations remain supported while a mock cannot supply a
+    # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
+    if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
     if journal.get("new_device_id"):
         # Only a real, well-formed id may be resumed; anything else (a mock, a number, a

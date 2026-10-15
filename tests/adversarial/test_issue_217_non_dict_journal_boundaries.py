@@ -2,16 +2,19 @@
 
 A MagicMock is the reported case. The same resume branch also fires for any
 object whose .get("new_device_id") is truthy, including other unittest mocks,
-a list/str/int journal, UserDict, MappingProxyType, and a duck-typed mapping
-that is not a dict. Production journals are dicts from json.loads of
-journal.json; anything else must raise IdentityError rather than stringify
-into a logical Drone id.
+a list/str/int journal, and a duck-typed mapping that is not a Mapping. Production
+journals are dicts from json.loads of journal.json; anything that is not a real
+Mapping must raise IdentityError rather than stringify into a logical Drone id.
 
-Expected, from the issue (mock or non-dict journals should raise) and the
+Adjudicated for issue #254: real collections.abc.Mapping implementations
+(UserDict, MappingProxyType) are journals and resume a well-formed id. They are
+no longer in the rejection set; see NonDictJournalRejectionTests.
+
+Expected, from the issue (mock or non-Mapping journals should raise) and the
 clone-id invariant in docs/drone-identity.md:
 
 - Every unittest.mock flavour is rejected, including spec=dict masquerades.
-- Non-dict builtins and mapping-likes that are not dict raise IdentityError.
+- Non-dict builtins and objects that are not a Mapping raise IdentityError.
 - A duck-typed object with get/__getitem__ returning a MAC still raises.
 - dict subclasses (including defaultdict) still resume or mint as a dict.
 - Rejection does not persist a mock-named file or rewrite an existing id.
@@ -91,8 +94,6 @@ NON_DICT_JOURNALS = {
     "bool-true": True,
     "set": {RESUMED_ID},
     "object": object(),
-    "UserDict": UserDict({"new_device_id": RESUMED_ID}),
-    "MappingProxyType": MappingProxyType({"new_device_id": RESUMED_ID}),
     "duck-typed": _DuckTypedJournal(),
 }
 
@@ -187,7 +188,7 @@ class NonDictJournalRejectionTests(_ChooseDeviceIdSandbox):
 
     def test_rejection_leaves_an_existing_persisted_id_alone(self) -> None:
         self.persisted.write_text(CONFIGURED_ID + "\n", encoding="utf-8")
-        for label, journal in (("MagicMock", mock.MagicMock()), ("list", []), ("UserDict", UserDict())):
+        for label, journal in (("MagicMock", mock.MagicMock()), ("list", []), ("duck-typed", _DuckTypedJournal())):
             with self.subTest(journal=label):
                 with self.assertRaises(identity.IdentityError):
                     self._choose(journal)
@@ -205,6 +206,17 @@ class DictSubclassStillAJournalTests(_ChooseDeviceIdSandbox):
         journal["new_device_id"] = RESUMED_ID
         chosen = self._choose(journal)
         self.assertEqual(chosen, RESUMED_ID)
+
+    def test_real_mapping_implementations_resume_per_issue_254(self) -> None:
+        # Adjudicated: issue #254 makes a real Mapping a journal, so UserDict and
+        # MappingProxyType resume the same well-formed id a dict would.
+        for label, journal in (
+            ("UserDict", UserDict({"new_device_id": RESUMED_ID})),
+            ("MappingProxyType", MappingProxyType({"new_device_id": RESUMED_ID})),
+        ):
+            with self.subTest(journal=label):
+                self.assertEqual(self._choose(journal), RESUMED_ID)
+                self.assertFalse(self.persisted.exists())
 
     def test_dict_subclass_without_new_device_id_mints(self) -> None:
         chosen = self._choose(_JournalDict())
