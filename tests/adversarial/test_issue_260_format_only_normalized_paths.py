@@ -50,9 +50,9 @@ class FormatOnlyNormalizedPathTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def _assert_rejected_before_connect(self, value):
+    def _assert_rejected_before_connect(self, value, error=ValueError):
         with mock.patch.object(state_store.sqlite3, "connect") as connect:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(error):
                 state_store.open_database(value)
             connect.assert_not_called()
 
@@ -74,10 +74,19 @@ class FormatOnlyNormalizedPathTests(unittest.TestCase):
             with self.subTest(value=ascii(value)):
                 self._assert_rejected_before_connect(value)
 
-    def test_pathlike_and_utf8_bytes_forms_are_rejected_before_connect(self):
+    def test_pathlike_str_forms_with_format_only_final_name_are_rejected_before_connect(self):
         self._assert_rejected_before_connect(_PathLike(ZWSP + "/"))
-        self._assert_rejected_before_connect(_PathLike((ZWSP + "/").encode("utf-8")))
-        self._assert_rejected_before_connect(_PathLike(("sub/" + BOM).encode("utf-8")))
+        self._assert_rejected_before_connect(_PathLike("sub/" + BOM))
+
+    def test_pathlike_bytes_forms_follow_the_issue_170_and_220_contracts(self):
+        # Adjudicated dispute (#260): a bytes-returning __fspath__ is not a filesystem path, so
+        # #170 requires TypeError for it. #220 requires ValueError for blank values, including
+        # b''. Bytes that decode to format characters only are blank, so ValueError. Bytes with
+        # a visible '/' are not blank as a whole, so TypeError. Both are rejected before connect.
+        self._assert_rejected_before_connect(_PathLike((ZWSP + "/").encode("utf-8")), TypeError)
+        self._assert_rejected_before_connect(_PathLike(("sub/" + BOM).encode("utf-8")), TypeError)
+        self._assert_rejected_before_connect(_PathLike(ZWSP.encode("utf-8")), ValueError)
+        self._assert_rejected_before_connect(_PathLike((BOM + WORD_JOINER).encode("utf-8")), ValueError)
 
     def test_path_objects_that_normalize_to_format_only_names_are_rejected(self):
         for value in (Path(ZWSP + "/"), Path("./" + ZWSP), Path("sub") / ZWSP):

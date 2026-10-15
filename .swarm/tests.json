@@ -6717,6 +6717,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_dotdot_format_parent.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-dotdot-format-parent",
+      "name": "Out-of-scope #260 evidence: a format-only directory component is created before a '..' database name",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_dotdot_format_parent.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1

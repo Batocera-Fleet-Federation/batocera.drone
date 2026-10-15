@@ -27,6 +27,7 @@ INVISIBLE_NON_FORMAT = (
     "ᅟ",  # HANGUL CHOSEONG FILLER (Lo)
     "ﾠ",  # HALFWIDTH HANGUL FILLER (Lo)
     "͏",  # COMBINING GRAPHEME JOINER (Mn)
+    "️",  # VARIATION SELECTOR-16 (Mn), invisible with no base character
 )
 
 
