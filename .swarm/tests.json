@@ -5590,6 +5590,75 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_249_named_harness_teardown.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-249-named-harness-teardown",
+      "name": "Issue #249 named adversarial create_server harnesses stop LAN workers before temp removal",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py",
+          "tests/adversarial/test_issue_163_clone_auth_http_uat.py",
+          "tests/adversarial/test_issue_165_held_identity_vpn_startup.py",
+          "tests/adversarial/test_issue_212_harness_teardown_boundaries.py",
+          "tests/adversarial/test_issue_249_named_harness_teardown.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_249_combined_run_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-249-combined-run-uat",
+      "name": "Issue #249 leaky create_server teardown recreates temp DBs and pollutes the next harness",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_249_combined_run_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1

@@ -22,6 +22,7 @@ from app.integrations.media_keys import dispatch as dispatch_module
 from app.integrations.media_keys.config import ConfigStore
 from app.integrations.media_keys.dispatch import handle_press
 from app.integrations.media_keys.paths import MediaKeysPaths
+from app.transfer.peer_workers import stop_local_network_workers
 
 
 class RecordingControl:
@@ -118,6 +119,7 @@ class HoldHttpContractTests(unittest.TestCase):
             self.server.shutdown()
             self.server.server_close()
             thread.join(timeout=3)
+            stop_local_network_workers()
         self.addCleanup(stop)
 
         request = urllib.request.Request(
