@@ -5523,6 +5523,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_246_tls_pin_scheme_rewrite.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-246-tls-pin-scheme-rewrite",
+      "name": "Issue #246 gossip cannot rewrite a TLS-paired peer's route to cleartext http",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/security/test_issue_246_tls_pin_scheme_rewrite.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
