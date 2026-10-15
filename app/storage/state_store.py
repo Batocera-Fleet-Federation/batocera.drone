@@ -104,12 +104,23 @@ def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     return legacy.resolve().parent / DATABASE_FILENAME
 
 
+def _path_text(value: PathLike[str] | str, label: str) -> str:
+    """Return validated string path text, retaining the public str-PathLike contract."""
+    raw = os.fspath(value)
+    if isinstance(raw, bytes):
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TypeError(f"{label} must be a filesystem path")
+        if not _is_blank_path_text(decoded):
+            raise TypeError(f"{label} must be a filesystem path")
+        raw = decoded
+    return raw
+
+
 def open_database(path: PathLike[str] | str) -> sqlite3.Connection:
     _require_filesystem_path(path, "database path")
-    raw_path = os.fspath(path)
-    if isinstance(raw_path, bytes):
-        raw_path = os.fsdecode(raw_path)
-    path = Path(raw_path)
+    path = Path(_path_text(path, "database path"))
     _require_visible_database_filename(path, "database path")
     if path == Path("."):  # Path('') normalizes to '.', a directory, never a database file
         raise ValueError("database path must name a file")
