@@ -621,8 +621,8 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # reads the same.  ``isinstance`` is deliberately not sufficient here: unittest mocks
     # with ``spec=dict`` spoof it by overriding ``__class__``.  Check the actual type so
     # genuine Mapping implementations remain supported while a mock cannot supply a
-    # resumed id.
-    if not issubclass(type(journal), collections.abc.Mapping):
+    # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
+    if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
     if journal.get("new_device_id"):
         # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
