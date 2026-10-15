@@ -1188,6 +1188,17 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                     with self.assertRaises(identity.IdentityError):
                         identity._choose_device_id(settings, journal)
 
+    def test_choose_device_id_refuses_non_mapping_json_journal_without_minting_an_id(self) -> None:
+        # Decoded JSON that is not an object must fail closed: raise (so ensure_identity holds
+        # networking in RECOVERY_REQUIRED) and never mint or persist a fresh device id.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            for journal in ([], "02:11:22:33:44:55", 7, None, True):
+                with self.subTest(journal=journal):
+                    with self.assertRaisesRegex(identity.IdentityError, "must be a mapping"):
+                        identity._choose_device_id(settings, journal)
+            self.assertFalse(identity._device_id_path(Path(tmp)).exists())
+
     def test_choose_device_id_accepts_a_real_userdict_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")

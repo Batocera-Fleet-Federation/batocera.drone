@@ -253,7 +253,9 @@ def _read_json(path: Path) -> Any:
         return _CORRUPT
     try:
         value = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Absurdly deep nesting raises RecursionError rather than ValueError; it is just as
+        # unusable as torn JSON.
         return _CORRUPT
     return value if isinstance(value, dict) else _CORRUPT
 
@@ -1019,8 +1021,10 @@ def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> Identit
     journal = _read_json(_journal_path(settings))
     if journal is _CORRUPT or (isinstance(journal, dict) and not _valid_journal(journal)):
         # The journal contains no trustworthy intent. It may be a torn provisioning write,
-        # or simply a damaged file on the original machine. Re-derive the decision from the
-        # durable binding and present hardware before doing anything destructive.
+        # a damaged file on the original machine, or valid JSON that is not an object
+        # (_read_json maps those to _CORRUPT too). Re-derive the decision from the
+        # durable binding and present hardware before doing anything destructive: a
+        # confident hardware mismatch still clones, and without a binding the run holds.
         binding, problem = _load_binding(settings)
         if binding is None:
             return _enter_recovery(settings, problem or "journal_unreadable", None)
@@ -1038,7 +1042,11 @@ def _ensure_locked(settings: Any, provider: HardwareIdentityProvider) -> Identit
             # The bound original is intact. A corrupt journal alone must never retire it.
             result = _verified(settings, binding, hardware, pair, hardware_verified=True)
             if result.state == State.READY:
-                _journal_path(settings).unlink()
+                journal_path = _journal_path(settings)
+                if journal_path.is_dir() and not journal_path.is_symlink():
+                    journal_path.rmdir()
+                else:
+                    journal_path.unlink()
                 _fsync_directory(identity_dir(settings))
                 _log("Unreadable provisioning journal discarded after verifying the existing identity")
             return result
