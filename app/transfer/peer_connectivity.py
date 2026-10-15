@@ -412,6 +412,16 @@ class PairingLocalError(RuntimeError):
     """
 
 
+def _pairing_local_error(error: OSError, action: str = "complete pairing setup") -> PairingLocalError:
+    """Return a path-safe error for an operation on this Drone.
+
+    ``OSError.__str__`` commonly includes the filesystem path.  The OS reason is
+    actionable, but the path is neither useful to the caller nor safe to expose.
+    """
+    reason = error.strerror or type(error).__name__
+    return PairingLocalError(f"This Drone could not {action}: {reason}")
+
+
 class PeerPairingRejected(RuntimeError):
     """The peer answered the pairing POST, but the answer is not an accepted pairing.
 
@@ -432,7 +442,11 @@ def _local_pair_peer(
 ) -> dict:
     if not _identity_swarm_networking_allowed():
         raise PeerIdentityHold(PAIRING_IDENTITY_HOLD_MESSAGE)
-    if not _local_network.is_local_mode(settings):
+    try:
+        local_mode = _local_network.is_local_mode(settings)
+    except OSError as error:
+        raise _pairing_local_error(error) from error
+    if not local_mode:
         raise ValueError("Drone is not in local network mode")
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
     address = _peer_address(peer)
@@ -442,7 +456,10 @@ def _local_pair_peer(
     # (unauthenticated) discovery announcement that supplied the address: it is
     # the fingerprint pinned for an already-paired peer, else the one the
     # operator confirmed against the target Drone's own pairing screen.
-    pinned_record = _local_network.get_paired_peer(settings, peer_id) or {}
+    try:
+        pinned_record = _local_network.get_paired_peer(settings, peer_id) or {}
+    except OSError as error:
+        raise _pairing_local_error(error) from error
     pinned_key = _fingerprint_key(pinned_record.get("certificate_fingerprint"))
     confirmed_key = _fingerprint_key(confirmed_fingerprint)
     if str(confirmed_fingerprint or "").strip() and not _SHA256_HEX_RE.fullmatch(confirmed_key):
@@ -454,12 +471,15 @@ def _local_pair_peer(
         certificate = DroneCertificateManager(settings).ensure_certificate()
     except OSError as error:
         # Local certificate/key access failure: not a peer reachability problem.
-        reason = error.strerror or type(error).__name__
-        raise PairingLocalError(f"This Drone could not access its own certificate: {reason}") from error
+        raise _pairing_local_error(error, "access its own certificate") from error
     certificate_pem = str(certificate.get("public_certificate") or "")
     if not certificate_pem:
         raise RuntimeError("local Drone certificate is unavailable")
-    own_discovery = _local_network.discovery_payload(settings, str(certificate.get("fingerprint") or ""))
+    try:
+        own_discovery = _local_network.discovery_payload(settings, str(certificate.get("fingerprint") or ""))
+    except OSError as error:
+        # This is built before the outbound request; it cannot describe the peer.
+        raise _pairing_local_error(error) from error
     payload = {
         "pairing_code": str(pairing_code or "").strip(),
         "tailnet_auto_pair": bool(tailnet_auto_pair),
@@ -519,50 +539,65 @@ def _local_pair_peer(
             raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
         if offered != anchor:
             raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
-    previous_path = _local_peer_cert_cache_path(settings, peer_id)
     try:
+        previous_path = _local_peer_cert_cache_path(settings, peer_id)
         previous_pem = previous_path.read_bytes()
-    except OSError:
+    except FileNotFoundError:
         previous_pem = None
-    cert_path, fingerprint = _save_local_peer_certificate(settings, peer_id, remote_pem)
+    except OSError as error:
+        raise _pairing_local_error(error) from error
+    try:
+        cert_path, fingerprint = _save_local_peer_certificate(settings, peer_id, remote_pem)
+    except OSError as error:
+        # The peer has answered, but persisting its local trust pin is ours.
+        raise _pairing_local_error(error) from error
     expected = anchor or _fingerprint_key(peer.get("certificate_fingerprint"))
     returned = _fingerprint_key(result.get("certificate_fingerprint"))
     observed = _fingerprint_key(fingerprint)
     if (expected and expected != observed) or (returned and returned != observed):
         # Put back whatever pin was live before this rejected response.
-        if previous_pem is None:
-            cert_path.unlink(missing_ok=True)
-        else:
-            cert_path.write_bytes(previous_pem)
+        try:
+            if previous_pem is None:
+                cert_path.unlink(missing_ok=True)
+            else:
+                cert_path.write_bytes(previous_pem)
+        except OSError as error:
+            raise _pairing_local_error(error) from error
         raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
-    stored = _local_network.save_paired_peer(
-        settings,
-        {
-            **peer,
-            "name": str(result.get("name") or peer.get("name") or peer_id),
-            "reachable_url": address,
-            "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
-            "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
-            "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
-            "peer_mtls_port": int(
-                result.get("peer_mtls_port")
-                or peer.get("peer_mtls_port")
-                or result.get("api_port")
-                or peer.get("api_port")
-                or 443
-            ),
-            "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
-            "certificate_fingerprint": fingerprint,
-            "certificate_path": str(cert_path),
-            "paired_over_tls": urlparse(address).scheme == "https",
-            "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
-        },
-    )
+    try:
+        stored = _local_network.save_paired_peer(
+            settings,
+            {
+                **peer,
+                "name": str(result.get("name") or peer.get("name") or peer_id),
+                "reachable_url": address,
+                "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
+                "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
+                "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
+                "peer_mtls_port": int(
+                    result.get("peer_mtls_port")
+                    or peer.get("peer_mtls_port")
+                    or result.get("api_port")
+                    or peer.get("api_port")
+                    or 443
+                ),
+                "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
+                "certificate_fingerprint": fingerprint,
+                "certificate_path": str(cert_path),
+                "paired_over_tls": urlparse(address).scheme == "https",
+                "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
+            },
+        )
+    except OSError as error:
+        raise _pairing_local_error(error) from error
     try:
         from . import swarm_membership
     except ImportError:  # pragma: no cover - direct script execution fallback
         from transfer import swarm_membership  # type: ignore
-    swarm_membership.record_approved_member(settings, stored)
+    try:
+        swarm_membership.record_approved_member(settings, stored)
+    except OSError as error:
+        raise _pairing_local_error(error) from error
     try:
         swarm_membership.propagate_membership(settings)
     except Exception as error:
