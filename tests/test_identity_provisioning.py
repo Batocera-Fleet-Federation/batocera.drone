@@ -1187,6 +1187,14 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                     with self.assertRaises(identity.IdentityError):
                         identity._choose_device_id(settings, journal)
 
+    def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            for value in (mock.MagicMock(), 12345, ["02:aa:bb:cc:dd:ee"], "bad id with spaces!"):
+                with self.subTest(value=type(value)):
+                    with self.assertRaises(identity.IdentityError):
+                        identity._choose_device_id(settings, {"new_device_id": value})
+
     def test_retire_device_id_rejects_mock_root(self) -> None:
         with self.assertRaises(TypeError):
             identity._retire_device_id(self._mock_settings())

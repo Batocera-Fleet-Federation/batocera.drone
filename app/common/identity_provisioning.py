@@ -622,7 +622,13 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     if dict not in type(journal).__mro__:
         raise IdentityError("the identity journal must be a mapping")
     if journal.get("new_device_id"):
-        return str(journal["new_device_id"])
+        # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
+        # malformed string) must not be stringified into the identity.
+        resumed = journal["new_device_id"]
+        normalized = _normalize_device_id(resumed) if isinstance(resumed, str) else None
+        if normalized is None:
+            raise IdentityError("the journaled device id is not a valid Drone id")
+        return normalized
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
