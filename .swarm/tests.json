@@ -5753,6 +5753,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_252_falsy_and_boundary_probes.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-252-falsy-and-boundary-probes",
+      "name": "Issue #252 falsy/spoofed mock resumed ids, str/dict masquerades, and id-length boundaries raise IdentityError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_252_falsy_and_boundary_probes.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
