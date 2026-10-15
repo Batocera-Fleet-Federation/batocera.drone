@@ -6343,6 +6343,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_255_malformed_journal_clone_reprovision.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-255-malformed-journal-clone-reprovision",
+      "name": "Issue #255 padded non-object journal preserves hardware-based clone reprovisioning",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_255_malformed_journal_clone_reprovision.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
