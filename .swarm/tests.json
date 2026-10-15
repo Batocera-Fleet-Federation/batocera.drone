@@ -5878,6 +5878,68 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_mock_mapping_masquerade.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-mock-mapping-masquerade",
+      "name": "Issue #254 a unittest mock that inherits Mapping must not resume a device id",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_mock_mapping_masquerade.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_254_mapping_dict_parity.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-254-mapping-dict-parity",
+      "name": "Issue #254 real Mapping journals match dict outcomes for every resumed-id value",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_254_mapping_dict_parity.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
