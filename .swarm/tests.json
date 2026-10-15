@@ -6810,6 +6810,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_263_blank_legacy_credentials_path_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-263-blank-legacy-credentials-path",
+      "name": "Issue #263 blank legacy credentials paths fail before injected state writes or directory unlink",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_263_blank_legacy_credentials_path_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
