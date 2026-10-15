@@ -5659,6 +5659,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_249_out_of_scope_health_worker_join.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-249-out-of-scope-health-worker-join",
+      "name": "Out-of-scope #249 evidence: stop_local_network_workers does not join the peer-health worker",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_249_out_of_scope_health_worker_join.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
