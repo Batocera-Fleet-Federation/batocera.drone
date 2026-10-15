@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
     fcntl = None  # type: ignore
 
 try:
-    from .device_identity import _device_id_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
+    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
     from .hardware_identity import (
         BASELINE,
         CONTRADICTORY,
@@ -63,6 +63,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import (  # type: ignore
         _device_id_path,
+        _is_mock_path,
         _normalize_device_id,
         _require_real_path,
         _write_persisted_machine_id,
@@ -622,7 +623,25 @@ def _choose_device_id(settings: Any, journal: dict) -> str:
     if dict not in type(journal).__mro__:
         raise IdentityError("the identity journal must be a mapping")
     if journal.get("new_device_id"):
-        return str(journal["new_device_id"])
+        # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
+        # malformed string) must not be stringified into the identity.
+        resumed = journal["new_device_id"]
+        # Spec'd mocks can spoof ``isinstance(value, str)``. Reject them before
+        # calling the normalizer, which invokes string methods on its input.
+        normalized = (
+            _normalize_device_id(resumed)
+            if isinstance(resumed, str) and not _is_mock_path(resumed)
+            else None
+        )
+        if normalized is None:
+            raise IdentityError("the journaled device id is not a valid Drone id")
+        return normalized
+    if "new_device_id" in journal:
+        # A falsey mock is still a present, invalid resumed value, not a missing
+        # journal field. Real JSON null/empty values retain the legacy fresh-id path.
+        resumed = journal["new_device_id"]
+        if _is_mock_path(resumed):
+            raise IdentityError("the journaled device id is not a valid Drone id")
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
