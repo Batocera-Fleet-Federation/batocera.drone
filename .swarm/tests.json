@@ -6655,6 +6655,68 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_format_category_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-format-category-boundaries",
+      "name": "Issue #260 every Unicode format character alone is rejected at all path entry points before SQLite, and visible names containing one still open",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_format_category_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_invisible_non_format_names.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-invisible-non-format-names",
+      "name": "Out-of-scope #260 evidence: blank-looking non-format names (Hangul fillers, Braille blank, combining joiner) reach sqlite3.connect",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_invisible_non_format_names.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
