@@ -6500,6 +6500,285 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_format_only_database_paths.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-format-only-database-paths",
+      "name": "Issue #260 format-only database paths are rejected before SQLite while visible format-character names remain valid",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_format_only_database_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_format_only_normalized_paths.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-format-only-normalized-paths",
+      "name": "Issue #260 format-only names hidden by separators or dot components are rejected before SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_format_only_normalized_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_format_only_env_database_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-format-only-env-database-path",
+      "name": "Issue #260 format-only DRONE_STATE_DATABASE_FILE never reaches sqlite3.connect with an invisible name",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_format_only_env_database_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_whitespace_env_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-whitespace-env-path",
+      "name": "Out-of-scope #220 evidence: whitespace-only DRONE_STATE_DATABASE_FILE reaches sqlite3.connect",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_whitespace_env_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_whitespace_separator_path.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-whitespace-separator-path",
+      "name": "Out-of-scope #220 evidence: whitespace-only final name behind a separator reaches sqlite3.connect",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_whitespace_separator_path.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_format_category_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-format-category-boundaries",
+      "name": "Issue #260 every Unicode format character alone is rejected at all path entry points before SQLite, and visible names containing one still open",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_format_category_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_invisible_non_format_names.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-invisible-non-format-names",
+      "name": "Out-of-scope #260 evidence: blank-looking non-format names (Hangul fillers, Braille blank, combining joiner) reach sqlite3.connect",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_invisible_non_format_names.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_out_of_scope_dotdot_format_parent.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-out-of-scope-dotdot-format-parent",
+      "name": "Out-of-scope #260 evidence: a format-only directory component is created before a '..' database name",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_out_of_scope_dotdot_format_parent.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_260_payload_migration_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-260-payload-migration-uat",
+      "name": "Issue #260 rejected paths preserve migration input and visible format names retain independent persistent state",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_260_payload_migration_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1

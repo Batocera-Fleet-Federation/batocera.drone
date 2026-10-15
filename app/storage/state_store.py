@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import unicodedata
 from os import PathLike
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,23 @@ def _is_mock(value: object) -> bool:
     return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
 
 
+def _is_blank_path_text(raw: str) -> bool:
+    """Return whether *raw* carries no visible name: only whitespace or format characters.
+
+    ``str.strip()`` ignores whitespace but not invisible format characters such as the
+    zero-width space (U+200B) or the byte-order mark (U+FEFF). A name made only of those
+    would still reach SQLite as an odd, invisible filename, so both count as blank here.
+    A name that merely *contains* such characters alongside visible text stays valid.
+    """
+    return all(char.isspace() or unicodedata.category(char) == "Cf" for char in raw)
+
+
+def _require_visible_database_filename(path: Path, label: str) -> None:
+    """Reject a database path whose normalized final filename is only invisible text."""
+    if _is_blank_path_text(path.name):
+        raise ValueError(f"{label} must name a file")
+
+
 def _require_filesystem_path(value: object, label: str) -> None:
     """Reject unittest mocks and non-path values before SQLite can see them.
 
@@ -53,15 +71,18 @@ def _require_filesystem_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path") from None
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
-    # '' (or whitespace) would otherwise become Path('.') and fail inside SQLite.
-    if not raw.strip():
+    # '' (or whitespace/format-only, e.g. U+200B) would otherwise reach SQLite as a bogus name.
+    if _is_blank_path_text(raw):
         raise ValueError(f"{label} must not be empty")
 
 
 def database_path(userdata_root: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
-        return Path(configured).resolve()
+        _require_filesystem_path(configured, "database path")
+        resolved = Path(configured).resolve()
+        _require_visible_database_filename(resolved, "database path")
+        return resolved
 
     _require_filesystem_path(userdata_root, "userdata_root")
     return (Path(userdata_root) / "system" / "drone-app" / DATABASE_FILENAME).resolve()
@@ -70,7 +91,10 @@ def database_path(userdata_root: PathLike[str] | str) -> Path:
 def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     configured = os.environ.get("DRONE_STATE_DATABASE_FILE")
     if configured:
-        return Path(configured).resolve()
+        _require_filesystem_path(configured, "database path")
+        resolved = Path(configured).resolve()
+        _require_visible_database_filename(resolved, "database path")
+        return resolved
     _require_filesystem_path(path, "path")
     legacy = Path(path)
     # A legacy *file* path must have a file name. '', '.', './', '/' and '..' normalize to
@@ -80,9 +104,24 @@ def database_path_for_legacy_file(path: PathLike[str] | str) -> Path:
     return legacy.resolve().parent / DATABASE_FILENAME
 
 
+def _path_text(value: PathLike[str] | str, label: str) -> str:
+    """Return validated string path text, retaining the public str-PathLike contract."""
+    raw = os.fspath(value)
+    if isinstance(raw, bytes):
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TypeError(f"{label} must be a filesystem path")
+        if not _is_blank_path_text(decoded):
+            raise TypeError(f"{label} must be a filesystem path")
+        raw = decoded
+    return raw
+
+
 def open_database(path: PathLike[str] | str) -> sqlite3.Connection:
     _require_filesystem_path(path, "database path")
-    path = Path(path)
+    path = Path(_path_text(path, "database path"))
+    _require_visible_database_filename(path, "database path")
     if path == Path("."):  # Path('') normalizes to '.', a directory, never a database file
         raise ValueError("database path must name a file")
     path.parent.mkdir(parents=True, exist_ok=True)
