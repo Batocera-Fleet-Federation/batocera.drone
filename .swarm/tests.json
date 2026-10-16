@@ -4066,8 +4066,8 @@
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-issue-227-out-of-scope-empty-path-cwd",
-      "name": "Out of scope for #227: Path('') and Path('.') persist device-id under the process cwd",
+      "id": "adversarial-issue-286-empty-dot-relative-paths",
+      "name": "Issue #286 rejects empty and relative userdata roots without cwd writes",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
