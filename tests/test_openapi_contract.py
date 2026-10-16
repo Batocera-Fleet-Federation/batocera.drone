@@ -46,6 +46,13 @@ class DroneOpenApiContractTest(unittest.TestCase):
                 op = OPENAPI_SPEC["paths"][path][method]
                 self.assertEqual(_ref_name(_json_schema(op["responses"][code])), schema_name)
 
+    def test_discovered_peer_pair_documents_upstream_and_identity_hold_errors(self):
+        # The handler replies 502 for peer-side failures and 503 while identity
+        # verification holds pairing; both must be documented for this route.
+        responses = OPENAPI_SPEC["paths"]["/admin/local-network/peers/{peer_id}/pair"]["post"]["responses"]
+        self.assertIn("502", responses)
+        self.assertIn("503", responses)
+
     def test_local_sync_contract_uses_file_transfer_options(self):
         for schema_name in ("LocalSyncRequest", "LocalBulkSyncRequest"):
             properties = OPENAPI_SPEC["components"]["schemas"][schema_name]["properties"]
