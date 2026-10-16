@@ -375,6 +375,7 @@ def _pairing_tls_context(address: str, expected_fingerprint: str) -> ssl.SSLCont
     # before each one: a hold that lands mid-flight must not still dial out.
     _require_swarm_networking()
     probe = ssl._create_unverified_context()
+    _require_swarm_networking()
     with socket.create_connection((host, port), timeout=10) as raw:
         with probe.wrap_socket(raw, server_hostname=host or None) as tls:
             leaf_der = tls.getpeercert(binary_form=True) or b""
@@ -667,6 +668,7 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
         headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
     )
     context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
+    _require_swarm_networking()
     with urlopen(request, timeout=timeout, context=context) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8")) if raw else {}

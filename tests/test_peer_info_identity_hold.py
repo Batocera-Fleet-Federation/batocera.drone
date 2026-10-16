@@ -12,6 +12,29 @@ FINGERPRINT = "ab" * 32
 
 
 class PeerInfoIdentityHoldTests(unittest.TestCase):
+    def test_hold_during_context_setup_blocks_the_next_dial(self) -> None:
+        for operation, dial_name in (
+            (lambda: peer_connectivity._fetch_peer_info("https://peer.example:8443"), "urlopen"),
+            (lambda: peer_connectivity._pairing_tls_context("https://peer.example:8443", FINGERPRINT),
+             "socket.create_connection"),
+        ):
+            with self.subTest(dial=dial_name):
+                allowed = True
+
+                def create_context():
+                    nonlocal allowed
+                    allowed = False
+                    return mock.MagicMock()
+
+                with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed",
+                                       side_effect=lambda: allowed), \
+                        mock.patch.object(peer_connectivity.ssl, "_create_unverified_context",
+                                          side_effect=create_context), \
+                        mock.patch(f"{peer_connectivity.__name__}.{dial_name}") as dial:
+                    with self.assertRaises(peer_connectivity.PeerIdentityHold):
+                        operation()
+                dial.assert_not_called()
+
     def test_fetch_peer_info_does_not_dial_while_held(self) -> None:
         for address in ("https://peer.example:8443", "http://peer.example:8080"):
             with self.subTest(address=address):
@@ -49,7 +72,7 @@ class PeerInfoIdentityHoldTests(unittest.TestCase):
         tls.__enter__.return_value.getpeercert.return_value = b"not-the-pinned-leaf"
         probe = mock.MagicMock()
         probe.wrap_socket.return_value = tls
-        with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", side_effect=[True, False]), \
+        with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", side_effect=[True, True, False]), \
                 mock.patch.object(peer_connectivity.ssl, "_create_unverified_context", return_value=probe), \
                 mock.patch.object(peer_connectivity.socket, "create_connection"), \
                 mock.patch.object(peer_connectivity, "_presented_chain_pem") as chain:
