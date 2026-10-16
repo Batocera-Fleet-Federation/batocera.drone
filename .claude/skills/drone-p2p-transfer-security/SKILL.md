@@ -570,6 +570,10 @@ Do not:
 
 ## Default Bias
 
+Every outbound peer dial is gated on `swarm_networking_allowed()` (identity hold): `_fetch_peer_info`
+and each live connection in `_pairing_tls_context` call `_require_swarm_networking()` right before
+connecting and raise `PeerIdentityHold` (the pair handlers reply 503). New outbound peer code must do the same.
+
 When unsure, choose the option that keeps:
 
 - peer discovery limited to directly paired peers (LAN or tailnet),
