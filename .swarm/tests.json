@@ -7163,6 +7163,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_real_listener_and_flat_import_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-real-listener-and-flat-import-uat",
+      "name": "Issue #267 held identity: a real listener sees no connection; flat import mode keeps the 503",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_real_listener_and_flat_import_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
