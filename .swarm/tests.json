@@ -7228,6 +7228,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_268_discovered_peer_pair_openapi_errors.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-268-discovered-peer-pair-openapi-errors",
+      "name": "Issue #268 discovered-peer pairing documents typed 502 and 503 responses",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/openapi_spec.py",
+          "tests/adversarial/test_issue_268_discovered_peer_pair_openapi_errors.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
