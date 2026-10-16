@@ -7291,6 +7291,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_268_served_pair_error_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-268-served-pair-error-contract",
+      "name": "Issue #268 served discovered-peer pair OpenAPI preserves typed 502 and 503 errors",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/api_app.py",
+          "app/web/openapi_spec.py",
+          "tests/adversarial/test_issue_268_served_pair_error_contract.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
