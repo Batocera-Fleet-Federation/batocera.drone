@@ -7259,6 +7259,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_268_adversarial_discovered_pair_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-268-discovered-pair-contract-and-runtime",
+      "name": "Issue #268 adversarial: discovered-peer pair documents and emits 502/503 contract",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/openapi_spec.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_268_adversarial_discovered_pair_contract.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
