@@ -4155,6 +4155,99 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_tailnet_auto_pair_missing_certificate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-tailnet-auto-pair-missing-certificate",
+      "name": "Issue #279 tailnet auto-pair maps a paired answer without a certificate to a rejection with no pin",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_tailnet_auto_pair_missing_certificate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_unpinned_rejection_keeps_previous_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-unpinned-rejection-keeps-previous-pin",
+      "name": "Issue #279 unpinned pairing rejection restores the previous certificate pin byte-for-byte",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_unpinned_rejection_keeps_previous_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_paired_malformed_port_after_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-malformed-port-after-pin",
+      "name": "Out-of-scope #279 evidence: a paired answer with a non-numeric port leaves a pin and raises ValueError (400)",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_out_of_scope_paired_malformed_port_after_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
