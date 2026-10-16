@@ -540,19 +540,19 @@ def _local_pair_peer(
     if remote_id != peer_id:
         raise PeerPairingRejected("paired peer identity did not match discovered peer")
     remote_pem = str(result.get("certificate_pem") or "")
-    # A status=paired answer without a certificate is still a rejected pairing.
-    # Without this check the unpinned path would reach the save step below and
-    # its ValueError would surface as a client 400.
+    # Preserve the distinct missing-certificate rejection.  The save primitive
+    # validates every remaining PEM as X.509 before deriving a fingerprint or
+    # opening the cache file, including on the unpinned HTTP path.
     if "BEGIN CERTIFICATE" not in remote_pem:
         raise PeerPairingRejected("paired peer did not return a certificate")
     if anchor:
         # Check before writing: the cert cache file may be the live pin of an
         # already-paired peer, which a rejected response must not overwrite.
         try:
-            offered = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
-        except Exception as error:  # noqa: BLE001 - malformed PEM is a rejected pairing
+            offered_fingerprint = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
+        except Exception as error:  # noqa: BLE001 - malformed X.509 is a rejected pairing
             raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
-        if offered != anchor:
+        if offered_fingerprint != anchor:
             raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
     try:
         previous_path = _local_peer_cert_cache_path(settings, peer_id)

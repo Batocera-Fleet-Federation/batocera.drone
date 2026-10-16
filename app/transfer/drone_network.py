@@ -78,7 +78,17 @@ def _network_mode(settings: Settings) -> str:
 
 
 def _certificate_pem_fingerprint(pem: str) -> str:
-    der = ssl.PEM_cert_to_DER_cert(str(pem or ""))
+    certificate_pem = str(pem or "")
+    # PEM_cert_to_DER_cert only decodes the PEM envelope.  It accepts arbitrary
+    # nonempty DER bytes, which must never be treated as a peer trust anchor.
+    # OpenSSL's CA loader performs the X.509 parse without requiring a network
+    # connection or a chain verification.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    try:
+        context.load_verify_locations(cadata=certificate_pem)
+    except (ssl.SSLError, TypeError, ValueError) as error:
+        raise ValueError("peer certificate is not a valid X.509 certificate") from error
+    der = ssl.PEM_cert_to_DER_cert(certificate_pem)
     if not der:
         raise ValueError("peer certificate is empty")
     return hashlib.sha256(der).hexdigest()
