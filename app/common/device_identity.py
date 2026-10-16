@@ -47,15 +47,20 @@ def _normalize_device_id(value: Optional[str]) -> Optional[str]:
 
 
 def _device_id_path(userdata_root: Path) -> Path:
-    _require_real_path(userdata_root, "userdata_root")
     override = os.environ.get("DRONE_DEVICE_ID_FILE")
-    if override is not None and os.path.isabs(override):
+    if override is not None:
+        _require_real_path(override, "DRONE_DEVICE_ID_FILE")
+        if not os.path.isabs(os.fspath(override)):
+            raise TypeError("DRONE_DEVICE_ID_FILE must be an absolute filesystem path")
+        _require_real_path(userdata_root, "userdata_root")
+        # An explicit absolute file override is independent of userdata_root;
+        # the identity file cannot resolve through cwd in that case.
         return Path(override)
-    # Without an absolute override, a relative root would read or persist identity
-    # under the process cwd. Enforce this here for every read/write helper.
+    _require_real_path(userdata_root, "userdata_root")
+    # Without an override, a relative root would read or persist identity under cwd.
     if not os.path.isabs(os.fspath(userdata_root)):
         raise TypeError("userdata_root must be an absolute filesystem path")
-    return Path(os.environ.get("DRONE_DEVICE_ID_FILE", str(userdata_root / "system" / "drone-app" / "device-id")))
+    return Path(userdata_root) / "system" / "drone-app" / "device-id"
 
 
 def _is_mock_path(value: object) -> bool:
@@ -144,8 +149,8 @@ def _runtime_machine_id() -> str:
 def _machine_id(userdata_root: Optional[Path] = None) -> str:
     if userdata_root is None:
         return _runtime_machine_id()
-    _require_real_path(userdata_root, "userdata_root")
-    persisted = _read_persisted_machine_id(userdata_root)
+    path = _device_id_path(userdata_root)
+    persisted = _normalize_device_id(_read_persisted_machine_id(userdata_root))
     if persisted:
         return persisted
     # The first boot must not adopt the NIC's MAC: installs on one host would share it and
@@ -154,7 +159,7 @@ def _machine_id(userdata_root: Optional[Path] = None) -> str:
     # instead of one that would change on every start.
     generated = random_device_id()
     try:
-        _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
     if _write_persisted_machine_id(userdata_root, generated):
@@ -167,5 +172,6 @@ def _fake_machine_id(userdata_root: Path) -> str:
     # USERDATA_ROOT, so two fake-data processes on one host do not share a host-derived id.
     # The root is required: _machine_id(None) returns the NIC-derived id, which is exactly
     # what this helper must never hand out, so reject a missing root instead of defaulting.
+    _require_real_path(userdata_root, "userdata_root")
     _device_id_path(userdata_root)
     return _machine_id(userdata_root)
