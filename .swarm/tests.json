@@ -4061,6 +4061,100 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_pairing_answer_shape_matrix.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-pairing-answer-shape-matrix",
+      "name": "Issue #279 pairing answers with malformed or zero-length certificate material are rejected without pins on both paths",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_pairing_answer_shape_matrix.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_http_certificate_shape_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-http-certificate-shape-uat",
+      "name": "Issue #279 pair-by-address answers malformed or zero-length certificate material with 502 and stores nothing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_http_certificate_shape_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_gossip_zero_length_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-gossip-zero-length-pin",
+      "name": "Out-of-scope #279 evidence: swarm gossip pins a zero-length certificate",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_279_out_of_scope_gossip_zero_length_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
