@@ -7511,6 +7511,69 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_helper_cwd_persistence_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-helper-cwd-persistence-boundaries",
+      "name": "Issue #286 device-id persistence helpers never write, read or resolve cwd-relative roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_helper_cwd_persistence_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_out_of_scope_empty_root_boot.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-out-of-scope-empty-root-boot",
+      "name": "Out-of-scope #286 evidence: empty USERDATA_ROOT aborts boot instead of falling back to the default",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_out_of_scope_empty_root_boot.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
