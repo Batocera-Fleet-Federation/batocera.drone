@@ -47,8 +47,9 @@ def _normalize_device_id(value: Optional[str]) -> Optional[str]:
 
 
 def _device_id_path(userdata_root: Path) -> Path:
-    if _is_mock_path(userdata_root):
-        raise TypeError("userdata_root must be a filesystem path")
+    # The read/write helpers resolve the path here, so enforce the absolute-root boundary
+    # at this chokepoint rather than only in the _machine_id entry points.
+    _require_real_path(userdata_root, "userdata_root")
     return Path(os.environ.get("DRONE_DEVICE_ID_FILE", str(userdata_root / "system" / "drone-app" / "device-id")))
 
 
