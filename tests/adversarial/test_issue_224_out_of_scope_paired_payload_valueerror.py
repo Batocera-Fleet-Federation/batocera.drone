@@ -1,20 +1,14 @@
-"""Out-of-scope adversarial finding for issue #224: a 200 with status=paired but no cert is 400.
+"""Adversarial finding for issue #224, now the expected 502 mapping (issue #279).
 
 Issue #224 is scoped to pair-by-address answering 500 when POST /v1/api/peer/pair returns
-HTTP 200 whose status is not paired. A related class of peer 200 still escapes the pairing
-helper: status=paired and a matching drone_id, but no certificate_pem.
+HTTP 200 whose status is not paired. A related class of peer 200 escaped the pairing helper:
+status=paired and a matching drone_id, but no certificate_pem. Before #279 the unpinned path
+called _save_local_peer_certificate, which raised ValueError('peer certificate is required'),
+and do_POST mapped that to HTTP 400.
 
-Evidence: _local_pair_peer only raises PeerPairingRejected before the cert save when the
-body is not JSON, status is not paired, or drone_id mismatches. With no TLS pin (the
-operator-typed http:// pair-by-address path) it then calls _save_local_peer_certificate,
-which raises ValueError('peer certificate is required'). _pair_peer_or_reply does not
-catch ValueError. do_POST maps ValueError to HTTP 400.
-
-Why outside scope: the issue reproduction is a 200 whose status is not paired (RuntimeError
-escaping as 500). This payload claims status=paired and is mapped to a client 400 rather
-than a 500.
-
-The assertions pin the current behaviour as evidence and are kept in their own suite.
+Adjudicated in #279: a peer's paired-looking answer without a certificate is a rejected pairing,
+the same peer-protocol 502 as the other malformed 200 answers. The 400 this suite originally
+pinned was the defect being reported, so the assertions now expect 502 and no persisted pin.
 """
 
 from __future__ import annotations
@@ -167,8 +161,8 @@ class PairedPayloadMissingCertTests(unittest.TestCase):
         morsel = next(iter(jar.values()))
         return f"{morsel.key}={morsel.value}"
 
-    def test_paired_200_without_certificate_is_400_not_502(self) -> None:
-        """Observed: ValueError from the cert save is a client 400, not a peer 502."""
+    def test_paired_200_without_certificate_is_502_not_400(self) -> None:
+        """Expected (#279): a paired answer without a certificate is a peer rejection, 502."""
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/v1/api/admin/local-network/pair-by-address",
             data=json.dumps({"address": self.peer.url, "pairing_code": "not-a-code"}).encode(),
@@ -187,10 +181,10 @@ class PairedPayloadMissingCertTests(unittest.TestCase):
         except ValueError:
             payload = {"raw": raw.decode("utf-8", "replace")}
 
-        self.assertEqual(status, 400, payload)
-        self.assertNotEqual(status, 502, payload)
+        self.assertEqual(status, 502, payload)
+        self.assertNotEqual(status, 400, payload)
         self.assertNotEqual(status, 500, payload)
-        self.assertIn("certificate", str(payload.get("error") or "").lower())
+        self.assertEqual(payload.get("error"), "That drone did not accept the pairing request.")
         self.assertGreaterEqual(self.peer.server.pair_hits, 1)
         stored = load_payload(database_path(self.userdata), "local_paired_peers", {})
         self.assertNotIn(PEER_ID, stored if isinstance(stored, dict) else {})

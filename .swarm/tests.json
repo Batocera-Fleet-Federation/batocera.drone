@@ -3999,12 +3999,74 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_missing_certificate_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-missing-certificate-boundaries",
+      "name": "Issue #279 paired answers without a usable certificate are rejected on pinned and unpinned paths without writes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_missing_certificate_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_decodable_non_certificate_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-decodable-non-certificate-pin",
+      "name": "Out-of-scope #279 evidence: a decodable non-certificate PEM body is persisted as a trust pin",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_out_of_scope_decodable_non_certificate_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-224-out-of-scope-paired-payload-valueerror",
-      "name": "Out of scope for #224: a 200 with status=paired but no certificate_pem is a client 400",
+      "name": "Issue #224 out-of-scope payload (status=paired without certificate_pem) maps to 502 (adjudicated under #279)",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
