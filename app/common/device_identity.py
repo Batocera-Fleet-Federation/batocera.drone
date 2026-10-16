@@ -72,6 +72,11 @@ def _require_real_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path")
     if not isinstance(value, (str, os.PathLike)):
         raise TypeError(f"{label} must be a filesystem path")
+    # Path('') and Path('.') are PathLike but resolve against the process cwd, so the
+    # persisted device-id would land wherever the process happened to start. Require an
+    # absolute root so the identity file always lives under the configured userdata tree.
+    if not os.path.isabs(os.fspath(value)):
+        raise TypeError(f"{label} must be an absolute filesystem path")
 
 
 def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
