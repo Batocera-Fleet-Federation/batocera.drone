@@ -7636,6 +7636,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_absolute_override_relative_root_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-absolute-override-relative-root-uat",
+      "name": "Issue #286 regression: relative userdata root with absolute DRONE_DEVICE_ID_FILE keeps booting and never writes under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_286_absolute_override_relative_root_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
