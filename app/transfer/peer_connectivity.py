@@ -540,6 +540,11 @@ def _local_pair_peer(
     if remote_id != peer_id:
         raise PeerPairingRejected("paired peer identity did not match discovered peer")
     remote_pem = str(result.get("certificate_pem") or "")
+    # A status=paired answer without a certificate is still a rejected pairing.
+    # Without this check the unpinned path would reach the save step below and
+    # its ValueError would surface as a client 400.
+    if "BEGIN CERTIFICATE" not in remote_pem:
+        raise PeerPairingRejected("paired peer did not return a certificate")
     if anchor:
         # Check before writing: the cert cache file may be the live pin of an
         # already-paired peer, which a rejected response must not overwrite.
@@ -561,6 +566,9 @@ def _local_pair_peer(
     except OSError as error:
         # The peer has answered, but persisting its local trust pin is ours.
         raise _pairing_local_error(error) from error
+    except ValueError as error:
+        # The save step rejects an unparseable certificate before writing anything.
+        raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
     expected = anchor or _fingerprint_key(peer.get("certificate_fingerprint"))
     returned = _fingerprint_key(result.get("certificate_fingerprint"))
     observed = _fingerprint_key(fingerprint)

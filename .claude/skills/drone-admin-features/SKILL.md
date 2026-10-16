@@ -369,6 +369,9 @@ write instead of one per job — otherwise O(N²) under the lock), and one
   path (issue #266); other `PermissionError`s stay a 502 connection failure. A peer
   that answers 200 without `status=paired` (or with a non-JSON / mismatched body) raises
   `PeerPairingRejected` from `transfer/peer_connectivity.py` and is also a fixed-message 502 (issue #224).
+  That includes a 200 with `status=paired` and a matching id but no `certificate_pem` (issue #279): the
+  missing/unparseable certificate is checked before anything is written, so it never reaches the save
+  step's `ValueError` (which would otherwise surface as a client 400).
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
