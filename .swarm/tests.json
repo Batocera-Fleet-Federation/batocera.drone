@@ -15,6 +15,37 @@
         "-s",
         "tests/adversarial/security",
         "-p",
+        "test_issue_279_rejects_trailing_der_after_certificate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-279-rejects-trailing-der-after-certificate",
+      "name": "Security: Issue #279 rejects a valid certificate followed by extra DER bytes as a pairing pin",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/drone_network.py",
+          "tests/adversarial/security/test_issue_279_rejects_trailing_der_after_certificate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
         "test_issue_279_rejects_multi_certificate_pem.py"
       ],
       "disruptive": false,
