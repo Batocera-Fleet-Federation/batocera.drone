@@ -97,4 +97,21 @@ def _certificate_pem_fingerprint(pem: str) -> str:
     der = ssl.PEM_cert_to_DER_cert(certificate_pem)
     if not der:
         raise ValueError("peer certificate is empty")
+    # OpenSSL accepts a leading certificate even when its PEM body contains
+    # extra DER bytes. Require the outer Certificate SEQUENCE to consume the
+    # entire payload so the pin hashes exactly the identity OpenSSL parsed.
+    if len(der) < 2 or der[0] != 0x30:
+        raise ValueError("peer certificate has an invalid DER sequence")
+    content_length = der[1]
+    header_length = 2
+    if content_length & 0x80:
+        length_octets = content_length & 0x7F
+        header_length += length_octets
+        if not length_octets or header_length > len(der) or der[2] == 0:
+            raise ValueError("peer certificate has an invalid DER length")
+        content_length = int.from_bytes(der[2:header_length], "big")
+        if content_length < 0x80:
+            raise ValueError("peer certificate has a nonminimal DER length")
+    if header_length + content_length != len(der):
+        raise ValueError("peer certificate DER must contain exactly one certificate")
     return hashlib.sha256(der).hexdigest()
