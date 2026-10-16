@@ -79,4 +79,6 @@ def _network_mode(settings: Settings) -> str:
 
 def _certificate_pem_fingerprint(pem: str) -> str:
     der = ssl.PEM_cert_to_DER_cert(str(pem or ""))
+    if not der:
+        raise ValueError("peer certificate is empty")
     return hashlib.sha256(der).hexdigest()
