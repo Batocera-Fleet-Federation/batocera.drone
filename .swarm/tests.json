@@ -4248,6 +4248,69 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_fresh_retry_and_side_effects_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-fresh-retry-and-side-effects-uat",
+      "name": "Issue #279 a certificate-less paired answer has no side effects and a later real-certificate retry pairs on both paths",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_fresh_retry_and_side_effects_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_fresh_marker_encoding_controls.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-fresh-marker-encoding-controls",
+      "name": "Issue #279 non-certificate PEM encodings are rejected without a pin on both paths, and genuine client errors stay ValueError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_fresh_marker_encoding_controls.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
