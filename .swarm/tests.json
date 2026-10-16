@@ -7417,6 +7417,100 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_relative_root_identity_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-relative-root-identity-boundaries",
+      "name": "Issue #286 identity helpers never write, read or adopt cwd state for relative or empty roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_relative_root_identity_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_relative_root_settings_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-relative-root-settings-uat",
+      "name": "Issue #286 Settings.from_env with relative or empty USERDATA_ROOT leaves the cwd untouched",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_286_relative_root_settings_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_out_of_scope_identity_fallbacks.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-out-of-scope-identity-fallbacks",
+      "name": "Out-of-scope #286 evidence: unwritable absolute root falls back to host NIC id; str absolute root crashes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_out_of_scope_identity_fallbacks.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
