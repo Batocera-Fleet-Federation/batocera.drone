@@ -47,9 +47,14 @@ def _normalize_device_id(value: Optional[str]) -> Optional[str]:
 
 
 def _device_id_path(userdata_root: Path) -> Path:
-    # The read/write helpers resolve the path here, so enforce the absolute-root boundary
-    # at this chokepoint rather than only in the _machine_id entry points.
     _require_real_path(userdata_root, "userdata_root")
+    override = os.environ.get("DRONE_DEVICE_ID_FILE")
+    if override is not None and os.path.isabs(override):
+        return Path(override)
+    # Without an absolute override, a relative root would read or persist identity
+    # under the process cwd. Enforce this here for every read/write helper.
+    if not os.path.isabs(os.fspath(userdata_root)):
+        raise TypeError("userdata_root must be an absolute filesystem path")
     return Path(os.environ.get("DRONE_DEVICE_ID_FILE", str(userdata_root / "system" / "drone-app" / "device-id")))
 
 
@@ -73,11 +78,6 @@ def _require_real_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path")
     if not isinstance(value, (str, os.PathLike)):
         raise TypeError(f"{label} must be a filesystem path")
-    # Path('') and Path('.') are PathLike but resolve against the process cwd, so the
-    # persisted device-id would land wherever the process happened to start. Require an
-    # absolute root so the identity file always lives under the configured userdata tree.
-    if not os.path.isabs(os.fspath(value)):
-        raise TypeError(f"{label} must be an absolute filesystem path")
 
 
 def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
@@ -167,5 +167,5 @@ def _fake_machine_id(userdata_root: Path) -> str:
     # USERDATA_ROOT, so two fake-data processes on one host do not share a host-derived id.
     # The root is required: _machine_id(None) returns the NIC-derived id, which is exactly
     # what this helper must never hand out, so reject a missing root instead of defaulting.
-    _require_real_path(userdata_root, "userdata_root")
+    _device_id_path(userdata_root)
     return _machine_id(userdata_root)
