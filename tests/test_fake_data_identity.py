@@ -3,6 +3,7 @@
 Regression for #199: ``_fake_machine_id`` used to ignore the userdata root and fall back to
 ``uuid.getnode()``, so two fake-data processes on one host shared a host-derived device id.
 """
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +70,23 @@ class FakeDataIdentityTests(unittest.TestCase):
         self.assertNotEqual(value, "02:42:ac:11:00:02")
         persisted = (userdata / "system" / "drone-app" / "device-id").read_text(encoding="utf-8").strip()
         self.assertEqual(persisted, value)
+
+    def test_relative_or_empty_root_never_persists_under_cwd(self):
+        # Regression for #286: Path('') and Path('.') are PathLike but resolve to the process
+        # cwd, so they must be rejected before anything is written.
+        cwd = self.root / "cwd"
+        cwd.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(cwd)
+            with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002):
+                for relative in (Path(""), Path("."), Path("relative-root")):
+                    with self.subTest(root=str(relative)):
+                        with self.assertRaises(TypeError):
+                            device_identity._fake_machine_id(relative)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(sorted(path.name for path in cwd.iterdir()), [])
 
 
 if __name__ == "__main__":
