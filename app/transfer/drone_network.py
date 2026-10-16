@@ -79,6 +79,12 @@ def _network_mode(settings: Settings) -> str:
 
 def _certificate_pem_fingerprint(pem: str) -> str:
     certificate_pem = str(pem or "")
+    # A CA file can contain many certificates, but a pairing response represents
+    # one peer identity and must pin exactly the certificate we fingerprint.
+    begin_marker = "-----BEGIN CERTIFICATE-----"
+    end_marker = "-----END CERTIFICATE-----"
+    if certificate_pem.count(begin_marker) != 1 or certificate_pem.count(end_marker) != 1:
+        raise ValueError("peer certificate must contain exactly one X.509 certificate")
     # PEM_cert_to_DER_cert only decodes the PEM envelope.  It accepts arbitrary
     # nonempty DER bytes, which must never be treated as a peer trust anchor.
     # OpenSSL's CA loader performs the X.509 parse without requiring a network
