@@ -595,6 +595,10 @@ class HandlersNetworkMixin:
             info = _fetch_peer_info(dialed)
         except ValueError:
             raise
+        except PeerIdentityHold as error:
+            # This Drone's own hold, raised before anything was dialed.
+            self._send_json(503, {"error": str(error)})
+            return
         except Exception as error:
             self._send_json(502, {"error": f"could not reach a Drone at {dialed}: {error}"})
             return
