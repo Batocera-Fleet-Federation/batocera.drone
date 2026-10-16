@@ -3813,7 +3813,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-223-out-of-scope-peer-info-ungated",
-      "name": "Out of scope for #223: peer-info fetch is not gated by the identity hold",
+      "name": "Issue #223 finding adjudicated by #267: peer-info fetch honours the identity hold",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -7063,6 +7063,69 @@
           "app/transfer/peer_connectivity.py",
           "app/web/handlers_network.py",
           "tests/adversarial/test_issue_267_pair_by_address_identity_gate_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_hold_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-hold-boundaries-uat",
+      "name": "Issue #267 held identity: every address form, mid-flight holds, tailnet probe",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_hold_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_out_of_scope_http_peer_calls_ungated.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-out-of-scope-http-peer-calls-ungated",
+      "name": "Out of scope for #267: http:// peer GET/POST ignore the identity hold",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_267_out_of_scope_http_peer_calls_ungated.py"
         ],
         "mounts": [],
         "servers": []
