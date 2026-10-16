@@ -371,12 +371,17 @@ def _pairing_tls_context(address: str, expected_fingerprint: str) -> ssl.SSLCont
     expected = _fingerprint_key(expected_fingerprint)
     parsed = urlparse(address)
     host, port = parsed.hostname or "", parsed.port or 443
+    # This opens live connections to the peer, so re-check the hold immediately
+    # before each one: a hold that lands mid-flight must not still dial out.
+    _require_swarm_networking()
     probe = ssl._create_unverified_context()
+    _require_swarm_networking()
     with socket.create_connection((host, port), timeout=10) as raw:
         with probe.wrap_socket(raw, server_hostname=host or None) as tls:
             leaf_der = tls.getpeercert(binary_form=True) or b""
     if leaf_der and hmac.compare_digest(hashlib.sha256(leaf_der).hexdigest(), expected):
         return _pinned_pairing_context(expected)
+    _require_swarm_networking()
     for pem in _presented_chain_pem(host, port):
         try:
             der = ssl.PEM_cert_to_DER_cert(pem)
@@ -401,6 +406,12 @@ class PeerIdentityHold(PermissionError):
     pair handlers can tell this Drone's own hold apart from an OS-level
     permission failure without inspecting ``errno``.
     """
+
+
+def _require_swarm_networking(message: str = PAIRING_IDENTITY_HOLD_MESSAGE) -> None:
+    """Raise ``PeerIdentityHold`` while the identity gate is holding outbound peer traffic."""
+    if not _identity_swarm_networking_allowed():
+        raise PeerIdentityHold(message)
 
 
 class PairingLocalError(RuntimeError):
@@ -516,8 +527,7 @@ def _local_pair_peer(
         # No trust anchor: this context refuses every server at the handshake,
         # so the pairing code and certificate are never written.
         context = _pinned_pairing_context("")
-    if not _identity_swarm_networking_allowed():
-        raise PeerIdentityHold(PAIRING_IDENTITY_HOLD_MESSAGE)
+    _require_swarm_networking()
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
     try:
@@ -651,11 +661,14 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
     certificate fingerprint before the peer can serve assets.
     """
     base = _normalize_peer_address(address)
+    # An outbound peer request of any scheme is held while the identity is unresolved.
+    _require_swarm_networking()
     request = Request(
         f"{base}/v1/api/peer/info",
         headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
     )
     context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
+    _require_swarm_networking()
     with urlopen(request, timeout=timeout, context=context) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8")) if raw else {}

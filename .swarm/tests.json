@@ -3813,7 +3813,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-223-out-of-scope-peer-info-ungated",
-      "name": "Out of scope for #223: peer-info fetch is not gated by the identity hold",
+      "name": "Issue #223 finding adjudicated by #267: peer-info fetch honours the identity hold",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -7030,6 +7030,199 @@
           "app/transfer/peer_connectivity.py",
           "app/web/handlers_network.py",
           "tests/adversarial/test_issue_266_out_of_scope_hold_text_heuristic.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_pair_by_address_identity_gate_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-pair-by-address-identity-gate-uat",
+      "name": "Issue #267 pair-by-address identity hold blocks bootstrap and TLS fallback dials",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_pair_by_address_identity_gate_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_hold_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-hold-boundaries-uat",
+      "name": "Issue #267 held identity: every address form, mid-flight holds, tailnet probe",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_hold_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_out_of_scope_http_peer_calls_ungated.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-out-of-scope-http-peer-calls-ungated",
+      "name": "Out of scope for #267: http:// peer GET/POST ignore the identity hold",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_267_out_of_scope_http_peer_calls_ungated.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_socket_level_and_branch_guards_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-socket-level-and-branch-guards-uat",
+      "name": "Issue #267 held identity touches no socket/DNS/subprocess; every pairing branch re-checks the hold",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_socket_level_and_branch_guards_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_real_listener_and_flat_import_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-real-listener-and-flat-import-uat",
+      "name": "Issue #267 held identity: a real listener sees no connection; flat import mode keeps the 503",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_real_listener_and_flat_import_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_267_fetch_to_pair_transition_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-267-fetch-to-pair-transition-uat",
+      "name": "Issue #267 hold between pair-by-address bootstrap and pairing POST",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_267_fetch_to_pair_transition_uat.py"
         ],
         "mounts": [],
         "servers": []
