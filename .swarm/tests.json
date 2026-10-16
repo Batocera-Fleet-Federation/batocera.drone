@@ -3967,6 +3967,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_paired_response_certificate_boundary_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-paired-response-certificate-boundary-uat",
+      "name": "Issue #279 pair-by-address maps a paired response without certificate_pem to 502 without persistence",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_paired_response_certificate_boundary_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
