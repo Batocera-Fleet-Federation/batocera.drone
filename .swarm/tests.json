@@ -8246,6 +8246,37 @@
       "timeoutSeconds": 180
     },
     {
+      "id": "adversarial-issue-340-compatibility-listener-lifecycle-uat",
+      "name": "Issue #340 returned server shutdown retires its compatibility listener",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_340_compatibility_listener_lifecycle_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_340_compatibility_listener_lifecycle_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
       "id": "adversarial-issue-337-tailnet-refresh-uat",
       "name": "Issue #337 authenticated tailnet refresh, TLS connection switch, and rejection atomicity",
       "origin": "adversarial",

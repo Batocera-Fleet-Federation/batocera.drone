@@ -1977,7 +1977,22 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     _drop_log_last: Dict[str, float] = {}
     _DROP_LOG_INTERVAL_SECONDS = 60.0
 
+    def shutdown(self):
+        # Compatibility listeners are owned by the primary server returned from
+        # create_server(). Stop their serve_forever loops with the primary loop.
+        for listener in getattr(self, "_owned_compatibility_servers", ()):
+            if getattr(listener, "thread", None) is not None:
+                listener.shutdown()
+        super().shutdown()
+
     def server_close(self):
+        if not getattr(self, "_closing_owned_listeners", False):
+            self._closing_owned_listeners = True
+            try:
+                for listener in getattr(self, "_owned_compatibility_servers", ()):
+                    listener.server_close()
+            finally:
+                self._closing_owned_listeners = False
         if getattr(self, "_owns_multiplayer_worker", False):
             try:
                 from .multiplayer.worker import stop_multiplayer_worker
@@ -2689,6 +2704,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
             scheme = "http" if settings.http_only else "https"
             print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
         server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
+        server._owned_compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
 
         # The one dedicated peer-to-peer mTLS listener: CERT_OPTIONAL + paired-peer
         # trust lives here only, so browsers on the ports above never get asked for
