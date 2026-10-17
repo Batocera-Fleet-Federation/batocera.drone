@@ -144,6 +144,36 @@ class PeerHealthShutdownBarrierUAT(unittest.TestCase):
             self.assertFalse(health.is_alive())
             self.assertIsNone(peer_workers._LOCAL_NETWORK_STOP)
 
+    def test_finite_timeout_does_not_report_a_successful_barrier_before_inflight_work_exits(self) -> None:
+        """The historical blocked-peer ordering must time out, then allow retry."""
+        def blocked_peers(_settings):
+            self.entered.set()
+            self.assertTrue(self.release.wait(2), "test did not release paired_peers")
+            return []
+
+        with mock.patch.object(local_network, "paired_peers", side_effect=blocked_peers), \
+                mock.patch.object(local_network, "save_peer_checks") as save, \
+                mock.patch.object(swarm_membership, "propagate_membership") as gossip:
+            peer_workers._start_local_network_workers(mock.Mock(device_id="uat-344"))
+            self.assertTrue(self.entered.wait(2), "health worker never read paired peers")
+            stop = peer_workers._LOCAL_NETWORK_STOP
+            health = peer_workers._LOCAL_NETWORK_HEALTH
+
+            with self.assertRaises(TimeoutError):
+                peer_workers.stop_local_network_workers(timeout=0.05)
+
+            self.assertTrue(stop.is_set())
+            self.assertIs(peer_workers._LOCAL_NETWORK_STOP, stop)
+            self.assertIs(peer_workers._LOCAL_NETWORK_HEALTH, health)
+            self.assertTrue(health.is_alive(), "a timeout must not pretend the worker retired")
+            # Releasing after the failed stop must not allow the cancelled iteration
+            # to write peer state; a second successful stop establishes the barrier.
+            self.release.set()
+            peer_workers.stop_local_network_workers(timeout=2)
+            self.assertFalse(health.is_alive())
+            save.assert_not_called()
+            gossip.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
