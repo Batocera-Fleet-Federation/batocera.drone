@@ -196,7 +196,10 @@ broadcasts a removal/rotation for the original; a peer can never force an identi
 (collisions are isolated + logged via `record_collision`); when you add per-peer state
 (table/namespace/file), add it to `swarm_reset.py`. Tests: `tests/test_hardware_identity.py`,
 `tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
-disk images via `image_disk`). Depth: `docs/drone-identity.md`.
+disk images via `image_disk`). Resume journals accept `new_device_id` only when it is absent,
+`null`, or a valid non-empty Drone id; any other present value is rejected before a fresh id
+can be minted. Keep `_choose_device_id()` behavior aligned with `_valid_journal()`. Depth:
+`docs/drone-identity.md`.
 
 ## Admin credentials (`common/auth.py`)
 

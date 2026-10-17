@@ -166,11 +166,19 @@ class MockRootHelperRejectionTests(_CwdSandbox):
         self.assertNotEqual(chosen, CONFIGURED_ID)
         self.assertIsNone(chosen)
 
-    def test_empty_and_missing_journal_new_device_id_do_not_bypass_the_guard(self) -> None:
+    def test_absent_or_null_journal_new_device_id_do_not_bypass_the_root_guard(self) -> None:
         settings = self._settings(mock.MagicMock())
-        for journal in ({}, {"new_device_id": ""}, {"new_device_id": None}, {"new_device_id": 0}):
+        for journal in ({}, {"new_device_id": None}):
             with self.subTest(journal=journal):
                 with self.assertRaisesRegex(TypeError, REJECTION):
+                    identity._choose_device_id(settings, journal)
+                self._assert_cwd_clean()
+
+    def test_present_malformed_journal_new_device_id_fails_before_the_root_guard(self) -> None:
+        settings = self._settings(mock.MagicMock())
+        for journal in ({"new_device_id": ""}, {"new_device_id": 0}):
+            with self.subTest(journal=journal):
+                with self.assertRaisesRegex(identity.IdentityError, "journaled device id"):
                     identity._choose_device_id(settings, journal)
                 self._assert_cwd_clean()
 

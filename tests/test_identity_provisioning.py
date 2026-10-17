@@ -1210,10 +1210,24 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
     def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
-            for value in (mock.MagicMock(), 12345, ["02:aa:bb:cc:dd:ee"], "bad id with spaces!"):
+            for value in (mock.MagicMock(), 0, False, [], {}, 12345, ["02:aa:bb:cc:dd:ee"], "bad id with spaces!"):
                 with self.subTest(value=type(value)):
                     with self.assertRaises(identity.IdentityError):
                         identity._choose_device_id(settings, {"new_device_id": value})
+                    self.assertFalse(identity._device_id_path(Path(tmp)).exists())
+
+    def test_choose_device_id_treats_none_as_no_resumed_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            chosen = identity._choose_device_id(settings, {"new_device_id": None})
+            self.assertEqual(identity._device_id_path(Path(tmp)).read_text(encoding="utf-8").strip(), chosen)
+
+    def test_choose_device_id_rejects_empty_string_as_invalid_resumed_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            with self.assertRaises(identity.IdentityError):
+                identity._choose_device_id(settings, {"new_device_id": ""})
+            self.assertFalse(identity._device_id_path(Path(tmp)).exists())
 
     def test_retire_device_id_rejects_mock_root(self) -> None:
         with self.assertRaises(TypeError):
