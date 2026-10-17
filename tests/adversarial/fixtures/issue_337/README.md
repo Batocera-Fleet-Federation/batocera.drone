@@ -1,0 +1,1 @@
+Issue #337 loopback-only TLS fixtures. These public, non-production test keys must never be used for deployment. Certificates are fixed fixtures valid for 100 years from creation; leaf-chain.crt contains a leaf signed by victim.crt. No test generates identities, uses external servers, or depends on host trust stores.

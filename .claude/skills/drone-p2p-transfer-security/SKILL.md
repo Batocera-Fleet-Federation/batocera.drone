@@ -107,6 +107,14 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
     `_local_pair_peer` refuses an http address. Peers paired over plain http (`http_only`
     fleets, which still pin the cert) keep their http routes.
+- **Paired tailnet metadata refresh (#337):** the bootstrap `/v1/api/peer/info`
+  body is only a discovery hint. Before accepting a paired Drone's tailnet IP,
+  ports, scheme or advertised URL, re-fetch using `_fetch_peer_info` with the
+  persisted `expected_fingerprint`. It authenticates the actual TLS connection
+  via `_pairing_tls_context` (pinned identity or a leaf signed by it), requires
+  HTTPS, rejects redirects, and the handler requires the same Drone id in the
+  authenticated response. Missing/invalid pins and verification failures leave
+  paired routes unchanged. A missing or copied body fingerprint proves nothing.
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.

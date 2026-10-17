@@ -8244,6 +8244,46 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-337-tailnet-refresh-uat",
+      "name": "Issue #337 authenticated tailnet refresh, TLS connection switch, and rejection atomicity",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_337_tailnet_refresh_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_337_tailnet_refresh_uat.py",
+          "tests/adversarial/fixtures/issue_337/leaf-chain.crt",
+          "tests/adversarial/fixtures/issue_337/leaf.crt",
+          "tests/adversarial/fixtures/issue_337/leaf.key",
+          "tests/adversarial/fixtures/issue_337/other.crt",
+          "tests/adversarial/fixtures/issue_337/other.key",
+          "tests/adversarial/fixtures/issue_337/victim.crt",
+          "tests/adversarial/fixtures/issue_337/victim.key"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
