@@ -89,10 +89,19 @@ def _start_local_network_generation(settings: Settings) -> None:
     def tailnet_watchdog() -> None:
         interval = max(30, int(os.environ.get("DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS", "60")))
         while not _wait_for_generation_stop(stop, interval):
-            if not tailnet_status().get("running"):
-                ensure_tailnet_networking(settings)
-            else:
-                _repair_tailnet_data_path()
+            # One failed pass must not end the watchdog: an unhandled exception
+            # would kill this thread for good, so log it and try again next tick.
+            try:
+                if not tailnet_status().get("running"):
+                    ensure_tailnet_networking(settings)
+                else:
+                    _repair_tailnet_data_path()
+            except Exception as error:
+                print(
+                    f"Tailnet watchdog pass failed: {error.__class__.__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     Thread(target=tailnet_watchdog, name="drone-tailnet-watchdog", daemon=True).start()
 
