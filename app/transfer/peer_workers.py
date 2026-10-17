@@ -28,8 +28,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 _LOCAL_NETWORK_STOP: Optional[Event] = None
 _LOCAL_NETWORK_DISCOVERY: Optional[Thread] = None
+_LOCAL_NETWORK_HEALTH: Optional[Thread] = None
 # Serializes start/stop so overlapping callers cannot both read the same live
-# generation and then overwrite each other's stop event / discovery handle.
+# generation and then overwrite each other's stop event / worker handles.
 # Re-entrant because a start retires the previous generation via stop.
 _LOCAL_NETWORK_LIFECYCLE_LOCK = RLock()
 
@@ -50,16 +51,20 @@ def _sleep_unless_stopped(stop: Event, seconds: float, slice_seconds: float = 1.
 
 
 def stop_local_network_workers(timeout: float = 2.0) -> None:
-    """Signal the current local-network generation to stop.
+    """Stop and join discovery and peer-health workers within ``timeout`` seconds.
 
     Worker loops wait on the generation event, so signalling it retires their
     pending poll waits immediately.  Discovery additionally needs its socket
-    closed before it can be joined.
+    closed before it can be joined. A timed-out join raises ``TimeoutError`` and
+    retains the stopped generation for another stop attempt. Callers must not
+    remove peer state until this function returns successfully; a restart also
+    must finish retiring the previous generation before replacing its handles.
     """
-    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
+    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY, _LOCAL_NETWORK_HEALTH
     with _LOCAL_NETWORK_LIFECYCLE_LOCK:
         if _LOCAL_NETWORK_STOP is not None:
             _LOCAL_NETWORK_STOP.set()
+        deadline = time.monotonic() + max(0.0, timeout)
         discovery = _LOCAL_NETWORK_DISCOVERY
         if discovery is not None:
             # Unblock recvfrom so join is not racing the 1s datagram timeout.
@@ -67,8 +72,21 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
             if callable(closer):
                 closer()
             discovery.join(timeout)
+        health = _LOCAL_NETWORK_HEALTH
+        if health is not None:
+            join = getattr(health, "join", None)
+            if callable(join):
+                join(max(0.0, deadline - time.monotonic()))
+        for worker in (discovery, health):
+            # Like the running check below, support opaque harness handles.
+            # Real Thread handles always report liveness as a boolean.
+            is_alive = getattr(worker, "is_alive", None)
+            if callable(is_alive) and is_alive() is True:
+                name = getattr(worker, "name", "unknown")
+                raise TimeoutError(f"Local-network worker did not stop: {name}")
         _LOCAL_NETWORK_STOP = None
         _LOCAL_NETWORK_DISCOVERY = None
+        _LOCAL_NETWORK_HEALTH = None
 
 
 def local_network_workers_running() -> bool:
@@ -97,9 +115,9 @@ def _start_local_network_workers(settings: Settings) -> None:
 
 
 def _start_local_network_generation(settings: Settings) -> None:
-    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY
-    # A live generation must be stopped before its stop event and discovery
-    # handle are overwritten, otherwise its discovery thread is orphaned.
+    global _LOCAL_NETWORK_STOP, _LOCAL_NETWORK_DISCOVERY, _LOCAL_NETWORK_HEALTH
+    # A live generation must be stopped before its stop event and worker
+    # handles are overwritten, otherwise its threads are orphaned.
     stop_local_network_workers()
     stop = Event()
     _LOCAL_NETWORK_STOP = stop
@@ -154,11 +172,13 @@ def _start_local_network_generation(settings: Settings) -> None:
     def health_loop() -> None:
         # Sleep in short slices so a stopped or restarted generation retires
         # this thread within one slice instead of lingering a full interval.
-        while not _sleep_unless_stopped(stop, interval):
+        while not _sleep_unless_stopped(stop, interval, slice_seconds=0.1):
             if not _local_network.is_local_mode(settings):
                 continue
             checks = []
             for peer in _local_network.paired_peers(settings):
+                if stop.is_set():
+                    return
                 peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
                 address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
                 checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -190,7 +210,11 @@ def _start_local_network_generation(settings: Settings) -> None:
                 except Exception as error:
                     result["failure_reason"] = str(error)
                 checks.append(result)
+            if stop.is_set():
+                return
             _local_network.save_peer_checks(settings, checks)
+            if stop.is_set():
+                return
             try:
                 from . import swarm_membership
             except ImportError:  # pragma: no cover - direct script execution fallback
@@ -204,4 +228,5 @@ def _start_local_network_generation(settings: Settings) -> None:
                     flush=True,
                 )
 
-    Thread(target=health_loop, name="drone-local-peer-health", daemon=True).start()
+    _LOCAL_NETWORK_HEALTH = Thread(target=health_loop, name="drone-local-peer-health", daemon=True)
+    _LOCAL_NETWORK_HEALTH.start()

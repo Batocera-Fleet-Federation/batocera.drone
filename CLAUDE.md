@@ -261,6 +261,10 @@ A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed 
 Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
 runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
 (default 300) while a Drone is not enrolled.
+Local-network shutdown joins discovery and peer-health workers before clearing
+their generation. If the timeout expires, `stop_local_network_workers()` raises
+`TimeoutError` and retains the stopped generation for retry; do not delete peer
+state or replace the generation until shutdown succeeds. See `drone-edge-networking`.
 
 ## Integrations (`app/integrations/`) — optional local extensions
 
