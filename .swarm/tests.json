@@ -7699,6 +7699,69 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_str_pathlike_identity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-str-pathlike-identity-uat",
+      "name": "Issue #287 str and PathLike roots persist or fail closed without getnode or cwd writes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_287_str_pathlike_identity_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_out_of_scope_nul_root.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-out-of-scope-nul-root",
+      "name": "Out of scope for #287: NUL-containing identity root escapes as ValueError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_287_out_of_scope_nul_root.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
