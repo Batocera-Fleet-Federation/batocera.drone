@@ -108,6 +108,10 @@ class ApiRoutesMixin:
                 self._handle_peer_health()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "content-inventory":
+                self._handle_peer_content_inventory(parts[2], query_params)
+                return
+
             if len(parts) == 3 and parts[0] == "peer" and parts[1] == "inventory":
                 self._handle_peer_inventory(parts[2], query_params)
                 return

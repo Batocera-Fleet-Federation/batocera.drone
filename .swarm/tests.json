@@ -8179,6 +8179,71 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_333_pinned_inventory_receiver_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-333-pinned-inventory-receiver-uat",
+      "name": "Issue #333 receiver rejects replayed, malformed, and pin-mismatched signed inventories before asset fetch",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_download.py",
+          "app/transfer/signed_inventory.py",
+          "tests/adversarial/test_issue_333_pinned_inventory_receiver_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_333_inventory_source_special_file_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-333-inventory-source-special-file-uat",
+      "name": "Issue #333 inventory endpoint rejects non-regular source files before hashing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/signed_inventory.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_333_inventory_source_special_file_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
