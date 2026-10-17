@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -2804,6 +2805,10 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     return server
 
 
+def _raise_shutdown_requested(signum, frame) -> None:
+    raise KeyboardInterrupt()
+
+
 def main() -> None:
     settings = Settings.from_env()
     try:
@@ -2819,7 +2824,14 @@ def main() -> None:
         # Clone detection / identity provisioning: must finish before any listener, poller,
         # discovery or peer worker exists (see common/identity_provisioning.py).
         settings = _identity.ensure_identity(settings).settings
+        previous_sigterm = None
         try:
+            # service_bootstrap.sh stops the app with SIGTERM; turn it into the same
+            # unwind as Ctrl-C so the finally below retires the local-network workers.
+            try:
+                previous_sigterm = signal.signal(signal.SIGTERM, _raise_shutdown_requested)
+            except ValueError:  # not the main thread
+                previous_sigterm = None
             server = create_server(settings)
             _start_drone_auto_update_poller(settings)
             # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
@@ -2844,6 +2856,8 @@ def main() -> None:
             # Retire any local-network generation created during startup, including
             # failures before the server enters its serve loop.
             stop_local_network_workers()
+            if previous_sigterm is not None:
+                signal.signal(signal.SIGTERM, previous_sigterm)
     except KeyboardInterrupt:
         print("Drone App shutdown requested", file=sys.stderr, flush=True)
         raise
