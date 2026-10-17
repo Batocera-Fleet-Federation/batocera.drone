@@ -193,6 +193,17 @@ broadcasts a removal/rotation for the original; a peer can never force an identi
 `tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
 disk images via `image_disk`). Depth: `docs/drone-identity.md`.
 
+## Admin credentials (`common/auth.py`)
+
+**There is no universal default password** (the old `batocera`/`linux` fallback is gone — don't reintroduce
+one, in code, Docker defaults or tests that assume it). `DroneCredentialStore.load()` returns persisted
+PBKDF2 credentials; else the operator's `DRONE_APP_PASSWORD` (env); else `setup_required` where `check()`
+matches nothing. `create_server()` calls `ensure_initial_password()`, which generates a random one-time
+password, persists only its hash, and writes the plaintext to a 0600 `initial-password.txt` beside the
+credentials file (never logged/returned over HTTP; `update()` deletes it; deleting it before the first
+change regenerates). Loopback stays pre-authenticated, so the on-device UI can set real credentials. Tests
+that need to log in pass `env_password=` or call `update()`.
+
 ## Transport layer (`app/transport/`) — the outbound-only networking
 
 This is **single-source P2P, not torrent-style swarming**: each transfer pulls the

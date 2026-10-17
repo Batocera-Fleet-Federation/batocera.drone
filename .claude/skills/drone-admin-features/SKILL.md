@@ -87,6 +87,12 @@ gateway's own session expired." See
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
 
+There is **no default password**: with no persisted credentials and no
+`DRONE_APP_PASSWORD`, `create_server()` → `DroneCredentialStore.ensure_initial_password()`
+generates a random one-time password (hash in the state DB, plaintext in a 0600
+`initial-password.txt` beside `credentials.json`, removed by the next credentials
+update). Never add a hard-coded fallback login; tests should pass `env_password=`.
+
 ## Admin menu (tiles, some of them tabbed)
 
 `renderAdminMenu()` (`drone.js`) includes **Debug, Artwork, Torrents, VPN, Email,

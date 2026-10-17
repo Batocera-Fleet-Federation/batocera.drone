@@ -87,7 +87,7 @@ from urllib.error import HTTPError, URLError
 class SessionAuthTests(unittest.TestCase):
     def _auth(self, tmp: str) -> SessionAuth:
         credentials_path = Path(tmp) / "credentials.json"
-        store = DroneCredentialStore(credentials_path)
+        store = DroneCredentialStore(credentials_path, env_password="linux")  # operator-provided secret
         db_path = database_path_for_legacy_file(credentials_path)
         return SessionAuth(credential_store=store, session_store=SessionStore(db_path))
 
@@ -99,6 +99,52 @@ class SessionAuthTests(unittest.TestCase):
             session = auth.authenticate_request({"Cookie": f"drone_session={token}"})
             self.assertIsNotNone(session)
             self.assertEqual(session["username"], "batocera")
+
+    def test_no_universal_default_password_without_operator_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials_path = Path(tmp) / "credentials.json"
+            store = DroneCredentialStore(credentials_path)
+            auth = SessionAuth(credential_store=store, session_store=SessionStore(database_path_for_legacy_file(credentials_path)))
+            self.assertTrue(store.setup_required())
+            for password in ("linux", "", "batocera", "changeme"):
+                self.assertIsNone(auth.login("batocera", password))
+            self.assertFalse(store.check("", ""))
+
+    def test_initial_password_is_random_hashed_and_root_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials_path = Path(tmp) / "credentials.json"
+            db_path = database_path_for_legacy_file(credentials_path)
+            store = DroneCredentialStore(credentials_path)
+            target = store.ensure_initial_password()
+            self.assertEqual(target, Path(tmp) / "initial-password.txt")
+            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+            fields = dict(line.split(": ", 1) for line in target.read_text().splitlines())
+            self.assertEqual(fields["username"], "batocera")
+            self.assertGreaterEqual(len(fields["password"]), 20)
+            auth = SessionAuth(credential_store=store, session_store=SessionStore(db_path))
+            self.assertIsNone(auth.login("batocera", "linux"))
+            self.assertIsNotNone(auth.login("batocera", fields["password"]))
+            saved = load_payload(db_path, "credentials", {})
+            self.assertNotIn(fields["password"], str(saved))
+            self.assertFalse(store.setup_required())
+            # Stable across restarts: no regeneration while the file is present.
+            self.assertIsNone(DroneCredentialStore(credentials_path).ensure_initial_password())
+            self.assertIsNotNone(auth.login("batocera", fields["password"]))
+            # Deleting the file before changing the password is the recovery path.
+            target.unlink()
+            regenerated = DroneCredentialStore(credentials_path).ensure_initial_password()
+            self.assertIsNotNone(regenerated)
+            # Setting real credentials removes the plaintext and ends regeneration.
+            store.update("arcade-admin", "BetterPass123")
+            self.assertFalse(regenerated.exists())
+            self.assertIsNone(DroneCredentialStore(credentials_path).ensure_initial_password())
+
+    def test_env_password_skips_initial_password_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DroneCredentialStore(Path(tmp) / "credentials.json", env_password="operator-secret")
+            self.assertIsNone(store.ensure_initial_password())
+            self.assertFalse((Path(tmp) / "initial-password.txt").exists())
+            self.assertTrue(store.check("batocera", "operator-secret"))
 
     def test_login_rejects_wrong_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +165,7 @@ class SessionAuthTests(unittest.TestCase):
             for loopback_ip in ("127.0.0.1", "::1"):
                 session = auth.authenticate_request({}, loopback_ip)
                 self.assertIsNotNone(session)
-                self.assertEqual(session["username"], "batocera")  # DroneCredentialStore's default
+                self.assertEqual(session["username"], "batocera")  # DroneCredentialStore's default username
                 self.assertIsNone(session["token"])
 
     def test_authenticate_request_does_not_trust_non_loopback_with_no_cookie(self) -> None:

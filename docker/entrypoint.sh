@@ -117,7 +117,9 @@ PY
 fi
 
 export DRONE_APP_USERNAME="${DRONE_APP_USERNAME:-${ROM_API_USERNAME:-admin}}"
-export DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-${ROM_API_PASSWORD:-changeme}}"
+# No built-in default password: when neither is set the Drone generates a random one-time
+# password and writes it to $USERDATA_ROOT/system/drone-app/initial-password.txt.
+export DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-${ROM_API_PASSWORD:-}}"
 export BATOCERA_CONF_FILE="${BATOCERA_CONF_FILE:-$USERDATA_ROOT/system/batocera.conf}"
 export ES_SETTINGS_FILE="${ES_SETTINGS_FILE:-$USERDATA_ROOT/system/configs/emulationstation/es_settings.cfg}"
 export OVERMIND_DEVICE_ID="${OVERMIND_DEVICE_ID:-$DRONE_DEVICE_ID}"

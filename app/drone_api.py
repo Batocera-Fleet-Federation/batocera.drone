@@ -2520,6 +2520,17 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         settings.password,
         state_database_file=_state_database_path(settings.userdata_root),
     )
+    try:
+        initial_password_file = credential_store.ensure_initial_password()
+    except Exception as credential_error:  # noqa: BLE001 - stay locked (no login) rather than fall open
+        initial_password_file = None
+        print(f"Initial admin password setup failed: {credential_error}", file=sys.stderr, flush=True)
+    if initial_password_file is not None:
+        print(
+            f"No admin password is configured: a random one-time password was written to {initial_password_file} "
+            "(readable by root only). Log in with it, then change it in Admin -> Credentials.",
+            flush=True,
+        )
     session_store = SessionStore(_state_database_path(settings.userdata_root))
     auth = SessionAuth(credential_store=credential_store, session_store=session_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
