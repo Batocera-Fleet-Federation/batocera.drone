@@ -92,6 +92,31 @@ class LocalNetworkWorkerLifecycleTests(unittest.TestCase):
             peer_workers.stop_local_network_workers(timeout=1.0)
         self.assertFalse(peer_workers.local_network_workers_running())
 
+    def test_crashed_discovery_thread_is_not_reported_live(self) -> None:
+        # Discovery can die on its own without a stop: the generation event stays
+        # unset, so only the thread's liveness shows the generation is gone.
+        crashed = mock.Mock()
+        crashed.is_alive.return_value = True
+        with mock.patch.object(peer_workers, "Thread"), \
+                mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
+                mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm"), \
+                mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True}), \
+                mock.patch.object(peer_workers, "_repair_tailnet_data_path"), \
+                mock.patch.object(local_network, "start_discovery_worker", side_effect=[crashed, mock.Mock()]) as start:
+            peer_workers._start_local_network_workers(mock.Mock())
+            self.assertTrue(peer_workers.local_network_workers_running())
+            crashed.is_alive.return_value = False
+            self.assertFalse(peer_workers.local_network_workers_running())
+            first_stop = start.call_args.kwargs["stop_event"]
+            self.assertFalse(first_stop.is_set())
+            # A restart after the crash must start a fresh, live generation.
+            peer_workers._start_local_network_workers(mock.Mock())
+            self.assertEqual(start.call_count, 2)
+            self.assertTrue(peer_workers.local_network_workers_running())
+            peer_workers.stop_local_network_workers(timeout=1.0)
+        self.assertTrue(first_stop.is_set())
+        self.assertFalse(peer_workers.local_network_workers_running())
+
     def test_second_start_does_not_orphan_first_discovery_thread(self) -> None:
         first = mock.Mock()
         second = mock.Mock()
