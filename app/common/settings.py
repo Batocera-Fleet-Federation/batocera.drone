@@ -17,8 +17,10 @@ from typing import Optional, Tuple
 
 try:
     from .device_identity import _fake_machine_id, _machine_id, _normalize_device_id
+    from ..storage.state_store import database_path
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import _fake_machine_id, _machine_id, _normalize_device_id  # type: ignore
+    from storage.state_store import database_path  # type: ignore
 
 
 def _require_env(name: str) -> str:
@@ -64,6 +66,7 @@ def _parse_port_list(value: Optional[str]) -> Tuple[int, ...]:
 @dataclass(frozen=True)
 class Settings:
     userdata_root: Path
+    state_database_file: Path
     roms_root: Path
     bios_root: Path
     saves_root: Path
@@ -157,6 +160,10 @@ class Settings:
 
         return cls(
             userdata_root=userdata_root,
+            # Resolve the optional override with the rest of this immutable
+            # configuration snapshot. Long-lived workers must not follow a
+            # later harness's process environment to a different database.
+            state_database_file=database_path(userdata_root),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             saves_root=Path(os.environ.get("SAVES_ROOT", "/userdata/saves")),
