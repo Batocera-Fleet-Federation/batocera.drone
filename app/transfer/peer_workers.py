@@ -39,6 +39,16 @@ def _wait_for_generation_stop(stop: Event, interval: float) -> bool:
     return stop.wait(interval)
 
 
+def _sleep_unless_stopped(stop: Event, seconds: float, slice_seconds: float = 1.0) -> bool:
+    """Sleep for ``seconds`` in slices, returning ``True`` once ``stop`` is set."""
+    remaining = seconds
+    while remaining > 0 and not stop.is_set():
+        step = min(remaining, slice_seconds)
+        time.sleep(step)
+        remaining -= step
+    return stop.is_set()
+
+
 def stop_local_network_workers(timeout: float = 2.0) -> None:
     """Signal the current local-network generation to stop.
 
@@ -133,10 +143,9 @@ def _start_local_network_generation(settings: Settings) -> None:
     interval = max(10, int(os.environ.get("DRONE_LOCAL_HEALTH_INTERVAL_SECONDS", "30")))
 
     def health_loop() -> None:
-        while not stop.is_set():
-            time.sleep(interval)
-            if stop.is_set():
-                return
+        # Sleep in short slices so a stopped or restarted generation retires
+        # this thread within one slice instead of lingering a full interval.
+        while not _sleep_unless_stopped(stop, interval):
             if not _local_network.is_local_mode(settings):
                 continue
             checks = []
