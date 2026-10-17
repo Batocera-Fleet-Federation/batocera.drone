@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -673,11 +674,11 @@ except ImportError:
 
 
 try:
-    from .transfer.peer_workers import _start_local_network_workers, local_network_workers_running
+    from .transfer.peer_workers import _start_local_network_workers, local_network_workers_running, stop_local_network_workers
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from transfer.peer_workers import _start_local_network_workers, local_network_workers_running  # type: ignore
+    from transfer.peer_workers import _start_local_network_workers, local_network_workers_running, stop_local_network_workers  # type: ignore
 
 
 try:
@@ -2804,6 +2805,10 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     return server
 
 
+def _raise_shutdown_requested(signum, frame) -> None:
+    raise KeyboardInterrupt()
+
+
 def main() -> None:
     settings = Settings.from_env()
     try:
@@ -2819,26 +2824,40 @@ def main() -> None:
         # Clone detection / identity provisioning: must finish before any listener, poller,
         # discovery or peer worker exists (see common/identity_provisioning.py).
         settings = _identity.ensure_identity(settings).settings
-        server = create_server(settings)
-        _start_drone_auto_update_poller(settings)
-        # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
-        # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
+        previous_sigterm = None
         try:
+            # service_bootstrap.sh stops the app with SIGTERM; turn it into the same
+            # unwind as Ctrl-C so the finally below retires the local-network workers.
             try:
-                from .web.api_bridge import maybe_start as _maybe_start_api_bridge
-            except ImportError:
-                from web.api_bridge import maybe_start as _maybe_start_api_bridge  # type: ignore
-            _maybe_start_api_bridge(settings)
-        except Exception as _bridge_error:  # noqa: BLE001
-            print(f"FastAPI bridge startup skipped: {_bridge_error}", file=sys.stderr, flush=True)
-        print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
-        server_auth = getattr(server, "auth", None)
-        credential_store = getattr(server_auth, "credential_store", None)
-        safe_username = credential_store.load().get("username") if credential_store else settings.username
-        print(f"Auth username: {safe_username}")
-        scheme = "http" if settings.http_only else "https"
-        print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
-        server.serve_forever()
+                previous_sigterm = signal.signal(signal.SIGTERM, _raise_shutdown_requested)
+            except ValueError:  # not the main thread
+                previous_sigterm = None
+            server = create_server(settings)
+            _start_drone_auto_update_poller(settings)
+            # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
+            # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
+            try:
+                try:
+                    from .web.api_bridge import maybe_start as _maybe_start_api_bridge
+                except ImportError:
+                    from web.api_bridge import maybe_start as _maybe_start_api_bridge  # type: ignore
+                _maybe_start_api_bridge(settings)
+            except Exception as _bridge_error:  # noqa: BLE001
+                print(f"FastAPI bridge startup skipped: {_bridge_error}", file=sys.stderr, flush=True)
+            print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
+            server_auth = getattr(server, "auth", None)
+            credential_store = getattr(server_auth, "credential_store", None)
+            safe_username = credential_store.load().get("username") if credential_store else settings.username
+            print(f"Auth username: {safe_username}")
+            scheme = "http" if settings.http_only else "https"
+            print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
+            server.serve_forever()
+        finally:
+            # Retire any local-network generation created during startup, including
+            # failures before the server enters its serve loop.
+            stop_local_network_workers()
+            if previous_sigterm is not None:
+                signal.signal(signal.SIGTERM, previous_sigterm)
     except KeyboardInterrupt:
         print("Drone App shutdown requested", file=sys.stderr, flush=True)
         raise
