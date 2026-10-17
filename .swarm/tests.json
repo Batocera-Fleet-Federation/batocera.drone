@@ -8379,6 +8379,39 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-344-peer-health-shutdown-barrier-uat",
+      "name": "Issue #344 peer-health shutdown prevents post-return state writes",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_344_peer_health_shutdown_barrier_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_344_peer_health_shutdown_barrier_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
