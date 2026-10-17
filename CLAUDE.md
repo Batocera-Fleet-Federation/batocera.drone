@@ -168,7 +168,12 @@ sync to; a completed local pass just marks the cache clean, see
 `transfer/peer_download.py`; cert pinning + peer client in
 `transfer/peer_connectivity.py` via `_peer_trust_cafile`, SSL-retry; the mTLS
 identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). The
-peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
+peer-pinned identity also signs fresh, nonce-bound ROM/BIOS content inventories
+(`transfer/signed_inventory.py`, `/peer/content-inventory/{roms,bios}`). Receivers
+verify against the persisted pairing pin and full-file SHA-256 for every file,
+including folder children, before installing; caller fingerprints alone are not
+content authority. Sources without this endpoint fail closed and must be upgraded.
+The peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
 hostname/IP-aware HTTPS leaf signed by that identity during startup, including
 current LAN and Tailscale addresses. See
 `drone-p2p-transfer-security` skill.
