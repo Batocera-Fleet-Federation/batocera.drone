@@ -7125,6 +7125,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             cert_path = Path(tmp) / "local-a.crt"
             cert_path.write_text("certificate", encoding="utf-8")
             with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer._local_network, "get_paired_peer", return_value=None), \
                     mock.patch.object(handlers_peer, "tailnet_peer_ips", return_value={"100.64.0.5"}), \
                     mock.patch.object(handlers_peer._local_network, "validate_pairing_code") as validate, \
                     mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
@@ -7165,6 +7166,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             cert_path = Path(tmp) / "local-a.crt"
             cert_path.write_text("certificate", encoding="utf-8")
             with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer._local_network, "get_paired_peer", return_value=None), \
                     mock.patch.object(handlers_peer._local_network, "validate_pairing_code", return_value=True), \
                     mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
                     mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
