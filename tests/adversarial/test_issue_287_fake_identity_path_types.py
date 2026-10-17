@@ -8,16 +8,22 @@ root, persist across calls, and must not fall back to a host NIC identifier.
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.common import device_identity
+REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from app.common import device_identity  # noqa: E402
 
 
-class CustomPathLike(os.PathLike[str]):
+class CustomPathLike(os.PathLike):
     def __init__(self, value: str) -> None:
         self.value = value
 

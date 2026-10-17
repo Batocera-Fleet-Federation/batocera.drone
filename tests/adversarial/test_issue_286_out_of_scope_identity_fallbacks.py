@@ -53,7 +53,8 @@ class OutOfScopeIdentityFallbackTests(unittest.TestCase):
         value = device_identity._fake_machine_id(blocker / "userdata")
         self.assertNotEqual(value, HOST_DERIVED)
 
-    @unittest.expectedFailure
+    # Adjudicated (#287 dispute): the str-root crash is fixed by #287, so this assertion now
+    # passes and is kept as a regression instead of an expected failure.
     def test_fake_absolute_str_root_is_accepted_or_cleanly_rejected(self):
         userdata = self.root / "userdata"
         (userdata / "system" / "drone-app").mkdir(parents=True)
