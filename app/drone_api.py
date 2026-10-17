@@ -2819,30 +2819,30 @@ def main() -> None:
         # Clone detection / identity provisioning: must finish before any listener, poller,
         # discovery or peer worker exists (see common/identity_provisioning.py).
         settings = _identity.ensure_identity(settings).settings
-        server = create_server(settings)
-        _start_drone_auto_update_poller(settings)
-        # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
-        # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
         try:
+            server = create_server(settings)
+            _start_drone_auto_update_poller(settings)
+            # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
+            # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
             try:
-                from .web.api_bridge import maybe_start as _maybe_start_api_bridge
-            except ImportError:
-                from web.api_bridge import maybe_start as _maybe_start_api_bridge  # type: ignore
-            _maybe_start_api_bridge(settings)
-        except Exception as _bridge_error:  # noqa: BLE001
-            print(f"FastAPI bridge startup skipped: {_bridge_error}", file=sys.stderr, flush=True)
-        print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
-        server_auth = getattr(server, "auth", None)
-        credential_store = getattr(server_auth, "credential_store", None)
-        safe_username = credential_store.load().get("username") if credential_store else settings.username
-        print(f"Auth username: {safe_username}")
-        scheme = "http" if settings.http_only else "https"
-        print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
-        try:
+                try:
+                    from .web.api_bridge import maybe_start as _maybe_start_api_bridge
+                except ImportError:
+                    from web.api_bridge import maybe_start as _maybe_start_api_bridge  # type: ignore
+                _maybe_start_api_bridge(settings)
+            except Exception as _bridge_error:  # noqa: BLE001
+                print(f"FastAPI bridge startup skipped: {_bridge_error}", file=sys.stderr, flush=True)
+            print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
+            server_auth = getattr(server, "auth", None)
+            credential_store = getattr(server_auth, "credential_store", None)
+            safe_username = credential_store.load().get("username") if credential_store else settings.username
+            print(f"Auth username: {safe_username}")
+            scheme = "http" if settings.http_only else "https"
+            print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
             server.serve_forever()
         finally:
-            # Retire the local-network generation (tailnet/peer-health loops and LAN
-            # discovery) on every exit path, not only on restart.
+            # Retire any local-network generation created during startup, including
+            # failures before the server enters its serve loop.
             stop_local_network_workers()
     except KeyboardInterrupt:
         print("Drone App shutdown requested", file=sys.stderr, flush=True)
