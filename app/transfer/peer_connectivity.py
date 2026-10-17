@@ -7,6 +7,7 @@ addresses/ports, runs the local-network pairing handshake, and probes peer healt
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
@@ -650,15 +651,15 @@ def _normalize_peer_address(raw: str) -> str:
     return f"{parsed.scheme}://{host}:{port}"
 
 
-def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
+def _fetch_peer_info(
+    address: str, timeout: float = 5.0, *, expected_fingerprint: Optional[str] = None,
+) -> dict:
     """Fetch a drone's open pairing-bootstrap identity (``GET /v1/api/peer/info``).
 
-    This is how a peer is "discovered" across links the multicast announce
-    cannot cross (e.g. a tailnet) -- by dialing its address directly. Same TOFU
-    trust model as the pair POST itself: TLS is unverified because no
-    certificate is pinned yet; current Tailnet membership or a pairing code
-    authorizes the exchange, and ``_local_pair_peer`` pins the advertised
-    certificate fingerprint before the peer can serve assets.
+    Bootstrap responses are untrusted discovery hints. For paired-peer metadata
+    refreshes, pass the persisted pin: the response must then arrive over TLS
+    authenticated by that identity (including HTTPS leaves signed by it).
+    Body-supplied fingerprints never authenticate the connection.
     """
     base = _normalize_peer_address(address)
     # An outbound peer request of any scheme is held while the identity is unresolved.
@@ -667,10 +668,31 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
         f"{base}/v1/api/peer/info",
         headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
     )
-    context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
-    _require_swarm_networking()
-    with urlopen(request, timeout=timeout, context=context) as response:
-        raw = response.read()
+    if expected_fingerprint is not None:
+        expected = _fingerprint_key(expected_fingerprint)
+        parsed = urlparse(base)
+        if parsed.scheme != "https" or not _SHA256_HEX_RE.fullmatch(expected):
+            raise ssl.SSLError("paired peer info requires HTTPS and a valid certificate pin")
+        context = _pairing_tls_context(base, expected)
+        # A direct connection avoids proxies and never follows redirects, including
+        # HTTPS-to-HTTP redirects that would bypass the certificate requirement.
+        connection = http.client.HTTPSConnection(
+            parsed.hostname, parsed.port or 443, timeout=timeout, context=context,
+        )
+        try:
+            _require_swarm_networking()
+            connection.request("GET", "/v1/api/peer/info", headers=dict(request.header_items()))
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ValueError("authenticated peer info request did not return HTTP 200")
+            raw = response.read()
+        finally:
+            connection.close()
+    else:
+        context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
+        _require_swarm_networking()
+        with urlopen(request, timeout=timeout, context=context) as response:
+            raw = response.read()
     payload = json.loads(raw.decode("utf-8")) if raw else {}
     if not isinstance(payload, dict) or str(payload.get("service") or "") != _local_network.DISCOVERY_SERVICE:
         raise ValueError("address did not answer as a Batocera Drone peer")

@@ -315,24 +315,24 @@ class HandlersNetworkMixin:
         discovered = local_match or _local_network.record_discovered_peer(self.settings, tailnet_peer, tailnet_ip)
         existing = _local_network.get_paired_peer(self.settings, peer_id)
         if existing:
-            # A LAN announce may have arrived while the peer's tailscaled was
-            # temporarily down and cleared its tailnet_ip. A successful probe
-            # over the authenticated tailnet is authoritative reachability
-            # evidence, so restore the route without replacing the preferred
-            # LAN URL or requiring the already-paired Drone to pair again.
-            expected_fingerprint = str(existing.get("certificate_fingerprint") or "").strip().lower()
-            observed_fingerprint = str(info.get("certificate_fingerprint") or "").strip().lower()
-            if expected_fingerprint and observed_fingerprint and expected_fingerprint != observed_fingerprint:
+            # The initial response only identifies a candidate pin. Re-fetch over
+            # TLS authenticated by that persisted pin before accepting any fields.
+            # Even a copied public fingerprint in the first body proves nothing.
+            try:
+                info = _fetch_peer_info(
+                    _normalize_peer_address(tailnet_ip), timeout=3.0,
+                    expected_fingerprint=str(existing.get("certificate_fingerprint") or ""),
+                )
+                if str(info.get("drone_id") or "").strip() != peer_id:
+                    raise ValueError("authenticated tailnet peer returned a different Drone id")
+            except Exception:
                 return _public_local_peer(
                     {
                         **existing,
-                        "tailnet_identity_error": "Tailnet peer certificate fingerprint does not match paired Drone",
+                        "tailnet_identity_error": "Tailnet peer certificate fingerprint could not be authenticated for paired Drone",
                     }
                 )
-            # Refresh the connection metadata from this probe too, not just
-            # the tailnet route. ``info`` was fetched from the peer moments
-            # ago and its certificate fingerprint matched the pinned one
-            # above, so it is authoritative.
+            # Only the authenticated response is authoritative for route/port repair.
             #
             # This is what repairs a record paired before peer_mtls_port
             # existed: _peer_api_port() falls back to api_port for such

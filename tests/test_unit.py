@@ -7244,7 +7244,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7277,7 +7278,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "cc:dd",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", side_effect=ssl.SSLError("pin mismatch")), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(handlers_network._local_network, "save_paired_peer") as saved:
@@ -7328,7 +7330,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7364,7 +7367,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
