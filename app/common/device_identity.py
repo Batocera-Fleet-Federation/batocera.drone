@@ -173,9 +173,8 @@ def _fake_machine_id(userdata_root: Path) -> str:
     # The root is required: _machine_id(None) returns the NIC-derived id, which is exactly
     # what this helper must never hand out, so reject a missing root instead of defaulting.
     _require_real_path(userdata_root, "userdata_root")
-    # This helper's public internal contract is Path (Settings.from_env supplies
-    # one); retain that boundary instead of accepting str/PathLike objects that
-    # cannot participate in the root path composition used by the identity API.
-    userdata_root / "system"
-    _device_id_path(userdata_root)
-    return _machine_id(userdata_root)
+    # Normalize accepted strings and PathLike objects before path composition. Keep the
+    # cwd guard here so an empty/dot root is rejected before identity generation.
+    normalized_root = Path(os.fspath(userdata_root))
+    _device_id_path(normalized_root)
+    return _machine_id(normalized_root)

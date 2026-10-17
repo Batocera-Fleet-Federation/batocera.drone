@@ -71,6 +71,41 @@ class FakeDataIdentityTests(unittest.TestCase):
         persisted = (userdata / "system" / "drone-app" / "device-id").read_text(encoding="utf-8").strip()
         self.assertEqual(persisted, value)
 
+    def test_fake_machine_id_accepts_str_and_pathlike_roots(self):
+        # Regression for #287: str and os.PathLike roots passed _require_real_path, then
+        # crashed on a str / str join. They must persist under the root like a Path does.
+        class FakePathLike:
+            def __init__(self, path):
+                self._path = path
+
+            def __fspath__(self):
+                return self._path
+
+        for label, make_root in (("str", str), ("pathlike", FakePathLike)):
+            with self.subTest(root=label):
+                userdata = self.root / f"typed-{label}"
+                (userdata / "system" / "drone-app").mkdir(parents=True)
+                with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002) as getnode:
+                    value = device_identity._fake_machine_id(make_root(str(userdata)))
+                getnode.assert_not_called()
+                self.assertNotEqual(value, "02:42:ac:11:00:02")
+                persisted = (userdata / "system" / "drone-app" / "device-id").read_text(encoding="utf-8").strip()
+                self.assertEqual(persisted, value)
+
+    def test_relative_str_root_is_rejected_without_getnode(self):
+        cwd = self.root / "relative-cwd"
+        cwd.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(cwd)
+            with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002) as getnode:
+                with self.assertRaises(TypeError):
+                    device_identity._fake_machine_id("relative/root")
+            getnode.assert_not_called()
+        finally:
+            os.chdir(previous)
+        self.assertFalse((cwd / "relative").exists())
+
     def test_relative_or_empty_root_never_persists_under_cwd(self):
         # Regression for #286: Path('') and Path('.') are PathLike but resolve to the process
         # cwd, so they must be rejected before anything is written.
