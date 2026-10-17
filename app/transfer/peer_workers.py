@@ -76,10 +76,19 @@ def local_network_workers_running() -> bool:
 
     Callers that latch "workers were started" must check this too: a stop
     issued directly on this module clears the live generation, and the latch
-    alone would then skip the restart.
+    alone would then skip the restart.  A generation whose discovery thread
+    died without a stop (crash) is not live either, so it gets restarted too.
     """
     with _LOCAL_NETWORK_LIFECYCLE_LOCK:
-        return _LOCAL_NETWORK_STOP is not None and not _LOCAL_NETWORK_STOP.is_set()
+        if _LOCAL_NETWORK_STOP is None or _LOCAL_NETWORK_STOP.is_set():
+            return False
+        discovery = _LOCAL_NETWORK_DISCOVERY
+        if discovery is None:
+            return False
+        # The handle is opaque (tests and harnesses substitute their own), so only
+        # a handle that reports liveness can be found dead; otherwise trust the event.
+        is_alive = getattr(discovery, "is_alive", None)
+        return not callable(is_alive) or bool(is_alive())
 
 
 def _start_local_network_workers(settings: Settings) -> None:
