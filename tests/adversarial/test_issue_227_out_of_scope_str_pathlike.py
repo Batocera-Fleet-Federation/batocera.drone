@@ -1,15 +1,15 @@
-"""Out-of-scope evidence for #227: str / PathLike pass the guard then fail on ``/``.
+"""Evidence for #227's str / PathLike guard, adjudicated against #287.
 
-``_fake_machine_id`` now calls ``_require_real_path``, which accepts ``str`` and
-``os.PathLike``. ``_device_id_path`` then does ``userdata_root / "system"``,
-which is a Path operation, so a ``str`` root raises
-``TypeError: unsupported operand type(s) for /: 'str' and 'str'`` and a custom
-PathLike raises the same against its type. Neither call returns getnode.
+``_fake_machine_id`` calls ``_require_real_path``, which accepts ``str`` and
+``os.PathLike``. The original revision of this suite pinned the follow-on defect:
+``_device_id_path`` did ``userdata_root / "system"``, so a ``str`` or custom PathLike
+root raised ``TypeError: unsupported operand type(s) for /``.
 
-Why outside scope: #227 is the missing-root getnode leak. ``Settings.from_env``
-always passes a ``Path``. ``_machine_id`` already required Path operations
-before this change; the new guard documents a broader contract than the
-join can honour. These assertions pin that mismatch as evidence.
+Adjudication (round 2, #287 dispute): that join failure is the defect #287 fixes, not
+a contract to preserve. The guard acceptance assertion stays. The join-failure pin is
+replaced with the #287 contract: the root persists under its own directory and
+``uuid.getnode()`` is never returned. The fuller #287 coverage lives in
+``test_issue_287_fake_identity_path_types.py``.
 """
 
 from __future__ import annotations
@@ -51,25 +51,17 @@ class StrPathLikeEvidenceTests(unittest.TestCase):
         self._env.stop()
         self._tmpdir.cleanup()
 
-    def test_require_real_path_accepts_str_and_pathlike_but_helper_cannot_join_them(self) -> None:
+    def test_require_real_path_accepts_str_and_pathlike_and_helper_persists_under_each(self) -> None:
         _require_real_path(str(self.root), "userdata_root")
         _require_real_path(_FsPath(str(self.root)), "userdata_root")
+        persisted = self.root / "system" / "drone-app" / "device-id"
         with mock.patch.object(device_identity.uuid, "getnode", return_value=GETNODE) as getnode:
-            with self.assertRaisesRegex(TypeError, "unsupported operand type"):
-                _fake_machine_id(str(self.root))
-            with self.assertRaisesRegex(TypeError, "unsupported operand type"):
-                _fake_machine_id(_FsPath(str(self.root)))
+            for supplied in (str(self.root), _FsPath(str(self.root))):
+                with self.subTest(root_type=type(supplied).__name__):
+                    value = _fake_machine_id(supplied)
+                    self.assertNotEqual(value, RUNTIME_MAC)
+                    self.assertEqual(persisted.read_text(encoding="utf-8").strip(), value)
         getnode.assert_not_called()
-        self.assertFalse((self.root / "system" / "drone-app" / "device-id").exists())
-        # The TypeError is a join failure, not the filesystem-path guard, and not getnode.
-        with mock.patch.object(device_identity.uuid, "getnode", return_value=GETNODE):
-            try:
-                value = _fake_machine_id(str(self.root))
-            except TypeError as exc:
-                self.assertNotEqual(str(exc), RUNTIME_MAC)
-                self.assertIn("unsupported operand type", str(exc))
-            else:
-                self.fail(f"str root returned {value!r} instead of failing the Path join")
 
 
 if __name__ == "__main__":
