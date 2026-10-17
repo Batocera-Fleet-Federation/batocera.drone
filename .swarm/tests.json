@@ -7986,6 +7986,39 @@
         "servers": []
       },
       "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_service_stop_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-service-stop-contract",
+      "name": "Issue #312 service stop preserves Drone cleanup before listener termination",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/service_bootstrap.sh",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_312_service_stop_contract.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
