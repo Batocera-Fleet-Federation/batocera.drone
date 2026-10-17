@@ -7825,6 +7825,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_305_watchdog_exception_recovery.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-305-watchdog-exception-recovery",
+      "name": "Issue #305 watchdog continues after transient status, enrollment, or repair errors",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_305_watchdog_exception_recovery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
