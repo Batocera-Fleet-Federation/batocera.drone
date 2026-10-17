@@ -15,6 +15,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_325_listener_rollback_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-325-listener-rollback-uat",
+      "name": "Issue #325 failed create_server boot releases peer-mTLS listener before retry",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/web/server_tls.py",
+          "tests/adversarial/test_issue_325_listener_rollback_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_142_streamdeck_disconnected_uat.py"
       ],
       "disruptive": false,

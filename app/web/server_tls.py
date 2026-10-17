@@ -41,6 +41,14 @@ def register_live_tls_servers(servers) -> None:
                 _LIVE_TLS_SERVERS.append(server)
 
 
+def unregister_live_tls_servers(servers) -> None:
+    """Forget listeners that were registered but never came up (startup rolled back)."""
+    with _LIVE_TLS_LOCK:
+        for server in servers or ():
+            while server in _LIVE_TLS_SERVERS:
+                _LIVE_TLS_SERVERS.remove(server)
+
+
 def activate_peer_certificate(cert_path: Path) -> None:
     """Trust ``cert_path`` on every listener this process is serving."""
     with _LIVE_TLS_LOCK:
