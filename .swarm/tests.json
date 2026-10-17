@@ -8147,6 +8147,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_331_authorized_pair_tls_downgrade_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-331-authorized-pair-tls-downgrade-uat",
+      "name": "Issue #331 code-authorized and tailnet-authorized pairing cannot downgrade a TLS-paired peer",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_331_authorized_pair_tls_downgrade_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
