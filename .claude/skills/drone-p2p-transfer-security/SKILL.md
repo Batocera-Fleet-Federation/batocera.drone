@@ -74,7 +74,7 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     (`_PinnedFingerprintContext`) and checks the returned cert before touching the pin file;
     `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for https peers without one.
   - **No plaintext for TLS-paired peers (#246):** `_local_pair_peer` records
-    `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers).
+    `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers). It is sticky: `save_paired_peer` keeps it True for a TLS-pinned peer and `_handle_peer_pair` refuses (409) a `scheme=http` re-pair before touching the pinned cert, even with a valid pairing code or tailnet auto-pair.
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
     `_local_pair_peer` refuses an http address. Peers paired over plain http (`http_only`
     fleets, which still pin the cert) keep their http routes.

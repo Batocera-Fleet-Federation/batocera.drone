@@ -124,13 +124,19 @@ class HandlersPeerMixin:
             _identity.record_collision(self.settings, "pair-request-own-certificate")
             self._send_json(409, {"error": "duplicate Drone identity detected"})
             return
+        scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https")).strip().lower()
+        existing_peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if scheme != "https" and _local_network.peer_requires_tls(existing_peer):
+            # A peer already paired over TLS is never downgraded to cleartext, even by a
+            # code-authorised pair request; refuse before touching its pinned certificate.
+            self._send_json(409, {"error": "peer is paired over TLS; plaintext re-pairing refused"})
+            return
         cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
         expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
         if expected and expected != fingerprint.lower():
             cert_path.unlink(missing_ok=True)
             raise ValueError("peer certificate fingerprint mismatch")
         source_ip = self.client_address[0] if self.client_address else ""
-        scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https"))
         port = int(payload.get("api_port") or 443)
         peer_mtls_port = int(payload.get("peer_mtls_port") or port)
         advertised_reachable_url = str(payload.get("reachable_url") or "").strip()

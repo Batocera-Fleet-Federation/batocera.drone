@@ -360,11 +360,15 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     peers = _load_peer_map(settings, "local_paired_peers")
     is_new = peer_id not in peers
     previous = dict(peers.get(peer_id) or {})
-    if peer_requires_tls(previous):
-        # No writer (gossip, tailnet probe, discovery) may move a TLS-pinned
-        # peer to cleartext; the requirement is sticky (see peer_requires_tls).
+    requires_tls = peer_requires_tls(previous)
+    if requires_tls:
+        # No writer (gossip, tailnet probe, discovery, code-authorised pair)
+        # may move a TLS-pinned peer to cleartext; the requirement is sticky
+        # (see peer_requires_tls), including the paired_over_tls flag itself.
         peer = _without_cleartext_overrides(peer)
     peer = dict(peer)
+    if requires_tls and "paired_over_tls" in peer:
+        peer["paired_over_tls"] = True
     for key in ("scheme", "protocol"):
         if key in peer:
             peer[key] = str(peer[key] or "").strip().lower()

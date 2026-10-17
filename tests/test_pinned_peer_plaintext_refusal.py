@@ -147,3 +147,49 @@ class TlsPairedPeerPlaintextRefusalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodeAuthorizedPairCannotDowngradeTests(unittest.TestCase):
+    """A valid pairing code must not clear paired_over_tls via scheme=http (issue #331)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        env = {"USERDATA_ROOT": str(Path(self._tmp.name) / "userdata"), "DRONE_DEVICE_ID": "local-a"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.settings = Settings.from_env()
+        local_network.set_mode(self.settings, local_network.MODE_LOCAL_NETWORK)
+        local_network.save_paired_peer(
+            self.settings,
+            {"drone_id": "victim", "scheme": "https", "reachable_url": "https://192.168.1.20",
+             "certificate_fingerprint": FINGERPRINT, "paired_over_tls": True},
+        )
+
+    def test_save_paired_peer_keeps_tls_flag_when_overwritten_with_false(self) -> None:
+        stored = local_network.save_paired_peer(
+            self.settings,
+            {"drone_id": "victim", "scheme": "http", "reachable_url": "http://10.0.0.66",
+             "paired_over_tls": False},
+        )
+        self.assertTrue(stored["paired_over_tls"])
+        self.assertEqual(stored["reachable_url"], "https://192.168.1.20")
+        self.assertEqual(stored["scheme"], "https")
+
+    def test_pair_request_with_http_scheme_is_refused_for_tls_peer(self) -> None:
+        from app.web import handlers_peer
+
+        handler = handlers_peer.HandlersPeerMixin()
+        handler.settings = self.settings
+        handler.client_address = ("10.0.0.66", 12345)
+        handler.server = mock.MagicMock()
+        handler._send_json = mock.MagicMock()
+        payload = {"pairing_code": "123456", "drone_id": "victim", "scheme": "http",
+                   "certificate_pem": "-----BEGIN CERTIFICATE-----fake"}
+        with mock.patch.object(handlers_peer._local_network, "validate_pairing_code", return_value=True), \
+                mock.patch.object(handlers_peer, "_save_local_peer_certificate") as save_cert:
+            handler._handle_peer_pair(payload)
+        self.assertEqual(handler._send_json.call_args[0][0], 409)
+        save_cert.assert_not_called()
+        stored = local_network.get_paired_peer(self.settings, "victim")
+        self.assertTrue(stored["paired_over_tls"])
+        self.assertEqual(stored["reachable_url"], "https://192.168.1.20")
