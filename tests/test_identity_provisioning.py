@@ -1207,6 +1207,22 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                 identity._choose_device_id(settings, journal), "02:11:22:33:44:55"
             )
 
+    def test_record_journal_serializes_mapping_implementations_as_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp)
+            expected = {"state": "PROVISIONING", "reason": "clone"}
+            for journal in (
+                collections.UserDict(expected),
+                collections.ChainMap({"state": "PROVISIONING"}, {"reason": "clone"}),
+                types.MappingProxyType(expected),
+            ):
+                with self.subTest(journal=type(journal).__name__):
+                    identity._record_journal(settings, journal)
+                    self.assertEqual(
+                        json.loads(identity._journal_path(settings).read_text(encoding="utf-8")),
+                        expected,
+                    )
+
     def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")

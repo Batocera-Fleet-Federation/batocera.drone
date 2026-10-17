@@ -544,7 +544,11 @@ def _consume_authorization(settings: Any) -> None:
 
 
 def _record_journal(settings: Any, journal: dict) -> None:
-    _atomic_write_json(_journal_path(settings), journal)
+    # ``json.dump`` serializes concrete dicts, but not every Mapping implementation.
+    # Snapshot mapping journals before the atomic write so adapters such as UserDict,
+    # ChainMap, and mappingproxy persist as the same JSON object as a plain dict.
+    payload = dict(journal) if isinstance(journal, collections.abc.Mapping) else journal
+    _atomic_write_json(_journal_path(settings), payload)
 
 
 def _valid_journal(journal: dict) -> bool:
