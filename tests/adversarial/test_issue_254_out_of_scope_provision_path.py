@@ -1,15 +1,13 @@
-"""Out-of-scope evidence for issue #254: a UserDict journal never reaches the id check in _provision.
+"""Regression evidence: a UserDict journal reaches the id check in _provision.
 
 #254 is about _choose_device_id refusing a real Mapping. The real provisioning entry
-point, _provision, persists the journal (_record_journal -> json) before it ever calls
-_choose_device_id. A UserDict resumed journal therefore fails with a raw TypeError at
-the state-update write, so the accepted-Mapping resume path is unreachable from
-_provision. Production journals are json.loads dicts (_read_json), so no production
-path hits this.
+point historically persisted the journal (_record_journal -> json) before it called
+_choose_device_id. A UserDict then failed with a raw TypeError at the state-update
+write, so the accepted-Mapping resume path was unreachable from _provision.
 
-Filed as out of scope: the owner decision on whether non-dict journals should be
-persisted (or stay dict-only) belongs to a separate labelled issue. These assertions
-document the current behavior; they are not a #254 acceptance gate.
+Issue #358 resolves that conflict by requiring _provision to normalize a genuine
+Mapping before its first durable write. This test is retained, with its superseded
+expectation revised, to verify that the real provisioning path reaches the id check.
 """
 
 from __future__ import annotations
@@ -73,14 +71,13 @@ class ProvisionPathUserDictOutOfScopeTests(unittest.TestCase):
             "new_device_id": RESUMED_ID,
         })
 
-    def test_userdict_journal_fails_in_record_journal_before_the_id_check(self) -> None:
+    def test_userdict_journal_reaches_the_id_check(self) -> None:
         journal = self._resumed_journal(collections.UserDict)
-        with _enter_all(self._patched({})) as patches:
+        with _enter_all(self._patched({"side_effect": identity.IdentityError("reached id check")})) as patches:
             choose = patches[-1]
-            with self.assertRaisesRegex(TypeError, "not JSON serializable"):
+            with self.assertRaisesRegex(identity.IdentityError, "reached id check"):
                 identity._provision(self.settings, None, "clone", None, journal)
-        # The #254 check is never reached on the real provisioning path.
-        choose.assert_not_called()
+        choose.assert_called_once()
 
     def test_plain_dict_journal_reaches_the_id_check_on_the_same_path(self) -> None:
         # Positive control: the same wiring with a dict gets past the write to the id check.

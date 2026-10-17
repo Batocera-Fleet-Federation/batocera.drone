@@ -6049,7 +6049,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-provision-path",
-      "name": "Out-of-scope #254 evidence: a UserDict journal fails in _provision's journal write before the id check",
+      "name": "Regression evidence: a UserDict journal reaches _provision's resumed-id check",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
