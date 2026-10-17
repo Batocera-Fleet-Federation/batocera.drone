@@ -8115,6 +8115,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_328_real_discovery_exit_restart_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-328-real-discovery-exit-restart-uat",
+      "name": "Issue #328 create_server replaces a naturally exited LAN discovery thread",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_328_real_discovery_exit_restart_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
