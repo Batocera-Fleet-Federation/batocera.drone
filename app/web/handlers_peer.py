@@ -706,6 +706,41 @@ class HandlersPeerMixin:
             "items": page,
         }
 
+    def _handle_peer_content_inventory(self, asset_type: str, query_params: dict) -> None:
+        """Sign a bounded inventory for exactly one local asset and request nonce."""
+        if not self._peer_request_authorized():
+            return
+        try:
+            try:
+                from ..transfer.signed_inventory import safe_path, sign_inventory
+            except ImportError:  # pragma: no cover - flat execution
+                from transfer.signed_inventory import safe_path, sign_inventory
+            rel = safe_path((query_params.get("relative_path") or [""])[0])
+            system = (query_params.get("system") or [""])[0]
+            nonce = (query_params.get("nonce") or [""])[0]
+            if asset_type == "roms":
+                safe_path(system)
+                if "/" in system:
+                    raise ValueError("invalid system")
+                root = self.repository.get_local_system_dir(system).resolve()
+            elif asset_type == "bios" and not system:
+                root = self.repository.get_bios_root().resolve()
+                if not self.repository.is_local_bios_path(rel):
+                    raise FileNotFoundError()
+            else:
+                raise ValueError("invalid inventory asset type")
+            target = (root / rel).resolve()
+            if root not in target.parents or not target.exists():
+                raise FileNotFoundError()
+            payload = sign_inventory(self.settings, asset_type, system, rel, nonce, target)
+        except FileNotFoundError:
+            self._send_json(404, {"error": "not found"})
+            return
+        except ValueError:
+            self._send_json(400, {"error": "invalid content inventory request"})
+            return
+        self._send_json(200, payload)
+
     def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():
             return
