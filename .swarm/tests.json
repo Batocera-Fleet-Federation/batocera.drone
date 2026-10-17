@@ -7856,6 +7856,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_306_peer_health_interruptible_sleep.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-306-peer-health-interruptible-sleep",
+      "name": "Issue #306 local peer-health worker stop and restart responsiveness",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_306_peer_health_interruptible_sleep.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
