@@ -124,7 +124,9 @@ Rules:
 - The tailnet watchdog and bootstrap-retry threads (`transfer/peer_workers.py`) belong
   to a local-network generation. They check that generation's stop event after each
   sleep and exit, so a restart or stop never stacks a second copy. Keep that check
-  if you change their loops.
+  if you change their loops. `main()` calls `stop_local_network_workers()` when the
+  serve loop exits, so process shutdown retires the generation the same way a
+  restart does (the discovery socket is closed and joined).
 
 ## Settings
 
