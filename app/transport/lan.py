@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
 
 from .base import DownloadRequest, PeerTransport, TransferContext
 from .tailnet import is_tailnet_address
@@ -49,10 +48,7 @@ class LanDirectTransport(PeerTransport):
 
     def lan_url(self, peer: dict) -> Optional[str]:
         """Return the peer's LAN (or tailnet) URL if directly reachable, else None."""
-        url = self._tailnet_url(peer) or self._same_network_url(peer)
-        if url and peer_requires_tls(peer) and urlsplit(url).scheme.lower() != "https":
-            return None
-        return url
+        return self._tailnet_url(peer) or self._same_network_url(peer)
 
     def _same_network_url(self, peer: dict) -> Optional[str]:
         # Check the peer's cheap fields first so we only resolve our own network
@@ -83,6 +79,10 @@ class LanDirectTransport(PeerTransport):
     @staticmethod
     def _peer_url(peer: dict, host_ip: str) -> str:
         scheme = str(peer.get("scheme") or "https").strip().lower()
+        # Preserve the trust requirement before replacing the routes that may
+        # be its only evidence on records predating paired_over_tls.
+        if peer_requires_tls(peer):
+            scheme = "https"
         try:
             # Prefer the dedicated peer-mTLS port (falls back to api_port for
             # peer records that predate the browser/peer-mTLS listener split --
