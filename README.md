@@ -221,6 +221,12 @@ DRONE_APP_PASSWORD="change-this-password"
 
 The installer and `run_web_now.sh` use these if they are already set. If they are not set, the scripts prompt you.
 
+There is no built-in default password. If no password was ever configured, the Drone generates a random
+one-time password on first start and writes it (root-only, mode 0600) to
+`/userdata/system/drone-app/initial-password.txt`; read it over SSH, log in, then change it under
+Admin -> Credentials (which deletes the file). Opening the admin UI on the device itself (`127.0.0.1`)
+needs no login. If you delete the file before changing the password, restarting the Drone generates a new one.
+
 Normal installs and service recovery download the published `drone-app.tar.gz` release, validate it in a staging directory, and overlay it only after the version and required web/API/integration files check out. A failed or incomplete release download leaves the existing install unchanged. Source/codeload archives require an explicit development option:
 
 ```bash

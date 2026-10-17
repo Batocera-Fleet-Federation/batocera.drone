@@ -3,7 +3,12 @@
 Extracted from ``drone_api.py``. Holds:
 
 * ``DroneCredentialStore`` — PBKDF2-hashed local credentials persisted in the
-  shared state DB (with an env/default fallback).
+  shared state DB. There is **no universal default password**: until an operator
+  sets one (``DRONE_APP_PASSWORD``, or the admin credentials form from a
+  loopback/on-device session) a fresh Drone generates a random one-time initial
+  password, stores only its hash, and writes the plaintext to a root-only file
+  beside the credentials file (``initial-password.txt``) for the operator to read
+  on the device. ``update()`` deletes that file.
 * ``SessionStore`` + ``SessionAuth`` — cookie-based login, replacing the old
   ``BasicAuth``/``Authorization: Basic`` scheme. A browser's native Basic-auth
   prompt is invasive for humans and awkward for automation (every call needs
@@ -86,8 +91,8 @@ DRONE_AUTH_BLOCK_DURATION_SECONDS = max(1.0, float(os.environ.get("DRONE_AUTH_BL
 
 class DroneCredentialStore:
     DEFAULT_USERNAME = "batocera"
-    DEFAULT_PASSWORD = "linux"
     STATE_NAMESPACE = "credentials"
+    INITIAL_PASSWORD_FILENAME = "initial-password.txt"
 
     def __init__(
         self,
@@ -123,6 +128,10 @@ class DroneCredentialStore:
         except Exception:
             return False
 
+    @property
+    def initial_password_path(self) -> Path:
+        return self.path.parent / self.INITIAL_PASSWORD_FILENAME
+
     def load(self) -> dict:
         data = _load_state_payload(
             self.state_database_file,
@@ -133,17 +142,68 @@ class DroneCredentialStore:
         if isinstance(data, dict) and data.get("username") and data.get("password_hash"):
             return data
         username = self.env_username or self.DEFAULT_USERNAME
-        password = self.env_password or self.DEFAULT_PASSWORD
-        return {"username": username, "password_plain_fallback": password, "source": "default"}
+        if self.env_password:
+            return {"username": username, "password_plain_fallback": self.env_password, "source": "env"}
+        # No operator-provided secret and nothing persisted: nobody can log in
+        # until ensure_initial_password() (or update()) provisions one.
+        return {"username": username, "source": "default", "setup_required": True}
+
+    def setup_required(self) -> bool:
+        return bool(self.load().get("setup_required"))
+
+    def ensure_initial_password(self) -> Optional[Path]:
+        """Provision a random one-time admin password when none is configured.
+
+        Returns the path of the root-only file holding the plaintext when a new
+        password was generated, else ``None`` (credentials already persisted, or an
+        operator-provided env password is in effect). Deleting the file while the
+        initial password is still unchanged and restarting generates a fresh one. Only the hash is persisted
+        in the state DB; the plaintext is never logged or returned over HTTP.
+        """
+        with self._lock:
+            current = self.load()
+            lost_file = bool(current.get("initial")) and not self.initial_password_path.exists()
+            if not current.get("setup_required") and not lost_file:
+                return None  # configured; a deleted initial-password file is the recovery path
+            username = self.env_username or self.DEFAULT_USERNAME
+            password = secrets.token_urlsafe(18)
+            target = self.initial_password_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.unlink(missing_ok=True)
+            descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(f"username: {username}\npassword: {password}\n")
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+            try:
+                _save_state_payload(
+                    self.state_database_file,
+                    self.STATE_NAMESPACE,
+                    {
+                        "username": username,
+                        "password_hash": self._hash_password(password),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "initial": True,
+                    },
+                )
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+            return target
 
     def check(self, username: str, password: str) -> bool:
         data = self.load()
-        if not hmac.compare_digest(username, str(data.get("username") or "")):
-            return False
+        expected_username = str(data.get("username") or "")
+        username_ok = hmac.compare_digest(username.encode("utf-8"), expected_username.encode("utf-8"))
         password_hash = data.get("password_hash")
         if password_hash:
-            return self._verify_hash(password, str(password_hash))
-        return hmac.compare_digest(password, str(data.get("password_plain_fallback") or ""))
+            return self._verify_hash(password, str(password_hash)) and username_ok
+        plain = str(data.get("password_plain_fallback") or "")
+        if not plain:
+            return False  # setup required: no password exists, so nothing can match
+        return hmac.compare_digest(password.encode("utf-8"), plain.encode("utf-8")) and username_ok
 
     def update(self, username: str, password: str) -> dict:
         username = username.strip()
@@ -163,6 +223,7 @@ class DroneCredentialStore:
                 data,
             )
             self.path.unlink(missing_ok=True)
+            self.initial_password_path.unlink(missing_ok=True)
             return {"username": username, "updated_at": data["updated_at"], "stored": True}
 
 
