@@ -8211,6 +8211,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_332_lan_tier_scheme_casing.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-332-lan-tier-scheme-casing",
+      "name": "Issue #332 LAN tier must not build cleartext routes for a TLS-pinned peer with mixed-case scheme",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transport/lan.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
