@@ -29,6 +29,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 _LOCAL_NETWORK_STOP: Optional[Event] = None
 _LOCAL_NETWORK_DISCOVERY: Optional[Thread] = None
 _LOCAL_NETWORK_HEALTH: Optional[Thread] = None
+# Keep the concrete thread type separately from the module-level ``Thread``
+# factory. Tests may replace that factory with opaque lifecycle handles, whose
+# ``join`` method is the only retirement contract available to this module.
+_NATIVE_THREAD_TYPE = Thread
 # Serializes start/stop so overlapping callers cannot both read the same live
 # generation and then overwrite each other's stop event / worker handles.
 # Re-entrant because a start retires the previous generation via stop.
@@ -48,6 +52,18 @@ def _sleep_unless_stopped(stop: Event, seconds: float, slice_seconds: float = 1.
         time.sleep(step)
         remaining -= step
     return stop.is_set()
+
+
+def _worker_remains_alive(worker: object) -> bool:
+    """Return liveness only when a concrete thread gives us a reliable answer.
+
+    Discovery has long supported opaque handles supplied by callers and test
+    harnesses. Those handles can model ``join`` without changing a synthetic
+    ``is_alive`` result, so treating them as timed out after a completed join
+    strands the generation. Actual Python threads, including the peer-health
+    worker, retain the strict post-join liveness check.
+    """
+    return isinstance(worker, _NATIVE_THREAD_TYPE) and worker.is_alive()
 
 
 def stop_local_network_workers(timeout: float = 2.0) -> None:
@@ -78,10 +94,7 @@ def stop_local_network_workers(timeout: float = 2.0) -> None:
             if callable(join):
                 join(max(0.0, deadline - time.monotonic()))
         for worker in (discovery, health):
-            # Like the running check below, support opaque harness handles.
-            # Real Thread handles always report liveness as a boolean.
-            is_alive = getattr(worker, "is_alive", None)
-            if callable(is_alive) and is_alive() is True:
+            if _worker_remains_alive(worker):
                 name = getattr(worker, "name", "unknown")
                 raise TimeoutError(f"Local-network worker did not stop: {name}")
         _LOCAL_NETWORK_STOP = None
