@@ -641,10 +641,15 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
             raise IdentityError("the journaled device id is not a valid Drone id")
         return normalized
     if "new_device_id" in journal:
-        # A falsey mock is still a present, invalid resumed value, not a missing
-        # journal field. Real JSON null/empty values retain the legacy fresh-id path.
+        # A present non-None value is an attempted resume, even when falsey. Only JSON
+        # null (or an absent field) means there is no id to resume. Keeping this aligned
+        # with _valid_journal prevents malformed journals from silently minting identity.
         resumed = journal["new_device_id"]
-        if _is_mock_path(resumed):
+        if resumed is not None and (
+            not isinstance(resumed, str)
+            or _is_mock_path(resumed)
+            or not _normalize_device_id(resumed)
+        ):
             raise IdentityError("the journaled device id is not a valid Drone id")
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
