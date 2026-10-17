@@ -8347,6 +8347,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-342-discovery-thread-settings-snapshot-uat",
+      "name": "Issue #342 discovery thread retains its Settings database snapshot",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_342_discovery_thread_settings_snapshot_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_342_discovery_thread_settings_snapshot_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
