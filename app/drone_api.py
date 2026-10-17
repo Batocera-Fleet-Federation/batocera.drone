@@ -624,6 +624,7 @@ try:
         _generate_self_signed_cert,
         _resolve_tls_material,
         register_live_tls_servers,
+        unregister_live_tls_servers,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -632,6 +633,7 @@ except ImportError:
         _generate_self_signed_cert,
         _resolve_tls_material,
         register_live_tls_servers,
+        unregister_live_tls_servers,
     )
 
 
@@ -2500,6 +2502,17 @@ def _build_cast_http_handler(settings: Settings):
     return factory
 
 
+def _abandon_listeners(listeners) -> None:
+    """Close listeners bound by a create_server() call that failed part-way through."""
+    unregister_live_tls_servers(listeners)
+    for listener in listeners:
+        # Only listeners whose serve_forever thread was started need shutdown(); shutdown()
+        # on a server that never entered serve_forever would wait forever.
+        if getattr(listener, "thread", None) is not None:
+            listener.shutdown()
+        listener.server_close()
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
     # Identity validation (main()) decides whether this Drone may take part in the swarm at
@@ -2641,167 +2654,180 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         json_cache=json_cache,
     )
 
-    server = DroneThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
-    server.auth = auth  # type: ignore[attr-defined]
-    _apply_server_tls(settings, server, peer_mtls=False)
-
-    compatibility_servers = []
-    for compatibility_port in settings.compatibility_https_ports:
-        try:
-            compatibility_server = DroneThreadingHTTPServer(("0.0.0.0", compatibility_port), handler_factory)
-            compatibility_server.auth = auth  # type: ignore[attr-defined]
-            _apply_server_tls(settings, compatibility_server, peer_mtls=False)
-        except OSError as error:
-            print(
-                f"Drone compatibility listener skipped on port {compatibility_port}: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
-            continue
-        compatibility_thread = Thread(
-            target=compatibility_server.serve_forever,
-            name=f"drone-compat-listener-{compatibility_port}",
-            daemon=True,
-        )
-        compatibility_thread.start()
-        compatibility_server.thread = compatibility_thread  # type: ignore[attr-defined]
-        compatibility_servers.append(compatibility_server)
-        scheme = "http" if settings.http_only else "https"
-        print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
-    server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
-
-    # The one dedicated peer-to-peer mTLS listener: CERT_OPTIONAL + paired-peer
-    # trust lives here only, so browsers on the ports above never get asked for
-    # a client certificate. api_routes.py's routing guard restricts this
-    # listener to /peer/* + bare /health; if the bind itself fails, fall back
-    # to the pre-split behavior (peer traffic allowed on the main listener too)
-    # rather than silently going P2P-dark behind a healthy-looking browser UI.
-    peer_mtls_server = None
+    # Every listener bound below is recorded in `listeners`. If anything later in this
+    # function raises (e.g. the LAN worker gate), they are shut down and closed so a retry
+    # can bind the same ports instead of failing with "Address already in use".
+    listeners: list = []
     try:
-        if swarm_enabled:
-            peer_mtls_server = DroneThreadingHTTPServer(("0.0.0.0", settings.peer_mtls_port), handler_factory)
-            peer_mtls_server.auth = auth  # type: ignore[attr-defined]
-            _apply_server_tls(settings, peer_mtls_server, peer_mtls=True)
-    except OSError as error:
-        print(
-            f"Drone peer-mTLS listener skipped on port {settings.peer_mtls_port} (falling back to "
-            f"serving /peer/* on the main listener): {error}",
-            file=sys.stderr,
-            flush=True,
-        )
-        peer_mtls_server = None
-    else:
-        if peer_mtls_server is not None:
-            peer_mtls_thread = Thread(
-                target=peer_mtls_server.serve_forever,
-                name="drone-peer-mtls-listener",
+        server = DroneThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
+        listeners.append(server)
+        server.auth = auth  # type: ignore[attr-defined]
+        _apply_server_tls(settings, server, peer_mtls=False)
+
+        compatibility_servers = []
+        for compatibility_port in settings.compatibility_https_ports:
+            try:
+                compatibility_server = DroneThreadingHTTPServer(("0.0.0.0", compatibility_port), handler_factory)
+                compatibility_server.auth = auth  # type: ignore[attr-defined]
+                _apply_server_tls(settings, compatibility_server, peer_mtls=False)
+            except OSError as error:
+                print(
+                    f"Drone compatibility listener skipped on port {compatibility_port}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            compatibility_thread = Thread(
+                target=compatibility_server.serve_forever,
+                name=f"drone-compat-listener-{compatibility_port}",
                 daemon=True,
             )
-            peer_mtls_thread.start()
-            peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
+            compatibility_thread.start()
+            compatibility_server.thread = compatibility_thread  # type: ignore[attr-defined]
+            compatibility_servers.append(compatibility_server)
+            listeners.append(compatibility_server)
             scheme = "http" if settings.http_only else "https"
-            print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
+            print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
+        server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
 
-    # Plain-HTTP -> HTTPS redirect listener. Skipped in http_only mode (there is
-    # no HTTPS to redirect to there) and when disabled via http_redirect_port=0.
-    # Never TLS-wrapped -- this is the one listener deliberately left unencrypted,
-    # and it only ever serves a 301 (see _HttpRedirectHandler).
-    http_redirect_server = None
-    if not settings.http_only and settings.http_redirect_port > 0:
+        # The one dedicated peer-to-peer mTLS listener: CERT_OPTIONAL + paired-peer
+        # trust lives here only, so browsers on the ports above never get asked for
+        # a client certificate. api_routes.py's routing guard restricts this
+        # listener to /peer/* + bare /health; if the bind itself fails, fall back
+        # to the pre-split behavior (peer traffic allowed on the main listener too)
+        # rather than silently going P2P-dark behind a healthy-looking browser UI.
+        peer_mtls_server = None
         try:
-            http_redirect_server = DroneThreadingHTTPServer(
-                ("0.0.0.0", settings.http_redirect_port), _build_http_redirect_handler(settings)
-            )
+            if swarm_enabled:
+                peer_mtls_server = DroneThreadingHTTPServer(("0.0.0.0", settings.peer_mtls_port), handler_factory)
+                peer_mtls_server.auth = auth  # type: ignore[attr-defined]
+                _apply_server_tls(settings, peer_mtls_server, peer_mtls=True)
         except OSError as error:
             print(
-                f"HTTP->HTTPS redirect listener skipped on port {settings.http_redirect_port}: {error}",
+                f"Drone peer-mTLS listener skipped on port {settings.peer_mtls_port} (falling back to "
+                f"serving /peer/* on the main listener): {error}",
                 file=sys.stderr,
                 flush=True,
             )
-            http_redirect_server = None
+            peer_mtls_server = None
         else:
-            http_redirect_thread = Thread(
-                target=http_redirect_server.serve_forever,
-                name="drone-http-redirect-listener",
-                daemon=True,
-            )
-            http_redirect_thread.start()
-            http_redirect_server.thread = http_redirect_thread  # type: ignore[attr-defined]
-            print(
-                f"Serving HTTP->HTTPS redirect on http://0.0.0.0:{settings.http_redirect_port}",
-                flush=True,
-            )
-    server.http_redirect_server = http_redirect_server  # type: ignore[attr-defined]
+            if peer_mtls_server is not None:
+                peer_mtls_thread = Thread(
+                    target=peer_mtls_server.serve_forever,
+                    name="drone-peer-mtls-listener",
+                    daemon=True,
+                )
+                peer_mtls_thread.start()
+                peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
+                listeners.append(peer_mtls_server)
+                scheme = "http" if settings.http_only else "https"
+                print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
 
-    # Cast-stream listener: on by default (settings.cast_enabled), opt-out
-    # via DRONE_CAST_ENABLED=0. Unlike http_redirect_server above, this one
-    # plain-HTTP listener does serve real content (a token-gated movie
-    # stream, see _CastHttpHandler) -- acceptable on by default because
-    # that content is gated by a single-movie-scoped token only an
-    # already-authenticated session could have minted, not left wide open.
-    cast_http_server = None
-    if settings.cast_enabled:
-        try:
-            cast_http_server = DroneThreadingHTTPServer(
-                ("0.0.0.0", settings.cast_http_port), _build_cast_http_handler(settings)
-            )
-        except OSError as error:
-            print(
-                f"Cast-stream listener skipped on port {settings.cast_http_port}: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
-            cast_http_server = None
+        # Plain-HTTP -> HTTPS redirect listener. Skipped in http_only mode (there is
+        # no HTTPS to redirect to there) and when disabled via http_redirect_port=0.
+        # Never TLS-wrapped -- this is the one listener deliberately left unencrypted,
+        # and it only ever serves a 301 (see _HttpRedirectHandler).
+        http_redirect_server = None
+        if not settings.http_only and settings.http_redirect_port > 0:
+            try:
+                http_redirect_server = DroneThreadingHTTPServer(
+                    ("0.0.0.0", settings.http_redirect_port), _build_http_redirect_handler(settings)
+                )
+            except OSError as error:
+                print(
+                    f"HTTP->HTTPS redirect listener skipped on port {settings.http_redirect_port}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                http_redirect_server = None
+            else:
+                http_redirect_thread = Thread(
+                    target=http_redirect_server.serve_forever,
+                    name="drone-http-redirect-listener",
+                    daemon=True,
+                )
+                http_redirect_thread.start()
+                http_redirect_server.thread = http_redirect_thread  # type: ignore[attr-defined]
+                listeners.append(http_redirect_server)
+                print(
+                    f"Serving HTTP->HTTPS redirect on http://0.0.0.0:{settings.http_redirect_port}",
+                    flush=True,
+                )
+        server.http_redirect_server = http_redirect_server  # type: ignore[attr-defined]
+
+        # Cast-stream listener: on by default (settings.cast_enabled), opt-out
+        # via DRONE_CAST_ENABLED=0. Unlike http_redirect_server above, this one
+        # plain-HTTP listener does serve real content (a token-gated movie
+        # stream, see _CastHttpHandler) -- acceptable on by default because
+        # that content is gated by a single-movie-scoped token only an
+        # already-authenticated session could have minted, not left wide open.
+        cast_http_server = None
+        if settings.cast_enabled:
+            try:
+                cast_http_server = DroneThreadingHTTPServer(
+                    ("0.0.0.0", settings.cast_http_port), _build_cast_http_handler(settings)
+                )
+            except OSError as error:
+                print(
+                    f"Cast-stream listener skipped on port {settings.cast_http_port}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                cast_http_server = None
+            else:
+                cast_http_thread = Thread(
+                    target=cast_http_server.serve_forever,
+                    name="drone-cast-http-listener",
+                    daemon=True,
+                )
+                cast_http_thread.start()
+                cast_http_server.thread = cast_http_thread  # type: ignore[attr-defined]
+                listeners.append(cast_http_server)
+                print(
+                    f"Serving cast-stream listener on http://0.0.0.0:{settings.cast_http_port} (token-gated, movies only)",
+                    flush=True,
+                )
+        server.cast_http_server = cast_http_server  # type: ignore[attr-defined]
+
+        all_tls_servers = [server, *compatibility_servers] + ([peer_mtls_server] if peer_mtls_server else [])
+        for tls_server in all_tls_servers:
+            tls_server.all_tls_servers = all_tls_servers  # type: ignore[attr-defined]
+            tls_server.is_peer_mtls_listener = False  # type: ignore[attr-defined]
+        register_live_tls_servers(all_tls_servers)
+        if peer_mtls_server is not None:
+            peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
+
+        # Restart when a stop (e.g. harness teardown) cleared the live generation,
+        # even though the once-per-process latch is still set.
+        if swarm_enabled and not (_LOCAL_NETWORK_WORKERS_STARTED and local_network_workers_running()):
+            _start_local_network_workers(settings)
+            _LOCAL_NETWORK_WORKERS_STARTED = True
+        if not _AUTOMATION_POLLER_STARTED:
+            _start_automation_poller(settings)
+            _AUTOMATION_POLLER_STARTED = True
+        if swarm_enabled:
+            # Multiplayer crash recovery + session housekeeping (idempotent; see multiplayer/worker.py).
+            server._owns_multiplayer_worker = _start_multiplayer_worker(settings, repository) is not None
+        if settings.rom_metadata_poll_seconds == 0:
+            print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
+        elif not _ROM_METADATA_POLLER_STARTED:
+            _start_rom_metadata_poller(settings, repository)
+            _ROM_METADATA_POLLER_STARTED = True
         else:
-            cast_http_thread = Thread(
-                target=cast_http_server.serve_forever,
-                name="drone-cast-http-listener",
-                daemon=True,
-            )
-            cast_http_thread.start()
-            cast_http_server.thread = cast_http_thread  # type: ignore[attr-defined]
-            print(
-                f"Serving cast-stream listener on http://0.0.0.0:{settings.cast_http_port} (token-gated, movies only)",
-                flush=True,
-            )
-    server.cast_http_server = cast_http_server  # type: ignore[attr-defined]
+            print("Asset metadata poller already started", file=sys.stdout, flush=True)
 
-    all_tls_servers = [server, *compatibility_servers] + ([peer_mtls_server] if peer_mtls_server else [])
-    for tls_server in all_tls_servers:
-        tls_server.all_tls_servers = all_tls_servers  # type: ignore[attr-defined]
-        tls_server.is_peer_mtls_listener = False  # type: ignore[attr-defined]
-    register_live_tls_servers(all_tls_servers)
-    if peer_mtls_server is not None:
-        peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
+        # Near-real-time ROM change detection wakes the poller above; only useful
+        # when the poller is running.
+        if settings.rom_metadata_poll_seconds == 0 or not ROM_METADATA_WATCH_ENABLED:
+            if not ROM_METADATA_WATCH_ENABLED:
+                print("ROM filesystem watcher disabled: ROM_METADATA_WATCH_ENABLED=0", file=sys.stdout, flush=True)
+        elif not _ROM_METADATA_WATCHER_STARTED:
+            _start_rom_metadata_watcher(settings)
+            _ROM_METADATA_WATCHER_STARTED = True
 
-    # Restart when a stop (e.g. harness teardown) cleared the live generation,
-    # even though the once-per-process latch is still set.
-    if swarm_enabled and not (_LOCAL_NETWORK_WORKERS_STARTED and local_network_workers_running()):
-        _start_local_network_workers(settings)
-        _LOCAL_NETWORK_WORKERS_STARTED = True
-    if not _AUTOMATION_POLLER_STARTED:
-        _start_automation_poller(settings)
-        _AUTOMATION_POLLER_STARTED = True
-    if swarm_enabled:
-        # Multiplayer crash recovery + session housekeeping (idempotent; see multiplayer/worker.py).
-        server._owns_multiplayer_worker = _start_multiplayer_worker(settings, repository) is not None
-    if settings.rom_metadata_poll_seconds == 0:
-        print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
-    elif not _ROM_METADATA_POLLER_STARTED:
-        _start_rom_metadata_poller(settings, repository)
-        _ROM_METADATA_POLLER_STARTED = True
-    else:
-        print("Asset metadata poller already started", file=sys.stdout, flush=True)
-
-    # Near-real-time ROM change detection wakes the poller above; only useful
-    # when the poller is running.
-    if settings.rom_metadata_poll_seconds == 0 or not ROM_METADATA_WATCH_ENABLED:
-        if not ROM_METADATA_WATCH_ENABLED:
-            print("ROM filesystem watcher disabled: ROM_METADATA_WATCH_ENABLED=0", file=sys.stdout, flush=True)
-    elif not _ROM_METADATA_WATCHER_STARTED:
-        _start_rom_metadata_watcher(settings)
-        _ROM_METADATA_WATCHER_STARTED = True
-
+    except BaseException:
+        _abandon_listeners(listeners)
+        raise
     return server
 
 
