@@ -356,7 +356,12 @@ if [ -n "$DRONE_TAILNET_IP" ]; then
 fi
 echo ""
 echo "   Works from any phone or computer on the same network."
-echo "   Sign in with username 'batocera' and password 'linux'."
+echo "   There is no built-in default password. Use your configured credentials."
+echo "   If no password is configured, the Drone writes a random one-time password"
+echo "   on first start to /userdata/system/drone-app/initial-password.txt (root-only)."
+echo "   Read that file over SSH for your login credentials, then change the password"
+echo "   under Admin -> Credentials."
+echo "   Opening the UI on the device itself (https://127.0.0.1) needs no login."
 echo "   (If it does not load yet, start the DRONE_SERVER service or reboot.)"
 echo ""
 echo "======================================================================"
