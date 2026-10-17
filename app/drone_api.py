@@ -673,11 +673,11 @@ except ImportError:
 
 
 try:
-    from .transfer.peer_workers import _start_local_network_workers, local_network_workers_running
+    from .transfer.peer_workers import _start_local_network_workers, local_network_workers_running, stop_local_network_workers
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from transfer.peer_workers import _start_local_network_workers, local_network_workers_running  # type: ignore
+    from transfer.peer_workers import _start_local_network_workers, local_network_workers_running, stop_local_network_workers  # type: ignore
 
 
 try:
@@ -2838,7 +2838,12 @@ def main() -> None:
         print(f"Auth username: {safe_username}")
         scheme = "http" if settings.http_only else "https"
         print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
-        server.serve_forever()
+        try:
+            server.serve_forever()
+        finally:
+            # Retire the local-network generation (tailnet/peer-health loops and LAN
+            # discovery) on every exit path, not only on restart.
+            stop_local_network_workers()
     except KeyboardInterrupt:
         print("Drone App shutdown requested", file=sys.stderr, flush=True)
         raise
