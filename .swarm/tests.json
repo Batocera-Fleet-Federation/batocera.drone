@@ -8443,6 +8443,37 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-355-mapping-journal-persistence",
+      "name": "Issue #355 journal persistence accepts standard Mapping implementations",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_mapping_journal_persistence.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_mapping_journal_persistence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
