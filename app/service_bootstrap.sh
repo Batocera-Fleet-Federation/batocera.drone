@@ -524,13 +524,36 @@ stop_app() {
     kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
   fi
   HTTPS_PORT="${HTTPS_PORT:-443}"
-  kill -9 $(lsof -t -i:"$HTTPS_PORT") 2>/dev/null || true
+  # Give the Python listener a chance to unwind main() and retire its local
+  # network workers before terminating the process. The supervisor may also
+  # receive TERM above; repeat against listeners in case it orphaned one.
+  stop_listener_port() {
+    listener_pids="$(lsof -t -i:"$1" 2>/dev/null || true)"
+    [ -n "$listener_pids" ] || return 0
+    kill $listener_pids 2>/dev/null || true
+    attempt=0
+    while [ "$attempt" -lt 2 ]; do
+      remaining=""
+      for listener_pid in $listener_pids; do
+        if kill -0 "$listener_pid" 2>/dev/null; then
+          remaining="$remaining $listener_pid"
+        fi
+      done
+      [ -n "$remaining" ] || return 0
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+    for listener_pid in $listener_pids; do
+      kill -0 "$listener_pid" 2>/dev/null && kill -9 "$listener_pid" 2>/dev/null || true
+    done
+  }
+  stop_listener_port "$HTTPS_PORT"
   compat_ports="$(printf '%s' "${DRONE_COMPAT_HTTPS_PORTS:-8443}" | tr ',;' '  ')"
   for compat_port in $compat_ports; do
-    kill -9 $(lsof -t -i:"$compat_port") 2>/dev/null || true
+    stop_listener_port "$compat_port"
   done
   peer_mtls_port="${DRONE_PEER_MTLS_PORT:-8543}"
-  kill -9 $(lsof -t -i:"$peer_mtls_port") 2>/dev/null || true
+  stop_listener_port "$peer_mtls_port"
   rm -f "$PID_FILE"
   rm -f "$CONTROL_PID_FILE"
 }
