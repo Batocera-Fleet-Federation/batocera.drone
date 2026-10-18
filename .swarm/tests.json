@@ -15,6 +15,70 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_359_attribute_hook_resumed_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-attribute-hook-resumed-id-uat",
+      "name": "Issue #359 resumed journal IDs ignore str attribute-hook substitution",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_attribute_hook_resumed_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_hostile_resumed_string_hooks_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-hostile-resumed-string-hooks-uat",
+      "name": "Issue #359 resumed journal IDs ignore hostile str-subclass hooks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_hostile_resumed_string_hooks_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_325_listener_rollback_uat.py"
       ],
       "disruptive": false,
@@ -32,6 +96,38 @@
           "app/drone_api.py",
           "app/web/server_tls.py",
           "tests/adversarial/test_issue_325_listener_rollback_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_resumed_journal_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-resumed-journal-id-uat",
+      "name": "Issue #359 resumed journal id ignores str-subclass overrides",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_resumed_journal_id_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -6111,7 +6207,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-resumed-id-coercion",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): str-subclass coercion and inconsistent Mapping KeyError",
+      "name": "Issue #359 str-subclass resume regression plus remaining #254 expectedFailure Mapping evidence",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
