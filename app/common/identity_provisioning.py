@@ -547,6 +547,22 @@ def _record_journal(settings: Any, journal: dict) -> None:
     _atomic_write_json(_journal_path(settings), journal)
 
 
+def _normalized_journal_device_id(value: object) -> Optional[str]:
+    """Validate a journaled id using its immutable string payload.
+
+    Journal data normally originates with ``json.loads`` and therefore contains
+    exact ``str`` instances.  Helper callers may provide a ``str`` subclass,
+    though, whose normal string hooks have been overridden.  Detach such a
+    value through ``str.__str__`` before normalizing so admission and resume
+    cannot see different identities.  Check mocks first because a mock with a
+    ``str`` spec can spoof ``isinstance(value, str)``.
+    """
+    if _is_mock_path(value) or not isinstance(value, str):
+        return None
+    plain_value = value if type(value) is str else str.__str__(value)
+    return _normalize_device_id(plain_value)
+
+
 def _valid_journal(journal: dict) -> bool:
     """Accept only journals that our provisioning state machine could have written.
 
@@ -571,7 +587,7 @@ def _valid_journal(journal: dict) -> bool:
     if HardwareSnapshot.from_dict(journal.get("hardware")) is None:
         return False
     new_device_id = journal.get("new_device_id")
-    if new_device_id is not None and (not isinstance(new_device_id, str) or not _normalize_device_id(new_device_id)):
+    if new_device_id is not None and _normalized_journal_device_id(new_device_id) is None:
         return False
     return True
 
@@ -632,16 +648,7 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
         # with _valid_journal prevents malformed journals from silently minting identity.
         resumed = journal["new_device_id"]
         if resumed is not None:
-            # A str subclass can override strip() (or truthiness) and thereby make
-            # validation see a different id from the immutable string payload. Convert
-            # through the base implementation before normalization so its methods cannot
-            # influence which identity is resumed.
-            plain_resumed = str.__str__(resumed) if isinstance(resumed, str) else resumed
-            normalized = (
-                _normalize_device_id(plain_resumed)
-                if isinstance(resumed, str) and not _is_mock_path(resumed)
-                else None
-            )
+            normalized = _normalized_journal_device_id(resumed)
             if normalized is None:
                 raise IdentityError("the journaled device id is not a valid Drone id")
             return normalized
