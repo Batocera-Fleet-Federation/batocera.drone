@@ -1207,6 +1207,26 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                 identity._choose_device_id(settings, journal), "02:11:22:33:44:55"
             )
 
+    def test_choose_device_id_rejects_mapping_with_inconsistent_key_lookup(self) -> None:
+        class InconsistentMapping(collections.abc.Mapping):
+            def __contains__(self, key: object) -> bool:
+                return key == "new_device_id"
+
+            def __getitem__(self, key: str) -> object:
+                raise KeyError(key)
+
+            def __iter__(self):
+                return iter(())
+
+            def __len__(self) -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            with self.assertRaisesRegex(identity.IdentityError, "journaled device id"):
+                identity._choose_device_id(settings, InconsistentMapping())
+            self.assertFalse(identity._device_id_path(Path(tmp)).exists())
+
     def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
