@@ -8570,6 +8570,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-360-mapping-lookup-boundaries-uat",
+      "name": "Issue #360 inconsistent Mapping and dict lookups fail closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_360_mapping_lookup_boundaries_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_360_mapping_lookup_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
