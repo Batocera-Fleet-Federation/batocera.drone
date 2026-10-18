@@ -47,6 +47,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_359_resumed_journal_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-resumed-journal-id-uat",
+      "name": "Issue #359 resumed journal id ignores str-subclass overrides",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_resumed_journal_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_142_streamdeck_disconnected_uat.py"
       ],
       "disruptive": false,
@@ -6111,7 +6143,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-resumed-id-coercion",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): str-subclass coercion and inconsistent Mapping KeyError",
+      "name": "Issue #359 str-subclass resume regression plus remaining #254 expectedFailure Mapping evidence",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
