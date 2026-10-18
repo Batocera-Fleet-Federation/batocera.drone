@@ -6145,7 +6145,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-provision-path",
-      "name": "Out-of-scope #254 evidence: a UserDict journal fails in _provision's journal write before the id check",
+      "name": "Regression evidence: a UserDict journal reaches _provision's resumed-id check",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -8535,6 +8535,68 @@
         "files": [
           "app/common/identity_provisioning.py",
           "tests/adversarial/test_issue_350_resumed_device_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-358-mapping-journal-provision-uat",
+      "name": "Issue #358 non-dict Mapping journal reaches resumed identity validation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_358_mapping_journal_provision_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_358_mapping_journal_provision_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-358-mapping-journal-resume-uat",
+      "name": "Issue #358 non-dict Mapping journal resumes its validated identity",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_358_mapping_journal_resume_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_358_mapping_journal_resume_uat.py"
         ],
         "mounts": [],
         "servers": []
