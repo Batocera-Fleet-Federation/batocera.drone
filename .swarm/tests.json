@@ -8572,6 +8572,37 @@
       }
     },
     {
+      "id": "adversarial-issue-358-mapping-journal-resume-uat",
+      "name": "Issue #358 non-dict Mapping journal resumes its validated identity",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_358_mapping_journal_resume_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_358_mapping_journal_resume_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
       "command": [
         "python3",
         "-m",
