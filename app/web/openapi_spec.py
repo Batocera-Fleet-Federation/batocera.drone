@@ -689,6 +689,12 @@ def _schemas() -> Dict[str, Schema]:
             {"audio_volume": _integer(minimum=0, maximum=100)},
             ("audio_volume",),
         ),
+        "RgsStatusResponse": _object({
+            "installed": _boolean(), "available": _boolean(),
+            "enabled": _boolean(nullable=True), "running": _boolean(nullable=True),
+            "error": _string(),
+        }, ("installed", "available", "enabled", "running")),
+        "RgsUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "ScreenModeResponse": _object({"screen_mode": _string(nullable=True)}),
         "ScreenModeUpdateRequest": _object(
             {"mode": _string()},
@@ -2514,6 +2520,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 )
             },
             "/admin/gameplay-logs": {"get": _operation("Get local gameplay history", {"200": _json_response("GameplayLogsResponse", "Gameplay history")}, tags=["admin"])},
+            "/admin/rgs": {
+                "get": _operation("Get RGS download manager status", {"200": _json_response("RgsStatusResponse")}, tags=["admin"]),
+                "post": _operation("Start or stop RGS and set its boot preference", {"200": _json_response("RgsStatusResponse")},
+                                   request_body=_json_request("RgsUpdateRequest"), tags=["admin"],
+                                   error_codes=("400", "401", "403", "429", "500", "503")),
+            },
             "/admin/system-info": {
                 "get": _operation(
                     "Get Batocera system information",

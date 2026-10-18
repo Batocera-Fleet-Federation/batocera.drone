@@ -41,3 +41,11 @@ available, an active VPN tunnel, and the RGS download-service files at their
 standard Batocera paths. The public port is assigned by Proton and may change
 when the VPN reconnects; RGS's existing mapping keepalive is responsible for
 updating the portal registration.
+
+The Controls page has an **RGS Download Manager** switch at the top. Turning it
+off stops RGS uploads and downloads immediately and disables the `rgs_download`
+service at boot. Turning it on enables startup at boot and starts RGS through its
+normal launcher, including the Proton route check above. The switch reports the
+observed process state separately from the boot preference; a failed start or
+stop is shown as an error. If RGS or Batocera service control is unavailable, the
+switch is disabled.
