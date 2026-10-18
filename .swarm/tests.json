@@ -8444,6 +8444,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-349-cleanup-stack-uat",
+      "name": "Issue #349 unittest cleanup retires LAN workers before userdata removal",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_cleanup_stack_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_cleanup_stack_uat.py",
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
