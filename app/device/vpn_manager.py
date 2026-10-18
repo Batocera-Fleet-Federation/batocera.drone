@@ -1,8 +1,7 @@
 """OpenVPN client management: upload a provider's .ovpn, store credentials,
 connect/disconnect, and report live status -- entirely from the Drone admin
-UI, no CLI/SSH required. Provider-agnostic (Proton VPN, NordVPN, PIA, ...):
-nothing here is Proton-specific, it just rewrites whatever ``.ovpn`` is
-uploaded to route through the credentials file this module manages.
+UI, no CLI/SSH required. Most behavior is provider-agnostic; Proton profiles
+also enable Proton's NAT-PMP port forwarding for RGS peer-to-peer traffic.
 
 Unlike TorrentManager, there is no background worker thread here: a VPN
 connection is exactly one process, so ``status()`` recomputes it fresh on
@@ -354,6 +353,11 @@ def save_credentials(settings: Settings, username: str, password: str) -> dict:
         raise ValueError("username is required")
     if not password:
         raise ValueError("password is required")
+    if proton_port_forwarding_supported(settings) and not username.lower().endswith("+pmp"):
+        # Proton requires the +pmp suffix on the OpenVPN service username to
+        # enable NAT-PMP. Keep the browser input simple; store the effective
+        # username OpenVPN and RGS need.
+        username += "+pmp"
     directory = vpn_dir(settings)
     directory.mkdir(parents=True, exist_ok=True)
     path = auth_path(settings)
@@ -364,6 +368,49 @@ def save_credentials(settings: Settings, username: str, password: str) -> dict:
         pass
     state = _save_state(settings, has_credentials=True, username=username)
     return {"status": "ok", "username": state["username"]}
+
+
+def proton_port_forwarding_supported(settings: Settings) -> bool:
+    """Identify Proton OpenVPN profiles from their shipped comments/remotes."""
+    try:
+        text = config_path(settings).read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+    return any(marker in text for marker in ("protonvpn", "protonvpn.com", "protonvpn.net", "proton ag"))
+
+
+def proton_port_forwarding_enabled(settings: Settings) -> bool:
+    """Whether this Proton profile's saved OpenVPN username includes +pmp."""
+    if not proton_port_forwarding_supported(settings):
+        return False
+    try:
+        with auth_path(settings).open("r", encoding="utf-8") as credentials:
+            return credentials.readline().strip().lower().endswith("+pmp")
+    except OSError:
+        return False
+
+
+def _enable_proton_port_forwarding_credentials(settings: Settings) -> bool:
+    """Add Proton's required ``+pmp`` suffix to credentials saved before this
+    integration was installed. Returns True if the active auth file changed.
+    """
+    if not proton_port_forwarding_supported(settings):
+        return False
+    path = auth_path(settings)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    if not lines or not lines[0] or lines[0].lower().endswith("+pmp"):
+        return False
+    lines[0] += "+pmp"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    _save_state(settings, username=lines[0])
+    return True
 
 
 # ---------------------------------------------------------------- process
@@ -436,10 +483,34 @@ def connect(settings: Settings) -> dict:
     errors = validate_ready(settings)
     if errors:
         return {"status": "error", "errors": errors}
+    proton_credentials_updated = _enable_proton_port_forwarding_credentials(settings)
     with _CONNECT_LOCK:
         cfg = config_path(settings)
-        if _find_running_openvpn_pid(cfg) is not None:
-            return {"status": "already_running"}
+        running_pid = _find_running_openvpn_pid(cfg)
+        if running_pid is not None:
+            if not proton_credentials_updated:
+                return {"status": "already_running"}
+            # The username suffix is applied to authentication at tunnel
+            # negotiation time, so recycle an existing Proton session once
+            # when upgrading an already-configured Drone.
+            try:
+                os.kill(running_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                return {"status": "error", "errors": [f"Could not restart OpenVPN to enable Proton port forwarding: {error}"]}
+            deadline = time.monotonic() + VPN_DISCONNECT_GRACE_SECONDS
+            while time.monotonic() < deadline and _find_running_openvpn_pid(cfg) is not None:
+                time.sleep(0.25)
+            remaining_pid = _find_running_openvpn_pid(cfg)
+            if remaining_pid is not None:
+                try:
+                    os.kill(remaining_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                time.sleep(0.25)
+            if _find_running_openvpn_pid(cfg) is not None:
+                return {"status": "error", "errors": ["The existing OpenVPN session could not be restarted to enable Proton port forwarding."]}
         binary = find_openvpn_binary()
         vpn_log = log_path(settings)
         try:
@@ -461,7 +532,7 @@ def connect(settings: Settings) -> dict:
             return {"status": "error", "errors": [message]}
         _save_state(settings, connected_at=None)
         print("VPN connect requested: openvpn daemonized", file=sys.stdout, flush=True)
-        return {"status": "connecting"}
+        return {"status": "connecting", "proton_port_forwarding": proton_credentials_updated or proton_port_forwarding_supported(settings)}
 
 
 def disconnect(settings: Settings) -> dict:
@@ -756,6 +827,7 @@ def status(settings: Settings) -> dict:
         "connected_duration_seconds": connected_duration_seconds,
         "tunnel_ip": tunnel_ip,
         "tunnel_interface": "tun0",
+        "proton_port_forwarding": proton_port_forwarding_enabled(settings),
         "validation_errors": validate_ready(settings),
         "log_available": log_path(settings).is_file(),
         "log_tail": _log_lines(settings, VPN_LOG_TAIL_LINES_FOR_DISPLAY),

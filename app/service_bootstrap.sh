@@ -124,6 +124,15 @@ PY
 }
 
 launch_drone() {
+  # RGS owns its download-service files and replaces them during an RGS
+  # upgrade. Re-apply Drone's Proton NAT-PMP compatibility patch before every
+  # Drone launch; rgs_proton.py also hooks RGS's own updater for same-session
+  # updates.
+  rgs_proton_helper="$WORK_DIR/app/device/rgs_proton.py"
+  if [ -f "$rgs_proton_helper" ]; then
+    python3 "$rgs_proton_helper" apply || echo "[drone-service] RGS Proton NAT-PMP integration could not be applied"
+  fi
+
   if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
     if validate_local_app; then
       # Upgrade the standalone tailnet service before launching Drone. Older

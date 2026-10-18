@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Integrate Proton VPN port forwarding with the RGS download service. Proton
+  OpenVPN profiles automatically store the `+pmp` service username, and legacy
+  saved credentials are upgraded on connect. Drone applies an update-resilient
+  RGS NAT-PMP patch that uses Proton's `10.2.0.1` gateway only when `+pmp` is
+  active, preventing RGS from advertising a home-router mapping instead. The
+  VPN status reports whether Proton port forwarding is enabled. See
+  `docs/proton-rgs.md`.
+
 - Add Multiplayer: a top-level page (dashboard, game browser, session lobby, settings) and a decentralised
   orchestrator (`app/multiplayer/`) that lets paired Drones play together. Any trusted peer can host; sessions
   are an explicit state machine coordinated over the existing pinned-certificate mTLS peer channel
