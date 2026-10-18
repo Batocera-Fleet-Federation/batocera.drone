@@ -6238,7 +6238,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-virtual-mapping-contract",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): a registered Mapping without get() escapes as AttributeError",
+      "name": "Issue #361 regression: a registered Mapping without get() fails closed",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -8597,6 +8597,68 @@
         "files": [
           "app/common/identity_provisioning.py",
           "tests/adversarial/test_issue_360_mapping_lookup_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-contract-uat",
+      "name": "Issue #361 incomplete virtual Mapping journal fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_contract_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_contract_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-membership-failure-uat",
+      "name": "Issue #361 virtual Mapping membership failure fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_membership_failure_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_membership_failure_uat.py"
         ],
         "mounts": [],
         "servers": []
