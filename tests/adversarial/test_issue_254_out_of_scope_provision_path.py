@@ -1,15 +1,8 @@
-"""Out-of-scope evidence for issue #254: a UserDict journal never reaches the id check in _provision.
+"""Issue #355 acceptance: a UserDict journal reaches the id check in _provision.
 
-#254 is about _choose_device_id refusing a real Mapping. The real provisioning entry
-point, _provision, persists the journal (_record_journal -> json) before it ever calls
-_choose_device_id. A UserDict resumed journal therefore fails with a raw TypeError at
-the state-update write, so the accepted-Mapping resume path is unreachable from
-_provision. Production journals are json.loads dicts (_read_json), so no production
-path hits this.
-
-Filed as out of scope: the owner decision on whether non-dict journals should be
-persisted (or stay dict-only) belongs to a separate labelled issue. These assertions
-document the current behavior; they are not a #254 acceptance gate.
+Issue #355 requires supported Mapping journals to serialize during provisioning,
+allowing the state machine to continue through resumed device-id selection. This
+revises the prior #254 out-of-scope failure expectation.
 """
 
 from __future__ import annotations
@@ -73,14 +66,18 @@ class ProvisionPathUserDictOutOfScopeTests(unittest.TestCase):
             "new_device_id": RESUMED_ID,
         })
 
-    def test_userdict_journal_fails_in_record_journal_before_the_id_check(self) -> None:
+    def test_userdict_journal_persists_and_reaches_the_id_check(self) -> None:
         journal = self._resumed_journal(collections.UserDict)
-        with _enter_all(self._patched({})) as patches:
+        with _enter_all(self._patched({"return_value": RESUMED_ID})) as patches:
             choose = patches[-1]
-            with self.assertRaisesRegex(TypeError, "not JSON serializable"):
+            try:
                 identity._provision(self.settings, None, "clone", None, journal)
-        # The #254 check is never reached on the real provisioning path.
-        choose.assert_not_called()
+            except Exception:  # noqa: BLE001 - later certificate work is outside this assertion
+                pass
+        choose.assert_called_once()
+        stored = identity._read_json(identity._journal_path(self.settings))
+        self.assertIsInstance(stored, dict)
+        self.assertEqual(stored["new_device_id"], RESUMED_ID)
 
     def test_plain_dict_journal_reaches_the_id_check_on_the_same_path(self) -> None:
         # Positive control: the same wiring with a dict gets past the write to the id check.
