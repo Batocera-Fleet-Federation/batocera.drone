@@ -1,13 +1,12 @@
-"""Regression evidence: a UserDict journal reaches the id check in _provision.
+"""Regression coverage for Mapping journals through the provisioning path.
 
 #254 is about _choose_device_id refusing a real Mapping. The real provisioning entry
 point historically persisted the journal (_record_journal -> json) before it called
 _choose_device_id. A UserDict then failed with a raw TypeError at the state-update
 write, so the accepted-Mapping resume path was unreachable from _provision.
 
-Issue #358 resolves that conflict by requiring _provision to normalize a genuine
-Mapping before its first durable write. This test is retained, with its superseded
-expectation revised, to verify that the real provisioning path reaches the id check.
+Issue #358 requires the real path to reach resumed-id validation; issue #355
+requires supported Mapping journals to persist as JSON objects before that check.
 """
 
 from __future__ import annotations
@@ -78,6 +77,19 @@ class ProvisionPathUserDictOutOfScopeTests(unittest.TestCase):
             with self.assertRaisesRegex(identity.IdentityError, "reached id check"):
                 identity._provision(self.settings, None, "clone", None, journal)
         choose.assert_called_once()
+
+    def test_userdict_journal_persists_and_reaches_the_id_check(self) -> None:
+        journal = self._resumed_journal(collections.UserDict)
+        with _enter_all(self._patched({"return_value": RESUMED_ID})) as patches:
+            choose = patches[-1]
+            try:
+                identity._provision(self.settings, None, "clone", None, journal)
+            except Exception:  # noqa: BLE001 - later certificate work is outside this assertion
+                pass
+        choose.assert_called_once()
+        stored = identity._read_json(identity._journal_path(self.settings))
+        self.assertIsInstance(stored, dict)
+        self.assertEqual(stored["new_device_id"], RESUMED_ID)
 
     def test_plain_dict_journal_reaches_the_id_check_on_the_same_path(self) -> None:
         # Positive control: the same wiring with a dict gets past the write to the id check.

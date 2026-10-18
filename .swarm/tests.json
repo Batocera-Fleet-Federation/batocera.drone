@@ -15,6 +15,70 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_359_attribute_hook_resumed_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-attribute-hook-resumed-id-uat",
+      "name": "Issue #359 resumed journal IDs ignore str attribute-hook substitution",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_attribute_hook_resumed_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_hostile_resumed_string_hooks_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-hostile-resumed-string-hooks-uat",
+      "name": "Issue #359 resumed journal IDs ignore hostile str-subclass hooks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_hostile_resumed_string_hooks_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_325_listener_rollback_uat.py"
       ],
       "disruptive": false,
@@ -32,6 +96,38 @@
           "app/drone_api.py",
           "app/web/server_tls.py",
           "tests/adversarial/test_issue_325_listener_rollback_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_resumed_journal_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-resumed-journal-id-uat",
+      "name": "Issue #359 resumed journal id ignores str-subclass overrides",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_resumed_journal_id_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -6111,7 +6207,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-resumed-id-coercion",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): str-subclass coercion and inconsistent Mapping KeyError",
+      "name": "Issue #359 str-subclass resume regression plus remaining #254 expectedFailure Mapping evidence",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -6142,7 +6238,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-virtual-mapping-contract",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): a registered Mapping without get() escapes as AttributeError",
+      "name": "Issue #361 regression: a registered Mapping without get() fails closed",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -8470,6 +8566,223 @@
         "files": [
           "app/common/identity_provisioning.py",
           "tests/adversarial/test_issue_358_mapping_journal_provision_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_360_inconsistent_mapping_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-360-inconsistent-mapping-uat",
+      "name": "Issue #360 inconsistent journal Mapping fails closed with IdentityError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_360_inconsistent_mapping_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-360-mapping-lookup-boundaries-uat",
+      "name": "Issue #360 inconsistent Mapping and dict lookups fail closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_360_mapping_lookup_boundaries_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_360_mapping_lookup_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-contract-uat",
+      "name": "Issue #361 incomplete virtual Mapping journal fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_contract_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_contract_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-membership-failure-uat",
+      "name": "Issue #361 virtual Mapping membership failure fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_membership_failure_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_membership_failure_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-mapping-journal-persistence",
+      "name": "Issue #355 journal persistence accepts standard Mapping implementations",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_mapping_journal_persistence.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_mapping_journal_persistence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-valid-mapping-journal-roundtrip-uat",
+      "name": "Issue #355 mapping journals round-trip through recovery validation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_valid_mapping_journal_roundtrip_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_valid_mapping_journal_roundtrip_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-composed-mapping-journal-uat",
+      "name": "Issue #355 composed Mapping journals retain recovery semantics",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_composed_mapping_journal_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_composed_mapping_journal_uat.py"
         ],
         "mounts": [],
         "servers": []
