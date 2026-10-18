@@ -15,6 +15,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_359_attribute_hook_resumed_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-attribute-hook-resumed-id-uat",
+      "name": "Issue #359 resumed journal IDs ignore str attribute-hook substitution",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_attribute_hook_resumed_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_359_hostile_resumed_string_hooks_uat.py"
       ],
       "disruptive": false,
