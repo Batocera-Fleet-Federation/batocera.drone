@@ -6238,7 +6238,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-virtual-mapping-contract",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): a registered Mapping without get() escapes as AttributeError",
+      "name": "Issue #361 regression: a registered Mapping without get() fails closed",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],

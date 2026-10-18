@@ -20,7 +20,10 @@ from app.common import identity_provisioning as identity
 
 
 class _RegisteredMembershipFailure:
-    """Virtual Mapping whose read interface raises AttributeError."""
+    """Virtual Mapping with ``get`` but a broken membership read."""
+
+    def get(self, key, default=None):
+        return default
 
     def __contains__(self, key):
         raise AttributeError("membership backend unavailable")
@@ -46,6 +49,7 @@ class Issue361VirtualMappingMembershipFailureTests(unittest.TestCase):
     def test_virtual_mapping_membership_attribute_error_fails_closed_without_minting(self) -> None:
         journal = _RegisteredMembershipFailure()
         self.assertTrue(issubclass(type(journal), collections.abc.Mapping))
+        self.assertTrue(callable(journal.get))
 
         with self.assertRaisesRegex(identity.IdentityError, "identity journal must be a mapping"):
             identity._choose_device_id(self.settings, journal)
