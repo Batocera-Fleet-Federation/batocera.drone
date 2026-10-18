@@ -1,8 +1,12 @@
-"""Issue #355 acceptance: a UserDict journal reaches the id check in _provision.
+"""Regression coverage for Mapping journals through the provisioning path.
 
-Issue #355 requires supported Mapping journals to serialize during provisioning,
-allowing the state machine to continue through resumed device-id selection. This
-revises the prior #254 out-of-scope failure expectation.
+#254 is about _choose_device_id refusing a real Mapping. The real provisioning entry
+point historically persisted the journal (_record_journal -> json) before it called
+_choose_device_id. A UserDict then failed with a raw TypeError at the state-update
+write, so the accepted-Mapping resume path was unreachable from _provision.
+
+Issue #358 requires the real path to reach resumed-id validation; issue #355
+requires supported Mapping journals to persist as JSON objects before that check.
 """
 
 from __future__ import annotations
@@ -65,6 +69,14 @@ class ProvisionPathUserDictOutOfScopeTests(unittest.TestCase):
             "steps": {},
             "new_device_id": RESUMED_ID,
         })
+
+    def test_userdict_journal_reaches_the_id_check(self) -> None:
+        journal = self._resumed_journal(collections.UserDict)
+        with _enter_all(self._patched({"side_effect": identity.IdentityError("reached id check")})) as patches:
+            choose = patches[-1]
+            with self.assertRaisesRegex(identity.IdentityError, "reached id check"):
+                identity._provision(self.settings, None, "clone", None, journal)
+        choose.assert_called_once()
 
     def test_userdict_journal_persists_and_reaches_the_id_check(self) -> None:
         journal = self._resumed_journal(collections.UserDict)

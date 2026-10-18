@@ -706,6 +706,15 @@ def _provision(
     journal: Optional[dict] = None,
 ) -> IdentityResult:
     """Create (or recreate) the identity. ``reason``: initial | clone | operator_new_identity."""
+    if journal is not None and not isinstance(journal, dict):
+        # _choose_device_id deliberately accepts any genuine Mapping as a resumed
+        # journal. Normalize it before the first durable write so JSON serialization
+        # cannot hide an invalid resumed id behind a raw TypeError. Keeping the
+        # mock/type gate aligned with _choose_device_id also prevents mocks from
+        # masquerading as a persisted journal.
+        if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
+            raise IdentityError("the identity journal must be a mapping")
+        journal = dict(journal)
     destructive = reason != "initial"
     resumed = journal is not None
     if destructive:
