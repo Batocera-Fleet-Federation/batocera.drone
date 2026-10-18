@@ -646,7 +646,13 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
         # A present non-None value is an attempted resume, even when falsey. Only JSON
         # null (or an absent field) means there is no id to resume. Keeping this aligned
         # with _valid_journal prevents malformed journals from silently minting identity.
-        resumed = journal["new_device_id"]
+        try:
+            resumed = journal["new_device_id"]
+        except KeyError as exc:
+            # A malformed Mapping can report membership but fail item lookup. Treat that
+            # contradiction as an invalid journaled id rather than leaking its lookup
+            # implementation detail or minting a replacement identity.
+            raise IdentityError("the journaled device id is not a valid Drone id") from exc
         if resumed is not None:
             normalized = _normalized_journal_device_id(resumed)
             if normalized is None:
