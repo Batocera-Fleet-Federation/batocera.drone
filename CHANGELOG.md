@@ -6,10 +6,10 @@
   OpenVPN profiles automatically store the `+pmp` service username, and legacy
   saved credentials are upgraded on connect. Drone applies an update-resilient
   RGS patch that uses Proton's `10.2.0.1` NAT-PMP gateway and skips home-router
-  UPnP when `+pmp` is active. The RGS process tree receives a dedicated
-  VPN-only egress firewall guard; if Batocera cannot install it, the RGS
-  launcher fails closed. The VPN status reports whether Proton port forwarding
-  is enabled. See `docs/proton-rgs.md`.
+  UPnP when `+pmp` is active. RGS's Python sockets bind to Proton's `tun0`
+  interface and external requests fail closed if the route leaves the tunnel.
+  The VPN status reports whether Proton port forwarding is enabled. See
+  `docs/proton-rgs.md`.
 
 - Add Multiplayer: a top-level page (dashboard, game browser, session lobby, settings) and a decentralised
   orchestrator (`app/multiplayer/`) that lets paired Drones play together. Any trusted peer can host; sessions

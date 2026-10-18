@@ -18,14 +18,14 @@ enabled. Drone also disables RGS's UPnP discovery in Proton mode, so RGS cannot
 fall back to creating a port mapping on the home router when Proton's mapping is
 unavailable.
 
-The RGS launcher puts its process tree in a dedicated `net_cls` cgroup and
-installs IPv4 and IPv6 output rules that reject its traffic unless it leaves
-through `tun0`. Loopback and replies to private LAN clients remain available
-for the local RGS UI. If Batocera cannot establish this guard, the RGS service
-launcher stops instead of starting RGS without VPN-only routing. The guard is
-applied when that launcher starts; an already-running RGS process must be
-restarted through the patched launcher to join it. Other Drone services are
-not moved into the RGS cgroup.
+The RGS Python service binds its IPv4 and IPv6 sockets to `tun0`, and refuses
+external socket and DNS operations unless the route to the internet uses that
+interface. This keeps its portal, download, and peer traffic on the VPN without
+depending on Batocera kernel firewall modules. Localhost connections remain
+available. If Proton's tunnel route is down, RGS external connections fail
+closed; the launcher also declines to start when the VPN route is not active.
+An already-running service must be restarted through the patched launcher to
+apply socket binding.
 
 When Proton's NAT-PMP endpoint is reachable, RGS retains its existing mapping
 renewal and backend registration behavior.

@@ -2,8 +2,8 @@
 
 RGS owns its download service and replaces it during updates. Drone applies
 idempotent helper patches at startup and adds a post-update hook to RGS's stable
-upgrade script. Its launcher also places the RGS process tree behind a VPN-only
-firewall guard when Proton port forwarding is active.
+upgrade script. When Proton port forwarding is active, it binds the RGS Python
+service's network sockets to the VPN interface and verifies the VPN route.
 """
 
 from __future__ import annotations
@@ -27,6 +27,9 @@ RGS_UPGRADE_SCRIPT = Path(os.environ.get(
 RGS_SERVICE_SCRIPT = Path(os.environ.get(
     "DRONE_RGS_SERVICE_SCRIPT", "/userdata/system/services/rgs_download"
 ))
+RGS_MAIN_SCRIPT = Path(os.environ.get(
+    "DRONE_RGS_MAIN_SCRIPT", "/userdata/system/rgs/download_service/download_service.py"
+))
 DRONE_APP_HELPER = Path(os.environ.get(
     "DRONE_RGS_PROTON_HELPER", "/userdata/system/drone-app/app/device/rgs_proton.py"
 ))
@@ -36,13 +39,8 @@ BACKUP_DIR = Path(os.environ.get(
 
 _PATCH_MARKER = "# >>> drone-proton-pmp-gateway"
 _UPDATER_MARKER = "# >>> drone-proton-pmp-post-update"
-_SERVICE_GUARD_MARKER = "# >>> drone-rgs-vpn-egress-guard"
+_SERVICE_GUARD_MARKER = "# >>> drone-rgs-vpn-socket-guard"
 _UPNP_PATCH_MARKER = "# >>> drone-proton-pmp-upnp-bypass"
-
-RGS_NET_CLS_ROOT = Path("/sys/fs/cgroup/net_cls")
-RGS_NET_CLS_GROUP = RGS_NET_CLS_ROOT / "drone-rgs"
-RGS_NET_CLS_CLASSID = "0x100001"
-RGS_EGRESS_CHAIN = "DRONE_RGS_VPN"
 
 _NATPMP_HELPER_BLOCK = '''# >>> drone-proton-pmp-gateway
 def _drone_proton_natpmp_gateway():
@@ -106,6 +104,78 @@ def _drone_proton_pmp_active():
     except OSError:
         return False
 # <<< drone-proton-pmp-upnp-bypass
+'''
+
+_VPN_SOCKET_BLOCK = '''# >>> drone-proton-vpn-socket-binding
+import errno as _drone_errno
+import socket as _drone_socket
+import subprocess as _drone_subprocess
+import time as _drone_time
+
+def _drone_proton_route_ready(force=False):
+    now = _drone_time.monotonic()
+    cached = getattr(_drone_proton_route_ready, "_cache", None)
+    if not force and cached and now - cached[0] < 0.05:
+        return cached[1]
+    try:
+        route = _drone_subprocess.run(
+            ["ip", "-4", "route", "get", "1.1.1.1"],
+            capture_output=True, text=True, timeout=2, check=True
+        ).stdout
+        route_fields = route.split()
+        ready = any(
+            route_fields[index:index + 2] == ["dev", "tun0"]
+            for index in range(len(route_fields) - 1)
+        )
+    except (OSError, _drone_subprocess.SubprocessError):
+        ready = False
+    _drone_proton_route_ready._cache = (now, ready)
+    return ready
+
+_drone_original_socket = _drone_socket.socket
+
+class _DroneProtonBoundSocket(_drone_original_socket):
+    def _drone_bind_to_tunnel(self, address):
+        if self.family not in (_drone_socket.AF_INET, _drone_socket.AF_INET6):
+            return
+        host = address[0] if isinstance(address, tuple) and address else ""
+        if host in ("127.0.0.1", "::1"):
+            return
+        if not _drone_proton_route_ready():
+            raise OSError(_drone_errno.ENETUNREACH, "Proton VPN route via tun0 is unavailable")
+        self.setsockopt(_drone_socket.SOL_SOCKET, _drone_socket.SO_BINDTODEVICE, b"tun0\\0")
+
+    def bind(self, address):
+        self._drone_bind_to_tunnel(address)
+        return super().bind(address)
+
+    def connect(self, address):
+        self._drone_bind_to_tunnel(address)
+        return super().connect(address)
+
+    def connect_ex(self, address):
+        try:
+            self._drone_bind_to_tunnel(address)
+        except OSError as error:
+            return error.errno or _drone_errno.ENETUNREACH
+        return super().connect_ex(address)
+
+    def sendto(self, data, *args):
+        address = args[-1] if args else None
+        if address is not None:
+            self._drone_bind_to_tunnel(address)
+        return super().sendto(data, *args)
+
+_drone_socket.socket = _DroneProtonBoundSocket
+_drone_original_getaddrinfo = _drone_socket.getaddrinfo
+
+def _drone_vpn_getaddrinfo(*args, **kwargs):
+    if not _drone_proton_route_ready(force=True):
+        raise _drone_socket.gaierror(_drone_socket.EAI_AGAIN, "Proton VPN route via tun0 is unavailable")
+    return _drone_original_getaddrinfo(*args, **kwargs)
+
+_drone_socket.getaddrinfo = _drone_vpn_getaddrinfo
+# <<< drone-proton-vpn-socket-binding
 '''
 
 
@@ -211,57 +281,48 @@ def _patch_upnp_helper(path: Path | None = None) -> str:
     return "Patched RGS UPnP discovery to skip the home router in Proton mode"
 
 
-def _run_firewall(executable: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [executable, *args],
-        check=check,
-        capture_output=True,
-        text=True,
-    )
+def _patch_main_script(*, enabled: bool, path: Path = RGS_MAIN_SCRIPT) -> str:
+    if not path.is_file():
+        return f"RGS main service script not present: {path}"
+    source = path.read_text(encoding="utf-8")
+    marker = "# >>> drone-proton-vpn-socket-binding"
+    if enabled and marker in source:
+        return "RGS main service already binds network sockets to Proton VPN"
+    if not enabled and marker in source:
+        block = re.compile(
+            r"(?ms)^# >>> drone-proton-vpn-socket-binding\n.*?"
+            r"^# <<< drone-proton-vpn-socket-binding\n?"
+        )
+        updated, count = block.subn("", source, count=1)
+        if count:
+            _atomic_write(path, updated.lstrip("\n"))
+            return "Removed the Proton-only socket binding because +pmp is disabled"
+        return "RGS VPN socket patch markers are malformed; no changes applied"
+    if not enabled:
+        return "Proton +pmp is not enabled; no RGS socket patch is needed"
+    updated = _VPN_SOCKET_BLOCK + "\n" + source
+    try:
+        compile(updated, str(path), "exec")
+    except SyntaxError as error:
+        return f"Patched RGS network guard failed syntax validation ({error}); no changes applied"
+    _backup_once(path, source)
+    _atomic_write(path, updated)
+    return "Patched RGS sockets and DNS lookups to require the Proton tun0 route"
 
 
-def _ensure_rgs_egress_guard(parent_pid: int) -> None:
-    """Tag the RGS launcher and deny its non-VPN network traffic."""
-    if not RGS_NET_CLS_ROOT.is_dir():
-        RGS_NET_CLS_ROOT.mkdir(parents=True, exist_ok=True)
-    if not (RGS_NET_CLS_ROOT / "tasks").exists():
-        subprocess.run(
-            ["mount", "-t", "cgroup", "-o", "net_cls", "net_cls", str(RGS_NET_CLS_ROOT)],
+def _ensure_tun_route() -> None:
+    try:
+        route = subprocess.run(
+            ["ip", "-4", "route", "get", "1.1.1.1"],
             check=True,
             capture_output=True,
             text=True,
-        )
-    if not (RGS_NET_CLS_ROOT / "tasks").exists():
-        raise RuntimeError("Batocera net_cls cgroup controller is unavailable")
-
-    RGS_NET_CLS_GROUP.mkdir(exist_ok=True)
-    (RGS_NET_CLS_GROUP / "net_cls.classid").write_text(RGS_NET_CLS_CLASSID, encoding="ascii")
-
-    # Guard both address families so IPv6 cannot bypass an IPv4-only tunnel.
-    for firewall, local_networks in (
-        ("iptables", ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")),
-        ("ip6tables", ("fc00::/7", "fe80::/10")),
-    ):
-        chain_check = _run_firewall(firewall, "-S", RGS_EGRESS_CHAIN, check=False)
-        if chain_check.returncode:
-            _run_firewall(firewall, "-N", RGS_EGRESS_CHAIN)
-        reject = ["!", "-o", "tun0", "-j", "REJECT"]
-        if _run_firewall(firewall, "-C", RGS_EGRESS_CHAIN, *reject, check=False).returncode:
-            _run_firewall(firewall, "-A", RGS_EGRESS_CHAIN, *reject)
-        # Keep local RGS UI replies functional; external traffic must use tun0.
-        for network in local_networks:
-            rule = ["-m", "conntrack", "--ctdir", "REPLY", "-d", network, "-j", "ACCEPT"]
-            if _run_firewall(firewall, "-C", RGS_EGRESS_CHAIN, *rule, check=False).returncode:
-                _run_firewall(firewall, "-I", RGS_EGRESS_CHAIN, "1", *rule)
-        loopback = ["-o", "lo", "-j", "ACCEPT"]
-        if _run_firewall(firewall, "-C", RGS_EGRESS_CHAIN, *loopback, check=False).returncode:
-            _run_firewall(firewall, "-I", RGS_EGRESS_CHAIN, "1", *loopback)
-
-        jump = ["-m", "cgroup", "--cgroup", RGS_NET_CLS_CLASSID, "-j", RGS_EGRESS_CHAIN]
-        if _run_firewall(firewall, "-C", "OUTPUT", *jump, check=False).returncode:
-            _run_firewall(firewall, "-I", "OUTPUT", "1", *jump)
-
-    (RGS_NET_CLS_GROUP / "tasks").write_text(str(parent_pid), encoding="ascii")
+            timeout=2,
+        ).stdout.split()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"Could not verify Proton VPN routing: {error}") from error
+    if not any(route[index:index + 2] == ["dev", "tun0"] for index in range(len(route) - 1)):
+        raise RuntimeError("RGS is configured for Proton +pmp, but the internet route is not through tun0")
 
 
 def _patch_rgs_updater(path: Path = RGS_UPGRADE_SCRIPT) -> str:
@@ -296,9 +357,9 @@ def _patch_rgs_service(path: Path = RGS_SERVICE_SCRIPT) -> str:
         return f"RGS service launcher not present: {path}"
     source = path.read_text(encoding="utf-8")
     if _SERVICE_GUARD_MARKER in source:
-        return "RGS service launcher already applies the Drone VPN guard before startup"
+        return "RGS service launcher already verifies VPN routing before startup"
 
-    # Upgrade the earlier NAT-PMP-only hook in place on existing installations.
+    # Upgrade the earlier pre-start hook in place on existing installations.
     legacy_hook = re.compile(
         rf"(?ms)^    {re.escape(_UPDATER_MARKER)}\n.*?"
         r"^    # <<< drone-proton-pmp-post-update\n"
@@ -312,7 +373,7 @@ def _patch_rgs_service(path: Path = RGS_SERVICE_SCRIPT) -> str:
         f"    {_UPDATER_MARKER}\n"
         f"    {_SERVICE_GUARD_MARKER}\n"
         f"    python3 {shlex.quote(str(DRONE_APP_HELPER))} prepare-service \"$$\" || {{ "
-        "echo 'Drone Proton VPN guard could not be applied; RGS will not start' >&2; exit 1; }\n"
+        "echo 'Drone Proton VPN route check failed; RGS will not start' >&2; exit 1; }\n"
         "    # <<< drone-proton-pmp-post-update\n"
     )
     updated = source.replace(anchor, hook + anchor, 1)
@@ -323,6 +384,7 @@ def _patch_rgs_service(path: Path = RGS_SERVICE_SCRIPT) -> str:
 
 def apply(*, include_updater: bool = True) -> list[str]:
     results = [_patch_natpmp_helper(), _patch_upnp_helper()]
+    results.append(_patch_main_script(enabled=_proton_pmp_credentials_enabled()))
     if include_updater:
         results.append(_patch_rgs_service())
         results.append(_patch_rgs_updater())
@@ -350,7 +412,7 @@ def _proton_pmp_credentials_enabled() -> bool:
 
 
 def prepare_service(parent_pid: int) -> list[str]:
-    """Patch RGS and enable its VPN-only firewall before its launcher forks."""
+    """Patch RGS and verify Proton routing before the service starts."""
     proton_pmp = _proton_pmp_credentials_enabled()
     results = apply(include_updater=False)
     if proton_pmp:
@@ -360,10 +422,10 @@ def prepare_service(parent_pid: int) -> list[str]:
         )
         if patch_failed:
             raise RuntimeError("RGS Proton-only discovery could not be patched safely")
-        _ensure_rgs_egress_guard(parent_pid)
-        results.append(f"RGS VPN-only egress guard active (parent PID {parent_pid})")
+        _ensure_tun_route()
+        results.append("RGS VPN socket binding active; internet route uses tun0")
     else:
-        results.append("Proton +pmp is not enabled; RGS egress guard is not needed")
+        results.append("Proton +pmp is not enabled; RGS socket guard is not needed")
     return results
 
 
