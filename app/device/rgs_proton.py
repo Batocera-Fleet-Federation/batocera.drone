@@ -252,8 +252,25 @@ def _patch_upnp_helper(path: Path | None = None) -> str:
     if not path.is_file():
         return f"RGS UPnP helper not present: {path}"
     source = path.read_text(encoding="utf-8")
-    if _UPNP_PATCH_MARKER in source:
+    marker_position = source.find(_UPNP_PATCH_MARKER)
+    class_match = re.search(r"(?m)^class PortMapper\b", source)
+    if marker_position >= 0 and class_match and marker_position < class_match.start():
         return "RGS UPnP helper already patched"
+    if marker_position >= 0:
+        # Repair the earlier patch layout, which could nest the remaining
+        # PortMapper methods inside the credential helper on annotated builds.
+        old_block = re.compile(
+            rf"(?ms)^# >>> {re.escape(_UPNP_PATCH_MARKER[6:])}\n.*?"
+            rf"^# <<< {re.escape(_UPNP_PATCH_MARKER[6:])}\n"
+        )
+        source, _ = old_block.subn("", source, count=1)
+        source = source.replace(
+            "        if _drone_proton_pmp_active():\n"
+            "            logger.info(\"Proton port forwarding is enabled; skipping router UPnP to keep RGS on VPN\")\n"
+            "            return False\n",
+            "",
+            1,
+        )
 
     method = re.search(
         r"(?m)^    async def _discover_upnp\(self\)(?:\s*->[^:]+)?:\s*$",
@@ -261,6 +278,9 @@ def _patch_upnp_helper(path: Path | None = None) -> str:
     )
     if not method:
         return "RGS UPnP helper changed upstream; no changes applied"
+    class_match = re.search(r"(?m)^class PortMapper\b", source)
+    if not class_match or class_match.start() > method.start():
+        return "RGS UPnP helper class layout changed upstream; no changes applied"
     body_start = source.find("\n", method.end()) + 1
     guard = (
         "        if _drone_proton_pmp_active():\n"
@@ -268,8 +288,9 @@ def _patch_upnp_helper(path: Path | None = None) -> str:
         "            return False\n"
     )
     updated = (
-        source[:method.start()]
+        source[:class_match.start()]
         + _UPNP_HELPER_BLOCK
+        + source[class_match.start():method.start()]
         + source[method.start():body_start]
         + guard
         + source[body_start:]
