@@ -642,11 +642,14 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
     if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
+    # Mapping.register is a promise, not a runtime protocol check: a virtual
+    # registration can lack get() entirely. Validate that required operation
+    # before using membership and item lookup to reject inconsistent mappings.
+    if not callable(getattr(type(journal), "get", None)):
+        raise IdentityError("the identity journal must be a mapping")
     try:
         has_resumed_id = "new_device_id" in journal
     except Exception as exc:
-        # Virtual Mapping registrations are not checked for the full Mapping
-        # protocol. Treat failures from their read interface as malformed input.
         raise IdentityError("the identity journal must be a mapping") from exc
     if has_resumed_id:
         # A present non-None value is an attempted resume, even when falsey. Only JSON
