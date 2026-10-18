@@ -255,7 +255,10 @@ def _patch_upnp_helper(path: Path | None = None) -> str:
     if _UPNP_PATCH_MARKER in source:
         return "RGS UPnP helper already patched"
 
-    method = re.search(r"(?m)^    async def _discover_upnp\(self\):\s*$", source)
+    method = re.search(
+        r"(?m)^    async def _discover_upnp\(self\)(?:\s*->[^:]+)?:\s*$",
+        source,
+    )
     if not method:
         return "RGS UPnP helper changed upstream; no changes applied"
     body_start = source.find("\n", method.end()) + 1
