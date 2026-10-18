@@ -626,31 +626,25 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
     if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
-    if journal.get("new_device_id"):
-        # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
-        # malformed string) must not be stringified into the identity.
-        resumed = journal["new_device_id"]
-        # Spec'd mocks can spoof ``isinstance(value, str)``. Reject them before
-        # calling the normalizer, which invokes string methods on its input.
-        normalized = (
-            _normalize_device_id(resumed)
-            if isinstance(resumed, str) and not _is_mock_path(resumed)
-            else None
-        )
-        if normalized is None:
-            raise IdentityError("the journaled device id is not a valid Drone id")
-        return normalized
     if "new_device_id" in journal:
         # A present non-None value is an attempted resume, even when falsey. Only JSON
         # null (or an absent field) means there is no id to resume. Keeping this aligned
         # with _valid_journal prevents malformed journals from silently minting identity.
         resumed = journal["new_device_id"]
-        if resumed is not None and (
-            not isinstance(resumed, str)
-            or _is_mock_path(resumed)
-            or not _normalize_device_id(resumed)
-        ):
-            raise IdentityError("the journaled device id is not a valid Drone id")
+        if resumed is not None:
+            # A str subclass can override strip() (or truthiness) and thereby make
+            # validation see a different id from the immutable string payload. Convert
+            # through the base implementation before normalization so its methods cannot
+            # influence which identity is resumed.
+            plain_resumed = str.__str__(resumed) if isinstance(resumed, str) else resumed
+            normalized = (
+                _normalize_device_id(plain_resumed)
+                if isinstance(resumed, str) and not _is_mock_path(resumed)
+                else None
+            )
+            if normalized is None:
+                raise IdentityError("the journaled device id is not a valid Drone id")
+            return normalized
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
