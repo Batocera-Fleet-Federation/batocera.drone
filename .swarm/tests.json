@@ -15,6 +15,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_359_hostile_resumed_string_hooks_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-hostile-resumed-string-hooks-uat",
+      "name": "Issue #359 resumed journal IDs ignore hostile str-subclass hooks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_hostile_resumed_string_hooks_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_325_listener_rollback_uat.py"
       ],
       "disruptive": false,
