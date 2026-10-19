@@ -136,7 +136,8 @@ refused for the same reason. The on-disk loader is dict-only by design (#366): a
 a `Mapping` but not a `dict` is classified as corrupt, so the disk-path `isinstance(..., dict)` gates
 can never be bypassed by a non-dict journal. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
 `tests/adversarial/test_issue_254_*`, `tests/adversarial/test_issue_255_*` and
-`tests/adversarial/test_issue_366_*` and `tests/adversarial/test_issue_369_*`.
+`tests/adversarial/test_issue_366_*`, `tests/adversarial/test_issue_369_*` and `tests/adversarial/test_issue_370_*`
+(a verified original with an array/scalar journal stays `READY`, identical to torn JSON).
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the
