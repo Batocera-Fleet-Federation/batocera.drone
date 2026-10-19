@@ -129,8 +129,11 @@ and the identity stays `READY`. On confidently different hardware (a clone) the 
 with a fresh id, the same as for torn JSON. Hardware, not the journal's contents, decides the clone
 case. In the Python API, `_choose_device_id` refuses a journal that is not a real mapping
 (`IdentityError`, "the identity journal must be a mapping") and never mints from it; mock objects are
-refused for the same reason. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
-`tests/adversarial/test_issue_254_*` and `tests/adversarial/test_issue_255_*`.
+refused for the same reason. The on-disk loader is dict-only by design (#366): a decoded value that is
+a `Mapping` but not a `dict` is classified as corrupt, so the disk-path `isinstance(..., dict)` gates
+can never be bypassed by a non-dict journal. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
+`tests/adversarial/test_issue_254_*`, `tests/adversarial/test_issue_255_*` and
+`tests/adversarial/test_issue_366_*`.
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the
