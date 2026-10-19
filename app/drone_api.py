@@ -1985,12 +1985,12 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
                 if getattr(listener, "thread", None) is not None:
                     listener.shutdown()
             super().shutdown()
-        finally:
-            # Test and embedding callers commonly shut down the HTTP server
-            # directly instead of unwinding through main()'s finally block.
-            # Retire LAN workers here as well, even if an owned listener fails
-            # to shut down, so their userdata remains safe to clean up.
+        except BaseException:
+            # A shutdown error can prevent callers from reaching worker cleanup.
+            # Successful HTTP shutdown leaves the independent LAN generation
+            # running until its owner calls stop_local_network_workers().
             stop_local_network_workers()
+            raise
 
     def server_close(self):
         if not getattr(self, "_closing_owned_listeners", False):
