@@ -9450,6 +9450,37 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-240-sunshine-pidfile",
+      "name": "Issue #240 Sunshine service keeps root PID state out of /tmp",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_sunshine_pidfile_security.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
