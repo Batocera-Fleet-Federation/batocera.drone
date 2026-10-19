@@ -59,10 +59,15 @@ class MalformedHttpInputTests(unittest.TestCase):
         thread.start()
 
         def stop():
-            self.server.shutdown()
-            self.server.server_close()
-            thread.join(timeout=3)
-            stop_local_network_workers()
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+                thread.join(timeout=3)
+            finally:
+                # LAN workers are process-wide and must retire before the
+                # preceding TemporaryDirectory cleanup removes userdata, even
+                # when one of the HTTP teardown operations raises.
+                stop_local_network_workers()
         self.addCleanup(stop)
 
         request = urllib.request.Request(
