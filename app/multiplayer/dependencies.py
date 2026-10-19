@@ -214,8 +214,9 @@ class SunshineInstaller:
     def _install(self, arch: str) -> None:
         staging = self.root.parent / ".sunshine-staging"
         try:
+            self._check_service_free()
             self._set("running", "checking", "Looking up the latest Sunshine release", 2)
-            asset = select_release_asset(self._fetch_json(RELEASE_API), arch)
+            asset =select_release_asset(self._fetch_json(RELEASE_API), arch)
             self._remove_tree(staging)
             staging.mkdir(parents=True, mode=0o700)
             image = staging / "sunshine.AppImage"
@@ -229,8 +230,13 @@ class SunshineInstaller:
             self._set("running", "extracting", "Unpacking Sunshine", 70)
             self._extract(image, staging)
             self._set("running", "installing", "Installing Sunshine and its service", 88)
-            self._swap_in(staging / "squashfs-root", asset)
-            self._write_service()
+            try:
+                self._swap_in(staging / "squashfs-root", asset)
+                self._write_service()
+            except BaseException:
+                # Install is only offered when nothing is installed, so a failure here leaves nothing worth keeping.
+                self._remove_tree(self.root)
+                raise
             self._set("running", "starting", "Starting Sunshine", 95)
             started = self.start_service()
             self._on_change()
@@ -277,11 +283,16 @@ class SunshineInstaller:
             raise
         self._remove_tree(previous)
 
-    def _write_service(self) -> None:
+    def _check_service_free(self) -> None:
+        """Refuse before anything is promoted if a service Drone did not write already owns the name."""
         target = service_path(self.settings)
-        target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and SERVICE_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
             raise InstallError(f"A different {SERVICE_NAME} service already exists on this machine; Drone will not overwrite it.")
+
+    def _write_service(self) -> None:
+        target = service_path(self.settings)
+        self._check_service_free()
+        target.parent.mkdir(parents=True, exist_ok=True)
         binary, root = shlex.quote(str(managed_binary(self.settings))), shlex.quote(str(self.root / "app"))
         log = shlex.quote(str(Path(self.settings.userdata_root) / "system" / "logs" / "sunshine.log"))
         target.write_text(f"""#!/bin/sh
