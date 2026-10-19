@@ -9170,6 +9170,40 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-mixed-case-anchor-and-scheme-recording-uat",
+      "name": "Issue #332 mixed-case HTTPS evidence keeps pairing anchors, recorded schemes and sticky TLS routes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
