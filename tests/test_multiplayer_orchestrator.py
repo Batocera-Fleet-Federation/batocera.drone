@@ -152,10 +152,11 @@ class FullFlowTests(SwarmCase):
         page = self.h.list_games({"system": "snes", "include_peers": "1"})
         game = page["games"][0]
         self.assertEqual(game["players"], 2)
-        self.assertEqual(game["status"], "configuration")  # no core selected in Batocera yet
+        self.assertEqual(game["status"], "ready")  # no core set: installed snes9x is used for the session only
         self.assertEqual([peer["name"] for peer in game["peers"]], ["Drone guest"])
         self.assertEqual(game["peers"][0]["level"], "exact")
-        self.assertEqual(self.h.list_games({"system": "snes", "status": "ready"})["total"], 0)
+        self.assertEqual(self.h.list_games({"system": "snes", "status": "ready"})["total"], 1)
+        self.assertEqual(self.h.list_games({"system": "snes", "status": "configuration"})["total"], 0)
         self.assertEqual(self.h.list_games({"system": "snes", "peer": "guest"})["total"], 1)
         self.assertEqual(self.h.list_games({"system": "snes", "players": "4"})["total"], 0)
         self.assertEqual(self.h.list_games({"system": "snes", "q": "kart"})["total"], 1)

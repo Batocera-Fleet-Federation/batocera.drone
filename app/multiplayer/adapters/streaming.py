@@ -17,6 +17,7 @@ guest. Sunshine owns pairing, input policy and stream teardown independently.
 from typing import Dict, List, Optional
 
 from .. import models as m
+from ..dependencies import managed_binary
 from .base import ASSISTED, CONTENT_HOST_ONLY, TIER_EXPERIMENTAL, EmulatorAdapter
 
 SUNSHINE_PORTS = "TCP 47984, 47989, 47990, 48010; UDP 47998-48000, 48002, 48010"
@@ -69,6 +70,11 @@ class StreamingAdapter(EmulatorAdapter):
     guest_launches = False
     max_players = 2
 
+    def binary(self) -> Optional[str]:
+        # Also finds the Sunshine that Drone installed from Multiplayer settings.
+        extra = (str(managed_binary(self.probe.settings)),) + tuple(self.extra_binary_paths)
+        return self._cached("binary", lambda: self.probe.find_binary(self.binaries, extra))
+
     def moonlight_binary(self) -> Optional[str]:
         return self.probe.find_binary(("moonlight", "moonlight-qt", "Moonlight"), ("/usr/bin/moonlight-qt",))
 
@@ -80,9 +86,9 @@ class StreamingAdapter(EmulatorAdapter):
         guest = self.moonlight_binary() is not None
         reasons = []
         if not host:
-            reasons.append("Sunshine (host) is not installed")
+            reasons.append("Sunshine (host) is not installed; Drone can install it from Multiplayer settings")
         if not guest:
-            reasons.append("Moonlight (guest) is not installed")
+            reasons.append("Moonlight (guest) is not installed; Batocera's Moonlight client must be set up there")
         return {m.REMOTE_STREAMING: {"available": host or guest, "host_ready": host, "guest_ready": guest,
                                      "sunshine_running": self.sunshine_running() if host else False,
                                      "hardware": self.probe.hardware(), "reason": "; ".join(reasons)}}
@@ -104,11 +110,11 @@ class StreamingAdapter(EmulatorAdapter):
             return self.assessment(m.REMOTE_STREAMING, m.UNSUPPORTED, ["Game metadata lists a single player."], **extra)
         feature = self.detect_features()[m.REMOTE_STREAMING]
         if not feature["host_ready"]:
-            return self.assessment(m.REMOTE_STREAMING, m.UNSUPPORTED, ["Sunshine is not installed on this (host) machine."], **extra)
+            return self.assessment(m.REMOTE_STREAMING, m.UNSUPPORTED, ["Sunshine is not installed on this (host) machine. Install it from Multiplayer > Settings > Remote streaming."], **extra)
         reasons = ["Streams the host's local multiplayer to one remote guest; only the host needs the game."]
         if not feature["sunshine_running"]:
             return self.assessment(m.REMOTE_STREAMING, m.REQUIRES_CONFIGURATION,
-                                   reasons + ["Sunshine is installed but not running; start it first."], **extra)
+                                   reasons + ["Sunshine is installed but not running. Start it from Multiplayer > Settings > Remote streaming."], **extra)
         if not (feature["hardware"]["vaapi"] or feature["hardware"]["nvenc"]) and feature["hardware"]["cpu_count"] < 4:
             return self.assessment(m.REMOTE_STREAMING, m.UNSUPPORTED,
                                    reasons + ["No hardware encoder and fewer than 4 CPU cores: software encoding would not keep up."], **extra)
@@ -121,7 +127,7 @@ class StreamingAdapter(EmulatorAdapter):
         if role == m.HOST_ROLE and not feature["host_ready"]:
             return ["Sunshine is not installed on the host."]
         if role == m.GUEST_ROLE and not feature["guest_ready"]:
-            return ["Moonlight is not installed on this machine."]
+            return ["Moonlight is not installed on this machine; set up Batocera's Moonlight client first."]
         return []
 
     def prepare_session(self, session: dict, role: str, context: dict) -> dict:

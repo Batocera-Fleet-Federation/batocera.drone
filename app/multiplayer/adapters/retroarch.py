@@ -55,7 +55,12 @@ CONFIGGEN_GLOBS = (
     "/usr/lib/python3*/site-packages/configgen/emulatorlauncher.py",
     "/usr/lib/python3*/site-packages/configgen/generators/libretro/*.py",
 )
-CORES_DIR = "/usr/lib/libretro"
+# Base-image cores, then cores the user fetched with Batocera's content downloader.
+CORES_DIRS = ("/usr/lib/libretro", "/userdata/cores")
+CORES_DIR = CORES_DIRS[0]
+# Batocera's own per-system default emulator/core; the arch file overrides the generic one.
+DEFAULTS_FILES = ("/usr/share/batocera/configgen/configgen-defaults.yml", "/usr/share/batocera/configgen/configgen-defaults-arch.yml")
+INSTALL_HINT = "Install it from Batocera's Main Menu > Updates & Downloads > Content Downloader."
 INFO_DIR = "/usr/share/libretro/info"
 DEFAULT_PORT = 55435
 
@@ -67,6 +72,24 @@ def parse_info(text: str) -> Dict[str, str]:
         if separator:
             values[name.strip()] = value.strip().strip('"')
     return values
+
+
+def parse_defaults(text: str) -> Dict[str, Dict[str, str]]:
+    """``{system: {"emulator": ..., "core": ...}}`` from Batocera's configgen defaults (flat ``system:`` blocks)."""
+    result: Dict[str, Dict[str, str]] = {}
+    system = ""
+    for raw in str(text or "").splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            name, separator, rest = line.partition(":")
+            system = name.strip().strip("\"'") if separator and not rest.strip() else ""
+            continue
+        key, separator, value = line.strip().partition(":")
+        if system and separator and key in ("emulator", "core") and value.strip():
+            result.setdefault(system, {})[key] = value.strip().strip("\"'")
+    return result
 
 
 class RetroArchAdapter(EmulatorAdapter):
@@ -92,8 +115,8 @@ class RetroArchAdapter(EmulatorAdapter):
     content_match = CONTENT_EXACT
     awaits_host_port = True
 
-    def cores_dir(self) -> str:
-        return CORES_DIR
+    def cores_dirs(self) -> tuple:
+        return CORES_DIRS
 
     def _configgen_files(self) -> List[str]:
         files: List[str] = []
@@ -135,16 +158,36 @@ class RetroArchAdapter(EmulatorAdapter):
         return parse_info(self.probe.read_text(f"{INFO_DIR}/{core}_libretro.info"))
 
     def core_installed(self, core: str) -> bool:
-        return self.probe.exists(f"{self.cores_dir()}/{core}_libretro.so")
+        return any(self.probe.exists(f"{directory}/{core}_libretro.so") for directory in self.cores_dirs())
 
     def installed_candidates(self, system: str) -> List[str]:
         return [core for core in CANDIDATE_CORES.get(system, ()) if self.core_installed(core)]
 
+    def batocera_defaults(self) -> Dict[str, Dict[str, str]]:
+        def load() -> Dict[str, Dict[str, str]]:
+            merged: Dict[str, Dict[str, str]] = {}
+            for path in DEFAULTS_FILES:
+                for system, values in parse_defaults(self.probe.read_text(path)).items():
+                    merged.setdefault(system, {}).update(values)
+            return merged
+        return self._cached("batocera-defaults", load)
+
     def resolve_emulator(self, system: str, rom_name: str, overrides: dict) -> Dict[str, str]:
+        """Effective emulator/core: Drone override, then batocera.conf, then Batocera's built-in default.
+
+        ``source`` says where the core came from so the UI can explain it; only a value read from
+        Batocera or the user is trusted, never a guess.
+        """
         override_core = str((overrides.get("core_overrides") or {}).get(system) or "")
         emulator = self.probe.conf_value(system, rom_name, "emulator")
         core = override_core or self.probe.conf_value(system, rom_name, "core")
-        return {"emulator": emulator, "core": core, "overridden": bool(override_core)}
+        source = "override" if override_core else "batocera.conf" if core else ""
+        default = self.batocera_defaults().get(system, {})
+        if not emulator:
+            emulator = default.get("emulator", "")
+        if not core and (not emulator or emulator == "libretro") and default.get("core"):
+            core, source = default["core"], "batocera_default"
+        return {"emulator": emulator, "core": core, "overridden": bool(override_core), "source": source}
 
     def assess_game(self, game: dict, overrides: Optional[dict] = None) -> Optional[dict]:
         system = game.get("system", "")
@@ -162,45 +205,53 @@ class RetroArchAdapter(EmulatorAdapter):
         if chosen["emulator"] and chosen["emulator"] != "libretro":
             return self.assessment(m.RETROARCH_NETPLAY, m.UNSUPPORTED,
                                    [f"This game is configured to run in {chosen['emulator']}, not a RetroArch core."], **extra)
-        reasons: List[str] = []
-        if not chosen["emulator"]:
-            reasons.append("No emulator is set for this game in batocera.conf; assuming Batocera's libretro default.")
+        # Blockers are the first reasons the mechanism selector shows, so anything informational goes in ``notes``.
+        notes: List[str] = []
+        candidates = self.installed_candidates(system)
+        extra["candidate_cores"] = candidates
+        if chosen["source"] == "batocera_default" and not self.core_installed(chosen["core"]) and candidates:
+            notes.append(f"Batocera's default core '{chosen['core']}' is not installed; using installed core '{candidates[0]}' for this session.")
+            chosen["core"], chosen["source"] = candidates[0], "installed_candidate"
+        elif not chosen["core"] and candidates:
+            chosen["core"], chosen["source"] = candidates[0], "installed_candidate"
+        if chosen["source"] == "installed_candidate":
+            notes.append(f"No core is set for this game, so Drone will use the installed core '{chosen['core']}' for the session only; "
+                         "your Batocera setting is restored afterwards.")
+        elif chosen["source"] == "batocera_default":
+            notes.append(f"Using Batocera's default core '{chosen['core']}' for this system.")
+        emulator["core"] = chosen["core"]
+        extra["core_source"] = chosen["source"]
         if not chosen["core"]:
-            candidates = self.installed_candidates(system)
-            extra["candidate_cores"] = candidates
-            if not candidates:
-                return self.assessment(m.RETROARCH_NETPLAY, m.UNSUPPORTED,
-                                       reasons + ["No known RetroArch core for this system is installed."], **extra)
-            return self.assessment(m.RETROARCH_NETPLAY, m.REQUIRES_CONFIGURATION,
-                                   reasons + [f"No core is selected for this game. Installed candidates: {', '.join(candidates)}. "
-                                              "Pick one in the session or in Batocera."], **extra)
+            return self.assessment(m.RETROARCH_NETPLAY, m.UNSUPPORTED,
+                                   [f"No known RetroArch core for this system is installed. {INSTALL_HINT}"] + notes, **extra)
         if not self.core_installed(chosen["core"]):
             return self.assessment(m.RETROARCH_NETPLAY, m.INCOMPATIBLE,
-                                   reasons + [f"The selected core '{chosen['core']}' is not installed."], **extra)
+                                   [f"The selected core '{chosen['core']}' is not installed. {INSTALL_HINT}"] + notes, **extra)
         info = self.core_info(chosen["core"])
         emulator["core_version"] = m.clean_version(info.get("display_version"))
         if chosen["overridden"]:
-            reasons.append(f"Core '{chosen['core']}' comes from your Multiplayer emulator override.")
+            notes.append(f"Core '{chosen['core']}' comes from your Multiplayer emulator override.")
+        decisive: List[str] = []
         if info.get("savestate", "true").lower() == "false":
             classification = m.UNSUPPORTED
-            reasons.append(f"Core '{chosen['core']}' has no save states, which Netplay requires.")
+            decisive.append(f"Core '{chosen['core']}' has no save states, which Netplay requires.")
         elif info.get("savestate_features", "").lower() == "deterministic":
             classification = m.LIKELY_COMPATIBLE
-            reasons.append(f"Core '{chosen['core']}' reports deterministic save states.")
+            notes.append(f"Core '{chosen['core']}' reports deterministic save states.")
         elif info:
             classification = m.EXPERIMENTAL
-            reasons.append(f"Core '{chosen['core']}' does not report deterministic save states; Netplay may desync.")
+            notes.append(f"Core '{chosen['core']}' does not report deterministic save states; Netplay may desync.")
         else:
             classification = m.EXPERIMENTAL
-            reasons.append(f"No libretro info file for '{chosen['core']}'; Netplay support is unverified.")
+            notes.append(f"No libretro info file for '{chosen['core']}'; Netplay support is unverified.")
         if classification in (m.LIKELY_COMPATIBLE, m.EXPERIMENTAL):
             if players == 1:
                 classification = m.UNSUPPORTED
-                reasons.append("Game metadata lists a single player.")
+                decisive.append("Game metadata lists a single player, so Netplay was ruled out.")
             elif players is None and classification == m.LIKELY_COMPATIBLE:
                 classification = m.UNKNOWN
-                reasons.append("The game's player count is not recorded, so multiplayer support is unconfirmed.")
-        return self.assessment(m.RETROARCH_NETPLAY, classification, reasons, **extra)
+                decisive.append("The game's player count is not recorded, so multiplayer support is unconfirmed.")
+        return self.assessment(m.RETROARCH_NETPLAY, classification, decisive + notes, **extra)
 
     # --------------------------------------------------------------- sessions
     def validate_configuration(self, session: dict, role: str) -> List[str]:
