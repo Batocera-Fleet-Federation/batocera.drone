@@ -47,6 +47,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_332_mixed_case_tls_post_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-post-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS POSTs use pinned TLS over real sockets",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_post_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_359_hostile_resumed_string_hooks_uat.py"
       ],
       "disruptive": false,
@@ -8975,6 +9007,235 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_https_pinning_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-mixed-case-https-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS routes retain the pinned peer TLS context",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_https_pinning_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_332_lan_tier_scheme_casing.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-332-lan-tier-scheme-casing",
+      "name": "Issue #332 LAN tier must not build cleartext routes for a TLS-pinned peer with mixed-case scheme",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transport/lan.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_tls_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS routes use the pinned peer TLS over real sockets and never fall back to plaintext",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_route_policy_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-route-tls-policy-uat",
+      "name": "Issue #332 every mixed-case TLS evidence spelling keeps routes HTTPS and plain-HTTP fleets keep HTTP",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "app/transport/lan.py",
+          "tests/adversarial/test_issue_332_mixed_case_route_policy_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-out-of-scope-tls-route-precedence-evidence",
+      "name": "Out-of-scope #332 evidence (expectedFailure, non-blocking): TLS route precedence between scheme, protocol and address helpers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-332-mixed-case-binary-download-uat",
+      "name": "Issue #332 mixed-case HTTPS binary downloads retain the pinned TLS context",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_binary_download_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_binary_download_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-mixed-case-anchor-and-scheme-recording-uat",
+      "name": "Issue #332 mixed-case HTTPS evidence keeps pairing anchors, recorded schemes and sticky TLS routes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1

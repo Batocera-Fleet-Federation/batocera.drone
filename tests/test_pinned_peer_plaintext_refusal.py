@@ -44,6 +44,23 @@ class TlsPairedPeerPlaintextRefusalTests(unittest.TestCase):
         self.assertIs(context, create.return_value)
         create.assert_called_once_with(cafile=str(pin))
 
+    def test_mixed_case_https_route_keeps_pin_context_end_to_end(self) -> None:
+        # Issue #332: a mixed-case HTTPS route must not fall through to an
+        # unpinned/no-context path at any consumer (candidates, dial, pairing gate).
+        peer = {"drone_id": "victim", "reachable_url": "HTTPS://peer.local:8443",
+                "certificate_fingerprint": FINGERPRINT, "paired_over_tls": True}
+        candidates = peer_connectivity._peer_address_candidates(peer)
+        self.assertEqual(candidates, ["https://peer.local:8443"])
+        self.assertEqual(peer_connectivity._peer_address(peer), "https://peer.local:8443")
+        pin = Path(self._tmp.name) / "pin.crt"
+        with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True), \
+                mock.patch.object(peer_connectivity.ssl, "create_default_context") as create:
+            context = peer_connectivity._drone_client_ssl_context(
+                self.settings, "HTTPS://peer.local:8443/peer/inventory", verify=True, cafile=pin,
+            )
+        self.assertIs(context, create.return_value)
+        create.assert_called_once_with(cafile=str(pin))
+
     def test_persisted_and_legacy_routes_have_canonical_schemes(self) -> None:
         peer = {"drone_id": "victim", "scheme": "HTTPS", "reachable_url": "hTtPs://peer.local",
                 "certificate_fingerprint": FINGERPRINT}

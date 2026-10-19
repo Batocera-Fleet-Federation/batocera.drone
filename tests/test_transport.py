@@ -306,6 +306,37 @@ class LanDirectTransportTests(unittest.TestCase):
         peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "api_port": 443}
         self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
 
+    def test_tls_requirement_survives_lan_and_tailnet_route_rewrites(self):
+        from app.transfer.local_network import peer_requires_tls
+
+        for scheme in ("http", "HTTP", "hTtPs"):
+            for sticky_flag in (False, True):
+                for tailnet in (None, "100.64.0.9"):
+                    with self.subTest(scheme=scheme, sticky_flag=sticky_flag, tailnet=tailnet):
+                        peer = {
+                            "scheme": scheme, "certificate_fingerprint": "aa" * 32,
+                            "reachable_url": "HTTPS://old-address:8443",
+                            "paired_over_tls": sticky_flag, "api_port": 8443,
+                            "public_ip": "203.0.113.7", "local_ip": "192.168.1.50",
+                            "tailnet_ip": tailnet,
+                        }
+                        captured = {}
+                        transport = self._transport(
+                            "203.0.113.7", my_tailnet="100.64.0.2",
+                            fetch_fn=lambda r, c: captured.update(peer=c.peer),
+                        )
+                        host = tailnet or "192.168.1.50"
+                        self.assertEqual(transport.lan_url(peer), f"https://{host}:8443")
+                        transport.fetch(DownloadRequest(asset_type="rom"), self._ctx(peer))
+                        self.assertTrue(peer_requires_tls(captured["peer"]))
+                        self.assertEqual(captured["peer"]["reachable_url"], f"https://{host}:8443")
+
+    def test_legacy_plaintext_peer_retains_lan_route(self):
+        transport = self._transport("203.0.113.7")
+        peer = {"scheme": "HTTP", "certificate_fingerprint": "aa" * 32,
+                "public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "api_port": 8080}
+        self.assertEqual(transport.lan_url(peer), "http://192.168.1.50:8080")
+
     def test_no_lan_url_when_public_ip_differs(self):
         transport = self._transport("203.0.113.7")
         self.assertIsNone(transport.lan_url({"public_ip": "198.51.100.9", "local_ip": "192.168.1.50"}))
