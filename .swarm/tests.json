@@ -9236,6 +9236,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-install-atomicity-uat",
+      "name": "Issue #240 Sunshine UI install preserves foreign service ownership and rolls back partial state",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_install_atomicity_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_install_atomicity_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
