@@ -88,6 +88,29 @@ class MixedCaseHttpsPinningUAT(unittest.TestCase):
                         peer_connectivity._peer_post_json(url, {}, self.settings, peer_id="victim-332")
                 opened.assert_not_called()
 
+    def test_mixed_case_peer_route_selection_pins_before_request(self) -> None:
+        peer = {
+            "drone_id": "victim-332",
+            "scheme": "HTTPS",
+            "reachable_url": "hTtPs://peer.local:8443",
+            "advertised_reachable_url": "HTTP://attacker.local:8080",
+            "certificate_fingerprint": "aa" * 32,
+            "paired_over_tls": True,
+        }
+        with mock.patch.object(peer_connectivity, "_peer_trust_cafile", return_value=self.pin), \
+                mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True), \
+                mock.patch.object(peer_connectivity, "_candidate_dialable", return_value=True), \
+                mock.patch.object(peer_connectivity.ssl, "create_default_context") as create, \
+                mock.patch.object(peer_connectivity, "urlopen", return_value=_JsonResponse()) as opened:
+            payload, address = peer_connectivity._peer_get_json_for_peer(
+                peer, "/v1/api/peer/health", self.settings, peer_id="victim-332",
+            )
+
+        self.assertEqual(payload, {"status": "ok"})
+        self.assertEqual(address, "https://peer.local:8443")
+        create.assert_called_once_with(cafile=str(self.pin))
+        self.assertIs(opened.call_args.kwargs["context"], create.return_value)
+
 
 if __name__ == "__main__":
     unittest.main()
