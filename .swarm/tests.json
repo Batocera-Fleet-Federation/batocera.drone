@@ -9040,6 +9040,104 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_tls_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS routes use the pinned peer TLS over real sockets and never fall back to plaintext",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_route_policy_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-route-tls-policy-uat",
+      "name": "Issue #332 every mixed-case TLS evidence spelling keeps routes HTTPS and plain-HTTP fleets keep HTTP",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "app/transport/lan.py",
+          "tests/adversarial/test_issue_332_mixed_case_route_policy_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-out-of-scope-tls-route-precedence-evidence",
+      "name": "Out-of-scope #332 evidence (expectedFailure, non-blocking): TLS route precedence between scheme, protocol and address helpers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
