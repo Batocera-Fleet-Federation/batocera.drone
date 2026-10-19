@@ -1980,10 +1980,17 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     def shutdown(self):
         # Compatibility listeners are owned by the primary server returned from
         # create_server(). Stop their serve_forever loops with the primary loop.
-        for listener in getattr(self, "_owned_compatibility_servers", ()):
-            if getattr(listener, "thread", None) is not None:
-                listener.shutdown()
-        super().shutdown()
+        try:
+            for listener in getattr(self, "_owned_compatibility_servers", ()):
+                if getattr(listener, "thread", None) is not None:
+                    listener.shutdown()
+            super().shutdown()
+        finally:
+            # Test and embedding callers commonly shut down the HTTP server
+            # directly instead of unwinding through main()'s finally block.
+            # Retire LAN workers here as well, even if an owned listener fails
+            # to shut down, so their userdata remains safe to clean up.
+            stop_local_network_workers()
 
     def server_close(self):
         if not getattr(self, "_closing_owned_listeners", False):
