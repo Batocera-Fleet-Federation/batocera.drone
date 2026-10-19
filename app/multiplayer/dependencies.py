@@ -57,6 +57,11 @@ def service_path(settings: Any) -> Path:
     return Path(settings.userdata_root) / "system" / "services" / SERVICE_NAME
 
 
+def service_record(settings: Any) -> Path:
+    """Drone-owned record of the exact service script it wrote (a comment in the script proves nothing)."""
+    return managed_root(settings).parent / "sunshine-service.sha256"
+
+
 def machine_arch() -> str:
     return ARCHITECTURES.get(platform.machine().lower(), "")
 
@@ -235,6 +240,7 @@ class SunshineInstaller:
                 self._write_service()
             except BaseException:
                 # Install is only offered when nothing is installed, so a failure here leaves nothing worth keeping.
+                self._discard_service()
                 self._remove_tree(self.root)
                 raise
             self._set("running", "starting", "Starting Sunshine", 95)
@@ -286,16 +292,25 @@ class SunshineInstaller:
     def _check_service_free(self) -> None:
         """Refuse before anything is promoted if a service Drone did not write already owns the name."""
         target = service_path(self.settings)
-        if target.is_file() and SERVICE_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
+        if (target.is_file() or target.is_symlink()) and not self._owns_service():
             raise InstallError(f"A different {SERVICE_NAME} service already exists on this machine; Drone will not overwrite it.")
 
     def _write_service(self) -> None:
         target = service_path(self.settings)
         self._check_service_free()
         target.parent.mkdir(parents=True, exist_ok=True)
+        content = self._service_text()
+        # Record what we are about to write first, so a script we wrote is never left looking foreign.
+        record = service_record(self.settings)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(hashlib.sha256(content.encode("utf-8")).hexdigest(), encoding="utf-8")
+        target.write_text(content, encoding="utf-8")
+        target.chmod(0o755)
+
+    def _service_text(self) -> str:
         binary, root = shlex.quote(str(managed_binary(self.settings))), shlex.quote(str(self.root / "app"))
         log = shlex.quote(str(Path(self.settings.userdata_root) / "system" / "logs" / "sunshine.log"))
-        target.write_text(f"""#!/bin/sh
+        return (f"""#!/bin/sh
 # Sunshine game-streaming host for Batocera Drone multiplayer.
 # {SERVICE_MARKER} - do not edit by hand. Remove it with Uninstall in Multiplayer settings.
 BIN={binary}
@@ -329,8 +344,7 @@ case "$1" in
   *) echo "Usage: $0 {{start|stop|restart|status}}"; exit 2 ;;
 esac
 exit 0
-""", encoding="utf-8")
-        target.chmod(0o755)
+""")
 
     # ---------------------------------------------------------------- service
     def _batocera_services(self, action: str) -> bool:
@@ -343,12 +357,23 @@ exit 0
             return False
 
     def _owns_service(self) -> bool:
-        """True only for a DRONE_SUNSHINE script Drone wrote; an unmarked one belongs to someone else."""
+        """True only for the exact DRONE_SUNSHINE script Drone wrote (its recorded SHA-256 matches).
+
+        The marker comment is public, so copying it into someone else's script must not make that script ours.
+        """
         script = service_path(self.settings)
         try:
-            return script.is_file() and SERVICE_MARKER in script.read_text(encoding="utf-8", errors="replace")
+            if script.is_symlink() or not script.is_file():
+                return False
+            recorded = service_record(self.settings).read_text(encoding="utf-8").strip()
+            return bool(recorded) and hashlib.sha256(script.read_bytes()).hexdigest() == recorded
         except OSError:
             return False
+
+    def _discard_service(self) -> None:
+        if self._owns_service():
+            service_path(self.settings).unlink()
+        service_record(self.settings).unlink(missing_ok=True)
 
     def _service_script(self, action: str) -> bool:
         script = service_path(self.settings)
@@ -392,6 +417,7 @@ exit 0
                 self.stop_service()
                 self._batocera_services("disable")
                 service_path(self.settings).unlink()
+            service_record(self.settings).unlink(missing_ok=True)
             self._remove_tree(self.root)
             self._set("idle", "", "")
         self._on_change()
