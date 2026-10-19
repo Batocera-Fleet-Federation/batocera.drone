@@ -1408,7 +1408,7 @@ class SettingsTests(unittest.TestCase):
             }
             with mock.patch(
                 "app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context
-            ), mock.patch(
+            ), mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 7, "sha256": hashlib.sha256(b"ROMDATA").hexdigest()}]}), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
@@ -1473,7 +1473,7 @@ class SettingsTests(unittest.TestCase):
                 def read(self, _size=-1):
                     return self.chunks.pop(0)
 
-            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 11, "sha256": hashlib.sha256(b"replacement").hexdigest()}]}), mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
                 result = _download_rom_from_peer(
                     settings, {}, {"drone_id": "source-a", "reachable_url": "http://source-a:8080"},
                     "nes", "Game.nes", overwrite=True,
@@ -1542,7 +1542,7 @@ class SettingsTests(unittest.TestCase):
                 cancel.set()
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 14}]}), mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
                 with self.assertRaises(DownloadCancelled):
                     _download_rom_from_peer(
                         settings,
@@ -1575,8 +1575,8 @@ class SettingsTests(unittest.TestCase):
                 "file_size": 10,
                 "directories": ["PS3_GAME", "PS3_GAME/USRDIR"],
                 "files": [
-                    {"relative_path": "PS3_GAME/PARAM.SFO", "file_size": 5},
-                    {"relative_path": "PS3_GAME/USRDIR/EBOOT.BIN", "file_size": 5},
+                    {"relative_path": "PS3_GAME/PARAM.SFO", "file_size": 5, "sha256": hashlib.sha256(b"param").hexdigest()},
+                    {"relative_path": "PS3_GAME/USRDIR/EBOOT.BIN", "file_size": 5, "sha256": hashlib.sha256(b"eboot").hexdigest()},
                 ],
             }
 
@@ -1603,7 +1603,7 @@ class SettingsTests(unittest.TestCase):
                 raise AssertionError(url)
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ), mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("folder sync should not hash")):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "ps3", "Game.ps3", expected_size=10)
@@ -1639,8 +1639,8 @@ class SettingsTests(unittest.TestCase):
                 "file_size": len(marker_bytes) + len(track_bytes),
                 "directories": [],
                 "files": [
-                    {"relative_path": "Game.gdi", "file_size": len(marker_bytes)},
-                    {"relative_path": "track01.bin", "file_size": len(track_bytes)},
+                    {"relative_path": "Game.gdi", "file_size": len(marker_bytes), "sha256": hashlib.sha256(marker_bytes).hexdigest()},
+                    {"relative_path": "track01.bin", "file_size": len(track_bytes), "sha256": hashlib.sha256(track_bytes).hexdigest()},
                 ],
             }
 
@@ -1676,7 +1676,7 @@ class SettingsTests(unittest.TestCase):
                 expected_fingerprint=expected_fingerprint,
                 marker_relative_path="Game/Game.gdi",
             )
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
@@ -1691,7 +1691,7 @@ class SettingsTests(unittest.TestCase):
 
             # Present marker (matching fingerprint) -> skipped without touching the peer.
             with mock.patch(
-                "app.transfer.peer_download._peer_get_json", side_effect=AssertionError("must not fetch manifest")
+                "app.transfer.peer_download.fetch_inventory", side_effect=AssertionError("must not fetch manifest")
             ), mock.patch("app.transfer.peer_download.urlopen", side_effect=AssertionError("must not download")):
                 skipped = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
             self.assertEqual(skipped["status"], "skipped")
@@ -1701,7 +1701,7 @@ class SettingsTests(unittest.TestCase):
             # so the present-check cannot accept the bad folder later.
             bad_kwargs = dict(kwargs, expected_fingerprint="0" * 32)
             (game_dir / "Game.gdi").unlink()  # fresh marker so the present-check passes through
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 with self.assertRaises(RuntimeError):
@@ -7244,7 +7244,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7277,7 +7278,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "cc:dd",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", side_effect=ssl.SSLError("pin mismatch")), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(handlers_network._local_network, "save_paired_peer") as saved:
@@ -7328,7 +7330,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7364,7 +7367,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(

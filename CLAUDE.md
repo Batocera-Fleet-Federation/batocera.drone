@@ -168,7 +168,12 @@ sync to; a completed local pass just marks the cache clean, see
 `transfer/peer_download.py`; cert pinning + peer client in
 `transfer/peer_connectivity.py` via `_peer_trust_cafile`, SSL-retry; the mTLS
 identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). The
-peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
+peer-pinned identity also signs fresh, nonce-bound ROM/BIOS content inventories
+(`transfer/signed_inventory.py`, `/peer/content-inventory/{roms,bios}`). Receivers
+verify against the persisted pairing pin and full-file SHA-256 for every file,
+including folder children, before installing; caller fingerprints alone are not
+content authority. Sources without this endpoint fail closed and must be upgraded.
+The peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
 hostname/IP-aware HTTPS leaf signed by that identity during startup, including
 current LAN and Tailscale addresses. See
 `drone-p2p-transfer-security` skill.
@@ -191,7 +196,10 @@ broadcasts a removal/rotation for the original; a peer can never force an identi
 (collisions are isolated + logged via `record_collision`); when you add per-peer state
 (table/namespace/file), add it to `swarm_reset.py`. Tests: `tests/test_hardware_identity.py`,
 `tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
-disk images via `image_disk`). Depth: `docs/drone-identity.md`.
+disk images via `image_disk`). Resume journals accept `new_device_id` only when it is absent,
+`null`, or a valid non-empty Drone id; any other present value is rejected before a fresh id
+can be minted. Keep `_choose_device_id()` behavior aligned with `_valid_journal()`. Depth:
+`docs/drone-identity.md`.
 
 ## Admin credentials (`common/auth.py`)
 
@@ -256,6 +264,10 @@ A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed 
 Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
 runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
 (default 300) while a Drone is not enrolled.
+Local-network shutdown joins discovery and peer-health workers before clearing
+their generation. If the timeout expires, `stop_local_network_workers()` raises
+`TimeoutError` and retains the stopped generation for retry; do not delete peer
+state or replace the generation until shutdown succeeds. See `drone-edge-networking`.
 
 ## Integrations (`app/integrations/`) — optional local extensions
 

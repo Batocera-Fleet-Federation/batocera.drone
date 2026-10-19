@@ -127,6 +127,15 @@ Rules:
   if you change their loops. `main()` calls `stop_local_network_workers()` when the
   serve loop exits, so process shutdown retires the generation the same way a
   restart does (the discovery socket is closed and joined).
+- Discovery and peer-health handles are retained per generation. Shutdown joins
+  both within one timeout budget before clearing them; health iterations check
+  cancellation between peer probes and before state writes/membership gossip.
+  `stop_local_network_workers()` raises `TimeoutError` if either worker remains
+  alive, retaining the signalled generation so shutdown can be retried. A restart
+  cannot overwrite that generation until retirement succeeds. Do not remove the
+  state tree after a failed stop; release/finish the in-flight work and retry.
+  Regression coverage: `tests/test_peer_health_worker_shutdown.py`. Tailnet tasks
+  still use cooperative cancellation and are not covered by these two joins.
 
 ## Settings
 

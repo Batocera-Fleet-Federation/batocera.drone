@@ -20,7 +20,6 @@ try:
     from ..device import notifications as _notifications
     from ..storage.state_store import (
         append_event,
-        database_path,
         delete_peer_route,
         load_events,
         load_payload,
@@ -32,7 +31,6 @@ except ImportError:
     from device import notifications as _notifications  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event,
-        database_path,
         delete_peer_route,
         load_events,
         load_payload,
@@ -65,7 +63,7 @@ def _now_iso() -> str:
 
 
 def _db(settings: Any) -> Path:
-    return database_path(settings.userdata_root)
+    return settings.state_database_file
 
 
 def get_integrations(settings: Any) -> dict:

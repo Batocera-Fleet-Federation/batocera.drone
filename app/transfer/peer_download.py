@@ -2,7 +2,8 @@
 
 Extracted from ``drone_api.py``. Given a selected paired peer, pulls a ROM, ROM
 folder, BIOS, save, or artwork over cert-pinned mTLS ``GET /peer/*`` (SSL-retry via
-the peer cert cache), writes it collision-safely with a sampled-hash guard.
+the peer cert cache). ROM/BIOS bytes are checked against a fresh identity-signed
+SHA-256 inventory before installation; other assets retain their fingerprint checks.
 """
 
 import ssl
@@ -23,13 +24,13 @@ try:
     from ..device.device_control import _ensure_rom_write_access
     from ..storage import config_backup_store as _config_backup_store
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
+    from .signed_inventory import fetch_inventory, verify_file
     from .download_errors import DownloadCancelled
     from .peer_connectivity import (
         PEER_CHECK_TIMEOUT_SECONDS,
         _drone_client_ssl_context,
         _is_ssl_url_error,
         _preferred_peer_address,
-        _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
     )
@@ -44,13 +45,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from storage import config_backup_store as _config_backup_store  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
+    from transfer.signed_inventory import fetch_inventory, verify_file
     from transfer.download_errors import DownloadCancelled  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         PEER_CHECK_TIMEOUT_SECONDS,
         _drone_client_ssl_context,
         _is_ssl_url_error,
         _preferred_peer_address,
-        _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
     )
@@ -124,7 +125,6 @@ def _download_rom_folder_from_peer(
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
-    manifest_url = f"{address}/v1/api/peer/rom-manifest/{quote(system, safe='')}/{quote(rel, safe='/')}"
     system_dir = (settings.roms_root / system).resolve()
     target_dir = (system_dir / rel).resolve()
     if target_dir == system_dir or system_dir not in target_dir.parents:
@@ -179,7 +179,7 @@ def _download_rom_folder_from_peer(
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if urlparse(address).scheme == "https" and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
-    manifest = _peer_get_json(manifest_url, settings, peer_id=peer_id, config=config)
+    manifest = fetch_inventory(settings, config, peer_id, address, "roms", system, rel, "folder")
     files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
     directories = manifest.get("directories") if isinstance(manifest.get("directories"), list) else []
     if not files and not directories:
@@ -230,6 +230,8 @@ def _download_rom_folder_from_peer(
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
+                    if file_bytes + len(chunk) > item["file_size"]:
+                        raise ValueError("download exceeds signed inventory size")
                     handle.write(chunk)
                     file_bytes += len(chunk)
                     bytes_written += len(chunk)
@@ -251,6 +253,7 @@ def _download_rom_folder_from_peer(
                     raise RuntimeError(f"size mismatch for {child_rel} expected={expected_file_size} actual={file_bytes}")
             except ValueError:
                 pass
+        verify_file(partial_target, item)
         partial_target.replace(target)
     if expected_size not in (None, ""):
         try:
@@ -388,6 +391,7 @@ def _download_rom_from_peer(
             except Exception:
                 continue
 
+    inventory = fetch_inventory(settings, config, peer_id, address, "roms", system, rel, "file")
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if urlparse(address).scheme == "https" and not cafile:
@@ -420,6 +424,8 @@ def _download_rom_from_peer(
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
+                if bytes_written + len(chunk) > inventory["files"][0]["file_size"]:
+                    raise ValueError("download exceeds signed inventory size")
                 handle.write(chunk)
                 bytes_written += len(chunk)
                 if progress_callback:
@@ -444,6 +450,8 @@ def _download_rom_from_peer(
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
+                    if bytes_written + len(chunk) > inventory["files"][0]["file_size"]:
+                        raise ValueError("download exceeds signed inventory size")
                     handle.write(chunk)
                     bytes_written += len(chunk)
                     if progress_callback:
@@ -456,6 +464,9 @@ def _download_rom_from_peer(
             if partial_target.exists():
                 partial_target.unlink()
             raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
+        except Exception:
+            partial_target.unlink(missing_ok=True)
+            raise
     except DownloadCancelled:
         if partial_target.exists():
             partial_target.unlink()
@@ -464,9 +475,11 @@ def _download_rom_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         raise
+    verify_file(partial_target, inventory["files"][0])
     if expected_size not in (None, ""):
         try:
             if int(expected_size) != bytes_written:
+                partial_target.unlink(missing_ok=True)
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
@@ -561,6 +574,7 @@ def _download_bios_from_peer(
                 except OSError:
                     continue
 
+    inventory = fetch_inventory(settings, config, peer_id, address, "bios", "", rel, "file")
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if urlparse(address).scheme == "https" and not cafile:
@@ -594,6 +608,8 @@ def _download_bios_from_peer(
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
+                if bytes_written + len(chunk) > inventory["files"][0]["file_size"]:
+                    raise ValueError("download exceeds signed inventory size")
                 handle.write(chunk)
                 bytes_written += len(chunk)
                 if progress_callback:
@@ -618,6 +634,8 @@ def _download_bios_from_peer(
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
+                    if bytes_written + len(chunk) > inventory["files"][0]["file_size"]:
+                        raise ValueError("download exceeds signed inventory size")
                     handle.write(chunk)
                     bytes_written += len(chunk)
                     if progress_callback:
@@ -630,6 +648,9 @@ def _download_bios_from_peer(
             if partial_target.exists():
                 partial_target.unlink()
             raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
+        except Exception:
+            partial_target.unlink(missing_ok=True)
+            raise
     except DownloadCancelled:
         if partial_target.exists():
             partial_target.unlink()
@@ -638,13 +659,15 @@ def _download_bios_from_peer(
         if partial_target.exists():
             partial_target.unlink()
         raise
+    verify_file(partial_target, inventory["files"][0])
     if expected_size not in (None, ""):
         try:
             if int(expected_size) != bytes_written:
+                partial_target.unlink(missing_ok=True)
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
-    # BIOS verifies against a full-file MD5 (exact emulator identity), not the sampled fingerprint.
+    # Keep BIOS MD5 compatibility metadata in addition to signed SHA-256 verification.
     actual_md5 = RomRepository.build_md5(partial_target)
     if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
         if partial_target.exists():

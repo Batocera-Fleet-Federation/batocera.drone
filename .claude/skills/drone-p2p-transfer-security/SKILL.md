@@ -55,6 +55,35 @@ When working on Drone peer-to-peer transfer logic, follow these rules:
 14. Avoid loading large file manifests into memory without pagination or streaming.
 15. Log enough transfer and connectivity data to debug issues without exposing secrets.
 
+## Signed ROM/BIOS inventories (#333)
+
+`transfer/signed_inventory.py` authenticates ROM and BIOS content independently of
+transport. Before any new file transfer, `_download_rom_from_peer`,
+`_download_bios_from_peer`, and `_download_rom_folder_from_peer` request
+`GET /peer/content-inventory/{roms,bios}` with an unpredictable 256-bit nonce,
+asset-relative path and ROM system (empty for BIOS). The authorized handler signs
+a bounded inventory using the existing Drone identity key via OpenSSL. The signed
+payload binds protocol version, source Drone id, asset type, system, path, entry
+type, nonce, file sizes and full-file SHA-256 hashes. Folder inventories include
+every child, not only the marker. Symlink children are refused.
+
+The receiver loads the certificate from its local peer cache, checks its SHA-256
+fingerprint against the **persisted paired record**, and verifies the signature
+and every request binding. Never accept a certificate or trust pin from the
+caller or the response. The nonce prevents replay without clock synchronization.
+There is no unsigned/old-peer fallback: source peers need this endpoint before
+ROM/BIOS pulls can succeed. Upgrade source peers as well as receivers.
+
+Every file is checked against signed size/SHA-256 before replacing its target;
+streams exceeding signed size are aborted and partial files removed. Existing
+caller-supplied sampled fingerprints/BIOS MD5 remain compatibility checks, never
+the content authentication authority. Existing-file skips do not install bytes.
+Inventories are limited to 10,000 entries and an 8 MiB response; oversized folder
+requests fail closed. Hashing streams files and does not persist new peer state.
+OpenSSL is already required for Drone certificate lifecycle; no Python crypto
+package or new key distribution is introduced. Saves/media/artwork are outside
+this ROM/BIOS control and retain their existing validation.
+
 ## Peer Discovery and Pairing Rules
 
 Peer candidates come from **direct pairing**, not a third-party directory:
@@ -78,6 +107,14 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
     `_local_pair_peer` refuses an http address. Peers paired over plain http (`http_only`
     fleets, which still pin the cert) keep their http routes.
+- **Paired tailnet metadata refresh (#337):** the bootstrap `/v1/api/peer/info`
+  body is only a discovery hint. Before accepting a paired Drone's tailnet IP,
+  ports, scheme or advertised URL, re-fetch using `_fetch_peer_info` with the
+  persisted `expected_fingerprint`. It authenticates the actual TLS connection
+  via `_pairing_tls_context` (pinned identity or a leaf signed by it), requires
+  HTTPS, rejects redirects, and the handler requires the same Drone id in the
+  authenticated response. Missing/invalid pins and verification failures leave
+  paired routes unchanged. A missing or copied body fingerprint proves nothing.
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.
