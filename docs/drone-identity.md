@@ -127,13 +127,16 @@ certificate but no binding) the run ends in `RECOVERY_REQUIRED` with swarm netwo
 certificate replaced. On a bound original that still matches its hardware, the journal is discarded
 and the identity stays `READY`. On confidently different hardware (a clone) the drone reprovisions
 with a fresh id, the same as for torn JSON. Hardware, not the journal's contents, decides the clone
-case. In the Python API, `_choose_device_id` refuses a journal that is not a real mapping
+case. This is deliberate (#369): "never used to mint" applies to the journal's *contents*, not to the
+clone verdict. Keeping an unreadable-journal clone in `RECOVERY_REQUIRED` would leave it holding the
+original's logical id, certificate and pinned peers, so an unreadable journal never blocks a clone
+from reprovisioning. In the Python API, `_choose_device_id` refuses a journal that is not a real mapping
 (`IdentityError`, "the identity journal must be a mapping") and never mints from it; mock objects are
 refused for the same reason. The on-disk loader is dict-only by design (#366): a decoded value that is
 a `Mapping` but not a `dict` is classified as corrupt, so the disk-path `isinstance(..., dict)` gates
 can never be bypassed by a non-dict journal. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
 `tests/adversarial/test_issue_254_*`, `tests/adversarial/test_issue_255_*` and
-`tests/adversarial/test_issue_366_*`.
+`tests/adversarial/test_issue_366_*` and `tests/adversarial/test_issue_369_*`.
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the
