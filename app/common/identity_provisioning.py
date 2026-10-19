@@ -249,6 +249,10 @@ def _read_json(path: Path) -> Any:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return _ABSENT
+    except UnicodeDecodeError:
+        # Invalid UTF-8 bytes are corrupt content, not an I/O failure: treat them like torn JSON
+        # so a hardware mismatch can still clone instead of failing the whole provisioning run.
+        return _CORRUPT
     except OSError:
         return _CORRUPT
     try:

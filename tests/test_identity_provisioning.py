@@ -651,6 +651,19 @@ class RecoveryAndInterruptionTests(ProvisioningTestBase):
         self.assertEqual(result.state, State.READY)
         self.assertNotEqual(fingerprint_of(clone), fingerprint_of(original))
 
+    def test_invalid_utf8_journal_still_reprovisions_a_confident_clone(self) -> None:
+        # #371: invalid UTF-8 bytes must count as an unreadable journal, not raise
+        # UnicodeDecodeError out of provisioning and hold the proven clone in recovery.
+        original, _ = self.install()
+        target = self.tmp / "disk-b"
+        image_disk(self.root, target)
+        clone = settings_for(target)
+        identity._journal_path(clone).write_bytes(b"[]\xff")
+        result = identity.ensure_identity(clone, provider_for(self.hw_b))
+        self.assertEqual(result.state, State.READY)
+        self.assertNotEqual(result.reason, "provisioning_failed")
+        self.assertNotEqual(fingerprint_of(clone), fingerprint_of(original))
+
     def test_concurrent_initialization_creates_a_single_identity(self) -> None:
         results = []
 
