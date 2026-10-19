@@ -25,9 +25,7 @@ from app.common.settings import Settings
 from app.storage.state_store import database_path
 
 
-# Adjudicated during #286: this evidence is outside that issue's scope (credentials environment defaults). The assertions are
-# unchanged; they are marked expectedFailure so the suite stays collectable for scheduled runs
-# without blocking unrelated deliveries, and reports an unexpected success once the gap is fixed.
+# Fixed in #396: a blank (or whitespace-only) DRONE_CREDENTIALS_FILE now means "unset".
 class BlankCredentialsEnvStartupOutOfScopeTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
@@ -43,13 +41,11 @@ class BlankCredentialsEnvStartupOutOfScopeTests(unittest.TestCase):
             "DRONE_DEVICE_ID": "adversarial-263",
         }
 
-    @unittest.expectedFailure
     def test_blank_credentials_env_resolves_to_the_default_credentials_file(self) -> None:
         with mock.patch.dict(os.environ, self.environment, clear=True):
             settings = Settings.from_env()
         self.assertEqual(settings.credentials_file, self.userdata / "system" / "drone-app" / "credentials.json")
 
-    @unittest.expectedFailure
     def test_store_built_from_blank_credentials_env_constructs_at_startup(self) -> None:
         with mock.patch.dict(os.environ, self.environment, clear=True):
             settings = Settings.from_env()
@@ -60,6 +56,24 @@ class BlankCredentialsEnvStartupOutOfScopeTests(unittest.TestCase):
                 state_database_file=database_path(settings.userdata_root),
             )
         self.assertIsInstance(store, DroneCredentialStore)
+
+    def test_whitespace_credentials_env_resolves_to_the_default_credentials_file(self) -> None:
+        default = self.userdata / "system" / "drone-app" / "credentials.json"
+        for blank in (" ", "\t", "  \n"):
+            with self.subTest(blank=repr(blank)):
+                with mock.patch.dict(os.environ, {**self.environment, "DRONE_CREDENTIALS_FILE": blank}, clear=True):
+                    self.assertEqual(Settings.from_env().credentials_file, default)
+
+    def test_explicit_credentials_env_is_still_honoured(self) -> None:
+        custom = self.root / "custom" / "creds.json"
+        with mock.patch.dict(os.environ, {**self.environment, "DRONE_CREDENTIALS_FILE": str(custom)}, clear=True):
+            self.assertEqual(Settings.from_env().credentials_file, custom)
+
+    def test_unset_credentials_env_resolves_to_the_default_credentials_file(self) -> None:
+        environment = {k: v for k, v in self.environment.items() if k != "DRONE_CREDENTIALS_FILE"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.credentials_file, self.userdata / "system" / "drone-app" / "credentials.json")
 
 
 if __name__ == "__main__":
