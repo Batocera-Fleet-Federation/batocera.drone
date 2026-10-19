@@ -216,7 +216,7 @@ class SunshineInstaller:
         try:
             self._check_service_free()
             self._set("running", "checking", "Looking up the latest Sunshine release", 2)
-            asset =select_release_asset(self._fetch_json(RELEASE_API), arch)
+            asset = select_release_asset(self._fetch_json(RELEASE_API), arch)
             self._remove_tree(staging)
             staging.mkdir(parents=True, mode=0o700)
             image = staging / "sunshine.AppImage"
@@ -342,9 +342,17 @@ exit 0
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def _owns_service(self) -> bool:
+        """True only for a DRONE_SUNSHINE script Drone wrote; an unmarked one belongs to someone else."""
+        script = service_path(self.settings)
+        try:
+            return script.is_file() and SERVICE_MARKER in script.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+
     def _service_script(self, action: str) -> bool:
         script = service_path(self.settings)
-        if not script.is_file():
+        if not self._owns_service():
             return False
         try:
             return self._run(["sh", str(script), action], timeout=30.0).returncode == 0
@@ -353,8 +361,8 @@ exit 0
 
     def start_service(self) -> bool:
         """Enable the service for reboots and start it now; True when a Sunshine process is up."""
-        if not service_path(self.settings).is_file():
-            if not self.is_managed_install():
+        if not self._owns_service():
+            if service_path(self.settings).is_file() or not self.is_managed_install():
                 raise m.MultiplayerError("not_managed", "Sunshine here was not installed by Drone, so Drone does not start it. Start it from Batocera.", 409)
             self._write_service()
         self._batocera_services("enable")
@@ -368,6 +376,8 @@ exit 0
         return self.probe.process_running(("sunshine",))
 
     def stop_service(self) -> None:
+        if not self._owns_service():
+            return
         self._batocera_services("stop")
         self._service_script("stop")
 
@@ -375,13 +385,13 @@ exit 0
         with self._lock:
             if self._job["state"] == "running":
                 raise m.MultiplayerError("install_in_progress", "Sunshine is being installed right now; wait for it to finish.", 409)
-            if not self.is_managed_install() and not service_path(self.settings).is_file():
+            owns_service = self._owns_service()
+            if not self.is_managed_install() and not owns_service:
                 raise m.MultiplayerError("not_managed", "Drone did not install Sunshine on this machine, so it will not remove it.", 409)
-            self.stop_service()
-            self._batocera_services("disable")
-            script = service_path(self.settings)
-            if script.is_file() and SERVICE_MARKER in script.read_text(encoding="utf-8", errors="replace"):
-                script.unlink()
+            if owns_service:
+                self.stop_service()
+                self._batocera_services("disable")
+                service_path(self.settings).unlink()
             self._remove_tree(self.root)
             self._set("idle", "", "")
         self._on_change()
