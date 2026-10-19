@@ -11,7 +11,7 @@ from unittest import mock
 from app.multiplayer import models as m
 from app.multiplayer.adapters.streaming import StreamingAdapter
 from app.multiplayer.dependencies import (DOWNLOAD_PREFIX, SERVICE_MARKER, InstallError, SunshineInstaller, managed_binary,
-                                          managed_root, select_release_asset, service_path)
+                                          managed_root, select_release_asset, service_path, service_record)
 from multiplayer_support import FakeProbe
 from test_multiplayer_core import make_settings
 from test_multiplayer_orchestrator import SwarmCase
@@ -150,8 +150,74 @@ class InstallTests(InstallerCase):
         self.assertEqual(installer.job()["state"], "failed")
         self.assertEqual(script.read_text(), "#!/bin/sh\necho mine\n")
 
+    def test_receipt_write_failure_rolls_back_the_created_service_and_application(self):
+        installer = self.installer()
+        with mock.patch("app.multiplayer.dependencies.os.replace", side_effect=OSError("receipt unavailable")):
+            installer.start_install()
+        self.assertEqual(installer.job()["state"], "failed")
+        self.assertFalse(managed_root(self.settings).exists())
+        self.assertFalse(service_path(self.settings).exists())
+        self.assertFalse(service_record(self.settings).exists())
+        self.assertEqual(list(managed_root(self.settings).parent.iterdir()), [])
+
 
 class UninstallTests(InstallerCase):
+    def test_authenticated_receipt_survives_installer_restart(self):
+        self.installer().start_install()
+        restarted = self.installer()
+        self.assertTrue(restarted._owns_service())
+        self.assertEqual((restarted.root / ".service-key").stat().st_mode & 0o777, 0o600)
+        restarted.uninstall()
+        self.assertFalse(service_path(self.settings).exists())
+        self.assertFalse(service_record(self.settings).exists())
+
+    def test_recomputed_digest_cannot_authorize_a_modified_installed_service(self):
+        installer = self.installer()
+        installer.start_install()
+        script = service_path(self.settings)
+        foreign = script.read_text() + "\necho administrator-owned\n"
+        script.write_text(foreign)
+        record = service_record(self.settings)
+        forged = hashlib.sha256(foreign.encode()).hexdigest()
+        record.write_text(forged)
+        self.commands.clear()
+        restarted = self.installer()
+        self.assertFalse(restarted._owns_service())
+        with self.assertRaises(m.MultiplayerError):
+            restarted.start_service()
+        restarted.stop_service()
+        restarted.uninstall()  # May remove the managed app, but never the foreign service/record.
+        self.assertEqual(self.commands, [])
+        self.assertEqual(script.read_text(), foreign)
+        self.assertEqual(record.read_text(), forged)
+
+    def test_copying_a_valid_script_and_receipt_does_not_own_a_replacement_inode(self):
+        installer = self.installer()
+        installer.start_install()
+        script = service_path(self.settings)
+        replacement = script.with_name("replacement")
+        replacement.write_bytes(script.read_bytes())
+        replacement.replace(script)
+        self.assertFalse(self.installer()._owns_service())
+
+    def test_receipt_requires_private_install_key_and_valid_mac(self):
+        installer = self.installer()
+        installer.start_install()
+        record = service_record(self.settings)
+        original = record.read_bytes()
+        for malformed in ('{"version":1,"mac":"☃"}', '{}', 'null', 'not json'):
+            record.write_text(malformed)
+            self.assertFalse(installer._owns_service())
+        record.write_bytes(original)
+        key = installer.root / ".service-key"
+        key.chmod(0o644)
+        self.assertFalse(installer._owns_service())
+        key.chmod(0o600)
+        self.assertTrue(installer._owns_service())
+        key.unlink()
+        self.assertFalse(installer._owns_service())
+        self.assertFalse(key.exists(), "inspection must not create signing authority")
+
     def test_uninstall_removes_only_what_drone_installed(self):
         installer = self.installer()
         installer.start_install()

@@ -85,7 +85,9 @@ matrix and "Manual hardware validation" in sync with reality.
 
 - `dependencies.py` is the **only** place Drone installs anything for multiplayer. Keep it fail-closed: official
   `LizardByte/Sunshine` HTTPS release, required `sha256:` digest from the release API, size cap, extract with the
-  AppImage's own `--appimage-extract` (never run from the download dir), fixed argv, service file owned only if its SHA-256 matches the record Drone wrote (the marker comment is public and proves nothing),
+  AppImage's own `--appimage-extract` (never run from the download dir), fixed argv. Service ownership requires an
+  HMAC receipt binding the script bytes, path and inode to the private key created during verified installation;
+  public markers and checksum-only sidecars are never ownership evidence. Inspection never creates that key.
   uninstall never touches a Sunshine/service Drone did not write and keeps Sunshine's own config/pairings. Endpoints
   are `GET /admin/multiplayer/dependencies` and `POST .../dependencies/sunshine/{install,start,stop,uninstall}`
   (same session + same-origin + JSON gate as other mutations; stop/uninstall refused while streaming is in use).

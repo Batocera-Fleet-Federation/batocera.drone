@@ -425,6 +425,15 @@ write is never touched, and a Sunshine Drone did not install is never removed). 
 client pairings under `/userdata/system/.config/sunshine` are kept. Stop/uninstall are refused while a
 streaming session is active. After the first start, open Sunshine's web UI on the machine and set its
 username/password straight away — Drone never sees or stores them. Install needs internet access on the Drone.
+Service ownership is recorded in an HMAC-authenticated receipt, signed with a private installation key
+(`sunshine/.service-key`, mode `0600`) created only after the verified application is installed. The receipt
+binds the service's path, filesystem identity and contents and survives Drone restarts. Copied comments,
+copied service files and public SHA-256 sidecars cannot authorize start, stop or removal. The receipt key
+is local installation state, never shared with peers, and is removed with the managed application.
+Legacy checksum-only receipts and missing/invalid keys are not automatically adopted: the service is
+left alone for administrator inspection. Remove a conflicting service manually after reviewing it, then
+reinstall Sunshine through Drone to establish new provenance. This does not protect against a root
+administrator who can alter Drone's code or private installation state.
 **Moonlight** (the guest side) is not installed by Drone; set up Batocera's Moonlight client on the guest.
 Like every other streaming claim here, the installer is covered by simulated tests only: a real install on
 x86_64 and aarch64 Batocera hardware is still to be validated.

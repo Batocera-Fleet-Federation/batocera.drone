@@ -17,6 +17,7 @@ uninstalling leaves them alone so a reinstall does not lose pairings.
 """
 
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -24,7 +25,9 @@ import re
 import shlex
 import shutil
 import ssl
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.request
@@ -58,7 +61,7 @@ def service_path(settings: Any) -> Path:
 
 
 def service_record(settings: Any) -> Path:
-    """Drone-owned record of the exact service script it wrote (a comment in the script proves nothing)."""
+    """Authenticated installation receipt (the legacy filename is retained for upgrades)."""
     return managed_root(settings).parent / "sunshine-service.sha256"
 
 
@@ -268,6 +271,7 @@ class SunshineInstaller:
 
     def _swap_in(self, extracted: Path, asset: Dict[str, Any]) -> None:
         root = self.root
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
         (root / "bin").mkdir(parents=True, exist_ok=True)
         app, previous = root / "app", root / "app.previous"
         self._remove_tree(previous)
@@ -282,6 +286,13 @@ class SunshineInstaller:
                                f"export HOME={shlex.quote(str(home))}\nexec {shlex.quote(str(app / 'AppRun'))} \"$@\"\n", encoding="utf-8")
             wrapper.chmod(0o755)
             (root / "version.json").write_text(json.dumps({"tag": asset["tag"], "asset": asset["name"], "sha256": asset["sha256"]}), encoding="utf-8")
+            # Only a completed, verified application promotion creates signing authority.
+            # Never create a key while inspecting a service or reading a receipt.
+            with (root / ".service-key").open("xb") as key_file:
+                os.fchmod(key_file.fileno(), 0o600)
+                key_file.write(os.urandom(32))
+                key_file.flush()
+                os.fsync(key_file.fileno())
         except Exception:
             self._remove_tree(app)
             if had_previous:
@@ -298,14 +309,46 @@ class SunshineInstaller:
     def _write_service(self) -> None:
         target = service_path(self.settings)
         self._check_service_free()
+        if self._owns_service():
+            return
         target.parent.mkdir(parents=True, exist_ok=True)
         content = self._service_text()
-        # Record what we are about to write first, so a script we wrote is never left looking foreign.
+        key = self._service_key()
         record = service_record(self.settings)
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(hashlib.sha256(content.encode("utf-8")).hexdigest(), encoding="utf-8")
-        target.write_text(content, encoding="utf-8")
-        target.chmod(0o755)
+        # Atomic replacement prevents a restart from seeing half a receipt, and does
+        # not follow a pre-existing sidecar symlink.
+        temporary = None
+        created = None
+        try:
+            # Exclusive creation also refuses a foreign file appearing after preflight.
+            with target.open("x", encoding="utf-8") as script:
+                created = os.fstat(script.fileno())
+                script.write(content)
+                os.fchmod(script.fileno(), 0o755)
+                script.flush()
+                os.fsync(script.fileno())
+            receipt = {"version": 1, "mac": hmac.new(key, self._service_evidence(), hashlib.sha256).hexdigest()}
+            with tempfile.NamedTemporaryFile(mode="w", dir=record.parent, delete=False, encoding="utf-8") as handle:
+                temporary = Path(handle.name)
+                json.dump(receipt, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, record)
+        except BaseException:
+            # A failed receipt write must not strand an installed-looking service.
+            # Remove only the inode this operation created, preserving any replacement.
+            if created is not None:
+                try:
+                    current = target.lstat()
+                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                        target.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _service_text(self) -> str:
         binary, root = shlex.quote(str(managed_binary(self.settings))), shlex.quote(str(self.root / "app"))
@@ -357,23 +400,45 @@ exit 0
             return False
 
     def _owns_service(self) -> bool:
-        """True only for the exact DRONE_SUNSHINE script Drone wrote (its recorded SHA-256 matches).
+        """Authenticate the installed script, not a public marker or reproducible checksum.
 
-        The marker comment is public, so copying it into someone else's script must not make that script ours.
+        The receipt binds both bytes and filesystem identity, so copying the service
+        and its receipt onto a replacement file does not transfer ownership. This
+        protects against copied metadata, not an administrator controlling Drone's
+        private installation directory (Drone itself runs as root).
         """
-        script = service_path(self.settings)
         try:
-            if script.is_symlink() or not script.is_file():
+            if not self.is_managed_install() or service_record(self.settings).is_symlink():
                 return False
-            recorded = service_record(self.settings).read_text(encoding="utf-8").strip()
-            return bool(recorded) and hashlib.sha256(script.read_bytes()).hexdigest() == recorded
-        except OSError:
+            with service_record(self.settings).open(encoding="utf-8") as handle:
+                receipt = json.loads(handle.read(4096))
+            if (not isinstance(receipt, dict) or receipt.get("version") != 1
+                    or not isinstance(receipt.get("mac"), str) or not re.fullmatch(r"[0-9a-f]{64}", receipt["mac"])):
+                return False
+            expected = hmac.new(self._service_key(), self._service_evidence(), hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, receipt["mac"])
+        except (OSError, ValueError, InstallError):
             return False
+
+    def _service_key(self) -> bytes:
+        path = self.root / ".service-key"
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size != 32:
+            raise InstallError("Sunshine's private installation receipt key is invalid; Drone will not manage its service.")
+        return path.read_bytes()
+
+    def _service_evidence(self) -> bytes:
+        script = service_path(self.settings)
+        info = script.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64 * 1024:
+            raise InstallError("Sunshine's service is not a regular Drone-owned script.")
+        return json.dumps([str(script), info.st_dev, info.st_ino, hashlib.sha256(script.read_bytes()).hexdigest()],
+                          separators=(",", ":")).encode("utf-8")
 
     def _discard_service(self) -> None:
         if self._owns_service():
             service_path(self.settings).unlink()
-        service_record(self.settings).unlink(missing_ok=True)
+            service_record(self.settings).unlink(missing_ok=True)
 
     def _service_script(self, action: str) -> bool:
         script = service_path(self.settings)
@@ -417,7 +482,8 @@ exit 0
                 self.stop_service()
                 self._batocera_services("disable")
                 service_path(self.settings).unlink()
-            service_record(self.settings).unlink(missing_ok=True)
+            if owns_service:
+                service_record(self.settings).unlink(missing_ok=True)
             self._remove_tree(self.root)
             self._set("idle", "", "")
         self._on_change()
