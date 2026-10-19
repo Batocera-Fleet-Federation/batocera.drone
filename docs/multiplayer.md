@@ -434,6 +434,12 @@ Legacy checksum-only receipts and missing/invalid keys are not automatically ado
 left alone for administrator inspection. Remove a conflicting service manually after reviewing it, then
 reinstall Sunshine through Drone to establish new provenance. This does not protect against a root
 administrator who can alter Drone's code or private installation state.
+The Start button is offered only for an installation Drone can manage. A foreign or modified
+service is left for administrator review; the card explains the blocker. If an interrupted install
+left only partial application files, press Install again: after verifying the new download, Drone
+replaces the leftover installation key without adopting any existing foreign service. A missing
+service can be recreated for an intact managed installation with its valid private key; a missing
+or invalid key requires uninstalling and reinstalling.
 **Moonlight** (the guest side) is not installed by Drone; set up Batocera's Moonlight client on the guest.
 Like every other streaming claim here, the installer is covered by simulated tests only: a real install on
 x86_64 and aarch64 Batocera hardware is still to be validated.

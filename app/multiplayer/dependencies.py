@@ -179,18 +179,20 @@ class SunshineInstaller:
         running = self.probe.process_running(("sunshine",)) if installed else False
         job = self.job()
         installing = job["state"] == "running"
+        start_block = self._service_start_block()
         return {
             "name": "Sunshine", "purpose": "Host side of remote streaming. Guests connect with Moonlight.",
             "installed": installed, "managed": managed, "running": running,
             "version": self.installed_version() if managed else "",
             "supported": bool(arch), "architecture": platform.machine(),
             "can_install": bool(arch) and not installed and not installing,
-            "can_start": installed and not running and not installing,
+            "can_start": installed and not start_block and not running and not installing,
             "can_uninstall": managed and not installing,
             "service_installed": service_path(self.settings).is_file(),
             "install_dir": str(self.root), "web_ui": WEB_UI_URL, "job": job,
             "source": "github.com/LizardByte/Sunshine (official release, SHA-256 verified)",
             "notes": [
+                *([start_block] if installed and start_block else []),
                 "After the first start, open Sunshine's web UI on this machine and set its own username and password right away.",
                 "Pairing with a guest's Moonlight uses a PIN you enter in that web UI; Drone never sees Sunshine's credentials.",
                 "Uninstalling removes the program and its service but keeps Sunshine's settings and pairings.",
@@ -213,7 +215,7 @@ class SunshineInstaller:
             arch = self._arch()
             if not arch:
                 raise m.MultiplayerError("unsupported_architecture", f"Sunshine has no build for '{platform.machine()}'.", 409)
-            if self.probe.find_binary(("sunshine",), (str(managed_binary(self.settings)), "/usr/bin/sunshine")):
+            if self.is_managed_install() or self.probe.find_binary(("sunshine",), (str(managed_binary(self.settings)), "/usr/bin/sunshine")):
                 raise m.MultiplayerError("already_installed", "Sunshine is already installed on this machine.", 409)
             self._set("running", "checking", "Looking up the latest Sunshine release", 0)
             self._spawn(lambda: self._install(arch), "drone-sunshine-install")
@@ -256,7 +258,7 @@ class SunshineInstaller:
         except subprocess.TimeoutExpired:
             self._set("failed", "", "Unpacking Sunshine took too long and was stopped. Try again.")
         except OSError as error:
-            self._set("failed", "", f"Sunshine could not be installed: {error.strerror or error.__class__.__name__}.")
+            self._set("failed", "", f"Sunshine could not be installed: {error.strerror or error.__class__.__name__}. Check available storage and write permissions, then try Install Sunshine again.")
         except Exception as error:  # noqa: BLE001 - surface any network/parse failure as a message, never a crash
             self._set("failed", "", f"Sunshine could not be installed: {error.__class__.__name__}. Check this Drone's internet access and try again.")
         finally:
@@ -288,11 +290,21 @@ class SunshineInstaller:
             (root / "version.json").write_text(json.dumps({"tag": asset["tag"], "asset": asset["name"], "sha256": asset["sha256"]}), encoding="utf-8")
             # Only a completed, verified application promotion creates signing authority.
             # Never create a key while inspecting a service or reading a receipt.
-            with (root / ".service-key").open("xb") as key_file:
-                os.fchmod(key_file.fileno(), 0o600)
-                key_file.write(os.urandom(32))
-                key_file.flush()
-                os.fsync(key_file.fileno())
+            # An interrupted install may have left a key without an application.
+            # Replace that residue with fresh authority only after verification and
+            # promotion; never reuse it or follow a leftover key symlink.
+            temporary_key = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=root, delete=False) as key_file:
+                    temporary_key = Path(key_file.name)
+                    os.fchmod(key_file.fileno(), 0o600)
+                    key_file.write(os.urandom(32))
+                    key_file.flush()
+                    os.fsync(key_file.fileno())
+                os.replace(temporary_key, root / ".service-key")
+            finally:
+                if temporary_key is not None:
+                    temporary_key.unlink(missing_ok=True)
         except Exception:
             self._remove_tree(app)
             if had_previous:
@@ -303,7 +315,7 @@ class SunshineInstaller:
     def _check_service_free(self) -> None:
         """Refuse before anything is promoted if a service Drone did not write already owns the name."""
         target = service_path(self.settings)
-        if (target.is_file() or target.is_symlink()) and not self._owns_service():
+        if (target.exists() or target.is_symlink()) and not self._owns_service():
             raise InstallError(f"A different {SERVICE_NAME} service already exists on this machine; Drone will not overwrite it.")
 
     def _write_service(self) -> None:
@@ -449,11 +461,27 @@ exit 0
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def _service_start_block(self) -> str:
+        """Shared preflight for the UI and start action; inspection never mints authority."""
+        if not self.is_managed_install():
+            return "Sunshine here was not installed by Drone, so Drone does not start it. Start it from Batocera."
+        if self._owns_service():
+            return ""
+        script = service_path(self.settings)
+        if script.exists() or script.is_symlink():
+            return f"A different or modified {SERVICE_NAME} service exists. Ask an administrator to review it before starting Sunshine from Drone."
+        try:
+            self._service_key()
+        except (OSError, InstallError):
+            return "Sunshine's installation receipt key is missing or invalid. Uninstall and reinstall Sunshine from Multiplayer settings."
+        return ""
+
     def start_service(self) -> bool:
         """Enable the service for reboots and start it now; True when a Sunshine process is up."""
+        block = self._service_start_block()
+        if block:
+            raise m.MultiplayerError("not_managed", block, 409)
         if not self._owns_service():
-            if service_path(self.settings).is_file() or not self.is_managed_install():
-                raise m.MultiplayerError("not_managed", "Sunshine here was not installed by Drone, so Drone does not start it. Start it from Batocera.", 409)
             self._write_service()
         self._batocera_services("enable")
         if not (self._batocera_services("start") or self._service_script("start")):

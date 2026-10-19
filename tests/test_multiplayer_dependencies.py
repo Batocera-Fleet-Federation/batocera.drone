@@ -84,6 +84,24 @@ class InstallerCase(unittest.TestCase):
 
 
 class InstallTests(InstallerCase):
+    def test_retry_replaces_leftover_key_symlink_without_writing_its_target(self):
+        installer = self.installer()
+        installer.root.mkdir(parents=True)
+        other_key = self.tmp / "unrelated-key"
+        other_key.write_bytes(b"k" * 32)
+        (installer.root / ".service-key").symlink_to(other_key)
+        installer.start_install()
+        self.assertEqual(installer.job()["state"], "succeeded", installer.job())
+        self.assertEqual(other_key.read_bytes(), b"k" * 32)
+        self.assertFalse((installer.root / ".service-key").is_symlink())
+        self.assertTrue(installer._owns_service())
+
+    def test_storage_failure_includes_recovery_action(self):
+        installer = self.installer(download=mock.Mock(side_effect=OSError(28, "No space left on device")))
+        installer.start_install()
+        self.assertIn("storage", installer.job()["message"])
+        self.assertIn("try Install Sunshine again", installer.job()["message"])
+
     def test_install_downloads_verifies_extracts_registers_one_service_and_starts_it(self):
         installer = self.installer()
         with mock.patch("app.multiplayer.dependencies.shutil.which", return_value=None):
@@ -247,6 +265,25 @@ class UninstallTests(InstallerCase):
 
 
 class StatusAndAdapterTests(InstallerCase):
+    def test_missing_service_can_be_recreated_only_with_a_valid_install_key(self):
+        installer = self.installer()
+        installer.start_install()
+        self.probe.processes.clear()
+        service_path(self.settings).unlink()
+        self.assertTrue(installer.status()["can_start"])
+        self.assertTrue(installer.start_service())
+        self.assertTrue(installer._owns_service())
+        self.probe.processes.clear()
+        service_path(self.settings).unlink()
+        (installer.root / ".service-key").unlink()
+        self.commands.clear()
+        self.assertFalse(installer.status()["can_start"])
+        self.assertIn("reinstall", " ".join(installer.status()["notes"]))
+        with self.assertRaises(m.MultiplayerError):
+            installer.start_service()
+        self.assertEqual(self.commands, [])
+        self.assertFalse((installer.root / ".service-key").exists())
+
     def test_status_reports_what_the_ui_can_do(self):
         installer = self.installer()
         status = installer.status()
