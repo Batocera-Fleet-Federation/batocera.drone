@@ -121,6 +121,10 @@ sources, libretro core info) and cached for 30 s.
   guest launch offers in slot order after the host's port is confirmed listening. Cores without
   deterministic save states are classed *Experimental* and may desync. The host's
   core is pinned for the ROM during the session so both sides emulate identically.
+  When no core is set for a game Drone resolves it from `batocera.conf`, then Batocera's
+  `configgen-defaults.yml`, then the first installed candidate core — never silently a core that is not
+  installed — and the reason says which one was used (`core_source`). A blocker is always listed before
+  informational notes so the selector shows the real cause.
   The `netplay.*` per-game keys follow Batocera's launcher; if your build's
   launcher lacks any of them Drone falls back to manual instructions.
 * **Dolphin** — the Netplay window is Dolphin's own (Tools → Start NetPlay…).
@@ -400,8 +404,30 @@ guest. **Remaining manual step:** the one-time PIN pairing in Sunshine's web UI
 Drone conservatively limits its streaming lobby to the host plus one remote guest;
 this is a Drone limit, not a claim about Sunshine's client capacity. Hardware encoder
 probes are hints, not codec validation. Pairing, stream connection/termination and
-virtual controller mapping remain manual in Sunshine/Moonlight. Install Sunshine/Moonlight with
-Batocera's own tooling; Drone installs nothing.
+virtual controller mapping remain manual in Sunshine/Moonlight.
+
+### Installing Sunshine from Drone
+
+Batocera does not ship Sunshine, so **Multiplayer → Settings → Remote streaming** has an
+**Install Sunshine** button (and **Start** / **Uninstall**). The host dialog links there when
+Sunshine is the only thing blocking streaming. What it does, in a background job with a progress bar:
+
+1. Looks up the latest release of `LizardByte/Sunshine` over HTTPS and picks the AppImage for this
+   machine's architecture (x86_64 or aarch64; anything else is reported as unsupported).
+2. Downloads it, and **refuses to install** unless the file matches the SHA-256 digest GitHub's release
+   API publishes (no digest, wrong size, or a download URL outside the official repository are all refused).
+3. Unpacks it with the AppImage's own `--appimage-extract` (no FUSE, nothing mounted) into
+   `/userdata/system/drone-multiplayer/sunshine/` and writes one launcher plus one Batocera service,
+   `/userdata/system/services/DRONE_SUNSHINE`, then enables and starts it. Both survive reboots and Drone updates.
+
+**Uninstall** stops the service and deletes exactly those two things (a same-named service Drone did not
+write is never touched, and a Sunshine Drone did not install is never removed). Sunshine's own settings and
+client pairings under `/userdata/system/.config/sunshine` are kept. Stop/uninstall are refused while a
+streaming session is active. After the first start, open Sunshine's web UI on the machine and set its
+username/password straight away — Drone never sees or stores them. Install needs internet access on the Drone.
+**Moonlight** (the guest side) is not installed by Drone; set up Batocera's Moonlight client on the guest.
+Like every other streaming claim here, the installer is covered by simulated tests only: a real install on
+x86_64 and aarch64 Batocera hardware is still to be validated.
 
 ## Settings
 
@@ -517,7 +543,9 @@ a raw configuration key.
 | Symptom | Likely cause / fix |
 |---|---|
 | "No multiplayer mechanism is usable…" | Open the game's *Host…* dialog: it lists each mechanism's blockers (missing game on a peer, no core selected, core not installed, Sunshine not running, …). |
-| Status *Configuration required* for a RetroArch game | No core is selected in Batocera for that system/game. Choose one in Batocera, or pick one under *Advanced* when hosting. |
+| RetroArch game blocked: "No known RetroArch core … is installed" / "core … is not installed" | Install the core from Batocera's Main Menu → Updates & Downloads → Content Downloader (Drone does not install cores). Cores in `/usr/lib/libretro` and `/userdata/cores` are both detected. |
+| A RetroArch game has no core set | Not a problem: Drone uses Batocera's own default core for the system (read from its configgen defaults), else the first installed core, for the session only. Pick another under *Advanced* when hosting. |
+| Streaming: "Sunshine is not installed on this (host) machine" | *Multiplayer → Settings → Remote streaming → Install Sunshine*. |
 | "Core … versions differ" / "RetroArch versions are incompatible" | Update both Drones' RetroArch/core to the same version. |
 | "…incompatible Dolphin versions" | Install the same Dolphin build everywhere. |
 | Guest: "did not answer" for host port | Peers don't share a LAN/tailnet route, or the host's game exited. Run *Connectivity diagnostics*. |
@@ -597,8 +625,9 @@ and [configuration generator](https://github.com/batocera-linux/batocera.linux/b
 Drone still checks the installed sources rather than assuming a Batocera version
 exposes those keys. Sunshine's
 [input options](https://docs.lizardbyte.dev/projects/sunshine/v0.22.2/about/advanced_usage.html)
-are managed by Sunshine, independently of Drone's swarm certificates. No dependency
-is installed and no Sunshine service or firewall is created by Drone.
+are managed by Sunshine, independently of Drone's swarm certificates. The only dependency Drone installs
+is Sunshine, and only when you press *Install Sunshine* (see "Installing Sunshine from Drone"); it creates
+one `DRONE_SUNSHINE` service and no firewall rules.
 
 Security regression tests in `tests/test_multiplayer_hardening.py` cover hostile
 session IDs, changed acceptance snapshots, completed-session resurrection,

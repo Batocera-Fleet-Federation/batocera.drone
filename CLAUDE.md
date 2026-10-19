@@ -89,7 +89,8 @@ find files nested under a subpackage. Every `except ImportError` fallback must f
   PPSSPP, Switch, generic LAN, streaming, detect-only emulators), `matching`, `mechanism`,
   `compat_db`, `network`, `launcher`, `settings_store`, `worker`, `identity_reset`, and the
   `MultiplayerOrchestrator` (`orchestrator.py`, composed from `core`/`sessions`/`protocol`/
-  `lifecycle`/`library` mixins). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
+  `lifecycle`/`library` mixins) and `dependencies` (the one-click, checksum-verified Sunshine installer + `DRONE_SUNSHINE`
+  service; nothing else is installed by multiplayer). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
   (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported

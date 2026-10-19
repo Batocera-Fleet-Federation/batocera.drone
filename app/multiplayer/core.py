@@ -14,6 +14,7 @@ from . import models as m
 from .adapters import adapters_by_id, build_adapters
 from .compat_db import CompatibilityDatabase
 from .config_guard import ConfigGuard
+from .dependencies import SunshineInstaller
 from .environment import SystemProbe
 from .launcher import GameLauncher
 from .matching import GameAssessor, GameLibrary
@@ -47,7 +48,7 @@ class OrchestratorBase:
                  peer_checks: Optional[Callable[[], List[dict]]] = None,
                  spawn: Callable[[Callable[[], None], str], None] = _spawn_thread,
                  audit: Optional[Callable[..., Any]] = None, bell: Optional[Callable[..., Any]] = None,
-                 sleep: Callable[[float], None] = None) -> None:
+                 sleep: Callable[[float], None] = None, installer: Optional[SunshineInstaller] = None) -> None:
         import time as _time
         self.settings = settings
         self.repository = repository
@@ -73,6 +74,13 @@ class OrchestratorBase:
         self._locks_guard = threading.Lock()
         self._creation_lock = threading.RLock()
         self._match_cache: Dict[Any, tuple] = {}
+        self.sunshine = installer or SunshineInstaller(settings, self.probe, on_change=self.dependencies_changed)
+
+    def dependencies_changed(self) -> None:
+        """An optional dependency was installed/started/removed: forget cached detection."""
+        for adapter in self.adapters:
+            adapter.refresh()
+        self.library.invalidate()
 
     # ----------------------------------------------------------------- identity
     @property
