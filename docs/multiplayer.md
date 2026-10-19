@@ -425,6 +425,7 @@ write is never touched, and a Sunshine Drone did not install is never removed). 
 client pairings under `/userdata/system/.config/sunshine` are kept. Stop/uninstall are refused while a
 streaming session is active. After the first start, open Sunshine's web UI on the machine and set its
 username/password straight away — Drone never sees or stores them. Install needs internet access on the Drone.
+The service runs as root, so it keeps its PID in a private `/run/drone-sunshine` directory (mode `0700`, symlinks and foreign owners refused) and only signals a PID whose command line is the Drone-installed Sunshine; it never uses `/tmp`. Services installed by an earlier build keep their old script until Sunshine is uninstalled and reinstalled.
 Service ownership is recorded in an HMAC-authenticated receipt, signed with a private installation key
 (`sunshine/.service-key`, mode `0600`) created only after the verified application is installed. The receipt
 binds the service's path, filesystem identity and contents and survives Drone restarts. Copied comments,

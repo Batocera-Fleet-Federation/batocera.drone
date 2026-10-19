@@ -371,25 +371,63 @@ class SunshineInstaller:
 BIN={binary}
 APP={root}
 LOG={log}
-PID_FILE=/tmp/drone-sunshine.pid
+RUN_DIR=/run/drone-sunshine
+PID_FILE=$RUN_DIR/sunshine.pid
+ME=$(id -u)
+
+# This runs as root. The PID lives in a private directory only root can write,
+# never in a world-writable location like /tmp.
+prepare_run_dir() {{
+  umask 077
+  [ -L "$RUN_DIR" ] && return 1
+  [ -d "$RUN_DIR" ] || mkdir -m 700 "$RUN_DIR" 2>/dev/null || return 1
+  [ -d "$RUN_DIR" ] && [ ! -L "$RUN_DIR" ] || return 1
+  [ "$(stat -c '%u %a' "$RUN_DIR" 2>/dev/null)" = "$ME 700" ] || return 1
+  return 0
+}}
+
+# Sets PID from a regular, root-owned, non-symlink file holding only digits.
+read_pid() {{
+  PID=
+  [ -f "$PID_FILE" ] && [ ! -L "$PID_FILE" ] || return 1
+  [ "$(stat -c %u "$PID_FILE" 2>/dev/null)" = "$ME" ] || return 1
+  read -r PID < "$PID_FILE" || return 1
+  case "$PID" in
+    ""|*[!0-9]*|0|1) PID=; return 1 ;;
+  esac
+  return 0
+}}
+
+# The recorded PID must still be our Sunshine, not a recycled or foreign process.
+owns_process() {{
+  CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null) || return 1
+  case "$CMD" in
+    *"$BIN"*|*"$APP"/*) return 0 ;;
+  esac
+  return 1
+}}
 
 is_running() {{
-  [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+  prepare_run_dir && read_pid && kill -0 "$PID" 2>/dev/null && owns_process
 }}
 
 case "$1" in
   start)
     [ -x "$BIN" ] || {{ echo "[drone-sunshine] not installed" >&2; exit 1; }}
+    prepare_run_dir || {{ echo "[drone-sunshine] $RUN_DIR is not a private directory" >&2; exit 1; }}
     is_running && exit 0
+    rm -f "$PID_FILE"
     mkdir -p "$(dirname "$LOG")"
     nohup "$BIN" >> "$LOG" 2>&1 &
-    echo $! > "$PID_FILE"
-    echo "[drone-sunshine] started (pid $(cat "$PID_FILE"))"
+    NEW=$!
+    printf '%s\\n' "$NEW" > "$PID_FILE.$$" && mv -f "$PID_FILE.$$" "$PID_FILE"
+    echo "[drone-sunshine] started (pid $NEW)"
     ;;
   stop)
-    [ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
-    rm -f "$PID_FILE"
-    pkill -f "$APP/usr/bin/sunshine" 2>/dev/null
+    if prepare_run_dir; then
+      if read_pid && owns_process; then kill "$PID" 2>/dev/null; fi
+      rm -f "$PID_FILE"
+    fi
     echo "[drone-sunshine] stopped"
     ;;
   restart) "$0" stop; sleep 1; "$0" start ;;
