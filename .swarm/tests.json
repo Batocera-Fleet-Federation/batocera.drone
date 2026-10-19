@@ -47,6 +47,38 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_332_mixed_case_tls_post_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-post-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS POSTs use pinned TLS over real sockets",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_post_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_359_hostile_resumed_string_hooks_uat.py"
       ],
       "disruptive": false,
