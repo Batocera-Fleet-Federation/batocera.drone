@@ -257,6 +257,9 @@ def _read_json(path: Path) -> Any:
         # Absurdly deep nesting raises RecursionError rather than ValueError; it is just as
         # unusable as torn JSON.
         return _CORRUPT
+    # Dict-only is the durable journal contract: json.loads of an object is always a dict, and
+    # the disk-path gates validate only when isinstance(..., dict). Widening this to any Mapping
+    # would let a non-dict journal skip those checks (see docs/drone-identity.md, #366).
     return value if isinstance(value, dict) else _CORRUPT
 
 
