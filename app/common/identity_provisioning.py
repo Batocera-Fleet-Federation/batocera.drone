@@ -653,9 +653,14 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
         raise IdentityError("the identity journal must be a mapping")
     try:
         has_resumed_id = "new_device_id" in journal
+        # Inherited ``__contains__`` treats a KeyError from ``__getitem__`` as absence, so
+        # a Mapping whose get() reports a value but whose item lookup fails would look
+        # like a fresh journal. Cross-check with get() so that contradiction is rejected
+        # instead of minting a replacement identity.
+        reports_resumed_id = journal.get("new_device_id") is not None
     except Exception as exc:
         raise IdentityError("the identity journal must be a mapping") from exc
-    if has_resumed_id:
+    if has_resumed_id or reports_resumed_id:
         # A present non-None value is an attempted resume, even when falsey. Only JSON
         # null (or an absent field) means there is no id to resume. Keeping this aligned
         # with _valid_journal prevents malformed journals from silently minting identity.
