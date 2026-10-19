@@ -114,14 +114,12 @@ class RealMappingValueBoundaryTests(_Tree):
             with self.subTest(journal=type(journal).__name__):
                 self.assertEqual(self._choose(journal), ("identity-error", INVALID_ID))
 
-    def test_a_falsy_bytes_id_mints_instead_of_resuming_the_pin(self) -> None:
-        # Empty bytes are a falsy, non-string "present" value. Mirror the dict legacy path: mint.
+    def test_a_falsy_bytes_id_is_rejected_as_a_present_non_string_value(self) -> None:
+        # Empty bytes are not JSON null: a present non-string resumed value must fail closed.
         for journal in (collections.UserDict({"new_device_id": b""}),
                         MappingProxyType({"new_device_id": b""})):
             with self.subTest(journal=type(journal).__name__):
-                outcome = self._choose(journal)
-                self.assertEqual(outcome[0], "returned")
-                self.assertNotEqual(outcome[1], CONFIGURED_ID)
+                self.assertEqual(self._choose(journal), ("identity-error", INVALID_ID))
 
 
 class CoercibleNonMappingTests(_Tree):

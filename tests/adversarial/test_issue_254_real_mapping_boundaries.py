@@ -184,16 +184,17 @@ class UserDictValueBoundaryTests(_Sandbox):
             self._choose(journal)
         self.assertFalse(self.persisted.exists())
 
-    def test_falsy_new_device_id_on_userdict_mints_instead_of_resuming(self) -> None:
-        for value in ("", None, 0):
+    def test_only_null_new_device_id_on_userdict_mints_instead_of_resuming(self) -> None:
+        chosen = self._choose(collections.UserDict({"new_device_id": None}))
+        self._assert_fresh_mint(chosen)
+        self.assertNotEqual(chosen, "None")
+
+    def test_present_falsy_malformed_new_device_id_on_userdict_is_rejected(self) -> None:
+        for value in ("", 0):
             with self.subTest(value=repr(value)):
-                if self.persisted.exists():
-                    self.persisted.unlink()
-                chosen = self._choose(collections.UserDict({"new_device_id": value}))
-                self._assert_fresh_mint(chosen)
-                self.assertNotEqual(chosen, "0")
-                self.assertNotEqual(chosen, "None")
-                self.persisted.unlink()
+                with self.assertRaisesRegex(identity.IdentityError, INVALID_JOURNALED_ID):
+                    self._choose(collections.UserDict({"new_device_id": value}))
+                self.assertFalse(self.persisted.exists())
 
     def test_whitespace_resumed_id_on_userdict_is_invalid_not_minted(self) -> None:
         with self.assertRaisesRegex(identity.IdentityError, INVALID_JOURNALED_ID):

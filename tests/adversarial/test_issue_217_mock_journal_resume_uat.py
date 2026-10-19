@@ -168,16 +168,20 @@ class Issue217RealJournalPositiveControlTests(_ChooseDeviceIdSandbox):
         self.assertNotEqual(chosen, CONFIGURED_ID)
         self.assertEqual(self.persisted.read_text(encoding="utf-8"), CONFIGURED_ID + "\n")
 
-    def test_falsy_new_device_id_does_not_resume_and_mints_instead(self) -> None:
-        for journal in ({"new_device_id": ""}, {"new_device_id": None}, {"new_device_id": 0}):
+    def test_only_null_new_device_id_mints_instead_of_resuming(self) -> None:
+        chosen = self._choose({"new_device_id": None})
+        self.assertRegex(chosen, MAC_SHAPED)
+        self.assertNotEqual(chosen, CONFIGURED_ID)
+        self.assertNotEqual(chosen, "None")
+
+    def test_present_falsy_malformed_new_device_id_is_rejected_without_minting(self) -> None:
+        for journal in ({"new_device_id": ""}, {"new_device_id": 0}):
             with self.subTest(journal=journal):
                 if self.persisted.exists():
                     self.persisted.unlink()
-                chosen = self._choose(journal)
-                self.assertRegex(chosen, MAC_SHAPED)
-                self.assertNotEqual(chosen, CONFIGURED_ID)
-                self.assertNotEqual(chosen, "0")
-                self.assertNotEqual(chosen, "None")
+                with self.assertRaisesRegex(identity.IdentityError, "journaled device id"):
+                    self._choose(journal)
+                self.assertFalse(self.persisted.exists())
 
 
 if __name__ == "__main__":

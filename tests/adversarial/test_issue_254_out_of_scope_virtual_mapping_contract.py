@@ -1,4 +1,4 @@
-"""Out-of-scope evidence for issue #254: a virtually registered Mapping can escape as AttributeError.
+"""Regression coverage for Issue #361's virtual-Mapping journal boundary.
 
 The #254 fix checks ``issubclass(type(journal), collections.abc.Mapping)``, so any class
 registered with ``Mapping.register`` passes the 'must be a mapping' check. Registration is a
@@ -6,9 +6,9 @@ promise that the class implements the Mapping contract. This class breaks that p
 has ``__getitem__`` but no ``get``, so _choose_device_id raises a raw AttributeError instead
 of IdentityError. Nothing in production reaches it: production journals are json.loads dicts.
 
-The test is an expectedFailure: the suite passes while the defect exists, so it is
-non-blocking evidence. It reports an unexpected success (and fails) once the defect is
-fixed, which is the signal to remove the marker.
+Issue #361 brings this malformed virtual-Mapping case into scope.  It must now be a
+blocking regression: untrusted journal input may not leak ``AttributeError`` or mint a
+replacement device identity.
 """
 
 from __future__ import annotations
@@ -37,8 +37,7 @@ class _RegisteredWithoutGet:
 collections.abc.Mapping.register(_RegisteredWithoutGet)
 
 
-class VirtualMappingContractOutOfScopeTests(unittest.TestCase):
-    @unittest.expectedFailure
+class VirtualMappingContractRegressionTests(unittest.TestCase):
     def test_registered_mapping_without_get_raises_identity_error_not_attribute_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = SimpleNamespace(userdata_root=tmp, device_id=CONFIGURED_ID)

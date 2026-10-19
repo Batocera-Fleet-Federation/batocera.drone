@@ -544,7 +544,27 @@ def _consume_authorization(settings: Any) -> None:
 
 
 def _record_journal(settings: Any, journal: dict) -> None:
-    _atomic_write_json(_journal_path(settings), journal)
+    # ``json.dump`` serializes concrete dicts, but not every Mapping implementation.
+    # Snapshot mapping journals before the atomic write so adapters such as UserDict,
+    # ChainMap, and mappingproxy persist as the same JSON object as a plain dict.
+    payload = dict(journal) if isinstance(journal, collections.abc.Mapping) else journal
+    _atomic_write_json(_journal_path(settings), payload)
+
+
+def _normalized_journal_device_id(value: object) -> Optional[str]:
+    """Validate a journaled id using its immutable string payload.
+
+    Journal data normally originates with ``json.loads`` and therefore contains
+    exact ``str`` instances.  Helper callers may provide a ``str`` subclass,
+    though, whose normal string hooks have been overridden.  Detach such a
+    value through ``str.__str__`` before normalizing so admission and resume
+    cannot see different identities.  Check mocks first because a mock with a
+    ``str`` spec can spoof ``isinstance(value, str)``.
+    """
+    if _is_mock_path(value) or not isinstance(value, str):
+        return None
+    plain_value = value if type(value) is str else str.__str__(value)
+    return _normalize_device_id(plain_value)
 
 
 def _valid_journal(journal: dict) -> bool:
@@ -571,7 +591,7 @@ def _valid_journal(journal: dict) -> bool:
     if HardwareSnapshot.from_dict(journal.get("hardware")) is None:
         return False
     new_device_id = journal.get("new_device_id")
-    if new_device_id is not None and (not isinstance(new_device_id, str) or not _normalize_device_id(new_device_id)):
+    if new_device_id is not None and _normalized_journal_device_id(new_device_id) is None:
         return False
     return True
 
@@ -626,26 +646,31 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
     if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
-    if journal.get("new_device_id"):
-        # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
-        # malformed string) must not be stringified into the identity.
-        resumed = journal["new_device_id"]
-        # Spec'd mocks can spoof ``isinstance(value, str)``. Reject them before
-        # calling the normalizer, which invokes string methods on its input.
-        normalized = (
-            _normalize_device_id(resumed)
-            if isinstance(resumed, str) and not _is_mock_path(resumed)
-            else None
-        )
-        if normalized is None:
-            raise IdentityError("the journaled device id is not a valid Drone id")
-        return normalized
-    if "new_device_id" in journal:
-        # A falsey mock is still a present, invalid resumed value, not a missing
-        # journal field. Real JSON null/empty values retain the legacy fresh-id path.
-        resumed = journal["new_device_id"]
-        if _is_mock_path(resumed):
-            raise IdentityError("the journaled device id is not a valid Drone id")
+    # Mapping.register is a promise, not a runtime protocol check: a virtual
+    # registration can lack get() entirely. Validate that required operation
+    # before using membership and item lookup to reject inconsistent mappings.
+    if not callable(getattr(type(journal), "get", None)):
+        raise IdentityError("the identity journal must be a mapping")
+    try:
+        has_resumed_id = "new_device_id" in journal
+    except Exception as exc:
+        raise IdentityError("the identity journal must be a mapping") from exc
+    if has_resumed_id:
+        # A present non-None value is an attempted resume, even when falsey. Only JSON
+        # null (or an absent field) means there is no id to resume. Keeping this aligned
+        # with _valid_journal prevents malformed journals from silently minting identity.
+        try:
+            resumed = journal["new_device_id"]
+        except Exception as exc:
+            # A malformed Mapping can report membership but fail item lookup. Treat that
+            # contradiction as an invalid journaled id rather than leaking its lookup
+            # implementation detail or minting a replacement identity.
+            raise IdentityError("the journaled device id is not a valid Drone id") from exc
+        if resumed is not None:
+            normalized = _normalized_journal_device_id(resumed)
+            if normalized is None:
+                raise IdentityError("the journaled device id is not a valid Drone id")
+            return normalized
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
@@ -681,6 +706,15 @@ def _provision(
     journal: Optional[dict] = None,
 ) -> IdentityResult:
     """Create (or recreate) the identity. ``reason``: initial | clone | operator_new_identity."""
+    if journal is not None and not isinstance(journal, dict):
+        # _choose_device_id deliberately accepts any genuine Mapping as a resumed
+        # journal. Normalize it before the first durable write so JSON serialization
+        # cannot hide an invalid resumed id behind a raw TypeError. Keeping the
+        # mock/type gate aligned with _choose_device_id also prevents mocks from
+        # masquerading as a persisted journal.
+        if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
+            raise IdentityError("the identity journal must be a mapping")
+        journal = dict(journal)
     destructive = reason != "initial"
     resumed = journal is not None
     if destructive:
