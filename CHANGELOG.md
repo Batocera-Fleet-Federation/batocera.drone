@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix RGS service state detection for Batocera's column-formatted service list,
+  and allow up to 20 seconds for RGS to start or stop before reporting failure.
+
 - Integrate Proton VPN port forwarding with the RGS download service. Proton
   OpenVPN profiles automatically store the `+pmp` service username, and legacy
   saved credentials are upgraded on connect. Drone applies an update-resilient

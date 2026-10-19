@@ -64,7 +64,7 @@ class RgsManagerTests(unittest.TestCase):
     def test_success_exit_without_state_change_is_not_success(self):
         with mock.patch.object(rgs_manager, "status", return_value={"available": True, "running": True, "enabled": False}), \
              mock.patch.object(rgs_manager, "_run"), \
-             mock.patch.object(rgs_manager.time, "monotonic", side_effect=[0, 6]):
+             mock.patch.object(rgs_manager.time, "monotonic", side_effect=[0, 21]):
             with self.assertRaisesRegex(OSError, "did not reach"):
                 rgs_manager.set_enabled(self.settings, False)
 

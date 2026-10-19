@@ -9,6 +9,7 @@ from pathlib import Path
 
 _LOCK = threading.Lock()
 _SERVICE = "rgs_download"
+_STATE_TIMEOUT_SECONDS = 20
 
 
 def _run(tool, action):
@@ -48,6 +49,20 @@ def _running(settings):
     return False
 
 
+def _service_enabled(output):
+    """Read both the legacy semicolon and current column output formats."""
+    for line in output.splitlines():
+        if ";" in line:
+            parts = [part.strip() for part in line.split(";", 1)]
+            if len(parts) == 2 and parts[0] == _SERVICE:
+                return parts[1] == "*"
+        else:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == _SERVICE:
+                return parts[-1] == "*"
+    raise LookupError("RGS is missing from the Batocera service list")
+
+
 def status(settings):
     installed = (Path(settings.userdata_root) / "system/services" / _SERVICE).is_file()
     state = {"installed": installed, "available": False, "enabled": None, "running": None}
@@ -57,11 +72,10 @@ def status(settings):
     if not tool or getattr(settings, "use_fake_data", False):
         return {**state, "error": "Batocera service control is unavailable"}
     try:
-        rows = [line.split(";", 1) for line in _run(tool, "list").splitlines()]
-        enabled = next(parts[1].strip() == "*" for parts in rows if len(parts) == 2 and parts[0] == _SERVICE)
+        enabled = _service_enabled(_run(tool, "list"))
         return {**state, "available": True, "enabled": enabled, "running": _running(settings)}
-    except StopIteration:
-        return {**state, "error": "RGS is missing from the Batocera service list"}
+    except LookupError as error:
+        return {**state, "error": str(error)}
     except OSError as error:
         return {**state, "error": str(error)}
 
@@ -77,11 +91,17 @@ def set_enabled(settings, enabled):
         # Use the original launcher so its Proton VPN pre-start guard still applies.
         for action in (("enable", "start") if enabled else ("stop", "disable")):
             _run(tool, action)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + _STATE_TIMEOUT_SECONDS
         while True:
             state = status(settings)
             if state["available"] and state["running"] == enabled and state["enabled"] == enabled:
                 return state
             if time.monotonic() >= deadline:
-                raise OSError(state.get("error", "RGS did not reach the requested state; check its service logs"))
+                if state.get("error"):
+                    raise OSError(state["error"])
+                raise OSError(
+                    f"RGS did not reach the requested state within {_STATE_TIMEOUT_SECONDS} seconds "
+                    f"(running={state.get('running')}, enabled={state.get('enabled')}); "
+                    "check its service logs"
+                )
             time.sleep(0.25)
