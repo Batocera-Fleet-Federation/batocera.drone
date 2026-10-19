@@ -6701,6 +6701,37 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_384_format_only_directory_component.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-384-format-only-directory-component",
+      "name": "Issue #384 format-only directory component before '..' is rejected before mkdir or SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_384_format_only_directory_component.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_260_format_only_normalized_paths.py"
       ],
       "disruptive": false,
