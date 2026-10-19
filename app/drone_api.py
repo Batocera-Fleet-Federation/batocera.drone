@@ -1989,7 +1989,12 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
             # A shutdown error can prevent callers from reaching worker cleanup.
             # Successful HTTP shutdown leaves the independent LAN generation
             # running until its owner calls stop_local_network_workers().
-            stop_local_network_workers()
+            # A failed worker stop must not replace the HTTP failure being reported;
+            # the stopped generation is retained for the owner's retry.
+            try:
+                stop_local_network_workers()
+            except Exception as cleanup_error:
+                print(f"Local-network worker cleanup after failed shutdown did not finish: {cleanup_error}", flush=True)
             raise
 
     def server_close(self):

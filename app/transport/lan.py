@@ -26,6 +26,11 @@ from typing import Any, Callable, Optional
 from .base import DownloadRequest, PeerTransport, TransferContext
 from .tailnet import is_tailnet_address
 
+try:
+    from ..transfer.local_network import peer_requires_tls
+except ImportError:
+    from transfer.local_network import peer_requires_tls  # type: ignore
+
 
 class LanDirectTransport(PeerTransport):
     name = "lan"
@@ -73,7 +78,11 @@ class LanDirectTransport(PeerTransport):
 
     @staticmethod
     def _peer_url(peer: dict, host_ip: str) -> str:
-        scheme = str(peer.get("scheme") or "https")
+        scheme = str(peer.get("scheme") or "https").strip().lower()
+        # Preserve the trust requirement before replacing the routes that may
+        # be its only evidence on records predating paired_over_tls.
+        if peer_requires_tls(peer):
+            scheme = "https"
         try:
             # Prefer the dedicated peer-mTLS port (falls back to api_port for
             # peer records that predate the browser/peer-mTLS listener split --

@@ -216,7 +216,9 @@ class Issue246RouteInventoryUAT(unittest.TestCase):
         )
         lan_url = transport.lan_url(poisoned)
         self.assertIsNotNone(lan_url)
-        self.assertTrue(str(lan_url).lower().startswith("http://"), lan_url)
+        # A TLS-paired peer must remain on HTTPS even after this record is
+        # poisoned with cleartext route metadata.
+        self.assertTrue(str(lan_url).lower().startswith("https://"), lan_url)
         ctx = TransferContext(settings=self.settings, repository=None, config={}, peer=poisoned)
         (self.settings.roms_root / "nes").mkdir(parents=True, exist_ok=True)
         with self.assertRaises(Exception):
