@@ -74,9 +74,8 @@ class ResumedIdCoercionTests(unittest.TestCase):
         )
         self.assertEqual(chosen, RESUMED_ID)
 
-    @unittest.expectedFailure
     def test_inconsistent_mapping_raises_identity_error_not_keyerror(self) -> None:
-        # Expected: IdentityError (the journaled-id error). Current: raw KeyError.
+        # #363 brings the malformed resumed-id Mapping boundary into scope.
         with self.assertRaises(identity.IdentityError):
             identity._choose_device_id(self.settings, _GetSaysPresentGetItemRaises())
 
