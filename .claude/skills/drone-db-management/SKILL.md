@@ -726,8 +726,11 @@ is opened. The same guard (`state_store._require_filesystem_path`) also protects
 `open_database()` and `database_path_for_legacy_file()`, so any path handed
 straight to SQLite must be a real `str`/`os.PathLike`, never a mock.
 The guard also raises `ValueError` for an empty or blank path: whitespace-only
-(`''`, `'  '`) or made only of format characters such as U+200B / U+FEFF (`str.strip()`
-does not remove those, so `_is_blank_path_text` checks Unicode category `Cf` too).
+(`''`, `'  '`) or made only of invisible characters: format characters such as U+200B / U+FEFF
+(`str.strip()` does not remove those, so `_is_blank_path_text` checks Unicode category `Cf`),
+combining/enclosing marks (`Mn`/`Me`, e.g. U+034F and variation selectors), and the Hangul
+fillers / Braille blank (U+115F, U+1160, U+3164, U+FFA0, U+2800) listed in
+`_INVISIBLE_FILLER_CODE_POINTS` (#382).
 `open_database()` rejects `Path('')` (which normalizes to `.`), so a blank path can
 never reach `sqlite3.connect`. A name that merely contains a format character next to
 visible text is still a valid filename. Callers must not use truthiness
