@@ -172,7 +172,12 @@ class Settings:
             music_root=Path(os.environ.get("MUSIC_ROOT", "/userdata/music")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
-            credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
+            # A blank override means "unset", like DRONE_APP_USERNAME above; Path("") would
+            # otherwise become "." and the credential store refuses a non-file path.
+            credentials_file=Path(
+                (os.environ.get("DRONE_CREDENTIALS_FILE") or "").strip()
+                or str(userdata_root / "system" / "drone-app" / "credentials.json")
+            ),
             https_port=int(https_port_value),
             compatibility_https_ports=tuple(port for port in compatibility_https_ports if port != int(https_port_value)),
             advertised_api_port=int(advertised_api_port_value),
