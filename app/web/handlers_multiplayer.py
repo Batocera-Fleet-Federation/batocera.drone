@@ -68,6 +68,8 @@ class HandlersMultiplayerMixin:
             return {"adapters": mp.list_adapters()} if not rest else mp.adapter_detail(rest[0])
         if head == "peers" and not rest:
             return {"peers": mp.list_peers()}
+        if head == "dependencies" and not rest:
+            return mp.dependencies()
         if head == "games":
             if rest == ["systems"]:
                 return {"systems": mp.list_game_systems()}
@@ -155,6 +157,8 @@ class HandlersMultiplayerMixin:
             return 200, mp.accept_invitation(body.get("session_id"), actor)
         if head == "settings" and not rest:
             return 200, mp.update_settings(body)
+        if head == "dependencies" and len(rest) == 2:
+            return (202 if rest[1] == "install" else 200), mp.dependency_action(rest[0], rest[1], actor)
         if head == "adapters" and rest == ["refresh"]:
             return 200, {"adapters": mp.refresh_detection()}
         if head == "connectivity" and rest == ["test"]:

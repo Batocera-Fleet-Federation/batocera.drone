@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Multiplayer: Settings → Remote streaming can now install, start and uninstall Sunshine from the UI (checksum-verified
+  official release, Drone-owned directory, one `DRONE_SUNSHINE` service). RetroArch games with no core set now use
+  Batocera's default core (or an installed one) for the session instead of being blocked, cores downloaded to
+  `/userdata/cores` are detected, and the selector reports the real blocker instead of a misleading note.
+
 - Fix RGS service state detection for Batocera's column-formatted service list,
   and allow up to 20 seconds for RGS to start or stop before reporting failure.
 

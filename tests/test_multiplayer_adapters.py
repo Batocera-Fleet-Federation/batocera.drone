@@ -74,11 +74,51 @@ class RetroArchTests(AdapterTestCase):
         self.assertEqual(result["emulator"]["core_version"], "1.62.3")
         self.assertTrue(result["ready"])
 
-    def test_no_selected_core_needs_configuration_and_lists_only_installed_candidates(self):
+    def test_unset_core_uses_an_installed_candidate_for_the_session_only(self):
         result = self.adapter().assess_game(SNES)
-        self.assertEqual(result["classification"], m.REQUIRES_CONFIGURATION)
+        self.assertEqual(result["classification"], m.LIKELY_COMPATIBLE)
         self.assertEqual(result["candidate_cores"], ["snes9x"])
-        self.assertFalse(result["ready"])
+        self.assertEqual(result["emulator"]["core"], "snes9x")
+        self.assertEqual(result["core_source"], "installed_candidate")
+        self.assertTrue(result["ready"])
+        self.assertTrue(any("session only" in reason for reason in result["reasons"]))
+
+    def test_batocera_default_core_is_used_when_nothing_is_configured(self):
+        defaults = "snes:\n  emulator: libretro\n  core:     snes9x  # default\nn64:\n  emulator: mupen64plus\n"
+        adapter = self.adapter(files={"/usr/share/batocera/configgen/configgen-defaults.yml": defaults})
+        result = adapter.assess_game(SNES)
+        self.assertEqual(result["core_source"], "batocera_default")
+        self.assertEqual(result["emulator"]["core"], "snes9x")
+        self.assertEqual(result["classification"], m.LIKELY_COMPATIBLE)
+        # The old "No emulator is set ... assuming" wording never reaches the user.
+        self.assertFalse(any("No emulator is set" in reason for reason in result["reasons"]))
+
+    def test_missing_default_core_falls_back_to_an_installed_one(self):
+        defaults = "snes:\n  emulator: libretro\n  core: bsnes\n"
+        result = self.adapter(files={"/usr/share/batocera/configgen/configgen-defaults.yml": defaults}).assess_game(SNES)
+        self.assertEqual(result["emulator"]["core"], "snes9x")
+        self.assertIn("bsnes", " ".join(result["reasons"]))
+
+    def test_default_emulator_that_is_not_libretro_is_unsupported(self):
+        defaults = "snes:\n  emulator: other\n  core: x\n"
+        result = self.adapter(files={"/usr/share/batocera/configgen/configgen-defaults.yml": defaults}).assess_game(SNES)
+        self.assertEqual(result["classification"], m.UNSUPPORTED)
+
+    def test_no_installed_core_blocks_with_the_real_reason_and_install_hint_first(self):
+        adapter = self.adapter()
+        adapter.probe.files.pop("/usr/lib/libretro/snes9x_libretro.so")
+        adapter.refresh()
+        result = adapter.assess_game(SNES)
+        self.assertEqual(result["classification"], m.UNSUPPORTED)
+        self.assertIn("Content Downloader", result["reasons"][0])
+
+    def test_downloaded_cores_in_userdata_count_as_installed(self):
+        adapter = self.adapter(conf={"snes.core": "bsnes"}, files={"/userdata/cores/bsnes_libretro.so": "binary"})
+        self.assertTrue(adapter.core_installed("bsnes"))
+
+    def test_single_player_reason_is_the_first_blocker(self):
+        result = self.adapter(conf={"snes.core": "snes9x"}).assess_game({**SNES, "players": 1})
+        self.assertIn("single player", result["reasons"][0])
 
     def test_session_override_supplies_the_core(self):
         result = self.adapter().assess_game(SNES, {"core_overrides": {"snes": "snes9x"}})

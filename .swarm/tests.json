@@ -9236,6 +9236,251 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-install-atomicity-uat",
+      "name": "Issue #240 Sunshine UI install preserves foreign service ownership and rolls back partial state",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_install_atomicity_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_install_atomicity_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-uninstall-ownership-uat",
+      "name": "Issue #240 Sunshine UI uninstall never stops an administrator-owned service",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_uninstall_ownership_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_uninstall_ownership_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-service-provenance-uat",
+      "name": "Issue #240 Sunshine UI uninstall requires durable Drone service provenance",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_service_provenance_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_service_provenance_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-service-record-forgery-uat",
+      "name": "Issue #240 Sunshine UI requires unforgeable service-install provenance",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_service_record_forgery_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_service_record_forgery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-retroarch-core-resolution-uat",
+      "name": "Issue #240 RetroArch core resolution never swaps a user core and pins the resolved core per ROM",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_retroarch_core_resolution_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_retroarch_core_resolution_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-ui-actions-uat",
+      "name": "Issue #240 Sunshine card offers only working actions and install recovers from residue",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_ui_actions_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_sunshine_ui_actions_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-streaming-seat-limit-invitation-uat",
+      "name": "Issue #240 invitation refresh and stale-copy guarantees under the host-plus-one streaming limit",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_streaming_seat_limit_invitation_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_streaming_seat_limit_invitation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-240-sunshine-pidfile",
+      "name": "Issue #240 Sunshine service keeps root PID state out of /tmp",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_sunshine_pidfile_security.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
