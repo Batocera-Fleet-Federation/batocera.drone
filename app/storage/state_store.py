@@ -37,15 +37,28 @@ def _is_mock(value: object) -> bool:
     return type(value).__module__ == "unittest.mock" or isinstance(value, mock_types)
 
 
+# Letter/symbol code points that render as nothing but are not format (Cf) characters:
+# Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) and the Braille pattern blank (U+2800).
+# Combining marks (Mn/Me, e.g. U+034F and the variation selectors) are covered by category.
+_INVISIBLE_FILLER_CODE_POINTS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀"})
+
+
 def _is_blank_path_text(raw: str) -> bool:
-    """Return whether *raw* carries no visible name: only whitespace or format characters.
+    """Return whether *raw* carries no visible name: only whitespace or invisible characters.
 
     ``str.strip()`` ignores whitespace but not invisible format characters such as the
-    zero-width space (U+200B) or the byte-order mark (U+FEFF). A name made only of those
-    would still reach SQLite as an odd, invisible filename, so both count as blank here.
+    zero-width space (U+200B) or the byte-order mark (U+FEFF). Combining marks and
+    enclosing marks (Mn/Me) have no base glyph when they stand alone, and a few letter or
+    symbol code points (Hangul fillers, Braille blank) draw nothing. A name made only of
+    those would still reach SQLite as an odd, invisible filename, so all count as blank.
     A name that merely *contains* such characters alongside visible text stays valid.
     """
-    return all(char.isspace() or unicodedata.category(char) == "Cf" for char in raw)
+    return all(
+        char.isspace()
+        or char in _INVISIBLE_FILLER_CODE_POINTS
+        or unicodedata.category(char) in ("Cf", "Mn", "Me")
+        for char in raw
+    )
 
 
 def _require_visible_database_filename(path: Path, label: str) -> None:
