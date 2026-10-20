@@ -150,7 +150,15 @@ class Settings:
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
-        userdata_root = Path(os.environ.get("USERDATA_ROOT", "/userdata"))
+        # A blank USERDATA_ROOT means "unset" (same as the other blank overrides). A relative
+        # root is a configuration error, reported here by name: identity and credentials must
+        # never resolve through the process working directory (see device_identity).
+        userdata_root = Path((os.environ.get("USERDATA_ROOT") or "").strip() or "/userdata")
+        if not userdata_root.is_absolute():
+            raise ValueError(
+                f"USERDATA_ROOT must be an absolute path (got {str(userdata_root)!r}); "
+                "leave it unset to use /userdata"
+            )
         default_drone_cert = userdata_root / "system" / "drone-app" / "certs" / "drone.crt"
         default_drone_key = userdata_root / "system" / "drone-app" / "certs" / "drone.key"
 
