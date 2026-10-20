@@ -48,7 +48,13 @@ try:
     )
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.network_identity import drone_scheme as _drone_scheme
-    from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
+    from ..transfer.peer_connectivity import (
+        _fingerprint_key,
+        _local_peer_cert_cache_path,
+        _pinned_peer_fingerprints,
+        _public_local_peer,
+        _save_local_peer_certificate,
+    )
     from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
     from ..transfer.transfer_batch import get_upload_batches as _get_upload_batches
@@ -85,7 +91,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
-    from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
+    from transfer.peer_connectivity import (  # type: ignore
+        _fingerprint_key,
+        _local_peer_cert_cache_path,
+        _pinned_peer_fingerprints,
+        _public_local_peer,
+        _save_local_peer_certificate,
+    )
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
     from transfer.transfer_batch import get_upload_batches as _get_upload_batches  # type: ignore
@@ -131,10 +143,29 @@ class HandlersPeerMixin:
             # code-authorised pair request; refuse before touching its pinned certificate.
             self._send_json(409, {"error": "peer is paired over TLS; plaintext re-pairing refused"})
             return
-        cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
+        if tailnet_authorized:
+            # The tailnet source address is the only authority here -- no pairing secret was
+            # checked -- so it may establish a new peer but never replace the certificate
+            # already pinned for one. Refuse before anything is written to the pin cache;
+            # changing a pinned certificate needs the pairing code.
+            pins = _pinned_peer_fingerprints(self.settings, peer_id, existing_peer)
+            if pins and _fingerprint_key(claimed_fingerprint) not in pins:
+                self._send_json(409, {"error": "peer certificate is already pinned; re-pairing it requires the pairing code"})
+                return
         expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
+        if expected and claimed_fingerprint and expected != claimed_fingerprint:
+            raise ValueError("peer certificate fingerprint mismatch")
+        try:
+            previous_pem = _local_peer_cert_cache_path(self.settings, peer_id).read_bytes()
+        except OSError:
+            previous_pem = None
+        cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
         if expected and expected != fingerprint.lower():
-            cert_path.unlink(missing_ok=True)
+            # Put back whatever pin was live before this rejected request.
+            if previous_pem is None:
+                cert_path.unlink(missing_ok=True)
+            else:
+                cert_path.write_bytes(previous_pem)
             raise ValueError("peer certificate fingerprint mismatch")
         source_ip = self.client_address[0] if self.client_address else ""
         port = int(payload.get("api_port") or 443)

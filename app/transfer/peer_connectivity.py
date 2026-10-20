@@ -196,6 +196,26 @@ def _save_local_peer_certificate(settings: Settings, peer_id: str, certificate_p
     return cert_path, fingerprint
 
 
+def _pinned_peer_fingerprints(settings: Settings, peer_id: str, record: Optional[dict] = None) -> set:
+    """Canonical fingerprints currently pinned for ``peer_id`` (empty when unpaired).
+
+    Draws on both the paired-peer row and the live certificate cache file, since
+    either one is what a later ``_peer_trust_cafile`` lookup would trust.
+    """
+    pins = set()
+    key = _fingerprint_key((record or {}).get("certificate_fingerprint"))
+    if key:
+        pins.add(key)
+    try:
+        cached = _local_peer_cert_cache_path(settings, peer_id)
+        if cached.exists():
+            pins.add(_fingerprint_key(_certificate_pem_fingerprint(cached.read_text(encoding="utf-8"))))
+    except Exception:  # noqa: BLE001 - an unreadable/corrupt cache file is not a usable pin
+        pass
+    pins.discard("")
+    return pins
+
+
 def _local_peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
     return (settings.userdata_root / "system" / "drone-app" / "local-peer-certs" / f"{safe}.crt").resolve()
