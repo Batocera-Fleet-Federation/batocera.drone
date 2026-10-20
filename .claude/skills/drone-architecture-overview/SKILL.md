@@ -48,7 +48,8 @@ Two Drones become peers by pairing **directly**, never through a third party:
 - **LAN discovery** — a short-lived rotating pairing code, exchanged over the
   local network (`transfer/local_network.py`).
 - **Tailnet, code-free** — accepted only when the pairing request's source IP is
-  itself an already-online tailnet address (`device/tailnet_service.py`).
+  itself an already-online tailnet address (`device/tailnet_service.py`). It can add
+  a new peer but never replace an existing pinned certificate — that needs the code.
 
 Pairing exchanges each Drone's **self-signed** mTLS certificate and pins the
 peer's exact fingerprint — there is no shared CA and no third party granting
