@@ -344,7 +344,9 @@ write instead of one per job — otherwise O(N²) under the lock), and one
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
-  other online tailnet device. Enroll/rotate (and drone startup, for a node
+  other online tailnet device. The auth key is handed to `tailscale up` via the
+  `TS_AUTHKEY` env var (`_run_cli(..., extra_env=)`), never `--authkey=` on argv
+  (visible in `ps`/`/proc`); keep it that way in the installer too. Enroll/rotate (and drone startup, for a node
   hands-free-enrolled by the installer's `TS_AUTHKEY`) also make a best-effort,
   opt-in call to Tailscale's own admin API to disable key expiry for this
   device (`disable_key_expiry`/`_maybe_disable_key_expiry`) — so an unattended

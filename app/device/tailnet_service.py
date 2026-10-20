@@ -163,12 +163,18 @@ def _repair_tailnet_data_path() -> None:
         _NETWORK_REPAIR_LOCK.release()
 
 
-def _run_cli(args: list, timeout: float) -> "subprocess.CompletedProcess[str]":
+def _run_cli(
+    args: list, timeout: float, extra_env: Optional[dict] = None
+) -> "subprocess.CompletedProcess[str]":
     cli_args = [str(TAILSCALE_CLI)]
     if TAILSCALE_SOCKET:
         cli_args.append(f"--socket={TAILSCALE_SOCKET}")
     cli_args.extend(args)
-    return subprocess.run(cli_args, capture_output=True, text=True, timeout=timeout)
+    run_kwargs: dict = {"capture_output": True, "text": True, "timeout": timeout}
+    if extra_env:
+        # Secrets go here, never in argv (visible in ps and /proc/<pid>/cmdline).
+        run_kwargs["env"] = {**os.environ, **extra_env}
+    return subprocess.run(cli_args, **run_kwargs)
 
 
 def _first_address(addresses: Iterable[object], *, ipv4: bool = True) -> str:
@@ -701,7 +707,6 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
         proc = _run_cli(
             [
                 "up",
-                f"--authkey={key}",
                 f"--hostname={hostname}",
                 "--accept-dns=false",
                 # Batocera's kernel does not provide the iptables filter
@@ -712,6 +717,9 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
                 "--timeout=45s",
             ],
             timeout=60,
+            # tailscale up reads TS_AUTHKEY when --authkey is absent, which
+            # keeps the reusable key out of the process command line.
+            extra_env={"TS_AUTHKEY": key},
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("Tailnet enrollment timed out; check the key and try again.") from error

@@ -8295,9 +8295,11 @@ class TailnetServiceTests(unittest.TestCase):
         from app.device import tailnet_service
 
         commands = []
+        envs = []
 
         def fake_run(command, **kwargs):
             commands.append(command)
+            envs.append(kwargs.get("env"))
             if "up" in command:
                 return mock.Mock(returncode=1, stdout="", stderr="backend error: invalid key\n")
             return mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
@@ -8311,7 +8313,14 @@ class TailnetServiceTests(unittest.TestCase):
         up_command = next(cmd for cmd in commands if "up" in cmd)
         self.assertIn("--accept-dns=false", up_command)
         self.assertIn("--netfilter-mode=off", up_command)
-        self.assertTrue(any(arg.startswith("--authkey=") for arg in up_command))
+        # The reusable key must reach tailscale via the environment, never argv.
+        self.assertFalse(any("authkey" in arg or "SECRET" in arg for arg in up_command))
+        up_env = envs[commands.index(up_command)]
+        self.assertEqual(up_env["TS_AUTHKEY"], "tskey-auth-SECRET")
+        # Other CLI calls (status, set) do not receive the key.
+        for command, env in zip(commands, envs):
+            if "up" not in command:
+                self.assertTrue(env is None or "TS_AUTHKEY" not in env or env["TS_AUTHKEY"] != "tskey-auth-SECRET")
 
     def test_startup_repairs_existing_tailnet_netfilter_preference(self) -> None:
         from app.device import tailnet_service
@@ -8625,7 +8634,9 @@ class InstallerTailscaleTests(unittest.TestCase):
     def test_installer_supports_hands_free_and_skip_paths(self) -> None:
         self.assertIn("DRONE_SKIP_TAILSCALE", self.install)
         self.assertIn("TS_AUTHKEY", self.install)
-        self.assertIn("--authkey=", self.install)
+        # The key is passed through the environment, never on the argv.
+        self.assertNotIn("--authkey", self.install)
+        self.assertIn('TS_AUTHKEY="$TS_AUTH"', self.install)
         self.assertIn("--netfilter-mode=off", self.install)
         # Keep Batocera's DNS untouched; the integration works on raw 100.x IPs.
         self.assertIn("--accept-dns=false", self.install)

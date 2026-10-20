@@ -234,7 +234,8 @@ install_tailscale_mesh() {
     echo "Enrolling in the tailnet with the provided auth key ..."
     # --accept-dns=false: keep Batocera's resolv.conf untouched (the Drone
     # tailnet integration works on raw 100.x addresses, not MagicDNS names).
-    if "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --authkey="$TS_AUTH" --hostname="$TS_HOSTNAME" --accept-dns=false --netfilter-mode=off; then
+    # The key goes in the environment, not argv, so ps/proc can't show it.
+    if TS_AUTHKEY="$TS_AUTH" "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --hostname="$TS_HOSTNAME" --accept-dns=false --netfilter-mode=off; then
       echo "✓ Enrolled in the tailnet as '$TS_HOSTNAME'"
     else
       echo "Tailnet enrollment failed; run it manually later:"
