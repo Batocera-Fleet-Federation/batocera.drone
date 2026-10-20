@@ -154,5 +154,50 @@ class PairPeerErrorMappingTests(unittest.TestCase):
         self.handler._send_json.assert_not_called()
 
 
+class PairingMalformedPortTests(unittest.TestCase):
+    """A non-numeric port in a paired answer is a peer rejection, and writes no trust pin (issue #425)."""
+
+    def _run_pairing(self, answer: dict):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(answer).encode("utf-8")
+        patches = [
+            mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True),
+            mock.patch.object(peer_connectivity._local_network, "is_local_mode", return_value=True),
+            mock.patch.object(peer_connectivity._local_network, "get_paired_peer", return_value={}),
+            mock.patch.object(peer_connectivity._local_network, "discovery_payload", return_value={}),
+            mock.patch.object(peer_connectivity, "DroneCertificateManager"),
+            mock.patch.object(peer_connectivity, "_drone_scheme", return_value="http"),
+            mock.patch.object(peer_connectivity, "_drone_advertised_api_port", return_value=8080),
+            mock.patch.object(peer_connectivity, "_drone_advertised_peer_mtls_port", return_value=8080),
+            mock.patch.object(peer_connectivity, "urlopen", return_value=response),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        save_pin = mock.patch.object(peer_connectivity, "_save_local_peer_certificate")
+        pin = save_pin.start()
+        self.addCleanup(save_pin.stop)
+        peer = {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}
+        with mock.patch.object(peer_connectivity._local_network, "save_paired_peer") as save_paired:
+            with self.assertRaises(PeerPairingRejected):
+                peer_connectivity._local_pair_peer(mock.MagicMock(device_id="drone-self"), peer, "CODE")
+        return pin, save_paired
+
+    def test_non_numeric_api_port_is_rejected_before_the_pin_is_written(self) -> None:
+        answer = {"status": "paired", "drone_id": "peer-a", "api_port": "not-a-port", "certificate_pem": "x"}
+        pin, save_paired = self._run_pairing(answer)
+
+        pin.assert_not_called()
+        save_paired.assert_not_called()
+
+    def test_out_of_range_peer_mtls_port_is_rejected_before_the_pin_is_written(self) -> None:
+        answer = {"status": "paired", "drone_id": "peer-a", "peer_mtls_port": 70000, "certificate_pem": "x"}
+        pin, save_paired = self._run_pairing(answer)
+
+        pin.assert_not_called()
+        save_paired.assert_not_called()
+
+
+
 if __name__ == "__main__":
     unittest.main()

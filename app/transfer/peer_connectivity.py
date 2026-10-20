@@ -446,6 +446,14 @@ class PeerPairingRejected(RuntimeError):
     """
 
 
+def _paired_peer_port(value) -> int:
+    """Parse a port advertised in a pairing answer; ``ValueError`` if it is not a usable port."""
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("port out of range")
+    return port
+
+
 def _local_pair_peer(
     settings: Settings,
     peer: dict,
@@ -552,6 +560,19 @@ def _local_pair_peer(
             raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
         if offered != anchor:
             raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
+    # Validate the advertised ports before the trust pin is written: a malformed
+    # answer must not leave a pin on disk with no paired-peer row behind it.
+    try:
+        api_port = _paired_peer_port(result.get("api_port") or peer.get("api_port") or 443)
+        peer_mtls_port = _paired_peer_port(
+            result.get("peer_mtls_port")
+            or peer.get("peer_mtls_port")
+            or result.get("api_port")
+            or peer.get("api_port")
+            or 443
+        )
+    except ValueError as error:
+        raise PeerPairingRejected("paired peer returned an invalid port") from error
     try:
         previous_path = _local_peer_cert_cache_path(settings, peer_id)
         previous_pem = previous_path.read_bytes()
@@ -586,14 +607,8 @@ def _local_pair_peer(
                 "reachable_url": address,
                 "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
                 "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
-                "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
-                "peer_mtls_port": int(
-                    result.get("peer_mtls_port")
-                    or peer.get("peer_mtls_port")
-                    or result.get("api_port")
-                    or peer.get("api_port")
-                    or 443
-                ),
+                "api_port": api_port,
+                "peer_mtls_port": peer_mtls_port,
                 "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
                 "certificate_fingerprint": fingerprint,
                 "certificate_path": str(cert_path),
