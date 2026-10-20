@@ -32,3 +32,30 @@ _GAMELIST_WRITE_LOCK = Lock()
 # subprocess calls, so a second caller waits for the first to fully finish (including
 # its own re-read of state) before starting its own -- never interleaves with it.
 _ES_LIFECYCLE_LOCK = Lock()
+
+
+# Forever-loop pollers (automation, outbound mail, VPN/SMTP/tailnet revocation, network-share
+# watchdog) cannot be interrupted mid-sleep, so they are retired by generation instead: each
+# captures the generation when it starts and returns, before any I/O, the first time it wakes to
+# a different one. Without this a poller left behind by a closed server keeps resolving the
+# environment-selected state database on every tick and writes into whatever database a later
+# server (or test) has since selected.
+_POLLER_GENERATION_LOCK = Lock()
+_POLLER_GENERATION = 0
+
+
+def poller_generation() -> int:
+    with _POLLER_GENERATION_LOCK:
+        return _POLLER_GENERATION
+
+
+def poller_retired(generation: int) -> bool:
+    return poller_generation() != generation
+
+
+def retire_pollers() -> int:
+    """Retire every poller started under an earlier generation; returns the new generation."""
+    global _POLLER_GENERATION
+    with _POLLER_GENERATION_LOCK:
+        _POLLER_GENERATION += 1
+        return _POLLER_GENERATION

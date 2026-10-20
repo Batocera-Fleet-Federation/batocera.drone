@@ -157,6 +157,16 @@ let a peer tell when a re-sync is needed. Schema is created inline with `CREATE 
 IF NOT EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
 tables/columns idempotently. See `drone-db-management` skill.
 
+**Forever-loop pollers** (automation, outbound-mail worker, VPN/SMTP/tailnet revocation, VPN self-heal,
+network-share watchdog) are latched on once per process by `create_server()` and sleep with `time.sleep`, so
+they are retired by generation, not by stop event: each captures `runtime_state.poller_generation()` at start and
+returns — before any I/O — the first time it wakes to a different one. `drone_api.retire_background_pollers()`
+bumps the generation and clears their `*_STARTED` latches; `main()` calls it beside
+`stop_local_network_workers()`. A plain HTTP shutdown does not (owner-driven, like the LAN workers). Any
+test harness that calls `create_server` should call both on teardown: a leftover poller re-resolves
+`DRONE_STATE_DATABASE_FILE` every tick, so it writes into (and re-creates the temp tree of) whatever later test
+selected that env. New forever-loop pollers must follow the same capture-and-check shape.
+
 **Poll loop:** `_start_rom_metadata_poller` + `RomFilesystemWatcher` (inotify,
 debounced) wake on file changes; `_poll_rom_metadata_once` scans ROM/BIOS metadata,
 hashes changed files, then syncs game saves — all purely local (there is no hub to

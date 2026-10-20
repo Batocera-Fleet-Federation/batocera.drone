@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Background pollers (automation, outbound mail, VPN/SMTP/tailnet revocation, network-share watchdog) can now be
+  retired with `retire_background_pollers()`; a retired poller exits on its next wake without touching storage,
+  so one that outlived its server no longer writes into a later server's state database.
+
 - Multiplayer: Settings → Remote streaming can now install, start and uninstall Sunshine from the UI (checksum-verified
   official release, Drone-owned directory, one `DRONE_SUNSHINE` service). RetroArch games with no core set now use
   Batocera's default core (or an installed one) for the session instead of being blocked, cores downloaded to
