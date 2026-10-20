@@ -733,5 +733,8 @@ fillers / Braille blank (U+115F, U+1160, U+3164, U+FFA0, U+2800) listed in
 `_INVISIBLE_FILLER_CODE_POINTS` (#382).
 `open_database()` rejects `Path('')` (which normalizes to `.`), so a blank path can
 never reach `sqlite3.connect`. A name that merely contains a format character next to
-visible text is still a valid filename. Callers must not use truthiness
+visible text is still a valid filename. The same rule applies to the *final component* of a
+legacy file path (`_is_file_shaped`, used by `require_legacy_file_path` and the legacy readers):
+`DroneCredentialStore('dir/\u3164')` raises `ValueError` instead of deriving a database beside an
+invisible-named file (#397). Callers must not use truthiness
 fallbacks to paper over a blank path; pass `None` for "derive the default".

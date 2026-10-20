@@ -103,6 +103,38 @@ class StateStorePathTypeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     state_store.database_path_for_legacy_file(bad)
 
+    def test_invisible_final_component_is_rejected_as_legacy_file(self):
+        # Hangul filler, Braille blank, zero-width space and friends render as nothing, so a
+        # legacy path ending in one must not derive a database beside an unnameable file.
+        invisible = ("\u3164", "\u2800", "\u200b", "\u115f", "\u1160", "\uffa0", "\ufeff", "\u3000", " ")
+        for char in invisible:
+            for bad in (char, f"dir/{char}", f"dir/{char}/", Path("dir") / char):
+                with self.subTest(char=char, bad=bad):
+                    with self.assertRaises(ValueError):
+                        state_store.require_legacy_file_path(bad)
+                    with self.assertRaises(ValueError):
+                        state_store.database_path_for_legacy_file(bad)
+                    self.assertIsNone(state_store._legacy_file_path(bad))
+
+    def test_credential_store_rejects_invisible_named_credentials_file(self):
+        from app.common.auth import DroneCredentialStore
+
+        for char in ("\u3164", "\u2800", "\u200b"):
+            for bad in (char, str(self.root / "dir" / char)):
+                with self.subTest(char=char, bad=bad):
+                    with self.assertRaises(ValueError):
+                        DroneCredentialStore(bad)
+                    with self.assertRaises(ValueError):
+                        DroneCredentialStore(bad, state_database_file=self.root / "state.sqlite3")
+        self.assertFalse((self.root / "dir").exists())
+        self.assertFalse((self.root / "state.sqlite3").exists())
+
+    def test_credentials_name_containing_invisible_character_is_still_valid(self):
+        from app.common.auth import DroneCredentialStore
+
+        store = DroneCredentialStore(self.root / "cred\u200bs.json")
+        self.assertEqual(store.state_database_file.name, state_store.DATABASE_FILENAME)
+
     def test_name_containing_format_character_is_still_a_valid_path(self):
         target = self.root / "a​b.sqlite3"
         connection = state_store.open_database(target)
