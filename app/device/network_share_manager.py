@@ -55,6 +55,7 @@ try:
     from ..common.network_references import is_network_reference as _is_network_reference
     from ..common.network_references import lexical_symlink_target as _lexical_symlink_target
     from ..common.network_references import symlink_points_to as _symlink_points_to
+    from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from . import network_es_overlay as _network_es_overlay
     from ..storage.state_store import database_path as _state_database_path
@@ -67,6 +68,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.network_references import is_network_reference as _is_network_reference  # type: ignore
     from common.network_references import lexical_symlink_target as _lexical_symlink_target  # type: ignore
     from common.network_references import symlink_points_to as _symlink_points_to  # type: ignore
+    from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from device import network_es_overlay as _network_es_overlay  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -1642,8 +1644,11 @@ def run_watchdog_poller(settings: Settings) -> None:
     """Forever-loop: verify every enabled share's mount is still alive and
     remount if not. Started as its own daemon thread from create_server(),
     same pattern as VPN's run_self_heal_poller."""
+    generation = poller_generation()
     while True:
         time.sleep(NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS)
+        if poller_retired(generation):
+            return
         for share in list_shares(settings):
             peer_id = str(share.get("peer_id") or "")
             if not peer_id or not share.get("enabled", True) or share.get("status") == "detaching":

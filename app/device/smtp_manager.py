@@ -51,6 +51,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 
 try:
+    from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -61,6 +62,7 @@ try:
     from . import crash_history as _crash_history
     from . import usb_enumeration as _usb_enumeration
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -446,8 +448,11 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     Drones are outbound-only with no push channel.
     """
     interval = max(30.0, SMTP_SHARING_CHECK_INTERVAL_SECONDS)
+    generation = poller_generation()
     while True:
         time.sleep(interval)
+        if poller_retired(generation):
+            return
         check_sharing_revocation(settings)
 
 
@@ -1139,8 +1144,11 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
     and never touch ``smtplib``. The owner queues due digests, then the sole
     outbound-mail consumer delivers digests, tests, and attachments.
     """
+    generation = poller_generation()
     while True:
         time.sleep(DIGEST_POLLER_TICK_SECONDS)
+        if poller_retired(generation):
+            return
         try:
             # The crash hook runs outside the Drone; pull its history into the inbox.
             _crash_history.ingest_new_crashes(settings)

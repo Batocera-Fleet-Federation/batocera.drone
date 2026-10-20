@@ -30,6 +30,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from app import drone_api
 from app.common.settings import Settings
 from app.storage import state_store
 from app.transfer import local_network, peer_workers
@@ -78,6 +79,9 @@ class _ThreadExceptionGuard:
 
 class DiscoveryTeardownUAT(unittest.TestCase):
     def setUp(self) -> None:
+        # Pollers left behind by an earlier harness's create_server() re-resolve the env-selected
+        # state DB on every tick; retire them so they cannot write into this test's database (#420).
+        drone_api.retire_background_pollers()
         self._tmp = tempfile.TemporaryDirectory(prefix="issue-191-uat-")
         self.root = Path(self._tmp.name)
         self.userdata = self.root / "userdata"
