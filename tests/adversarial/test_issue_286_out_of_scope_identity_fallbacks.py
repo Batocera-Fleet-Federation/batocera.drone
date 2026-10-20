@@ -45,7 +45,7 @@ class OutOfScopeIdentityFallbackTests(unittest.TestCase):
         self._getnode.stop()
         self._tmp.cleanup()
 
-    @unittest.expectedFailure
+    # Fixed by #452: fake-data mode no longer falls back to the NIC-derived id.
     def test_fake_unwritable_absolute_root_never_returns_host_derived_id(self):
         # A regular file blocks mkdir for root/…, so the id cannot be persisted under the root.
         blocker = self.root / "blocker"

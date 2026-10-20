@@ -93,8 +93,9 @@ A fresh install gets a random, locally administered, MAC-shaped `device-id` on i
 `Settings` build (`common/device_identity.py::random_device_id`), persisted under
 `system/drone-app/device-id` before use. It is never the NIC's MAC, so two installs on one host
 do not refuse each other as "this Drone itself". Installations that already persisted an id keep
-it, and `DRONE_DEVICE_ID` still pins one explicitly. If the id cannot be persisted, the NIC-derived
-id is used as before.
+it, and `DRONE_DEVICE_ID` still pins one explicitly. If a real install cannot persist the id, the
+NIC-derived id is used as before. Fake-data mode never uses that fallback (#452): when its
+`USERDATA_ROOT` cannot be written, it gets a stable id derived from the root path instead.
 
 ## Clone provisioning (what happens on different hardware)
 
