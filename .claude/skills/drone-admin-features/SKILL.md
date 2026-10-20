@@ -372,7 +372,8 @@ write instead of one per job — otherwise O(N²) under the lock), and one
   identity hold (`PeerIdentityHold`, a `PermissionError` subclass raised by `_local_pair_peer`) is 503,
   not "unreachable" (issue #223); a local failure reading/creating this Drone's own certificate or
   key (`PairingLocalError`, wrapped around `ensure_certificate`) is a 500 with the OS reason and no
-  path (issue #266); other `PermissionError`s stay a 502 connection failure. A peer
+  path (issue #266); every other `PermissionError` — even an errno-less one carrying the hold wording, and whatever
+  the identity gate says — is a 502 connection failure, because only the `PeerIdentityHold` type is the hold (issue #403). A peer
   that answers 200 without `status=paired` (or with a non-JSON / mismatched body) raises
   `PeerPairingRejected` from `transfer/peer_connectivity.py` and is also a fixed-message 502 (issue #224).
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
