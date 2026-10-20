@@ -27,7 +27,7 @@ class _JsonResponse:
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
         return False
 
-    def read(self) -> bytes:
+    def read(self, amount: int = -1) -> bytes:
         return json.dumps({"status": "ok"}).encode("utf-8")
 
 
