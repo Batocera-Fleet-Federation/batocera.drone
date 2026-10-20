@@ -1,9 +1,11 @@
 """Clone detection, automatic identity provisioning, recovery, and swarm isolation."""
 
 import collections
+import dataclasses
 import hashlib
 import json
 import ast
+import os
 import shutil
 import ssl
 import subprocess
@@ -1289,3 +1291,27 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             swarm_reset._clear_pinned_peer_certificates(self._mock_settings())
+
+
+class RelativeUserdataRootTests(ProvisioningTestBase):
+    """A relative USERDATA_ROOT must hold identity with a named reason and write nothing."""
+
+    def test_relative_root_holds_with_named_reason_and_writes_nothing(self) -> None:
+        cwd = self.tmp / "cwd"
+        cwd.mkdir()
+        settings = dataclasses.replace(settings_for(self.root), userdata_root=Path("rel-root"))
+        original_cwd = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, original_cwd)
+        with mock.patch.object(identity, "_log") as log:
+            result = identity.ensure_identity(settings, provider_for(self.hw_a))
+        self.assertEqual(result.state, State.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason, "relative_userdata_root")
+        self.assertFalse(result.swarm_networking_enabled)
+        self.assertTrue(any("USERDATA_ROOT must be an absolute path" in str(c.args[0]) for c in log.call_args_list))
+        self.assertEqual(list(cwd.iterdir()), [])
+        self.assertFalse((self.root / "system" / "drone-app" / "identity").exists())
+
+    def test_absolute_root_still_provisions(self) -> None:
+        _, result = self.install()
+        self.assertEqual(result.state, State.READY)
