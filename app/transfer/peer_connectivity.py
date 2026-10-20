@@ -601,14 +601,19 @@ def _local_pair_peer(
     if remote_id != peer_id:
         raise PeerPairingRejected("paired peer identity did not match discovered peer")
     remote_pem = str(result.get("certificate_pem") or "")
+    # Preserve the distinct missing-certificate rejection.  The save primitive
+    # validates every remaining PEM as X.509 before deriving a fingerprint or
+    # opening the cache file, including on the unpinned HTTP path.
+    if "BEGIN CERTIFICATE" not in remote_pem:
+        raise PeerPairingRejected("paired peer did not return a certificate")
     if anchor:
         # Check before writing: the cert cache file may be the live pin of an
         # already-paired peer, which a rejected response must not overwrite.
         try:
-            offered = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
-        except Exception as error:  # noqa: BLE001 - malformed PEM is a rejected pairing
+            offered_fingerprint = _fingerprint_key(_certificate_pem_fingerprint(remote_pem))
+        except Exception as error:  # noqa: BLE001 - malformed X.509 is a rejected pairing
             raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
-        if offered != anchor:
+        if offered_fingerprint != anchor:
             raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
     # Validate the advertised ports before the trust pin is written: a malformed
     # answer must not leave a pin on disk with no paired-peer row behind it.
@@ -635,6 +640,9 @@ def _local_pair_peer(
     except OSError as error:
         # The peer has answered, but persisting its local trust pin is ours.
         raise _pairing_local_error(error) from error
+    except ValueError as error:
+        # The save step rejects an unparseable certificate before writing anything.
+        raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
     expected = anchor or _fingerprint_key(peer.get("certificate_fingerprint"))
     returned = _fingerprint_key(result.get("certificate_fingerprint"))
     observed = _fingerprint_key(fingerprint)

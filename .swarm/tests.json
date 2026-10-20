@@ -15,6 +15,132 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_227_out_of_scope_empty_path_cwd.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-out-of-scope-empty-path-cwd",
+      "name": "Out of scope for #227: Path('') and Path('.') persist device-id under the process cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_227_out_of_scope_empty_path_cwd.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_279_rejects_trailing_der_after_certificate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-279-rejects-trailing-der-after-certificate",
+      "name": "Security: Issue #279 rejects a valid certificate followed by extra DER bytes as a pairing pin",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/drone_network.py",
+          "tests/adversarial/security/test_issue_279_rejects_trailing_der_after_certificate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_279_rejects_multi_certificate_pem.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-279-rejects-multi-certificate-pem",
+      "name": "Security: Issue #279 rejects a multi-certificate PEM bundle as a pairing pin",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/drone_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/security/test_issue_279_rejects_multi_certificate_pem.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_279_rejects_non_x509_pem.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-279-rejects-non-x509-pem",
+      "name": "Security: Issue #279 rejects a decodable non-X.509 pairing certificate without persistence",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/drone_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/security/test_issue_279_rejects_non_x509_pem.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_359_attribute_hook_resumed_id_uat.py"
       ],
       "disruptive": false,
@@ -4127,12 +4253,356 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_279_paired_response_certificate_boundary_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-paired-response-certificate-boundary-uat",
+      "name": "Issue #279 pair-by-address maps a paired response without certificate_pem to 502 without persistence",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_paired_response_certificate_boundary_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_missing_certificate_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-missing-certificate-boundaries",
+      "name": "Issue #279 paired answers without a usable certificate are rejected on pinned and unpinned paths without writes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_missing_certificate_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_decodable_non_certificate_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-decodable-non-certificate-pin",
+      "name": "Out-of-scope #279 evidence: a decodable non-certificate PEM body is persisted as a trust pin",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_out_of_scope_decodable_non_certificate_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_pairing_answer_shape_matrix.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-pairing-answer-shape-matrix",
+      "name": "Issue #279 pairing answers with malformed or zero-length certificate material are rejected without pins on both paths",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_pairing_answer_shape_matrix.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_http_certificate_shape_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-http-certificate-shape-uat",
+      "name": "Issue #279 pair-by-address answers malformed or zero-length certificate material with 502 and stores nothing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_http_certificate_shape_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_gossip_zero_length_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-gossip-zero-length-pin",
+      "name": "Out-of-scope #279 evidence: swarm gossip pins a zero-length certificate",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_279_out_of_scope_gossip_zero_length_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_tailnet_auto_pair_missing_certificate.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-tailnet-auto-pair-missing-certificate",
+      "name": "Issue #279 tailnet auto-pair maps a paired answer without a certificate to a rejection with no pin",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_tailnet_auto_pair_missing_certificate.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_unpinned_rejection_keeps_previous_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-unpinned-rejection-keeps-previous-pin",
+      "name": "Issue #279 unpinned pairing rejection restores the previous certificate pin byte-for-byte",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_unpinned_rejection_keeps_previous_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_out_of_scope_paired_malformed_port_after_pin.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-out-of-scope-malformed-port-after-pin",
+      "name": "Out-of-scope #279 evidence: a paired answer with a non-numeric port leaves a pin and raises ValueError (400)",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_out_of_scope_paired_malformed_port_after_pin.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_fresh_retry_and_side_effects_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-fresh-retry-and-side-effects-uat",
+      "name": "Issue #279 a certificate-less paired answer has no side effects and a later real-certificate retry pairs on both paths",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_279_fresh_retry_and_side_effects_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_279_fresh_marker_encoding_controls.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-279-fresh-marker-encoding-controls",
+      "name": "Issue #279 non-certificate PEM encodings are rejected without a pin on both paths, and genuine client errors stay ValueError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_279_fresh_marker_encoding_controls.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_224_out_of_scope_paired_payload_valueerror.py"
       ],
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-224-out-of-scope-paired-payload-valueerror",
-      "name": "Out of scope for #224: a 200 with status=paired but no certificate_pem is a client 400",
+      "name": "Issue #224 out-of-scope payload (status=paired without certificate_pem) maps to 502 (adjudicated under #279)",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],

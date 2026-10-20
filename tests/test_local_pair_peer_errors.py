@@ -147,6 +147,36 @@ class PairPeerErrorMappingTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertNotIn("proxy page", payload["error"])
 
+    def test_peer_200_paired_without_certificate_is_502_and_nothing_is_saved(self) -> None:
+        # Unpinned pair-by-address: a status=paired answer with a matching id but no
+        # certificate must be a rejected pairing (502), not a ValueError from the save step.
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({"status": "paired", "drone_id": "peer-a"}).encode("utf-8")
+        self.handler.settings.device_id = "drone-self"
+        patches = [
+            mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=True),
+            mock.patch.object(peer_connectivity._local_network, "is_local_mode", return_value=True),
+            mock.patch.object(peer_connectivity._local_network, "get_paired_peer", return_value={}),
+            mock.patch.object(peer_connectivity._local_network, "discovery_payload", return_value={}),
+            mock.patch.object(peer_connectivity, "DroneCertificateManager"),
+            mock.patch.object(peer_connectivity, "_drone_scheme", return_value="http"),
+            mock.patch.object(peer_connectivity, "_drone_advertised_api_port", return_value=8080),
+            mock.patch.object(peer_connectivity, "_drone_advertised_peer_mtls_port", return_value=8080),
+            mock.patch.object(peer_connectivity, "_save_local_peer_certificate"),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
+            self.assertIsNone(
+                self.handler._pair_peer_or_reply({"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}, "x", "")
+            )
+
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["error"], "That drone did not accept the pairing request.")
+        peer_connectivity._save_local_peer_certificate.assert_not_called()
+
     def test_successful_pairing_is_returned_without_a_response(self) -> None:
         paired = {"drone_id": "peer-a", "certificate_path": ""}
         with mock.patch.object(handlers_network, "_local_pair_peer", return_value=paired):
