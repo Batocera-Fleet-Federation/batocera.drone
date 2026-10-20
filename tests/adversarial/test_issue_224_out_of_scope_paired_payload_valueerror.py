@@ -168,10 +168,10 @@ class PairedPayloadMissingCertTests(unittest.TestCase):
         return f"{morsel.key}={morsel.value}"
 
     def test_paired_200_without_certificate_is_400_not_502(self) -> None:
-        """Observed: ValueError from the cert save is a client 400, not a peer 502."""
+        """A paired 200 with no certificate is the peer's bad answer (502), never a 500 or a stored pin."""
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/v1/api/admin/local-network/pair-by-address",
-            data=json.dumps({"address": self.peer.url, "pairing_code": "not-a-code"}).encode(),
+            data=json.dumps({"address": self.peer.url, "pairing_code": "not-a-code", "certificate_fingerprint": "ab" * 32}).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Cookie": self.cookie},
         )
@@ -187,10 +187,7 @@ class PairedPayloadMissingCertTests(unittest.TestCase):
         except ValueError:
             payload = {"raw": raw.decode("utf-8", "replace")}
 
-        self.assertEqual(status, 400, payload)
-        self.assertNotEqual(status, 502, payload)
-        self.assertNotEqual(status, 500, payload)
-        self.assertIn("certificate", str(payload.get("error") or "").lower())
+        self.assertEqual(status, 502, payload)
         self.assertGreaterEqual(self.peer.server.pair_hits, 1)
         stored = load_payload(database_path(self.userdata), "local_paired_peers", {})
         self.assertNotIn(PEER_ID, stored if isinstance(stored, dict) else {})

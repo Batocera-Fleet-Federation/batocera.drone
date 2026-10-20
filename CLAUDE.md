@@ -273,6 +273,7 @@ Multicast announcements are unauthenticated too: they never rewrite a paired
 peer's address/fingerprint (only `last_seen`), and the pairing code is only
 sent over a connection pinned to the pinned or operator-confirmed fingerprint
 (`_local_pair_peer`, `certificate_fingerprint` on the pair requests).
+An operator-typed `http://` pair-by-address is anchored like `https://`: without a pinned record or a confirmed fingerprint `_pair_peer_or_reply` answers 400 and `_local_pair_peer` raises before sending anything, so an on-path attacker cannot get its own certificate pinned (only code-free `tailnet_auto_pair` is exempt).
 A tailnet-authorised (code-free) `/peer/pair` request can add a peer but never replace a pinned certificate: `_handle_peer_pair` compares against `_pinned_peer_fingerprints` and answers 409 before writing, so only the pairing code can change a pin.
 A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed over plaintext `http://`
 (filters in `_peer_address_candidates`/`_peer_address`, refusal in `_local_pair_peer`; the flag is sticky — `save_paired_peer` never lets any writer clear it, and `_handle_peer_pair` answers 409 to a non-https re-pair of such a peer, even with a valid code; set by `_local_pair_peer`, `_handle_peer_pair` and swarm gossip, never by announcements).

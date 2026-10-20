@@ -191,11 +191,11 @@ class Boot:
         self.case.assertEqual(status, 200, payload)
         return str(payload["pairing"]["code"])
 
-    def pair_by_address(self, address: str, pairing_code: str):
+    def pair_by_address(self, address: str, pairing_code: str, fingerprint: str = "ab" * 32):
         return self.request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": address, "pairing_code": pairing_code},
+            {"address": address, "pairing_code": pairing_code, "certificate_fingerprint": fingerprint},
             headers=self.login(),
         )
 
@@ -260,7 +260,7 @@ class PairByAddressPeer403UAT(unittest.TestCase):
         self.assertEqual(status, 502, payload)
 
         code = alpha.pairing_code()
-        status, payload = beta.pair_by_address(alpha_url, code)
+        status, payload = beta.pair_by_address(alpha_url, code, alpha_info["certificate_fingerprint"])
         self.assertEqual(status, 200, msg=f"{payload}\n{logs()}")
         self.assertEqual(payload.get("status"), "paired")
         self.assertIn(alpha_info["drone_id"], _peers(beta.userdata))

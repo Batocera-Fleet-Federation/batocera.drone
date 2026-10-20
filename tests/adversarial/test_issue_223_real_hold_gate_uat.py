@@ -113,7 +113,7 @@ class HeldPairByAddressTests(_PairingCase):
     def test_held_http_pair_by_address_is_503_and_never_posts_the_code(self) -> None:
         _hold()
         self.handler._handle_admin_local_peer_pair_by_address(
-            {"address": HTTP_PEER, "pairing_code": "not-a-code"}
+            {"address": HTTP_PEER, "pairing_code": "not-a-code", "certificate_fingerprint": FINGERPRINT}
         )
 
         self.assertEqual(self._last_reply(), (503, {"error": HOLD_MESSAGE}))
@@ -131,7 +131,7 @@ class HeldPairByAddressTests(_PairingCase):
 
         self.urlopen.side_effect = fetch_then_hold
         self.handler._handle_admin_local_peer_pair_by_address(
-            {"address": HTTP_PEER, "pairing_code": "not-a-code"}
+            {"address": HTTP_PEER, "pairing_code": "not-a-code", "certificate_fingerprint": FINGERPRINT}
         )
 
         self.assertEqual(self._last_reply(), (503, {"error": HOLD_MESSAGE}))
@@ -167,12 +167,12 @@ class HoldLiftsTests(_PairingCase):
     def test_hold_is_not_sticky_once_identity_is_resolved_again(self) -> None:
         peer = {"drone_id": "peer-a", "reachable_url": HTTP_PEER}
         _hold()
-        self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", "ab" * 32))
         self.assertEqual(self._last_reply()[0], 503)
 
         identity_provisioning.reset_runtime_state_for_tests()
         self.pair_error = URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
-        self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", "ab" * 32))
 
         status, payload = self._last_reply()
         self.assertEqual(status, 502)
@@ -192,14 +192,14 @@ class ConnectionFailureBoundaryTests(_PairingCase):
             with self.subTest(errno=code):
                 self.handler._send_json.reset_mock()
                 self.pair_error = PermissionError(code, "Permission denied")
-                self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", ""))
+                self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", "ab" * 32))
                 status, payload = self._last_reply()
                 self.assertEqual(status, 502)
                 self.assertIn("Could not reach that drone", payload["error"])
 
     def test_errno_less_os_error_is_not_widened_into_a_hold(self) -> None:
         self.pair_error = OSError("network is down")
-        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", "ab" * 32))
 
         status, payload = self._last_reply()
         self.assertEqual(status, 502)
@@ -207,7 +207,7 @@ class ConnectionFailureBoundaryTests(_PairingCase):
 
     def test_ssl_failure_is_a_connection_failure_not_a_hold(self) -> None:
         self.pair_error = ssl.SSLError("certificate verify failed")
-        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", "ab" * 32))
 
         status, _ = self._last_reply()
         self.assertEqual(status, 502)
@@ -220,7 +220,7 @@ class ConnectionFailureBoundaryTests(_PairingCase):
         it must not be answered 503 as if this Drone's own state refused it.
         """
         self.pair_error = PermissionError("unexpected denial from the network stack")
-        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", "ab" * 32))
 
         status, payload = self._last_reply()
         self.assertEqual(status, 502)
