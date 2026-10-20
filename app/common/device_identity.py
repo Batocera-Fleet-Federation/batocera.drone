@@ -93,17 +93,89 @@ def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
         return None
 
 
+def _guard_root(userdata_root: Path, path: Path) -> Path:
+    """The directory below which no symlink is tolerated on the way to *path*.
+
+    ``userdata_root`` itself may legitimately be a symlink (an external drive), so it is
+    trusted as given. An explicit ``DRONE_DEVICE_ID_FILE`` outside it is operator-chosen,
+    so only its own parent directory is trusted.
+    """
+    root = Path(os.path.abspath(os.fspath(userdata_root)))
+    try:
+        Path(os.path.abspath(os.fspath(path))).relative_to(root)
+    except ValueError:
+        return Path(os.path.abspath(os.fspath(path.parent)))
+    return root
+
+
+def _components_below(guard: Path, target: Path) -> List[Path]:
+    relative = Path(os.path.abspath(os.fspath(target))).relative_to(guard)
+    return [guard.joinpath(*relative.parts[: index + 1]) for index in range(len(relative.parts))]
+
+
+def _ensure_device_id_dir(userdata_root: Path) -> bool:
+    """Create the id file's directory without following a symlink planted in its chain.
+
+    Returns False (creating nothing further) when a component below the trusted root is a
+    symlink, so ``mkdir`` can never be steered outside userdata. Other ``OSError`` propagate.
+    """
+    path = _device_id_path(userdata_root)
+    guard = _guard_root(userdata_root, path)
+    # The trusted root itself may not exist yet (first boot); create it as before.
+    guard.mkdir(parents=True, exist_ok=True)
+    for component in _components_below(guard, path.parent):
+        if os.path.islink(component):
+            return False
+        try:
+            os.mkdir(component)
+        except FileExistsError:
+            if os.path.islink(component) or not os.path.isdir(component):
+                return False
+    return True
+
+
 def _write_persisted_machine_id(userdata_root: Path, value: str) -> bool:
+    """Persist the id atomically, refusing a symlink at the file or anywhere in its parents.
+
+    The write goes to a sibling temp file that is renamed into place, so even a symlink
+    that appears after the check is replaced rather than followed (issue #458).
+    """
     normalized = _normalize_device_id(value)
     if not normalized:
         return False
+    temp_path = None
     try:
         path = _device_id_path(userdata_root)
-        if not path.parent.exists():
+        if not path.parent.is_dir():
             return False
-        path.write_text(f"{normalized}\n", encoding="utf-8")
+        guard = _guard_root(userdata_root, path)
+        if any(os.path.islink(component) for component in _components_below(guard, path)):
+            return False
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        for _ in range(8):
+            candidate = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temp_path = candidate
+            break
+        else:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{normalized}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
     except OSError:
         return False
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
     return True
 
 
@@ -158,7 +230,7 @@ def _path_derived_machine_id(userdata_root: Path) -> str:
 def _machine_id(userdata_root: Optional[Path] = None, *, host_fallback: bool = True) -> str:
     if userdata_root is None:
         return _runtime_machine_id()
-    path = _device_id_path(userdata_root)
+    _device_id_path(userdata_root)
     persisted = _normalize_device_id(_read_persisted_machine_id(userdata_root))
     if persisted:
         return persisted
@@ -169,7 +241,7 @@ def _machine_id(userdata_root: Optional[Path] = None, *, host_fallback: bool = T
     # host-derived fallback and get a stable root-derived id instead.
     generated = random_device_id()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_device_id_dir(userdata_root)
     except OSError:
         pass
     if _write_persisted_machine_id(userdata_root, generated):

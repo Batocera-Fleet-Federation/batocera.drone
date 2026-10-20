@@ -97,6 +97,12 @@ it, and `DRONE_DEVICE_ID` still pins one explicitly. If a real install cannot pe
 NIC-derived id is used as before. Fake-data mode never uses that fallback (#452): when its
 `USERDATA_ROOT` cannot be written, it gets a stable id derived from the root path instead.
 
+Persisting the id never follows a symlink (#458). `_write_persisted_machine_id` and
+`_ensure_device_id_dir` refuse a symlink at the id file or at any directory below `USERDATA_ROOT`
+(the root itself may be a symlink, e.g. an external drive), and the write goes to a temp file renamed
+into place, so a planted link can never redirect it onto another file. A refused write is treated like
+an unwritable root. Any new code that creates the id's directory or file must use these helpers.
+
 ## Clone provisioning (what happens on different hardware)
 
 State machine: `UNINITIALIZED → VALIDATING → CLONE_DETECTED → PROVISIONING → READY`, or
