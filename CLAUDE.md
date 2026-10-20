@@ -210,7 +210,7 @@ broadcasts a removal/rotation for the original; a peer can never force an identi
 `tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
 disk images via `image_disk`). Resume journals accept `new_device_id` only when it is absent,
 `null`, or a valid non-empty Drone id; any other present value is rejected before a fresh id
-can be minted. Keep `_choose_device_id()` behavior aligned with `_valid_journal()`. Depth:
+can be minted. Keep `_choose_device_id()` behavior aligned with `_valid_journal()`. The id file and its directories are never created through a symlink (`device_identity._ensure_device_id_dir`/`_write_persisted_machine_id`, #458); use those helpers, not `Path.mkdir`/`write_text`. Depth:
 `docs/drone-identity.md`.
 
 ## Admin credentials (`common/auth.py`)

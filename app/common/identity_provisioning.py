@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
     fcntl = None  # type: ignore
 
 try:
-    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
+    from .device_identity import _device_id_path, _ensure_device_id_dir, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
     from .hardware_identity import (
         BASELINE,
         CONTRADICTORY,
@@ -64,6 +64,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import (  # type: ignore
         _device_id_path,
+        _ensure_device_id_dir,
         _is_mock_path,
         _normalize_device_id,
         _require_real_path,
@@ -688,7 +689,7 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
     userdata_root = Path(settings.userdata_root)
     _retire_device_id(settings)
-    _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
+    _ensure_device_id_dir(userdata_root)
     candidate = random_device_id()
     _write_persisted_machine_id(userdata_root, candidate)
     return candidate
@@ -1218,7 +1219,7 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
             binding["history"].append(_history_entry("device_id_pinned_by_environment"))
         else:
             # The persisted id file was lost or edited; the binding is the source of truth.
-            _device_id_path(Path(settings.userdata_root)).parent.mkdir(parents=True, exist_ok=True)
+            _ensure_device_id_dir(Path(settings.userdata_root))
             _write_persisted_machine_id(Path(settings.userdata_root), binding["device_id"])
             settings = dataclasses.replace(settings, device_id=binding["device_id"])
         changed = True
