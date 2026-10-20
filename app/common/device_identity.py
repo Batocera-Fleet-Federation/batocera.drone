@@ -84,6 +84,13 @@ def _require_real_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path")
     if not isinstance(value, (str, os.PathLike)):
         raise TypeError(f"{label} must be a filesystem path")
+    # A NUL byte is never valid in a filesystem path; reject it here so it cannot reach
+    # open()/read_text() and escape as a raw ValueError past the OSError handlers.
+    raw = os.fspath(value)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "surrogateescape")
+    if "\x00" in raw:
+        raise TypeError(f"{label} must be a filesystem path")
 
 
 def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
