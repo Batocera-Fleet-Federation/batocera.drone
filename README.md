@@ -122,7 +122,7 @@ Local fake mode is opt-in with `USE_FAKE_DATA=true`. One visible nearby Drone is
 
 ## Multiplayer
 
-The **Multiplayer** page provides game discovery, invitations, readiness, lobbies and diagnostics over the existing pinned-certificate mTLS swarm, on LAN or Tailscale. Detected RetroArch launcher builds can configure and launch Netplay with temporary settings after local approval; Dolphin and other mechanisms expose supported manual or experimental steps. Selected RetroArch/Dolphin ROMs require full content equality. Sunshine/Moonlight is an optional streaming integration with external pairing, input and stream controls; Drone does not install it or manage its permissions. There is no central server or account.
+The **Multiplayer** page provides game discovery, invitations, readiness, lobbies and diagnostics over the existing pinned-certificate mTLS swarm, on LAN or Tailscale. Detected RetroArch launcher builds can configure and launch Netplay with temporary settings after local approval; Dolphin and other mechanisms expose supported manual or experimental steps. Selected RetroArch/Dolphin ROMs require full content equality. Sunshine/Moonlight is an optional streaming integration with external pairing, input and stream controls; Multiplayer settings can install Sunshine on the host from a checksum-verified official release. Moonlight setup remains manual. There is no central server or account.
 
 Support is reported honestly: RetroArch Netplay is the implemented, automated path; Dolphin, PPSSPP, Switch LAN play, generic LAN and Sunshine/Moonlight streaming are assisted or manual; other emulators are detection-only. Nothing is marked *verified* until a session you confirmed worked. The feature has been tested against a simulated swarm; real two-machine validation is still outstanding. See [docs/multiplayer.md](./docs/multiplayer.md) for the supported-emulator matrix, how to host and join, network and Tailscale notes, troubleshooting, the adapter development guide and the manual validation checklist.
 
@@ -220,6 +220,12 @@ DRONE_APP_PASSWORD="change-this-password"
 ```
 
 The installer and `run_web_now.sh` use these if they are already set. If they are not set, the scripts prompt you.
+
+There is no built-in default password. If no password was ever configured, the Drone generates a random
+one-time password on first start and writes it (root-only, mode 0600) to
+`/userdata/system/drone-app/initial-password.txt`; read it over SSH, log in, then change it under
+Admin -> Credentials (which deletes the file). Opening the admin UI on the device itself (`127.0.0.1`)
+needs no login. If you delete the file before changing the password, restarting the Drone generates a new one.
 
 Normal installs and service recovery download the published `drone-app.tar.gz` release, validate it in a staging directory, and overlay it only after the version and required web/API/integration files check out. A failed or incomplete release download leaves the existing install unchanged. Source/codeload archives require an explicit development option:
 

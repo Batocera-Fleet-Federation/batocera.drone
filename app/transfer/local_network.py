@@ -20,7 +20,6 @@ try:
     from ..device import notifications as _notifications
     from ..storage.state_store import (
         append_event,
-        database_path,
         delete_peer_route,
         load_events,
         load_payload,
@@ -32,7 +31,6 @@ except ImportError:
     from device import notifications as _notifications  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event,
-        database_path,
         delete_peer_route,
         load_events,
         load_payload,
@@ -65,7 +63,7 @@ def _now_iso() -> str:
 
 
 def _db(settings: Any) -> Path:
-    return database_path(settings.userdata_root)
+    return settings.state_database_file
 
 
 def get_integrations(settings: Any) -> dict:
@@ -323,6 +321,21 @@ def normalize_peer_url(value: object) -> str:
         return ""
 
 
+def peer_scheme(peer: Optional[dict]) -> str:
+    """Return the explicitly recorded route scheme, or "" when neither alias is set.
+
+    ``scheme`` and ``protocol`` are both read as evidence of the transport. If
+    either names https the peer is treated as https, so a conflicting or
+    mixed-case alias can never make a TLS-pinned peer look cleartext. An unset
+    scheme stays "" so callers keep their own default.
+    """
+    record = dict(peer or {})
+    values = [str(record.get(key) or "").strip().lower() for key in ("scheme", "protocol")]
+    if "https" in values:
+        return "https"
+    return next((value for value in values if value), "")
+
+
 def peer_requires_tls(peer: Optional[dict]) -> bool:
     """True for a peer that must never be dialed or rewritten to cleartext.
 
@@ -335,7 +348,7 @@ def peer_requires_tls(peer: Optional[dict]) -> bool:
         return True
     if not str(record.get("certificate_fingerprint") or "").strip():
         return False
-    if str(record.get("scheme") or record.get("protocol") or "").strip().lower() == "https":
+    if peer_scheme(record) == "https":
         return True
     return any(str(record.get(key) or "").strip().lower().startswith("https://") for key in _PEER_URL_KEYS)
 
@@ -360,11 +373,15 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     peers = _load_peer_map(settings, "local_paired_peers")
     is_new = peer_id not in peers
     previous = dict(peers.get(peer_id) or {})
-    if peer_requires_tls(previous):
-        # No writer (gossip, tailnet probe, discovery) may move a TLS-pinned
-        # peer to cleartext; the requirement is sticky (see peer_requires_tls).
+    requires_tls = peer_requires_tls(previous)
+    if requires_tls:
+        # No writer (gossip, tailnet probe, discovery, code-authorised pair)
+        # may move a TLS-pinned peer to cleartext; the requirement is sticky
+        # (see peer_requires_tls), including the paired_over_tls flag itself.
         peer = _without_cleartext_overrides(peer)
     peer = dict(peer)
+    if requires_tls and "paired_over_tls" in peer:
+        peer["paired_over_tls"] = True
     for key in ("scheme", "protocol"):
         if key in peer:
             peer[key] = str(peer[key] or "").strip().lower()

@@ -17,8 +17,10 @@ from typing import Optional, Tuple
 
 try:
     from .device_identity import _fake_machine_id, _machine_id, _normalize_device_id
+    from ..storage.state_store import database_path
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import _fake_machine_id, _machine_id, _normalize_device_id  # type: ignore
+    from storage.state_store import database_path  # type: ignore
 
 
 def _require_env(name: str) -> str:
@@ -64,6 +66,7 @@ def _parse_port_list(value: Optional[str]) -> Tuple[int, ...]:
 @dataclass(frozen=True)
 class Settings:
     userdata_root: Path
+    state_database_file: Path
     roms_root: Path
     bios_root: Path
     saves_root: Path
@@ -147,7 +150,15 @@ class Settings:
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
-        userdata_root = Path(os.environ.get("USERDATA_ROOT", "/userdata"))
+        # A blank USERDATA_ROOT means "unset" (same as the other blank overrides). A relative
+        # root is a configuration error, reported here by name: identity and credentials must
+        # never resolve through the process working directory (see device_identity).
+        userdata_root = Path((os.environ.get("USERDATA_ROOT") or "").strip() or "/userdata")
+        if not userdata_root.is_absolute():
+            raise ValueError(
+                f"USERDATA_ROOT must be an absolute path (got {str(userdata_root)!r}); "
+                "leave it unset to use /userdata"
+            )
         default_drone_cert = userdata_root / "system" / "drone-app" / "certs" / "drone.crt"
         default_drone_key = userdata_root / "system" / "drone-app" / "certs" / "drone.key"
 
@@ -157,6 +168,10 @@ class Settings:
 
         return cls(
             userdata_root=userdata_root,
+            # Resolve the optional override with the rest of this immutable
+            # configuration snapshot. Long-lived workers must not follow a
+            # later harness's process environment to a different database.
+            state_database_file=database_path(userdata_root),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             saves_root=Path(os.environ.get("SAVES_ROOT", "/userdata/saves")),
@@ -165,7 +180,12 @@ class Settings:
             music_root=Path(os.environ.get("MUSIC_ROOT", "/userdata/music")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
-            credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
+            # A blank override means "unset", like DRONE_APP_USERNAME above; Path("") would
+            # otherwise become "." and the credential store refuses a non-file path.
+            credentials_file=Path(
+                (os.environ.get("DRONE_CREDENTIALS_FILE") or "").strip()
+                or str(userdata_root / "system" / "drone-app" / "credentials.json")
+            ),
             https_port=int(https_port_value),
             compatibility_https_ports=tuple(port for port in compatibility_https_ports if port != int(https_port_value)),
             advertised_api_port=int(advertised_api_port_value),

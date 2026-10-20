@@ -7,6 +7,7 @@ addresses/ports, runs the local-network pairing handshake, and probes peer healt
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
@@ -58,6 +59,26 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 # Local copy of the peer-request timeout (drone_api keeps its own for peer_download,
 # still resident there); both read the same env var, so the value is identical.
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
+
+# Byte caps for peer JSON bodies. A peer (or, on the plaintext pair-by-address
+# path, an on-path attacker) must not make the Drone buffer an unbounded body.
+# Pairing and bootstrap-info answers are a few KB (one certificate PEM); the
+# general cap leaves room for the largest legitimate peer payloads (VPN/SMTP
+# config, swarm summaries).
+MAX_PEER_PAIRING_RESPONSE_BYTES = 64 * 1024
+MAX_PEER_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class PeerResponseTooLarge(ValueError):
+    """A peer answered with a body larger than the cap for that request."""
+
+
+def _read_capped(response, limit: int) -> bytes:
+    """Read at most ``limit`` bytes; raise ``PeerResponseTooLarge`` for a longer body."""
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise PeerResponseTooLarge(f"peer response exceeds {limit} bytes")
+    return raw
 
 # Name resolution is the one part of an outbound peer dial that no socket
 # timeout can bound: urlopen's ``timeout`` only starts applying once there is
@@ -159,12 +180,14 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     callers decide ``verify``/``cafile`` based on what trust material (if any) they
     have for the destination.
     """
+    if not _identity_swarm_networking_allowed():
+        # Identity unresolved (clone suspected / recovery required): no outbound peer
+        # traffic at all -- cleartext http:// peers included, and the inherited client
+        # certificate must not be presented to any peer. Checked before the scheme test so
+        # http:// peer GET/POST/download calls cannot bypass the hold.
+        raise PeerIdentityHold("peer connections are held pending Drone identity verification")
     if urlparse(url).scheme != "https":
         return None
-    if not _identity_swarm_networking_allowed():
-        # Identity unresolved (clone suspected / recovery required): the inherited client
-        # certificate must not be presented to any peer.
-        raise PeerIdentityHold("peer connections are held pending Drone identity verification")
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
     if verify and cafile:
         # The pinned peer certificate was captured directly at pairing time; its
@@ -191,6 +214,26 @@ def _save_local_peer_certificate(settings: Settings, peer_id: str, certificate_p
     except OSError:
         pass
     return cert_path, fingerprint
+
+
+def _pinned_peer_fingerprints(settings: Settings, peer_id: str, record: Optional[dict] = None) -> set:
+    """Canonical fingerprints currently pinned for ``peer_id`` (empty when unpaired).
+
+    Draws on both the paired-peer row and the live certificate cache file, since
+    either one is what a later ``_peer_trust_cafile`` lookup would trust.
+    """
+    pins = set()
+    key = _fingerprint_key((record or {}).get("certificate_fingerprint"))
+    if key:
+        pins.add(key)
+    try:
+        cached = _local_peer_cert_cache_path(settings, peer_id)
+        if cached.exists():
+            pins.add(_fingerprint_key(_certificate_pem_fingerprint(cached.read_text(encoding="utf-8"))))
+    except Exception:  # noqa: BLE001 - an unreadable/corrupt cache file is not a usable pin
+        pass
+    pins.discard("")
+    return pins
 
 
 def _local_peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
@@ -250,7 +293,7 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
     try:
         with urlopen(request, timeout=timeout, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
@@ -291,7 +334,7 @@ def _peer_post_json(
             timeout=timeout,
             context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
         ) as response:
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
@@ -443,6 +486,14 @@ class PeerPairingRejected(RuntimeError):
     """
 
 
+def _paired_peer_port(value) -> int:
+    """Parse a port advertised in a pairing answer; ``ValueError`` if it is not a usable port."""
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("port out of range")
+    return port
+
+
 def _local_pair_peer(
     settings: Settings,
     peer: dict,
@@ -516,6 +567,13 @@ def _local_pair_peer(
             # The pairing code must never travel in cleartext to a peer that
             # was paired over TLS.
             raise PeerPairingRejected("refusing to pair with a TLS-pinned Drone over plaintext http")
+        if not anchor and not tailnet_auto_pair:
+            # Without an out-of-band anchor, nothing on the plaintext path
+            # distinguishes the target from an on-path attacker, and the answer
+            # would be pinned on its own say-so. Refuse before anything is sent.
+            raise ValueError(
+                "pairing over plaintext http requires the certificate fingerprint shown on that Drone's pairing screen"
+            )
         context = None
     elif anchor:
         context = _pairing_tls_context(address, anchor)
@@ -529,7 +587,10 @@ def _local_pair_peer(
         context = _pinned_pairing_context("")
     _require_swarm_networking()
     with urlopen(request, timeout=10, context=context) as response:
-        raw = response.read()
+        try:
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
+        except PeerResponseTooLarge as error:
+            raise PeerPairingRejected("peer did not accept pairing request") from error
     try:
         result = json.loads(raw.decode("utf-8")) if raw else {}
     except ValueError as error:  # UnicodeDecodeError is a ValueError too
@@ -554,6 +615,19 @@ def _local_pair_peer(
             raise PeerPairingRejected("paired peer returned an unreadable certificate") from error
         if offered_fingerprint != anchor:
             raise PeerPairingRejected("paired peer certificate fingerprint did not match discovery")
+    # Validate the advertised ports before the trust pin is written: a malformed
+    # answer must not leave a pin on disk with no paired-peer row behind it.
+    try:
+        api_port = _paired_peer_port(result.get("api_port") or peer.get("api_port") or 443)
+        peer_mtls_port = _paired_peer_port(
+            result.get("peer_mtls_port")
+            or peer.get("peer_mtls_port")
+            or result.get("api_port")
+            or peer.get("api_port")
+            or 443
+        )
+    except ValueError as error:
+        raise PeerPairingRejected("paired peer returned an invalid port") from error
     try:
         previous_path = _local_peer_cert_cache_path(settings, peer_id)
         previous_pem = previous_path.read_bytes()
@@ -591,14 +665,8 @@ def _local_pair_peer(
                 "reachable_url": address,
                 "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
                 "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
-                "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
-                "peer_mtls_port": int(
-                    result.get("peer_mtls_port")
-                    or peer.get("peer_mtls_port")
-                    or result.get("api_port")
-                    or peer.get("api_port")
-                    or 443
-                ),
+                "api_port": api_port,
+                "peer_mtls_port": peer_mtls_port,
                 "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
                 "certificate_fingerprint": fingerprint,
                 "certificate_path": str(cert_path),
@@ -658,15 +726,15 @@ def _normalize_peer_address(raw: str) -> str:
     return f"{parsed.scheme}://{host}:{port}"
 
 
-def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
+def _fetch_peer_info(
+    address: str, timeout: float = 5.0, *, expected_fingerprint: Optional[str] = None,
+) -> dict:
     """Fetch a drone's open pairing-bootstrap identity (``GET /v1/api/peer/info``).
 
-    This is how a peer is "discovered" across links the multicast announce
-    cannot cross (e.g. a tailnet) -- by dialing its address directly. Same TOFU
-    trust model as the pair POST itself: TLS is unverified because no
-    certificate is pinned yet; current Tailnet membership or a pairing code
-    authorizes the exchange, and ``_local_pair_peer`` pins the advertised
-    certificate fingerprint before the peer can serve assets.
+    Bootstrap responses are untrusted discovery hints. For paired-peer metadata
+    refreshes, pass the persisted pin: the response must then arrive over TLS
+    authenticated by that identity (including HTTPS leaves signed by it).
+    Body-supplied fingerprints never authenticate the connection.
     """
     base = _normalize_peer_address(address)
     # An outbound peer request of any scheme is held while the identity is unresolved.
@@ -675,10 +743,31 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
         f"{base}/v1/api/peer/info",
         headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
     )
-    context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
-    _require_swarm_networking()
-    with urlopen(request, timeout=timeout, context=context) as response:
-        raw = response.read()
+    if expected_fingerprint is not None:
+        expected = _fingerprint_key(expected_fingerprint)
+        parsed = urlparse(base)
+        if parsed.scheme != "https" or not _SHA256_HEX_RE.fullmatch(expected):
+            raise ssl.SSLError("paired peer info requires HTTPS and a valid certificate pin")
+        context = _pairing_tls_context(base, expected)
+        # A direct connection avoids proxies and never follows redirects, including
+        # HTTPS-to-HTTP redirects that would bypass the certificate requirement.
+        connection = http.client.HTTPSConnection(
+            parsed.hostname, parsed.port or 443, timeout=timeout, context=context,
+        )
+        try:
+            _require_swarm_networking()
+            connection.request("GET", "/v1/api/peer/info", headers=dict(request.header_items()))
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ValueError("authenticated peer info request did not return HTTP 200")
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
+        finally:
+            connection.close()
+    else:
+        context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
+        _require_swarm_networking()
+        with urlopen(request, timeout=timeout, context=context) as response:
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
     payload = json.loads(raw.decode("utf-8")) if raw else {}
     if not isinstance(payload, dict) or str(payload.get("service") or "") != _local_network.DISCOVERY_SERVICE:
         raise ValueError("address did not answer as a Batocera Drone peer")
@@ -711,12 +800,18 @@ def _url_host(value: object) -> str:
 def _peer_address(peer: dict) -> Optional[str]:
     address = _local_network.normalize_peer_url(_peer_address_unchecked(peer)) or None
     if address and _peer_requires_tls(peer) and urlparse(address).scheme != "https":
-        return None
+        # The pre-baked route is cleartext and must never be dialed, but the record
+        # may still carry an https route (tailnet/LAN/IP). Offer the same first
+        # https route that _peer_address_candidates would, instead of giving up.
+        return next(
+            (value for value in _peer_address_candidates(peer) if urlparse(value).scheme == "https"),
+            None,
+        )
     return address
 
 
 def _peer_address_unchecked(peer: dict) -> Optional[str]:
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
+    scheme = _local_network.peer_scheme(peer) or "https"
     port = _peer_api_port(peer)
     # reachable_url/public_reachable_url are pre-baked strings built (and kept
     # refreshed by the LAN discovery beacon) using the admin/browser api_port.
@@ -812,7 +907,7 @@ def _peer_address_candidates(
         if value and value not in discovered:
             discovered.append(value)
 
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
+    scheme = _local_network.peer_scheme(peer) or "https"
     port = _peer_api_port(peer)
     port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
 
@@ -1015,7 +1110,7 @@ def _peer_get_json_for_peer(
             )
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return payload, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             # The peer answered and rejected the request; changing routes
             # cannot make an authorization or endpoint error succeed.
             raise
@@ -1080,7 +1175,7 @@ def _peer_post_json_for_peer(
             )
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return response, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             raise
         except (OSError, URLError, ssl.SSLError) as error:
             last_error = _more_diagnostic_error(last_error, error)
@@ -1143,7 +1238,7 @@ def _peer_download_file_for_peer(
                     output.write(chunk)
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return total, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             raise
         except ValueError:
             try:

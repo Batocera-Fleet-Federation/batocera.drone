@@ -98,6 +98,18 @@ class MultiplayerHttpTests(unittest.TestCase):
         self.assertEqual(self.call("/adapters/retroarch")[1]["id"], "retroarch")
         self.assertEqual(self.call("/adapters/nope")[0], 404)
 
+    def test_dependency_status_is_readable_and_actions_are_gated(self):
+        status, payload = self.call("/dependencies")
+        self.assertEqual(status, 200)
+        sunshine = payload["dependencies"]["sunshine"]
+        for key in ("installed", "running", "can_install", "can_start", "can_uninstall", "job", "web_ui"):
+            self.assertIn(key, sunshine)
+        # Nothing here may start a real download: only gating and allowlist checks are exercised.
+        self.assertEqual(self.call("/dependencies/sunshine/install", {}, cookie=False)[0], 401)
+        self.assertEqual(self.call("/dependencies/sunshine/install", {}, headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.call("/dependencies/sunshine/format-disk", {})[0], 404)
+        self.assertEqual(self.call("/dependencies/other/install", {})[0], 404)
+
     def test_game_browser_requires_a_valid_system_and_filters(self):
         self.assertEqual(self.call("/games")[1]["code"], "invalid_system")
         self.assertEqual(self.call("/games?system=../etc")[0], 400)

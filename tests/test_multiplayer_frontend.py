@@ -41,6 +41,27 @@ class MultiplayerFrontendTests(unittest.TestCase):
         self.assertNotIn('<script>', html)
         self.assertNotIn('data-mp-action="launch"', html)
 
+    def test_sunshine_card_offers_only_the_actions_the_machine_allows(self):
+        html = self.evaluate('mpDependencyCard({ installed: false, can_install: true, supported: true, job: { state: "idle" }, source: "<b>x</b>" })')
+        self.assertIn('data-mp-action="dep-install"', html)
+        self.assertNotIn('data-mp-action="dep-uninstall"', html)
+        self.assertNotIn("<b>x</b>", html)
+        html = self.evaluate('mpDependencyCard({ installed: true, managed: true, running: false, can_start: true, can_uninstall: true, job: { state: "running", percent: 40, message: "<i>x</i>" } })')
+        self.assertIn('data-mp-action="dep-start"', html)
+        self.assertIn('data-mp-action="dep-uninstall"', html)
+        self.assertIn("Installing", html)
+        self.assertNotIn("<i>x</i>", html)
+
+    def test_unmanaged_sunshine_cannot_be_uninstalled_from_the_ui(self):
+        html = self.evaluate('mpDependencyCard({ installed: true, managed: false, running: true, can_uninstall: false, job: { state: "idle" } })')
+        self.assertNotIn('data-mp-action="dep-uninstall"', html)
+        self.assertIn("will not remove it", html)
+
+    def test_setup_hint_links_to_settings_only_when_sunshine_is_the_blocker(self):
+        blocked = self.evaluate('mpSetupHint({ reason: "No multiplayer mechanism is usable.", candidates: [{ blockers: ["Sunshine is not installed on this (host) machine."] }] })')
+        self.assertIn("#multiplayer/settings", blocked)
+        self.assertEqual(self.evaluate('mpSetupHint({ reason: "ok", candidates: [{ blockers: ["Other"] }] })'), "")
+
     def test_multiplayer_renderer_is_loaded_before_initial_router_can_run(self):
         shell = (ROOT / "app/web/templates/index.html").read_text()
         self.assertLess(shell.index("/static/js/multiplayer.js"), shell.index("/static/js/drone.js"))

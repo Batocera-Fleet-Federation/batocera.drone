@@ -48,7 +48,13 @@ try:
     )
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.network_identity import drone_scheme as _drone_scheme
-    from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
+    from ..transfer.peer_connectivity import (
+        _fingerprint_key,
+        _local_peer_cert_cache_path,
+        _pinned_peer_fingerprints,
+        _public_local_peer,
+        _save_local_peer_certificate,
+    )
     from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
     from ..transfer.transfer_batch import get_upload_batches as _get_upload_batches
@@ -85,7 +91,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
-    from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
+    from transfer.peer_connectivity import (  # type: ignore
+        _fingerprint_key,
+        _local_peer_cert_cache_path,
+        _pinned_peer_fingerprints,
+        _public_local_peer,
+        _save_local_peer_certificate,
+    )
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
     from transfer.transfer_batch import get_upload_batches as _get_upload_batches  # type: ignore
@@ -124,13 +136,38 @@ class HandlersPeerMixin:
             _identity.record_collision(self.settings, "pair-request-own-certificate")
             self._send_json(409, {"error": "duplicate Drone identity detected"})
             return
-        cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
+        scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https")).strip().lower()
+        existing_peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if scheme != "https" and _local_network.peer_requires_tls(existing_peer):
+            # A peer already paired over TLS is never downgraded to cleartext, even by a
+            # code-authorised pair request; refuse before touching its pinned certificate.
+            self._send_json(409, {"error": "peer is paired over TLS; plaintext re-pairing refused"})
+            return
+        if tailnet_authorized:
+            # The tailnet source address is the only authority here -- no pairing secret was
+            # checked -- so it may establish a new peer but never replace the certificate
+            # already pinned for one. Refuse before anything is written to the pin cache;
+            # changing a pinned certificate needs the pairing code.
+            pins = _pinned_peer_fingerprints(self.settings, peer_id, existing_peer)
+            if pins and _fingerprint_key(claimed_fingerprint) not in pins:
+                self._send_json(409, {"error": "peer certificate is already pinned; re-pairing it requires the pairing code"})
+                return
         expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
+        if expected and claimed_fingerprint and expected != claimed_fingerprint:
+            raise ValueError("peer certificate fingerprint mismatch")
+        try:
+            previous_pem = _local_peer_cert_cache_path(self.settings, peer_id).read_bytes()
+        except OSError:
+            previous_pem = None
+        cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
         if expected and expected != fingerprint.lower():
-            cert_path.unlink(missing_ok=True)
+            # Put back whatever pin was live before this rejected request.
+            if previous_pem is None:
+                cert_path.unlink(missing_ok=True)
+            else:
+                cert_path.write_bytes(previous_pem)
             raise ValueError("peer certificate fingerprint mismatch")
         source_ip = self.client_address[0] if self.client_address else ""
-        scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https"))
         port = int(payload.get("api_port") or 443)
         peer_mtls_port = int(payload.get("peer_mtls_port") or port)
         advertised_reachable_url = str(payload.get("reachable_url") or "").strip()
@@ -699,6 +736,41 @@ class HandlersPeerMixin:
             "offset": offset,
             "items": page,
         }
+
+    def _handle_peer_content_inventory(self, asset_type: str, query_params: dict) -> None:
+        """Sign a bounded inventory for exactly one local asset and request nonce."""
+        if not self._peer_request_authorized():
+            return
+        try:
+            try:
+                from ..transfer.signed_inventory import safe_path, sign_inventory
+            except ImportError:  # pragma: no cover - flat execution
+                from transfer.signed_inventory import safe_path, sign_inventory
+            rel = safe_path((query_params.get("relative_path") or [""])[0])
+            system = (query_params.get("system") or [""])[0]
+            nonce = (query_params.get("nonce") or [""])[0]
+            if asset_type == "roms":
+                safe_path(system)
+                if "/" in system:
+                    raise ValueError("invalid system")
+                root = self.repository.get_local_system_dir(system).resolve()
+            elif asset_type == "bios" and not system:
+                root = self.repository.get_bios_root().resolve()
+                if not self.repository.is_local_bios_path(rel):
+                    raise FileNotFoundError()
+            else:
+                raise ValueError("invalid inventory asset type")
+            target = (root / rel).resolve()
+            if root not in target.parents or not target.exists():
+                raise FileNotFoundError()
+            payload = sign_inventory(self.settings, asset_type, system, rel, nonce, target)
+        except FileNotFoundError:
+            self._send_json(404, {"error": "not found"})
+            return
+        except ValueError:
+            self._send_json(400, {"error": "invalid content inventory request"})
+            return
+        self._send_json(200, payload)
 
     def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():

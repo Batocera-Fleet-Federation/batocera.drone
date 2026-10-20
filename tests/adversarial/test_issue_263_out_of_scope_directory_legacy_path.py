@@ -20,6 +20,7 @@ from unittest import mock
 from app.common.auth import DroneCredentialStore
 
 
+# Fixed in #399; the former expectedFailure marker is gone.
 class DirectoryLegacyPathOutOfScopeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._environment = mock.patch.dict(os.environ, {}, clear=True)
@@ -33,9 +34,8 @@ class DirectoryLegacyPathOutOfScopeTests(unittest.TestCase):
     def test_existing_directory_credentials_path_is_refused_before_database_write(self) -> None:
         directory = self.root / "creds.d"
         directory.mkdir()
-        store = DroneCredentialStore(directory, state_database_file=self.database)
         with self.assertRaises(ValueError):
-            store.update("batocera", "longenough1")
+            DroneCredentialStore(directory, state_database_file=self.database).update("batocera", "longenough1")
         self.assertFalse(self.database.exists())
 
 

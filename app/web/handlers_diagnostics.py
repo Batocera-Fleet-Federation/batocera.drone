@@ -16,6 +16,7 @@ try:
     from ..common.batocera_version import _read_batocera_version
     from ..common.http_errors import _format_http_error
     from ..common.logtail import _tail_lines
+    from ..device import rgs_manager
     from ..device.tailnet_service import tailnet_status
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.batocera_version import _read_batocera_version  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
+    from device import rgs_manager  # type: ignore
     from device.tailnet_service import tailnet_status  # type: ignore
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
@@ -49,6 +51,20 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 
 class HandlersDiagnosticsMixin:
+    def _handle_admin_rgs_get(self) -> None:
+        self._send_json(200, rgs_manager.status(self.settings))
+
+    def _handle_admin_rgs_post(self, payload: dict) -> None:
+        try:
+            state = rgs_manager.set_enabled(self.settings, payload.get("enabled"))
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except OSError as error:
+            self._send_json(503, {"error": str(error)})
+            return
+        self._send_json(200, state)
+
     def _handle_admin_logs(self, log_source: str, lines: int) -> None:
         import subprocess
         from pathlib import Path

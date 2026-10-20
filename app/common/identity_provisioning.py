@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - non-POSIX development hosts
     fcntl = None  # type: ignore
 
 try:
-    from .device_identity import _device_id_path, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
+    from .device_identity import _device_id_path, _ensure_device_id_dir, _is_mock_path, _normalize_device_id, _require_real_path, _write_persisted_machine_id, random_device_id
     from .hardware_identity import (
         BASELINE,
         CONTRADICTORY,
@@ -64,6 +64,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.device_identity import (  # type: ignore
         _device_id_path,
+        _ensure_device_id_dir,
         _is_mock_path,
         _normalize_device_id,
         _require_real_path,
@@ -249,6 +250,10 @@ def _read_json(path: Path) -> Any:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return _ABSENT
+    except UnicodeDecodeError:
+        # Invalid UTF-8 bytes are corrupt content, not an I/O failure: treat them like torn JSON
+        # so a hardware mismatch can still clone instead of failing the whole provisioning run.
+        return _CORRUPT
     except OSError:
         return _CORRUPT
     try:
@@ -257,6 +262,9 @@ def _read_json(path: Path) -> Any:
         # Absurdly deep nesting raises RecursionError rather than ValueError; it is just as
         # unusable as torn JSON.
         return _CORRUPT
+    # Dict-only is the durable journal contract: json.loads of an object is always a dict, and
+    # the disk-path gates validate only when isinstance(..., dict). Widening this to any Mapping
+    # would let a non-dict journal skip those checks (see docs/drone-identity.md, #366).
     return value if isinstance(value, dict) else _CORRUPT
 
 
@@ -544,7 +552,27 @@ def _consume_authorization(settings: Any) -> None:
 
 
 def _record_journal(settings: Any, journal: dict) -> None:
-    _atomic_write_json(_journal_path(settings), journal)
+    # ``json.dump`` serializes concrete dicts, but not every Mapping implementation.
+    # Snapshot mapping journals before the atomic write so adapters such as UserDict,
+    # ChainMap, and mappingproxy persist as the same JSON object as a plain dict.
+    payload = dict(journal) if isinstance(journal, collections.abc.Mapping) else journal
+    _atomic_write_json(_journal_path(settings), payload)
+
+
+def _normalized_journal_device_id(value: object) -> Optional[str]:
+    """Validate a journaled id using its immutable string payload.
+
+    Journal data normally originates with ``json.loads`` and therefore contains
+    exact ``str`` instances.  Helper callers may provide a ``str`` subclass,
+    though, whose normal string hooks have been overridden.  Detach such a
+    value through ``str.__str__`` before normalizing so admission and resume
+    cannot see different identities.  Check mocks first because a mock with a
+    ``str`` spec can spoof ``isinstance(value, str)``.
+    """
+    if _is_mock_path(value) or not isinstance(value, str):
+        return None
+    plain_value = value if type(value) is str else str.__str__(value)
+    return _normalize_device_id(plain_value)
 
 
 def _valid_journal(journal: dict) -> bool:
@@ -571,7 +599,7 @@ def _valid_journal(journal: dict) -> bool:
     if HardwareSnapshot.from_dict(journal.get("hardware")) is None:
         return False
     new_device_id = journal.get("new_device_id")
-    if new_device_id is not None and (not isinstance(new_device_id, str) or not _normalize_device_id(new_device_id)):
+    if new_device_id is not None and _normalized_journal_device_id(new_device_id) is None:
         return False
     return True
 
@@ -626,32 +654,42 @@ def _choose_device_id(settings: Any, journal: collections.abc.Mapping) -> str:
     # resumed id.  A unittest mock that also subclasses Mapping is still a mock.
     if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
         raise IdentityError("the identity journal must be a mapping")
-    if journal.get("new_device_id"):
-        # Only a real, well-formed id may be resumed; anything else (a mock, a number, a
-        # malformed string) must not be stringified into the identity.
-        resumed = journal["new_device_id"]
-        # Spec'd mocks can spoof ``isinstance(value, str)``. Reject them before
-        # calling the normalizer, which invokes string methods on its input.
-        normalized = (
-            _normalize_device_id(resumed)
-            if isinstance(resumed, str) and not _is_mock_path(resumed)
-            else None
-        )
-        if normalized is None:
-            raise IdentityError("the journaled device id is not a valid Drone id")
-        return normalized
-    if "new_device_id" in journal:
-        # A falsey mock is still a present, invalid resumed value, not a missing
-        # journal field. Real JSON null/empty values retain the legacy fresh-id path.
-        resumed = journal["new_device_id"]
-        if _is_mock_path(resumed):
-            raise IdentityError("the journaled device id is not a valid Drone id")
+    # Mapping.register is a promise, not a runtime protocol check: a virtual
+    # registration can lack get() entirely. Validate that required operation
+    # before using membership and item lookup to reject inconsistent mappings.
+    if not callable(getattr(type(journal), "get", None)):
+        raise IdentityError("the identity journal must be a mapping")
+    try:
+        has_resumed_id = "new_device_id" in journal
+        # Inherited ``__contains__`` treats a KeyError from ``__getitem__`` as absence, so
+        # a Mapping whose get() reports a value but whose item lookup fails would look
+        # like a fresh journal. Cross-check with get() so that contradiction is rejected
+        # instead of minting a replacement identity.
+        reports_resumed_id = journal.get("new_device_id") is not None
+    except Exception as exc:
+        raise IdentityError("the identity journal must be a mapping") from exc
+    if has_resumed_id or reports_resumed_id:
+        # A present non-None value is an attempted resume, even when falsey. Only JSON
+        # null (or an absent field) means there is no id to resume. Keeping this aligned
+        # with _valid_journal prevents malformed journals from silently minting identity.
+        try:
+            resumed = journal["new_device_id"]
+        except Exception as exc:
+            # A malformed Mapping can report membership but fail item lookup. Treat that
+            # contradiction as an invalid journaled id rather than leaking its lookup
+            # implementation detail or minting a replacement identity.
+            raise IdentityError("the journaled device id is not a valid Drone id") from exc
+        if resumed is not None:
+            normalized = _normalized_journal_device_id(resumed)
+            if normalized is None:
+                raise IdentityError("the journaled device id is not a valid Drone id")
+            return normalized
     _require_real_path(settings.userdata_root, "userdata_root")
     # A clone is a new device even when its copied configuration pins the source's id via
     # DRONE_DEVICE_ID; the retired id is remembered in the binding so the pin cannot revive it.
     userdata_root = Path(settings.userdata_root)
     _retire_device_id(settings)
-    _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
+    _ensure_device_id_dir(userdata_root)
     candidate = random_device_id()
     _write_persisted_machine_id(userdata_root, candidate)
     return candidate
@@ -681,6 +719,15 @@ def _provision(
     journal: Optional[dict] = None,
 ) -> IdentityResult:
     """Create (or recreate) the identity. ``reason``: initial | clone | operator_new_identity."""
+    if journal is not None and not isinstance(journal, dict):
+        # _choose_device_id deliberately accepts any genuine Mapping as a resumed
+        # journal. Normalize it before the first durable write so JSON serialization
+        # cannot hide an invalid resumed id behind a raw TypeError. Keeping the
+        # mock/type gate aligned with _choose_device_id also prevents mocks from
+        # masquerading as a persisted journal.
+        if _is_mock_path(journal) or not issubclass(type(journal), collections.abc.Mapping):
+            raise IdentityError("the identity journal must be a mapping")
+        journal = dict(journal)
     destructive = reason != "initial"
     resumed = journal is not None
     if destructive:
@@ -944,6 +991,14 @@ def resolve_recovery(settings: Any, action: str, provider: Optional[HardwareIden
 # ------------------------------------------------------------------ main entry
 
 
+def _relative_userdata_root(settings: Any) -> bool:
+    """True only for a real path string/PathLike that is not absolute (mocks are left to _require_real_path)."""
+    root = getattr(settings, "userdata_root", None)
+    if _is_mock_path(root) or not isinstance(root, (str, os.PathLike)):
+        return False
+    return not Path(root).is_absolute()
+
+
 def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] = None) -> IdentityResult:
     """Validate (or provision) this Drone's identity. Idempotent; call before any networking."""
     _publish(State.VALIDATING, "", "", False)
@@ -953,6 +1008,12 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
         _publish(State.READY, STATUS_MANAGED, managed, True)
         _log(f"Identity lifecycle is managed externally ({managed}); clone detection skipped")
         return IdentityResult(settings, State.READY, STATUS_MANAGED, reason=managed)
+    if _relative_userdata_root(settings):
+        # A relative root would resolve identity and key files against the process working
+        # directory. Hold with a named misconfiguration instead of writing anywhere.
+        _log("USERDATA_ROOT must be an absolute path; identity provisioning is held and nothing was written")
+        _publish(State.RECOVERY_REQUIRED, STATUS_RECOVERY, "relative_userdata_root", False)
+        return IdentityResult(settings, State.RECOVERY_REQUIRED, STATUS_RECOVERY, reason="relative_userdata_root", swarm_networking_enabled=False)
     provider = provider or HardwareIdentityProvider()
     try:
         with _ProvisioningLock(settings):
@@ -1158,7 +1219,7 @@ def _verified(settings: Any, binding: dict, hardware: HardwareSnapshot, pair: di
             binding["history"].append(_history_entry("device_id_pinned_by_environment"))
         else:
             # The persisted id file was lost or edited; the binding is the source of truth.
-            _device_id_path(Path(settings.userdata_root)).parent.mkdir(parents=True, exist_ok=True)
+            _ensure_device_id_dir(Path(settings.userdata_root))
             _write_persisted_machine_id(Path(settings.userdata_root), binding["device_id"])
             settings = dataclasses.replace(settings, device_id=binding["device_id"])
         changed = True

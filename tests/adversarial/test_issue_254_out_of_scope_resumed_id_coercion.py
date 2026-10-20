@@ -1,19 +1,18 @@
-"""Out-of-scope evidence for issue #254: resumed-id coercion depends on the journal's own methods.
+"""Regression coverage for #359 plus remaining out-of-scope #254 evidence.
 
 Issue #254 is about which journal types pass the 'must be a mapping' check. The two
 defects below are about what _choose_device_id does with a resumed value after the
-check passes. Both are outside #254 and are not reachable from production:
-production journals are json.loads dicts, and json never yields a str subclass or a
-Mapping whose get and __getitem__ disagree.
+check passes. The str-subclass case is Issue #359 and is now a required regression;
+the inconsistent Mapping remains outside #359. Neither is reachable from a JSON
+journal, but the helper accepts these Python-level inputs and must not let an object
+substitute a different logical identity.
 
-1. A str subclass that overrides strip() mints the id its override returns, not the
-   value the journal holds. (Same for a plain dict journal; #252 territory.)
+1. A str subclass that overrides strip() must resume its actual value, not the id its
+   override returns.
 2. A Mapping whose get() reports the key present but whose __getitem__ raises KeyError
    leaks a raw KeyError from _choose_device_id instead of IdentityError.
 
-Each defect is an expectedFailure: the suite passes while the defect exists, so it is
-non-blocking evidence. It reports an unexpected success (and fails) once the defect is
-fixed, which is the signal to remove the marker.
+The malformed Mapping defect is an expectedFailure and remains non-blocking evidence.
 """
 
 from __future__ import annotations
@@ -57,7 +56,7 @@ class _GetSaysPresentGetItemRaises(collections.abc.Mapping):
         return 0
 
 
-class ResumedIdCoercionOutOfScopeTests(unittest.TestCase):
+class ResumedIdCoercionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._env = mock.patch.dict("os.environ", {}, clear=True)
         self._env.start()
@@ -68,17 +67,15 @@ class ResumedIdCoercionOutOfScopeTests(unittest.TestCase):
         (self.userdata / "system" / "drone-app").mkdir(parents=True)
         self.settings = SimpleNamespace(userdata_root=self.userdata, device_id=CONFIGURED_ID)
 
-    @unittest.expectedFailure
     def test_str_subclass_resumed_id_is_not_minted_from_its_overridden_methods(self) -> None:
-        # Expected: the id is the journal's real value. Current: the override wins.
+        # #359: the id is the journal's real value, not a value made by strip().
         chosen = identity._choose_device_id(
             self.settings, collections.UserDict({"new_device_id": _LyingStr(RESUMED_ID)})
         )
         self.assertEqual(chosen, RESUMED_ID)
 
-    @unittest.expectedFailure
     def test_inconsistent_mapping_raises_identity_error_not_keyerror(self) -> None:
-        # Expected: IdentityError (the journaled-id error). Current: raw KeyError.
+        # #363 brings the malformed resumed-id Mapping boundary into scope.
         with self.assertRaises(identity.IdentityError):
             identity._choose_device_id(self.settings, _GetSaysPresentGetItemRaises())
 

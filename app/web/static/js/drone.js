@@ -14004,17 +14004,44 @@ function renderTailnetControlSummary(tailnet) {
   return `${versionNote} is installed but this Drone hasn't joined a tailnet yet. Use Connect to paste an auth key.`;
 }
 
+function syncRgsControls(state) {
+  const toggle = document.getElementById("rgsEnabledCheckbox");
+  const summary = document.getElementById("rgsStatus");
+  if (!toggle || !summary) return;
+  toggle.checked = state.running === true;
+  toggle.disabled = !state.available;
+  if (!state.installed) summary.textContent = "RGS download manager is not installed.";
+  else if (!state.available) summary.textContent = state.error || "RGS status is unavailable.";
+  else summary.textContent = `${state.running ? "On — uploads and downloads active." : "Off — uploads and downloads stopped."} ${state.enabled ? "Starts at boot." : "Disabled at boot."}`;
+}
+
+async function setRgsEnabled(toggle) {
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  document.getElementById("rgsStatus").textContent = enabled ? "Starting RGS…" : "Stopping RGS…";
+  try {
+    const state = await apiPost("/admin/rgs", {enabled});
+    syncRgsControls(state);
+    showToast(enabled ? "RGS download manager turned on." : "RGS download manager turned off.", "success");
+  } catch (err) {
+    showToast(`Failed to change RGS: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    const state = await api("/admin/rgs").catch(() => ({installed: true, available: false}));
+    syncRgsControls(state);
+  }
+}
+
 async function renderAdminControlsPage() {
   titleNode.textContent = "Controls";
   subtitleNode.textContent = "Screen mode, volume, screensaver, and EmulationStation configuration";
   setLoading(true, "Loading controls...");
   try {
-    const [payload, autoUpdate, tailnet] = await Promise.all([
+    const [payload, autoUpdate, tailnet, rgs] = await Promise.all([
       api("/admin/system-info"),
       api("/admin/system/auto-update"),
       // Never fatal: the Tailnet tile degrades to "unknown" rather than
       // taking the whole Controls page down with it.
       api("/admin/tailnet/status").catch(() => ({ installed: false, unavailable: true })),
+      api("/admin/rgs").catch(() => ({ installed: true, available: false })),
     ]);
     const fields = payload.fields || {};
     const pixnInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
@@ -14033,6 +14060,19 @@ async function renderAdminControlsPage() {
           <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
           <button class="btn btn-outline-danger" id="restartEsBtn" onclick="restartEmulationStation()"><i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation</button>
           ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
+      </div>
+      <div class="card mb-3">
+        <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+          <div>
+            <h2 class="h6 mb-1">RGS Download Manager</h2>
+            <div class="small text-muted" id="rgsStatus" aria-live="polite">Loading RGS status…</div>
+            <div class="small text-muted">Turning off stops RGS uploads and downloads and disables startup at boot.</div>
+          </div>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" role="switch" id="rgsEnabledCheckbox" onchange="setRgsEnabled(this)" disabled>
+            <label class="form-check-label" for="rgsEnabledCheckbox">Enable RGS</label>
+          </div>
+        </div>
       </div>
       <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
         <div class="col">
@@ -14213,6 +14253,7 @@ async function renderAdminControlsPage() {
       });
     }
 
+    syncRgsControls(rgs);
     loadScreenMode();
 
     const esCollectionsToggleBtn = document.getElementById("esCollectionsToggleBtn");

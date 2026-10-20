@@ -24,6 +24,7 @@ Decentralised multiplayer on the existing swarm. No hub, no account. Read
 | Launch / process | `launcher.py` (EmulationStation loopback API, `GameRuntime`, `BatoceraControl.exit_game`) |
 | Probes | `environment.py` (`SystemProbe`; the only place that touches PATH/files/subprocess for detection) |
 | Settings | `settings_store.py` |
+| Optional dependency install (Sunshine) | `dependencies.py` (`SunshineInstaller`: release lookup → SHA-256 verify → `--appimage-extract` → Drone-owned dir + `DRONE_SUNSHINE` service; background job; `LibraryMixin.dependency_action` allowlists install/start/stop/uninstall) |
 | HTTP | `web/handlers_multiplayer.py`; routes in `web/api_routes.py`; schemas in `web/openapi_spec.py::_multiplayer_paths` |
 | UI | `web/static/js/multiplayer.js` (hash `#multiplayer[/games[/system]|/session/<id>|/settings]`), router branch + nav button in `drone.js`/`index.html` |
 | Clone safety | `multiplayer/identity_reset.py`, called from `transfer/swarm_reset.py` |
@@ -81,6 +82,20 @@ matrix and "Manual hardware validation" in sync with reality.
 * A running `create_server` in tests starts the (idempotent) worker; call `stop_multiplayer_worker()` in cleanup.
 
 ## Hardening and external dependencies
+
+- `dependencies.py` is the **only** place Drone installs anything for multiplayer. Keep it fail-closed: official
+  `LizardByte/Sunshine` HTTPS release, required `sha256:` digest from the release API, size cap, extract with the
+  AppImage's own `--appimage-extract` (never run from the download dir), fixed argv. Service ownership requires an
+  HMAC receipt binding the script bytes, path and inode to the private key created during verified installation;
+  public markers and checksum-only sidecars are never ownership evidence. Inspection never creates that key.
+  uninstall never touches a Sunshine/service Drone did not write and keeps Sunshine's own config/pairings. Endpoints
+  are `GET /admin/multiplayer/dependencies` and `POST .../dependencies/sunshine/{install,start,stop,uninstall}`
+  (same session + same-origin + JSON gate as other mutations; stop/uninstall refused while streaming is in use).
+  Moonlight and libretro cores are **not** installed by Drone (no verified Batocera store API) — adapters give the
+  Content Downloader hint instead.
+- RetroArch core resolution order: Drone override → `batocera.conf` → Batocera `configgen-defaults.yml` (+`-arch`) →
+  first installed candidate (`core_source` says which). Put blockers before notes in `reasons`; the selector shows
+  `reasons[:2]` for UNSUPPORTED/INCOMPATIBLE.
 
 - `GameLibrary.content_hash` computes a selected file's SHA-256, caches by file/stat identity, and refuses changes
   during hashing. RetroArch/Dolphin joining requires full equality; sampled fingerprints only locate candidates.

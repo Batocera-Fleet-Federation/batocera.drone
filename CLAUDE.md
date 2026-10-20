@@ -89,7 +89,8 @@ find files nested under a subpackage. Every `except ImportError` fallback must f
   PPSSPP, Switch, generic LAN, streaming, detect-only emulators), `matching`, `mechanism`,
   `compat_db`, `network`, `launcher`, `settings_store`, `worker`, `identity_reset`, and the
   `MultiplayerOrchestrator` (`orchestrator.py`, composed from `core`/`sessions`/`protocol`/
-  `lifecycle`/`library` mixins). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
+  `lifecycle`/`library` mixins) and `dependencies` (the one-click, checksum-verified Sunshine installer + `DRONE_SUNSHINE`
+  service; nothing else is installed by multiplayer). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
   (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported
@@ -110,7 +111,8 @@ a new module and compose it — `class RomRepository(SomeMixin, ...):`. Methods 
 call that aren't `self.*`) are imported in the mixin module; anything still in `drone_api`
 is lazy-imported. First done: `roms/rom_artwork_apply.py`.
 `Settings.from_env()` (now `common/settings.py`, re-exported) reads `*_ROOT` env vars
-(default `/userdata/{roms,bios,saves,movies,shows,music}`).
+(default `/userdata/{roms,bios,saves,movies,shows,music}`). A blank `USERDATA_ROOT` means unset
+(`/userdata`); a relative `USERDATA_ROOT` raises a named `ValueError` at config time (#454).
 
 **Extracting more:** move the code to the right subpackage, add the dual re-export to
 `drone_api.py`, then **repoint test monkeypatches** — tests patch `app.drone_api.X`,
@@ -156,6 +158,16 @@ let a peer tell when a re-sync is needed. Schema is created inline with `CREATE 
 IF NOT EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
 tables/columns idempotently. See `drone-db-management` skill.
 
+**Forever-loop pollers** (automation, outbound-mail worker, VPN/SMTP/tailnet revocation, VPN self-heal,
+network-share watchdog) are latched on once per process by `create_server()` and sleep with `time.sleep`, so
+they are retired by generation, not by stop event: each captures `runtime_state.poller_generation()` at start and
+returns — before any I/O — the first time it wakes to a different one. `drone_api.retire_background_pollers()`
+bumps the generation and clears their `*_STARTED` latches; `main()` calls it beside
+`stop_local_network_workers()`. A plain HTTP shutdown does not (owner-driven, like the LAN workers). Any
+test harness that calls `create_server` should call both on teardown: a leftover poller re-resolves
+`DRONE_STATE_DATABASE_FILE` every tick, so it writes into (and re-creates the temp tree of) whatever later test
+selected that env. New forever-loop pollers must follow the same capture-and-check shape.
+
 **Poll loop:** `_start_rom_metadata_poller` + `RomFilesystemWatcher` (inotify,
 debounced) wake on file changes; `_poll_rom_metadata_once` scans ROM/BIOS metadata,
 hashes changed files, then syncs game saves — all purely local (there is no hub to
@@ -168,7 +180,12 @@ sync to; a completed local pass just marks the cache clean, see
 `transfer/peer_download.py`; cert pinning + peer client in
 `transfer/peer_connectivity.py` via `_peer_trust_cafile`, SSL-retry; the mTLS
 identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). The
-peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
+peer-pinned identity also signs fresh, nonce-bound ROM/BIOS content inventories
+(`transfer/signed_inventory.py`, `/peer/content-inventory/{roms,bios}`). Receivers
+verify against the persisted pairing pin and full-file SHA-256 for every file,
+including folder children, before installing; caller fingerprints alone are not
+content authority. Sources without this endpoint fail closed and must be upgraded.
+The peer-pinned identity stays stable; `web/server_tls.py` reconciles a separate
 hostname/IP-aware HTTPS leaf signed by that identity during startup, including
 current LAN and Tailscale addresses. See
 `drone-p2p-transfer-security` skill.
@@ -183,15 +200,32 @@ peer-facing may start earlier. Verdicts: same → no writes; confident different
 provisioning (retire old key first, `transfer/swarm_reset.py` targeted SQLite/pin reset,
 `tailnet_service.reset_local_node_identity()` — local state only, **never `tailscale logout`**,
 fresh random device id, fresh cert via `DroneCertificateManager`, journaled/resumable);
-missing/contradictory → `RECOVERY_REQUIRED` with `swarm_networking_allowed()` False (listener,
-workers, pollers, `/peer/*` and outbound peer TLS all gated). That includes the pair-by-address peer-info fetch (`_fetch_peer_info`, any scheme) and each live
+missing/contradictory, or a relative `userdata_root` (`relative_userdata_root`, nothing written) → `RECOVERY_REQUIRED` with `swarm_networking_allowed()` False (listener,
+workers, pollers, `/peer/*` and outbound peer TLS all gated). `_drone_client_ssl_context` checks the hold before its scheme test, so `http://` peer GET/POST/download calls raise `PeerIdentityHold` too (the failover loops re-raise it rather than trying the next address). That includes the pair-by-address peer-info fetch (`_fetch_peer_info`, any scheme) and each live
 dial in `_pairing_tls_context`: they raise `PeerIdentityHold` (503 from the handlers) before connecting. Admin overrides (`/admin/identity/*`,
 `web/handlers_identity.py`) need a real session **and** password re-entry. Rules: a clone never
 broadcasts a removal/rotation for the original; a peer can never force an identity reset
 (collisions are isolated + logged via `record_collision`); when you add per-peer state
 (table/namespace/file), add it to `swarm_reset.py`. Tests: `tests/test_hardware_identity.py`,
 `tests/test_identity_provisioning.py` (fixture hardware trees via `HardwareIdentityProvider(root)`,
-disk images via `image_disk`). Depth: `docs/drone-identity.md`.
+disk images via `image_disk`). Resume journals accept `new_device_id` only when it is absent,
+`null`, or a valid non-empty Drone id; any other present value is rejected before a fresh id
+can be minted. Keep `_choose_device_id()` behavior aligned with `_valid_journal()`. The id file and its directories are never created through a symlink (`device_identity._ensure_device_id_dir`/`_write_persisted_machine_id`, #458); use those helpers, not `Path.mkdir`/`write_text`. Depth:
+`docs/drone-identity.md`.
+
+## Admin credentials (`common/auth.py`)
+
+**There is no universal default password** (the old `batocera`/`linux` fallback is gone — don't reintroduce
+one, in code, Docker defaults or tests that assume it). `DroneCredentialStore.load()` returns persisted
+PBKDF2 credentials; else the operator's `DRONE_APP_PASSWORD` (env); else `setup_required` where `check()`
+matches nothing. `create_server()` calls `ensure_initial_password()`, which generates a random one-time
+password, persists only its hash, and writes the plaintext to a 0600 `initial-password.txt` beside the
+credentials file (never logged/returned over HTTP; `update()` deletes it; deleting it before the first
+change regenerates). Loopback stays pre-authenticated, so the on-device UI can set real credentials. Tests
+that need to log in pass `env_password=` or call `update()`.
+The legacy credentials path must be file-shaped **and not an existing directory**
+(`require_legacy_file_path`, checked in `__init__` and again at the top of `update()` before any write, so a
+failed update never leaves new credentials behind); a symlink is accepted wherever it points because `unlink` removes only the link.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
 
@@ -240,11 +274,18 @@ Multicast announcements are unauthenticated too: they never rewrite a paired
 peer's address/fingerprint (only `last_seen`), and the pairing code is only
 sent over a connection pinned to the pinned or operator-confirmed fingerprint
 (`_local_pair_peer`, `certificate_fingerprint` on the pair requests).
+An operator-typed `http://` pair-by-address is anchored like `https://`: without a pinned record or a confirmed fingerprint `_pair_peer_or_reply` answers 400 and `_local_pair_peer` raises before sending anything, so an on-path attacker cannot get its own certificate pinned (only code-free `tailnet_auto_pair` is exempt).
+Peer JSON responses are read through `_read_capped` in `transfer/peer_connectivity.py` (64 KiB for pairing/peer-info, 8 MiB for general peer GET/POST); an oversize body is a rejected pairing / `PeerResponseTooLarge`, never buffered whole.
+A tailnet-authorised (code-free) `/peer/pair` request can add a peer but never replace a pinned certificate: `_handle_peer_pair` compares against `_pinned_peer_fingerprints` and answers 409 before writing, so only the pairing code can change a pin.
 A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed over plaintext `http://`
-(filters in `_peer_address_candidates`/`_peer_address`, refusal in `_local_pair_peer`; set by `_local_pair_peer`, `_handle_peer_pair` and swarm gossip, never by announcements).
+(filters in `_peer_address_candidates`/`_peer_address`, refusal in `_local_pair_peer`; the flag is sticky — `save_paired_peer` never lets any writer clear it, and `_handle_peer_pair` answers 409 to a non-https re-pair of such a peer, even with a valid code; set by `_local_pair_peer`, `_handle_peer_pair` and swarm gossip, never by announcements).
 Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
 runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
 (default 300) while a Drone is not enrolled.
+Local-network shutdown joins discovery and peer-health workers before clearing
+their generation. If the timeout expires, `stop_local_network_workers()` raises
+`TimeoutError` and retains the stopped generation for retry; do not delete peer
+state or replace the generation until shutdown succeeds. See `drone-edge-networking`.
 
 ## Integrations (`app/integrations/`) — optional local extensions
 

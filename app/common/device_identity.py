@@ -9,6 +9,7 @@ cannot be persisted, the physical NIC MAC (or ``uuid.getnode()``) is used as bef
 Pure stdlib, no Drone-internal dependencies.
 """
 
+import hashlib
 import os
 import re
 import secrets
@@ -47,9 +48,20 @@ def _normalize_device_id(value: Optional[str]) -> Optional[str]:
 
 
 def _device_id_path(userdata_root: Path) -> Path:
-    if _is_mock_path(userdata_root):
-        raise TypeError("userdata_root must be a filesystem path")
-    return Path(os.environ.get("DRONE_DEVICE_ID_FILE", str(userdata_root / "system" / "drone-app" / "device-id")))
+    override = os.environ.get("DRONE_DEVICE_ID_FILE")
+    if override is not None:
+        _require_real_path(override, "DRONE_DEVICE_ID_FILE")
+        if not os.path.isabs(os.fspath(override)):
+            raise TypeError("DRONE_DEVICE_ID_FILE must be an absolute filesystem path")
+        _require_real_path(userdata_root, "userdata_root")
+        # An explicit absolute file override is independent of userdata_root;
+        # the identity file cannot resolve through cwd in that case.
+        return Path(override)
+    _require_real_path(userdata_root, "userdata_root")
+    # Without an override, a relative root would read or persist identity under cwd.
+    if not os.path.isabs(os.fspath(userdata_root)):
+        raise TypeError("userdata_root must be an absolute filesystem path")
+    return Path(userdata_root) / "system" / "drone-app" / "device-id"
 
 
 def _is_mock_path(value: object) -> bool:
@@ -72,6 +84,13 @@ def _require_real_path(value: object, label: str) -> None:
         raise TypeError(f"{label} must be a filesystem path")
     if not isinstance(value, (str, os.PathLike)):
         raise TypeError(f"{label} must be a filesystem path")
+    # A NUL byte is never valid in a filesystem path; reject it here so it cannot reach
+    # open()/read_text() and escape as a raw ValueError past the OSError handlers.
+    raw = os.fspath(value)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "surrogateescape")
+    if "\x00" in raw:
+        raise TypeError(f"{label} must be a filesystem path")
 
 
 def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
@@ -81,17 +100,89 @@ def _read_persisted_machine_id(userdata_root: Path) -> Optional[str]:
         return None
 
 
+def _guard_root(userdata_root: Path, path: Path) -> Path:
+    """The directory below which no symlink is tolerated on the way to *path*.
+
+    ``userdata_root`` itself may legitimately be a symlink (an external drive), so it is
+    trusted as given. An explicit ``DRONE_DEVICE_ID_FILE`` outside it is operator-chosen,
+    so only its own parent directory is trusted.
+    """
+    root = Path(os.path.abspath(os.fspath(userdata_root)))
+    try:
+        Path(os.path.abspath(os.fspath(path))).relative_to(root)
+    except ValueError:
+        return Path(os.path.abspath(os.fspath(path.parent)))
+    return root
+
+
+def _components_below(guard: Path, target: Path) -> List[Path]:
+    relative = Path(os.path.abspath(os.fspath(target))).relative_to(guard)
+    return [guard.joinpath(*relative.parts[: index + 1]) for index in range(len(relative.parts))]
+
+
+def _ensure_device_id_dir(userdata_root: Path) -> bool:
+    """Create the id file's directory without following a symlink planted in its chain.
+
+    Returns False (creating nothing further) when a component below the trusted root is a
+    symlink, so ``mkdir`` can never be steered outside userdata. Other ``OSError`` propagate.
+    """
+    path = _device_id_path(userdata_root)
+    guard = _guard_root(userdata_root, path)
+    # The trusted root itself may not exist yet (first boot); create it as before.
+    guard.mkdir(parents=True, exist_ok=True)
+    for component in _components_below(guard, path.parent):
+        if os.path.islink(component):
+            return False
+        try:
+            os.mkdir(component)
+        except FileExistsError:
+            if os.path.islink(component) or not os.path.isdir(component):
+                return False
+    return True
+
+
 def _write_persisted_machine_id(userdata_root: Path, value: str) -> bool:
+    """Persist the id atomically, refusing a symlink at the file or anywhere in its parents.
+
+    The write goes to a sibling temp file that is renamed into place, so even a symlink
+    that appears after the check is replaced rather than followed (issue #458).
+    """
     normalized = _normalize_device_id(value)
     if not normalized:
         return False
+    temp_path = None
     try:
         path = _device_id_path(userdata_root)
-        if not path.parent.exists():
+        if not path.parent.is_dir():
             return False
-        path.write_text(f"{normalized}\n", encoding="utf-8")
+        guard = _guard_root(userdata_root, path)
+        if any(os.path.islink(component) for component in _components_below(guard, path)):
+            return False
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        for _ in range(8):
+            candidate = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temp_path = candidate
+            break
+        else:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{normalized}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
     except OSError:
         return False
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
     return True
 
 
@@ -135,24 +226,35 @@ def _runtime_machine_id() -> str:
     return ":".join(f"{(node >> shift) & 0xff:02x}" for shift in range(40, -1, -8))
 
 
-def _machine_id(userdata_root: Optional[Path] = None) -> str:
+def _path_derived_machine_id(userdata_root: Path) -> str:
+    """A stable, MAC-shaped, locally administered id derived from the root path (never the NIC)."""
+    digest = hashlib.sha256(f"drone-fake-identity:{userdata_root}".encode("utf-8")).digest()
+    octets = bytearray(digest[:6])
+    octets[0] = (octets[0] | 0x02) & 0xFE
+    return ":".join(f"{octet:02x}" for octet in octets)
+
+
+def _machine_id(userdata_root: Optional[Path] = None, *, host_fallback: bool = True) -> str:
     if userdata_root is None:
         return _runtime_machine_id()
-    _require_real_path(userdata_root, "userdata_root")
-    persisted = _read_persisted_machine_id(userdata_root)
+    _device_id_path(userdata_root)
+    persisted = _normalize_device_id(_read_persisted_machine_id(userdata_root))
     if persisted:
         return persisted
     # The first boot must not adopt the NIC's MAC: installs on one host would share it and
     # refuse each other as "this Drone itself". The random id is persisted before use so
     # every later start agrees. If it cannot be persisted, fall back to the NIC-derived id
-    # instead of one that would change on every start.
+    # instead of one that would change on every start. Fake-data callers opt out of that
+    # host-derived fallback and get a stable root-derived id instead.
     generated = random_device_id()
     try:
-        _device_id_path(userdata_root).parent.mkdir(parents=True, exist_ok=True)
+        _ensure_device_id_dir(userdata_root)
     except OSError:
         pass
     if _write_persisted_machine_id(userdata_root, generated):
         return generated
+    if not host_fallback:
+        return _path_derived_machine_id(userdata_root)
     return next(iter(_physical_mac_candidates()), None) or _runtime_machine_id()
 
 
@@ -162,4 +264,9 @@ def _fake_machine_id(userdata_root: Path) -> str:
     # The root is required: _machine_id(None) returns the NIC-derived id, which is exactly
     # what this helper must never hand out, so reject a missing root instead of defaulting.
     _require_real_path(userdata_root, "userdata_root")
-    return _machine_id(userdata_root)
+    # Normalize accepted strings and PathLike objects before path composition. Keep the
+    # cwd guard here so an empty/dot root is rejected before identity generation.
+    normalized_root = Path(os.fspath(userdata_root))
+    _device_id_path(normalized_root)
+    # Never the NIC-derived fallback: an unwritable root must not leak the host's MAC.
+    return _machine_id(normalized_root, host_fallback=False)

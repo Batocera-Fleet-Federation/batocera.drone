@@ -207,7 +207,7 @@ class PairByAddressNonPaired200UAT(unittest.TestCase):
             return error.code, parsed, raw
 
     def _pair_by_address(self, pairing_code="not-a-code", address=None):
-        payload = {"address": address or self.peer.url, "pairing_code": pairing_code}
+        payload = {"address": address or self.peer.url, "pairing_code": pairing_code, "certificate_fingerprint": "ab" * 32}
         return self._request("POST", "/v1/api/admin/local-network/pair-by-address", payload)
 
     def _paired_ids(self) -> set[str]:

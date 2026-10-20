@@ -47,6 +47,9 @@ class _Recorder:
         self.health_alive_at_stop_return: bool | None = None
 
 
+# Adjudicated for #344: an unreleased health iteration cannot coexist with a
+# successful join barrier. A timeout is therefore the required result, followed
+# by a retry once the in-flight work is released.
 class HealthWorkerStopJoinOutOfScopeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="issue-249-health-")
@@ -117,25 +120,41 @@ class HealthWorkerStopJoinOutOfScopeTests(unittest.TestCase):
         return health
 
     def test_no_peer_check_or_membership_write_after_stop_returns(self) -> None:
-        """Stop must not return while a health iteration can still write state."""
-        self._start_with_inflight_health_iteration()
-        peer_workers.stop_local_network_workers(timeout=3.0)
+        """An unreleased iteration must time out rather than fake a completed stop."""
+        health = self._start_with_inflight_health_iteration()
+        stop = peer_workers._LOCAL_NETWORK_STOP
+        with self.assertRaises(TimeoutError):
+            peer_workers.stop_local_network_workers(timeout=0.05)
+        self.assertTrue(stop.is_set())
+        self.assertTrue(health.is_alive())
+
         self.recorder.stopped = True
         self.release.set()
-        health = self._health_thread()
-        if health is not None:
-            health.join(timeout=5)
+        peer_workers.stop_local_network_workers(timeout=3.0)
+        health.join(timeout=5)
         self.assertEqual(self.recorder.writes_after_stop, [])
 
     def test_stop_returns_only_after_health_worker_has_exited(self) -> None:
         """The health worker is a LAN worker of the generation; stop must join it like discovery."""
         health = self._start_with_inflight_health_iteration()
-        peer_workers.stop_local_network_workers(timeout=3.0)
+        errors: list[BaseException] = []
+
+        def stop() -> None:
+            try:
+                peer_workers.stop_local_network_workers(timeout=3.0)
+            except BaseException as error:
+                errors.append(error)
+
+        stopper = threading.Thread(target=stop)
+        stopper.start()
+        self.release.set()
+        stopper.join(timeout=5)
+        self.assertFalse(stopper.is_alive(), "stop did not finish after the health worker was released")
+        self.assertEqual(errors, [])
         self.assertFalse(
             health.is_alive(),
             "stop_local_network_workers returned while drone-local-peer-health was still alive",
         )
-        self.release.set()
         health.join(timeout=5)
 
 

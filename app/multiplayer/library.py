@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from . import models as m
+from .core import EVENT_SESSION
 from .matching import MAX_MATCH_QUERIES, browser_status, level_satisfies
 
 PAGE_MAX = 100
@@ -43,6 +44,35 @@ class LibraryMixin:
             adapter.refresh()
         self.library.invalidate()
         return self.list_adapters()
+
+    # ------------------------------------------------------------ dependencies
+    def dependencies(self) -> dict:
+        return {"dependencies": {"sunshine": self.sunshine.status()}}
+
+    def _streaming_in_use(self) -> bool:
+        return any(item.get("mechanism") == m.REMOTE_STREAMING for item in self.store.active())
+
+    def dependency_action(self, name: str, action: str, actor: str = "") -> dict:
+        """Install/start/stop/uninstall an optional dependency. Allowlisted; no caller-supplied commands or paths."""
+        if name != "sunshine" or action not in ("install", "start", "stop", "uninstall"):
+            raise m.MultiplayerError("not_found", "Unknown dependency action.", 404)
+        installer = self.sunshine
+        if action in ("stop", "uninstall") and self._streaming_in_use():
+            raise m.MultiplayerError("streaming_in_use", "A remote streaming session is active. End it before changing Sunshine.", 409)
+        if action == "install":
+            installer.start_install()
+        elif action == "start":
+            if installer.job()["state"] == "running":
+                raise m.MultiplayerError("install_in_progress", "Sunshine is being installed right now; wait for it to finish.", 409)
+            if not installer.start_service():
+                raise m.MultiplayerError("start_failed", "Sunshine did not start. Check /userdata/system/logs/sunshine.log.", 502)
+        elif action == "stop":
+            installer.stop_service()
+        else:
+            installer.uninstall()
+        self.dependencies_changed()
+        self.audit(EVENT_SESSION, f"Sunshine {action}", "", {"actor": actor, "dependency": name, "action": action})
+        return self.dependencies()
 
     # ------------------------------------------------------------------- peers
     def list_peers(self) -> List[dict]:

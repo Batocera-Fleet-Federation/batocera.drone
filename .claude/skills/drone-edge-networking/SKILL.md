@@ -124,7 +124,24 @@ Rules:
 - The tailnet watchdog and bootstrap-retry threads (`transfer/peer_workers.py`) belong
   to a local-network generation. They check that generation's stop event after each
   sleep and exit, so a restart or stop never stacks a second copy. Keep that check
-  if you change their loops.
+  if you change their loops. `main()` calls `stop_local_network_workers()` when the
+  serve loop exits, so process shutdown retires the generation the same way a
+  restart does (the discovery socket is closed and joined).
+- Discovery and peer-health handles are retained per generation. Shutdown joins
+  both within one timeout budget before clearing them; health iterations check
+  cancellation between peer probes and before state writes/membership gossip.
+  `stop_local_network_workers()` raises `TimeoutError` if either worker remains
+  alive, retaining the signalled generation so shutdown can be retried. A restart
+  cannot overwrite that generation until retirement succeeds. Do not remove the
+  state tree after a failed stop; release/finish the in-flight work and retry.
+  Regression coverage: `tests/test_peer_health_worker_shutdown.py`. Tailnet tasks
+  still use cooperative cancellation and are not covered by these two joins.
+- The other `create_server()` forever-loop pollers (automation, outbound mail, VPN/SMTP/tailnet
+  revocation, VPN self-heal, network-share watchdog) are not part of a LAN generation. They retire by
+  `runtime_state` poller generation (`drone_api.retire_background_pollers()`, also called by `main()`): a poller
+  returns before any I/O when it wakes to a newer generation. Harnesses that call `create_server` should call it
+  next to `stop_local_network_workers()`, or a leftover poller writes into the next test's env-selected state DB
+  (#420; regression coverage `tests/adversarial/test_issue_420_poller_retirement_uat.py`).
 
 ## Settings
 

@@ -234,7 +234,8 @@ install_tailscale_mesh() {
     echo "Enrolling in the tailnet with the provided auth key ..."
     # --accept-dns=false: keep Batocera's resolv.conf untouched (the Drone
     # tailnet integration works on raw 100.x addresses, not MagicDNS names).
-    if "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --authkey="$TS_AUTH" --hostname="$TS_HOSTNAME" --accept-dns=false --netfilter-mode=off; then
+    # The key goes in the environment, not argv, so ps/proc can't show it.
+    if TS_AUTHKEY="$TS_AUTH" "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --hostname="$TS_HOSTNAME" --accept-dns=false --netfilter-mode=off; then
       echo "✓ Enrolled in the tailnet as '$TS_HOSTNAME'"
     else
       echo "Tailnet enrollment failed; run it manually later:"
@@ -356,7 +357,12 @@ if [ -n "$DRONE_TAILNET_IP" ]; then
 fi
 echo ""
 echo "   Works from any phone or computer on the same network."
-echo "   Sign in with username 'batocera' and password 'linux'."
+echo "   There is no built-in default password. Use your configured credentials."
+echo "   If no password is configured, the Drone writes a random one-time password"
+echo "   on first start to /userdata/system/drone-app/initial-password.txt (root-only)."
+echo "   Read that file over SSH for your login credentials, then change the password"
+echo "   under Admin -> Credentials."
+echo "   Opening the UI on the device itself (https://127.0.0.1) needs no login."
 echo "   (If it does not load yet, start the DRONE_SERVER service or reboot.)"
 echo ""
 echo "======================================================================"

@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- Background pollers (automation, outbound mail, VPN/SMTP/tailnet revocation, network-share watchdog) can now be
+  retired with `retire_background_pollers()`; a retired poller exits on its next wake without touching storage,
+  so one that outlived its server no longer writes into a later server's state database.
+
+- Multiplayer: Settings → Remote streaming can now install, start and uninstall Sunshine from the UI (checksum-verified
+  official release, Drone-owned directory, one `DRONE_SUNSHINE` service). RetroArch games with no core set now use
+  Batocera's default core (or an installed one) for the session instead of being blocked, cores downloaded to
+  `/userdata/cores` are detected, and the selector reports the real blocker instead of a misleading note.
+
+- Fix RGS service state detection for Batocera's column-formatted service list,
+  and allow up to 20 seconds for RGS to start or stop before reporting failure.
+
+- Integrate Proton VPN port forwarding with the RGS download service. Proton
+  OpenVPN profiles automatically store the `+pmp` service username, and legacy
+  saved credentials are upgraded on connect. Drone applies an update-resilient
+  RGS patch that uses Proton's `10.2.0.1` NAT-PMP gateway and skips home-router
+  UPnP when `+pmp` is active. RGS's Python sockets bind to Proton's `tun0`
+  interface and external requests fail closed if the route leaves the tunnel.
+  The VPN status reports whether Proton port forwarding is enabled. See
+  `docs/proton-rgs.md`.
+
 - Add Multiplayer: a top-level page (dashboard, game browser, session lobby, settings) and a decentralised
   orchestrator (`app/multiplayer/`) that lets paired Drones play together. Any trusted peer can host; sessions
   are an explicit state machine coordinated over the existing pinned-certificate mTLS peer channel

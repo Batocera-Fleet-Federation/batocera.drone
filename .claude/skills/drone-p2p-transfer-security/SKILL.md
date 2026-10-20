@@ -55,6 +55,35 @@ When working on Drone peer-to-peer transfer logic, follow these rules:
 14. Avoid loading large file manifests into memory without pagination or streaming.
 15. Log enough transfer and connectivity data to debug issues without exposing secrets.
 
+## Signed ROM/BIOS inventories (#333)
+
+`transfer/signed_inventory.py` authenticates ROM and BIOS content independently of
+transport. Before any new file transfer, `_download_rom_from_peer`,
+`_download_bios_from_peer`, and `_download_rom_folder_from_peer` request
+`GET /peer/content-inventory/{roms,bios}` with an unpredictable 256-bit nonce,
+asset-relative path and ROM system (empty for BIOS). The authorized handler signs
+a bounded inventory using the existing Drone identity key via OpenSSL. The signed
+payload binds protocol version, source Drone id, asset type, system, path, entry
+type, nonce, file sizes and full-file SHA-256 hashes. Folder inventories include
+every child, not only the marker. Symlink children are refused.
+
+The receiver loads the certificate from its local peer cache, checks its SHA-256
+fingerprint against the **persisted paired record**, and verifies the signature
+and every request binding. Never accept a certificate or trust pin from the
+caller or the response. The nonce prevents replay without clock synchronization.
+There is no unsigned/old-peer fallback: source peers need this endpoint before
+ROM/BIOS pulls can succeed. Upgrade source peers as well as receivers.
+
+Every file is checked against signed size/SHA-256 before replacing its target;
+streams exceeding signed size are aborted and partial files removed. Existing
+caller-supplied sampled fingerprints/BIOS MD5 remain compatibility checks, never
+the content authentication authority. Existing-file skips do not install bytes.
+Inventories are limited to 10,000 entries and an 8 MiB response; oversized folder
+requests fail closed. Hashing streams files and does not persist new peer state.
+OpenSSL is already required for Drone certificate lifecycle; no Python crypto
+package or new key distribution is introduced. Saves/media/artwork are outside
+this ROM/BIOS control and retain their existing validation.
+
 ## Peer Discovery and Pairing Rules
 
 Peer candidates come from **direct pairing**, not a third-party directory:
@@ -72,15 +101,40 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     (`certificate_fingerprint` on the pair requests; `pairing.certificate_fingerprint` in the
     status payload). `_local_pair_peer` enforces it on the same TLS connection
     (`_PinnedFingerprintContext`) and checks the returned cert before touching the pin file;
-    `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for https peers without one.
+    `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for peers without one.
+  - **Plaintext `http://` pairing is anchored too (#431):** the answering certificate is pinned on first
+    contact, so an `http://` pair-by-address with neither a pinned record nor an operator-confirmed
+    fingerprint is refused before anything is sent (handler 400 for any code, `_local_pair_peer`
+    `ValueError`); with one, the answer's certificate must match it before the pin is written. The code
+    itself still crosses a cleartext link, so prefer `https://`. Only code-free `tailnet_auto_pair` (WireGuard,
+    source-address authorised) may pair over `http://` unanchored.
+  - **Peer JSON bodies are size-capped (#437):** every peer JSON read in `peer_connectivity.py` goes through
+    `_read_capped` (reads `limit + 1`, raises `PeerResponseTooLarge`, a `ValueError`). Pairing answers and the
+    `_fetch_peer_info` bootstrap fetch use `MAX_PEER_PAIRING_RESPONSE_BYTES` (64 KiB; `_local_pair_peer` turns an
+    oversize body into `PeerPairingRejected` before any pin is written); `_peer_get_json`/`_peer_post_json` use
+    `MAX_PEER_JSON_RESPONSE_BYTES` (8 MiB). Never add a bare `response.read()` for a peer JSON body.
+    Tests: `tests/test_peer_response_size_cap.py`.
   - **No plaintext for TLS-paired peers (#246):** `_local_pair_peer` records
-    `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers).
+    `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers). It is sticky: `save_paired_peer` keeps it True for a TLS-pinned peer and `_handle_peer_pair` refuses (409) a `scheme=http` re-pair before touching the pinned cert, even with a valid pairing code or tailnet auto-pair.
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
     `_local_pair_peer` refuses an http address. Peers paired over plain http (`http_only`
     fleets, which still pin the cert) keep their http routes.
+- **Paired tailnet metadata refresh (#337):** the bootstrap `/v1/api/peer/info`
+  body is only a discovery hint. Before accepting a paired Drone's tailnet IP,
+  ports, scheme or advertised URL, re-fetch using `_fetch_peer_info` with the
+  persisted `expected_fingerprint`. It authenticates the actual TLS connection
+  via `_pairing_tls_context` (pinned identity or a leaf signed by it), requires
+  HTTPS, rejects redirects, and the handler requires the same Drone id in the
+  authenticated response. Missing/invalid pins and verification failures leave
+  paired routes unchanged. A missing or copied body fingerprint proves nothing.
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.
+  Code-free pairing may only **add** a peer: `_handle_peer_pair` refuses (409) a tailnet-authorised
+  request whose certificate differs from any pin already held for that Drone id (paired row or
+  `local-peer-certs/<id>.crt`, via `_pinned_peer_fingerprints`) before anything is written; changing
+  a pinned certificate needs the pairing code. A rejected fingerprint mismatch restores the previous
+  cache file rather than unlinking it (issue #430).
 - A drone appearing through both LAN and tailnet discovery **deduplicates to one
   paired-peer entry**; local discovery wins when both agree on the same peer.
 - Forgetting a peer (`forget_peer`) is sticky — an explicitly forgotten tailnet peer
@@ -92,6 +146,10 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   A newer removal beats an older add and is forwarded the same way. Gossip must
   not replace a fingerprint already pinned for that drone id. An explicit re-pair
   is a new approval and can rejoin; a stale add cannot.
+- A trust pin is only ever a parseable X.509 certificate. `_certificate_pem_fingerprint`
+  (`transfer/drone_network.py`) hands the PEM to OpenSSL via `load_verify_locations`
+  before hashing; base64 decoding alone is not validation. Malformed input raises
+  `ValueError` before `_save_local_peer_certificate` writes anything (#423).
 
 Peer metadata should be refreshed periodically and stored locally; never treat a
 cached address as proof of live connectivity — that's what connectivity checks are for.
@@ -207,7 +265,8 @@ Rules:
     log (`record_collision`). A cloned disk must reprovision its own identity automatically and
     must never publish a membership removal/tombstone for the original.
 14. While identity is unresolved (`RECOVERY_REQUIRED`) no `/peer/*` route is served on any
-    listener and `_drone_client_ssl_context` refuses to present the client certificate.
+    listener and `_drone_client_ssl_context` refuses to present the client certificate. The check
+    precedes the scheme test, so cleartext `http://` peer calls are held as well (`PeerIdentityHold`).
 
 The application-created certificate system defines:
 

@@ -93,8 +93,15 @@ A fresh install gets a random, locally administered, MAC-shaped `device-id` on i
 `Settings` build (`common/device_identity.py::random_device_id`), persisted under
 `system/drone-app/device-id` before use. It is never the NIC's MAC, so two installs on one host
 do not refuse each other as "this Drone itself". Installations that already persisted an id keep
-it, and `DRONE_DEVICE_ID` still pins one explicitly. If the id cannot be persisted, the NIC-derived
-id is used as before.
+it, and `DRONE_DEVICE_ID` still pins one explicitly. If a real install cannot persist the id, the
+NIC-derived id is used as before. Fake-data mode never uses that fallback (#452): when its
+`USERDATA_ROOT` cannot be written, it gets a stable id derived from the root path instead.
+
+Persisting the id never follows a symlink (#458). `_write_persisted_machine_id` and
+`_ensure_device_id_dir` refuse a symlink at the id file or at any directory below `USERDATA_ROOT`
+(the root itself may be a symlink, e.g. an external drive), and the write goes to a temp file renamed
+into place, so a planted link can never redirect it onto another file. A refused write is treated like
+an unwritable root. Any new code that creates the id's directory or file must use these helpers.
 
 ## Clone provisioning (what happens on different hardware)
 
@@ -127,10 +134,17 @@ certificate but no binding) the run ends in `RECOVERY_REQUIRED` with swarm netwo
 certificate replaced. On a bound original that still matches its hardware, the journal is discarded
 and the identity stays `READY`. On confidently different hardware (a clone) the drone reprovisions
 with a fresh id, the same as for torn JSON. Hardware, not the journal's contents, decides the clone
-case. In the Python API, `_choose_device_id` refuses a journal that is not a real mapping
+case. This is deliberate (#369): "never used to mint" applies to the journal's *contents*, not to the
+clone verdict. Keeping an unreadable-journal clone in `RECOVERY_REQUIRED` would leave it holding the
+original's logical id, certificate and pinned peers, so an unreadable journal never blocks a clone
+from reprovisioning. In the Python API, `_choose_device_id` refuses a journal that is not a real mapping
 (`IdentityError`, "the identity journal must be a mapping") and never mints from it; mock objects are
-refused for the same reason. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
-`tests/adversarial/test_issue_254_*` and `tests/adversarial/test_issue_255_*`.
+refused for the same reason. The on-disk loader is dict-only by design (#366): a decoded value that is
+a `Mapping` but not a `dict` is classified as corrupt, so the disk-path `isinstance(..., dict)` gates
+can never be bypassed by a non-dict journal. Tests that pin this live in `tests/adversarial/test_issue_217_*`,
+`tests/adversarial/test_issue_254_*`, `tests/adversarial/test_issue_255_*` and
+`tests/adversarial/test_issue_366_*`, `tests/adversarial/test_issue_369_*` and `tests/adversarial/test_issue_370_*`
+(a verified original with an array/scalar journal stays `READY`, identical to torn JSON).
 
 An interrupted run (power loss, full disk, `openssl` failure) leaves `RECOVERY_REQUIRED`
 (swarm networking held) and resumes on the next start; a certificate already produced by the

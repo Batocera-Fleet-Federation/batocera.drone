@@ -282,6 +282,13 @@ async function mpLoadGames() {
   }
 }
 
+// When streaming is blocked only because Sunshine is missing/stopped, point at the one-click fix.
+function mpSetupHint(rec) {
+  const texts = [rec.reason].concat((rec.candidates || []).flatMap((item) => item.blockers || []));
+  if (!texts.some((text) => /Sunshine is not installed|Sunshine is installed but not running/.test(String(text)))) return "";
+  return `<div class="small mb-2"><a href="#multiplayer/settings" data-bs-dismiss="modal">Install or start Sunshine in Multiplayer settings</a> to enable remote streaming for this game.</div>`;
+}
+
 async function mpOpenHostDialog(system, gameId) {
   let detail;
   try { detail = await mpGet(`/games/${mpEncode(system)}/${mpEncode(gameId)}`); } catch (error) { mpFail(error); return; }
@@ -298,6 +305,7 @@ async function mpOpenHostDialog(system, gameId) {
   }).join("") : `<p class="text-muted mb-0">No paired Drone is online.</p>`;
   const body = `<div class="mb-3"><strong>${mpEsc(detail.game.title)}</strong> <span class="text-muted">${mpEsc(system)}</span></div>
     <div class="alert ${rec.mechanism ? "alert-info" : "alert-warning"} small">${mpEsc(rec.reason)}</div>
+    ${mpSetupHint(rec)}
     <h3 class="h6">Why each mechanism is (not) usable</h3><ul class="list-unstyled">${candidateRows}</ul>
     <h3 class="h6">Invite players</h3>${peerBoxes}
     <details class="mt-3"><summary>Advanced</summary>
@@ -438,9 +446,63 @@ async function mpDiagnostics(sessionId) {
   }
 }
 
+// ---------------------------------------------------------- dependencies
+// Sunshine (the streaming host) can be installed, started and removed from here. The install runs in the
+// background on the Drone, so the card polls its job until it finishes.
+function mpDependencyCard(dep) {
+  const job = dep.job || {};
+  const running = job.state === "running";
+  let state = mpBadge("Not installed", "secondary");
+  if (running) state = mpBadge("Installing…", "info");
+  else if (dep.installed && dep.running) state = mpBadge("Running", "success");
+  else if (dep.installed) state = mpBadge("Installed, not running", "warning");
+  const buttons = [];
+  if (dep.can_install) buttons.push(`<button class="btn btn-primary me-1" data-mp-action="dep-install">Install Sunshine</button>`);
+  if (dep.can_start) buttons.push(`<button class="btn btn-outline-light me-1" data-mp-action="dep-start">Start Sunshine</button>`);
+  if (dep.can_uninstall) buttons.push(`<button class="btn btn-outline-danger me-1" data-mp-action="dep-uninstall">Uninstall</button>`);
+  const progress = running ? `<div class="progress my-2" role="progressbar" aria-label="Sunshine install progress" aria-valuenow="${mpEsc(job.percent || 0)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" style="width:${mpEsc(job.percent || 0)}%"></div></div>` : "";
+  const message = job.message ? `<div class="small ${job.state === "failed" ? "text-danger" : "text-muted"}">${mpEsc(job.message)}</div>` : "";
+  const unsupported = dep.supported === false ? `<div class="small text-warning">${mpEsc(dep.unsupported_reason || "Sunshine is not available for this machine.")}</div>` : "";
+  const managed = dep.installed && !dep.managed ? `<div class="small text-muted">This Sunshine was not installed by Drone, so Drone will not remove it.</div>` : "";
+  return `<div id="mpSunshineCard" class="border rounded p-2 mb-3">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-1"><strong>Sunshine (streaming host)</strong>${state}</div>
+    <div class="small text-muted">${mpEsc(dep.purpose || "")}${dep.version ? ` Version ${mpEsc(dep.version)}.` : ""}</div>
+    ${progress}${message}${unsupported}${managed}
+    <div class="mt-2">${buttons.join("")}</div>
+    ${dep.installed ? `<ul class="small text-muted mt-2 mb-0">${(dep.notes || []).map((note) => `<li>${mpEsc(note)}</li>`).join("")}</ul>` : `<div class="small text-muted mt-1">Source: ${mpEsc(dep.source || "")}. Installed under ${mpEsc(dep.install_dir || "")}.</div>`}
+  </div>`;
+}
+
+async function mpRefreshDependencyCard() {
+  const node = document.getElementById("mpSunshineCard");
+  if (!node) return null;
+  const dep = (await mpGet("/dependencies")).dependencies.sunshine;
+  node.outerHTML = mpDependencyCard(dep);
+  return dep;
+}
+
+async function mpWatchInstall() {
+  if (mpState.watchingInstall) return;
+  mpState.watchingInstall = true;
+  try {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (!window.location.hash.startsWith("#multiplayer/settings")) return;
+      const dep = await mpRefreshDependencyCard();
+      if (!dep || dep.job.state !== "running") {
+        if (dep && dep.job.state === "succeeded") mpToast(dep.job.message || "Sunshine installed");
+        if (dep && dep.job.state === "failed") mpToast(dep.job.message || "Sunshine install failed", "danger");
+        return;
+      }
+    }
+  } finally {
+    mpState.watchingInstall = false;
+  }
+}
+
 // ------------------------------------------------------------------ settings
 async function mpRenderSettings() {
-  const [settings, adapters, peers] = await Promise.all([mpGet("/settings"), mpGet("/adapters"), mpGet("/peers")]);
+  const [settings, adapters, peers, deps] = await Promise.all([mpGet("/settings"), mpGet("/adapters"), mpGet("/peers"), mpGet("/dependencies")]);
   const check = (section, key, label, help = "") => `<div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="mp-${section}-${key}" data-mp-setting="${section}.${key}" ${settings[section][key] ? "checked" : ""}><label class="form-check-label" for="mp-${section}-${key}">${mpEsc(label)}</label>${help ? `<div class="small text-muted">${mpEsc(help)}</div>` : ""}</div>`;
   const select = (section, key, label, options) => `<div class="mb-2"><label class="form-label" for="mp-${section}-${key}">${mpEsc(label)}</label><select class="form-select" id="mp-${section}-${key}" data-mp-setting="${section}.${key}">${options.map(([value, text]) => `<option value="${mpEsc(value)}" ${String(settings[section][key]) === String(value) ? "selected" : ""}>${mpEsc(text)}</option>`).join("")}</select></div>`;
   const number = (section, key, label, min, max) => `<div class="mb-2"><label class="form-label" for="mp-${section}-${key}">${mpEsc(label)}</label><input class="form-control" type="number" min="${min}" max="${max}" id="mp-${section}-${key}" data-mp-setting="${section}.${key}" value="${mpEsc(settings[section][key])}"></div>`;
@@ -479,6 +541,7 @@ async function mpRenderSettings() {
         <button class="btn btn-outline-light" data-mp-action="redetect">Re-detect emulators</button></div></section></div>
       <div class="col-12 col-lg-6"><section class="card h-100"><div class="card-body"><h2 class="h5">Remote streaming</h2>
         <p class="small text-muted">Uses Sunshine (host) and Moonlight (guest). Drone does not stream video itself.</p>
+        ${mpDependencyCard(deps.dependencies.sunshine)}
         ${check("streaming", "enabled", "Enable remote streaming")}
         ${select("streaming", "quality", "Preferred quality", [["low_latency", "Low latency"], ["balanced", "Balanced"], ["quality", "Best quality"]])}
         ${select("streaming", "max_resolution", "Maximum resolution", ["854x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"].map((value) => [value, value]))}
@@ -496,6 +559,7 @@ async function mpRenderSettings() {
         <button class="btn btn-primary" data-mp-action="save-privacy">Save privacy</button></div></section></div>
     </div>`;
   decorateStackTables(content);
+  if ((deps.dependencies.sunshine.job || {}).state === "running") mpWatchInstall().catch(() => {});
 }
 
 function mpReadSection(section) {
@@ -622,6 +686,20 @@ async function mpOnAction(action, element) {
       values.allowed_inviters = Array.from(document.querySelectorAll("[data-mp-inviter]:checked")).map((box) => box.dataset.mpInviter);
       return mpSaveSettings({ privacy: values });
     }
+    case "dep-install":
+      await mpPost("/dependencies/sunshine/install");
+      mpToast("Installing Sunshine in the background");
+      await mpRefreshDependencyCard();
+      return mpWatchInstall();
+    case "dep-start":
+      await mpPost("/dependencies/sunshine/start");
+      mpToast("Sunshine started");
+      return mpRefreshDependencyCard();
+    case "dep-uninstall":
+      if (!await sdConfirm("Uninstall Sunshine", "<p>Remove Sunshine and its service from this Drone? Its settings and client pairings are kept, so a reinstall does not need pairing again.</p>", "Uninstall", "danger")) return;
+      await mpPost("/dependencies/sunshine/uninstall");
+      mpToast("Sunshine removed");
+      return mpRefreshDependencyCard();
     case "redetect":
       await mpPost("/adapters/refresh");
       mpToast("Emulator detection refreshed");

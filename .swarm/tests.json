@@ -13,6 +13,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_227_out_of_scope_empty_path_cwd.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-227-out-of-scope-empty-path-cwd",
+      "name": "Out of scope for #227: Path('') and Path('.') persist device-id under the process cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_227_out_of_scope_empty_path_cwd.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_279_rejects_trailing_der_after_certificate.py"
@@ -95,6 +126,166 @@
           "app/transfer/drone_network.py",
           "app/transfer/peer_connectivity.py",
           "tests/adversarial/security/test_issue_279_rejects_non_x509_pem.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_attribute_hook_resumed_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-attribute-hook-resumed-id-uat",
+      "name": "Issue #359 resumed journal IDs ignore str attribute-hook substitution",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_attribute_hook_resumed_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_tls_post_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-post-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS POSTs use pinned TLS over real sockets",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_post_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_hostile_resumed_string_hooks_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-hostile-resumed-string-hooks-uat",
+      "name": "Issue #359 resumed journal IDs ignore hostile str-subclass hooks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_hostile_resumed_string_hooks_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_325_listener_rollback_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-325-listener-rollback-uat",
+      "name": "Issue #325 failed create_server boot releases peer-mTLS listener before retry",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/web/server_tls.py",
+          "tests/adversarial/test_issue_325_listener_rollback_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_359_resumed_journal_id_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-359-resumed-journal-id-uat",
+      "name": "Issue #359 resumed journal id ignores str-subclass overrides",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_359_resumed_journal_id_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -4505,8 +4696,8 @@
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-issue-227-out-of-scope-empty-path-cwd",
-      "name": "Out of scope for #227: Path('') and Path('.') persist device-id under the process cwd",
+      "id": "adversarial-issue-286-empty-dot-relative-paths",
+      "name": "Issue #286 rejects empty and relative userdata roots without cwd writes",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -6456,7 +6647,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-provision-path",
-      "name": "Out-of-scope #254 evidence: a UserDict journal fails in _provision's journal write before the id check",
+      "name": "Regression evidence: a UserDict journal reaches _provision's resumed-id check",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -6518,7 +6709,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-resumed-id-coercion",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): str-subclass coercion and inconsistent Mapping KeyError",
+      "name": "Issue #359 str-subclass resume regression plus remaining #254 expectedFailure Mapping evidence",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -6549,7 +6740,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-254-out-of-scope-virtual-mapping-contract",
-      "name": "Out-of-scope #254 evidence (expectedFailure, non-blocking): a registered Mapping without get() escapes as AttributeError",
+      "name": "Issue #361 regression: a registered Mapping without get() fails closed",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -6965,6 +7156,37 @@
         "files": [
           "app/storage/state_store.py",
           "tests/adversarial/test_issue_260_format_only_database_paths.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_384_format_only_directory_component.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-384-format-only-directory-component",
+      "name": "Issue #384 format-only directory component before '..' is rejected before mkdir or SQLite",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/storage/state_store.py",
+          "tests/adversarial/test_issue_384_format_only_directory_component.py"
         ],
         "mounts": [],
         "servers": []
@@ -7762,6 +7984,2035 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_fake_machine_id_cwd_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-fake-machine-id-cwd-uat",
+      "name": "Issue #286 fake machine identity rejects cwd-relative roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_fake_machine_id_cwd_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_cwd_root_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-cwd-root-boundaries",
+      "name": "Issue #286 identity never writes under cwd for relative or empty roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_286_cwd_root_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_out_of_scope_device_id_file_env.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-out-of-scope-device-id-file-env",
+      "name": "Out-of-scope #286 evidence: relative DRONE_DEVICE_ID_FILE override writes under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_out_of_scope_device_id_file_env.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_relative_root_identity_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-relative-root-identity-boundaries",
+      "name": "Issue #286 identity helpers never write, read or adopt cwd state for relative or empty roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_relative_root_identity_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_relative_root_settings_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-relative-root-settings-uat",
+      "name": "Issue #286 Settings.from_env with relative or empty USERDATA_ROOT leaves the cwd untouched",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_286_relative_root_settings_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_out_of_scope_identity_fallbacks.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-out-of-scope-identity-fallbacks",
+      "name": "Out-of-scope #286 evidence: unwritable absolute root falls back to host NIC id; str absolute root crashes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_out_of_scope_identity_fallbacks.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_helper_cwd_persistence_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-helper-cwd-persistence-boundaries",
+      "name": "Issue #286 device-id persistence helpers never write, read or resolve cwd-relative roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_helper_cwd_persistence_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_out_of_scope_empty_root_boot.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-out-of-scope-empty-root-boot",
+      "name": "Out-of-scope #286 evidence: empty USERDATA_ROOT aborts boot instead of falling back to the default",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_out_of_scope_empty_root_boot.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_fresh_process_cwd_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-fresh-process-cwd-uat",
+      "name": "Issue #286 fresh process rejects empty and dot roots without cwd persistence",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_fresh_process_cwd_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_relative_pathlike_roots.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-relative-pathlike-roots",
+      "name": "Issue #286 rejects cwd-relative custom PathLike userdata roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_286_relative_pathlike_roots.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_286_absolute_override_relative_root_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-286-absolute-override-relative-root-uat",
+      "name": "Issue #286 regression: relative userdata root with absolute DRONE_DEVICE_ID_FILE keeps booting and never writes under cwd",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_286_absolute_override_relative_root_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_fake_identity_path_types.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-fake-identity-path-types",
+      "name": "Issue #287 fake identity accepts string and PathLike userdata roots",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_287_fake_identity_path_types.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_str_pathlike_identity_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-str-pathlike-identity-uat",
+      "name": "Issue #287 str and PathLike roots persist or fail closed without getnode or cwd writes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "app/common/settings.py",
+          "tests/adversarial/test_issue_287_str_pathlike_identity_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_out_of_scope_nul_root.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-out-of-scope-nul-root",
+      "name": "Out of scope for #287: NUL-containing identity root escapes as ValueError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_287_out_of_scope_nul_root.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_287_path_type_contract_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-287-path-type-contract-uat",
+      "name": "Issue #287 path-type contract: PurePosixPath persists, non-str fspath and whitespace text fail closed",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/device_identity.py",
+          "tests/adversarial/test_issue_287_path_type_contract_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_302_no_default_credentials_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-302-no-default-credentials-uat",
+      "name": "Issue #302 fresh and malformed credentials reject documented defaults",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/auth.py",
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_302_no_default_credentials_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_305_watchdog_exception_recovery.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-305-watchdog-exception-recovery",
+      "name": "Issue #305 watchdog continues after transient status, enrollment, or repair errors",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_305_watchdog_exception_recovery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_306_peer_health_interruptible_sleep.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-306-peer-health-interruptible-sleep",
+      "name": "Issue #306 local peer-health worker stop and restart responsiveness",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_306_peer_health_interruptible_sleep.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_main_shutdown_boundaries.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-main-shutdown-boundaries",
+      "name": "Issue #312 main retires local-network workers on normal and failed startup exits",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_312_main_shutdown_boundaries.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_shutdown_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-shutdown-boundaries-uat",
+      "name": "Issue #312 in-process shutdown retires the local-network generation in order",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_312_shutdown_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_signal_shutdown_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-signal-shutdown-uat",
+      "name": "Issue #312 SIGINT and SIGTERM shutdown of a real drone_api.main retire the local-network generation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "app/service_bootstrap.sh",
+          "tests/adversarial/test_issue_312_signal_shutdown_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_service_stop_contract.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-service-stop-contract",
+      "name": "Issue #312 service stop preserves Drone cleanup before listener termination",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/service_bootstrap.sh",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_312_service_stop_contract.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_312_real_thread_retirement_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-312-real-thread-retirement-uat",
+      "name": "Issue #312 stop wakes the real discovery and tailnet generation threads and leaves none alive",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_312_real_thread_retirement_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_328_create_server_discovery_crash_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-328-create-server-discovery-crash-uat",
+      "name": "Issue #328 create_server restarts LAN discovery after an un-stopped crash",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_328_create_server_discovery_crash_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_328_real_discovery_exit_restart_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-328-real-discovery-exit-restart-uat",
+      "name": "Issue #328 create_server replaces a naturally exited LAN discovery thread",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py",
+          "tests/adversarial/test_issue_328_real_discovery_exit_restart_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_331_authorized_pair_tls_downgrade_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-331-authorized-pair-tls-downgrade-uat",
+      "name": "Issue #331 code-authorized and tailnet-authorized pairing cannot downgrade a TLS-paired peer",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_331_authorized_pair_tls_downgrade_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_333_pinned_inventory_receiver_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-333-pinned-inventory-receiver-uat",
+      "name": "Issue #333 receiver rejects replayed, malformed, and pin-mismatched signed inventories before asset fetch",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_download.py",
+          "app/transfer/signed_inventory.py",
+          "tests/adversarial/test_issue_333_pinned_inventory_receiver_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_333_inventory_source_special_file_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-333-inventory-source-special-file-uat",
+      "name": "Issue #333 inventory endpoint rejects non-regular source files before hashing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/signed_inventory.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_333_inventory_source_special_file_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-340-compatibility-listener-lifecycle-uat",
+      "name": "Issue #340 returned server shutdown retires its compatibility listener",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_340_compatibility_listener_lifecycle_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_340_compatibility_listener_lifecycle_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-337-tailnet-refresh-uat",
+      "name": "Issue #337 authenticated tailnet refresh, TLS connection switch, and rejection atomicity",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_337_tailnet_refresh_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/web/handlers_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_337_tailnet_refresh_uat.py",
+          "tests/adversarial/fixtures/issue_337/leaf-chain.crt",
+          "tests/adversarial/fixtures/issue_337/leaf.crt",
+          "tests/adversarial/fixtures/issue_337/leaf.key",
+          "tests/adversarial/fixtures/issue_337/other.crt",
+          "tests/adversarial/fixtures/issue_337/other.key",
+          "tests/adversarial/fixtures/issue_337/victim.crt",
+          "tests/adversarial/fixtures/issue_337/victim.key"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-342-lan-worker-state-database-injection-uat",
+      "name": "Issue #342 LAN worker writes retain the injected Settings database",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_342_lan_worker_state_database_injection_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_342_lan_worker_state_database_injection_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-342-discovery-thread-settings-snapshot-uat",
+      "name": "Issue #342 discovery thread retains its Settings database snapshot",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_342_discovery_thread_settings_snapshot_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_342_discovery_thread_settings_snapshot_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-344-peer-health-shutdown-barrier-uat",
+      "name": "Issue #344 peer-health shutdown prevents post-return state writes",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_344_peer_health_shutdown_barrier_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_workers.py",
+          "app/transfer/local_network.py",
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_344_peer_health_shutdown_barrier_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-350-resumed-device-id-uat",
+      "name": "Issue #350 resumed device-id rejects falsy malformed journal values",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_350_resumed_device_id_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_350_resumed_device_id_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-358-mapping-journal-provision-uat",
+      "name": "Issue #358 non-dict Mapping journal reaches resumed identity validation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_358_mapping_journal_provision_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_358_mapping_journal_provision_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-358-mapping-journal-resume-uat",
+      "name": "Issue #358 non-dict Mapping journal resumes its validated identity",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_358_mapping_journal_resume_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_358_mapping_journal_resume_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_360_inconsistent_mapping_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-360-inconsistent-mapping-uat",
+      "name": "Issue #360 inconsistent journal Mapping fails closed with IdentityError",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_360_inconsistent_mapping_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-360-mapping-lookup-boundaries-uat",
+      "name": "Issue #360 inconsistent Mapping and dict lookups fail closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_360_mapping_lookup_boundaries_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_360_mapping_lookup_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-contract-uat",
+      "name": "Issue #361 incomplete virtual Mapping journal fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_contract_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_contract_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-361-virtual-mapping-membership-failure-uat",
+      "name": "Issue #361 virtual Mapping membership failure fails closed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_361_virtual_mapping_membership_failure_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_361_virtual_mapping_membership_failure_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-mapping-journal-persistence",
+      "name": "Issue #355 journal persistence accepts standard Mapping implementations",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_mapping_journal_persistence.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_mapping_journal_persistence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-valid-mapping-journal-roundtrip-uat",
+      "name": "Issue #355 mapping journals round-trip through recovery validation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_valid_mapping_journal_roundtrip_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_valid_mapping_journal_roundtrip_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-355-composed-mapping-journal-uat",
+      "name": "Issue #355 composed Mapping journals retain recovery semantics",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_355_composed_mapping_journal_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_355_composed_mapping_journal_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-349-http-harness-cleanup-exception",
+      "name": "Issue #349 HTTP harness cleanup retires LAN workers after shutdown errors",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_http_harness_cleanup_exception.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_http_harness_cleanup_exception.py",
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-349-cleanup-stack-uat",
+      "name": "Issue #349 unittest cleanup retires LAN workers before userdata removal",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_cleanup_stack_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_cleanup_stack_uat.py",
+          "tests/adversarial/test_issue_152_media_keys_http_malformed_input.py",
+          "tests/adversarial/test_issue_152_media_keys_hold_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-349-server-shutdown-boundary",
+      "name": "Issue #349 HTTP server retires LAN workers after shutdown BaseException",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_server_shutdown_boundary.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_server_shutdown_boundary.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-349-live-generation-retirement",
+      "name": "Issue #349 live LAN generation retires when a real HTTP shutdown raises",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_live_generation_retirement.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_live_generation_retirement.py",
+          "app/drone_api.py",
+          "app/transfer/peer_workers.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-349-shutdown-error-masking-evidence",
+      "name": "Out-of-scope #349 evidence: worker-stop timeout masks the HTTP shutdown error",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_349_shutdown_error_masking.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_349_shutdown_error_masking.py",
+          "app/drone_api.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_https_pinning_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-mixed-case-https-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS routes retain the pinned peer TLS context",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_https_pinning_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_332_lan_tier_scheme_casing.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-332-lan-tier-scheme-casing",
+      "name": "Issue #332 LAN tier must not build cleartext routes for a TLS-pinned peer with mixed-case scheme",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transport/lan.py",
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_tls_wire_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-tls-wire-pinning-uat",
+      "name": "Issue #332 mixed-case HTTPS routes use the pinned peer TLS over real sockets and never fall back to plaintext",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_tls_wire_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_route_policy_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-route-tls-policy-uat",
+      "name": "Issue #332 every mixed-case TLS evidence spelling keeps routes HTTPS and plain-HTTP fleets keep HTTP",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "app/transport/lan.py",
+          "tests/adversarial/test_issue_332_mixed_case_route_policy_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-out-of-scope-tls-route-precedence-evidence",
+      "name": "Out-of-scope #332 evidence (expectedFailure, non-blocking): TLS route precedence between scheme, protocol and address helpers",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/transfer/local_network.py",
+          "tests/adversarial/test_issue_332_out_of_scope_tls_route_precedence_evidence.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-332-mixed-case-binary-download-uat",
+      "name": "Issue #332 mixed-case HTTPS binary downloads retain the pinned TLS context",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_binary_download_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_332_mixed_case_binary_download_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-332-mixed-case-anchor-and-scheme-recording-uat",
+      "name": "Issue #332 mixed-case HTTPS evidence keeps pairing anchors, recorded schemes and sticky TLS routes",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/settings.py",
+          "app/transfer/local_network.py",
+          "app/transfer/peer_connectivity.py",
+          "app/web/handlers_network.py",
+          "tests/adversarial/test_issue_332_mixed_case_anchor_and_scheme_recording_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-install-atomicity-uat",
+      "name": "Issue #240 Sunshine UI install preserves foreign service ownership and rolls back partial state",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_install_atomicity_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_install_atomicity_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-uninstall-ownership-uat",
+      "name": "Issue #240 Sunshine UI uninstall never stops an administrator-owned service",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_uninstall_ownership_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_uninstall_ownership_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-service-provenance-uat",
+      "name": "Issue #240 Sunshine UI uninstall requires durable Drone service provenance",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_service_provenance_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_service_provenance_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-service-record-forgery-uat",
+      "name": "Issue #240 Sunshine UI requires unforgeable service-install provenance",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_service_record_forgery_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/test_issue_240_sunshine_service_record_forgery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-retroarch-core-resolution-uat",
+      "name": "Issue #240 RetroArch core resolution never swaps a user core and pins the resolved core per ROM",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_retroarch_core_resolution_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_retroarch_core_resolution_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-sunshine-ui-actions-uat",
+      "name": "Issue #240 Sunshine card offers only working actions and install recovers from residue",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_sunshine_ui_actions_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_sunshine_ui_actions_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-240-streaming-seat-limit-invitation-uat",
+      "name": "Issue #240 invitation refresh and stale-copy guarantees under the host-plus-one streaming limit",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_240_streaming_seat_limit_invitation_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_240_streaming_seat_limit_invitation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-240-sunshine-pidfile",
+      "name": "Issue #240 Sunshine service keeps root PID state out of /tmp",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_240_sunshine_pidfile_security.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/multiplayer/dependencies.py",
+          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-363-resumed-id-mapping-edges",
+      "name": "Issue #363 resumed-ID and virtual Mapping edge conditions",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_363_resumed_id_mapping_edges.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/identity_provisioning.py",
+          "tests/adversarial/test_issue_363_resumed_id_mapping_edges.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1

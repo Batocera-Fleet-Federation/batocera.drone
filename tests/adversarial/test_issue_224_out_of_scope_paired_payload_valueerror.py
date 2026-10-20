@@ -165,7 +165,7 @@ class PairedPayloadMissingCertTests(unittest.TestCase):
         """Expected (#279): a paired answer without a certificate is a peer rejection, 502."""
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/v1/api/admin/local-network/pair-by-address",
-            data=json.dumps({"address": self.peer.url, "pairing_code": "not-a-code"}).encode(),
+            data=json.dumps({"address": self.peer.url, "pairing_code": "not-a-code", "certificate_fingerprint": "ab" * 32}).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Cookie": self.cookie},
         )

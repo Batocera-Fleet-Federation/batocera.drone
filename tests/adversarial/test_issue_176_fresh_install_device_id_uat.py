@@ -241,7 +241,8 @@ class FreshInstallsOnOneHostUAT(unittest.TestCase):
         status, payload = beta.request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": "not-a-code"},
+            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": "not-a-code",
+             "certificate_fingerprint": alpha.info()["certificate_fingerprint"]},
             headers=beta.login(),
         )
         # Wrong code to a *different* Drone must not be the self-collision 409
@@ -263,7 +264,8 @@ class FreshInstallsOnOneHostUAT(unittest.TestCase):
         status, payload = beta.request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": code},
+            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": code,
+             "certificate_fingerprint": alpha.info()["certificate_fingerprint"]},
             headers=beta.login(),
         )
         self.assertEqual(

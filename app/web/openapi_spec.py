@@ -689,6 +689,12 @@ def _schemas() -> Dict[str, Schema]:
             {"audio_volume": _integer(minimum=0, maximum=100)},
             ("audio_volume",),
         ),
+        "RgsStatusResponse": _object({
+            "installed": _boolean(), "available": _boolean(),
+            "enabled": _boolean(nullable=True), "running": _boolean(nullable=True),
+            "error": _string(),
+        }, ("installed", "available", "enabled", "running")),
+        "RgsUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "ScreenModeResponse": _object({"screen_mode": _string(nullable=True)}),
         "ScreenModeUpdateRequest": _object(
             {"mode": _string()},
@@ -1984,6 +1990,18 @@ def _schemas() -> Dict[str, Schema]:
             "oneOf": [_ref("PeerInventorySummaryResponse"), _ref("PeerInventoryResponse")],
             "description": "Peer inventory summary or paged asset inventory, depending on asset_type.",
         },
+        "SignedContentInventory": _object(
+            {"inventory": _object({
+                "version": _integer(), "drone_id": _string(), "asset_type": _enum(["roms", "bios"]),
+                "system": _string(), "relative_path": _string(), "nonce": _string(),
+                "entry_type": _enum(["file", "folder"]), "file_size": _integer(),
+                "directories": _array(_string()),
+                "files": _array(_object({"relative_path": _string(), "file_size": _integer(), "sha256": _string()},
+                                        ("relative_path", "file_size", "sha256"))),
+            }, ("version", "drone_id", "asset_type", "system", "relative_path", "nonce", "entry_type", "file_size", "directories", "files")),
+             "signature": _string(description="Base64 OpenSSL SHA-256 signature over canonical JSON inventory, using the pinned Drone identity key.")},
+            ("inventory", "signature"),
+        ),
         "PeerRomManifestFile": _object({"relative_path": _string(), "file_size": _integer(), "modified_time": _integer()}, ("relative_path", "file_size", "modified_time")),
         "PeerRomManifestResponse": _object(
             {
@@ -2023,6 +2041,7 @@ def _schemas() -> Dict[str, Schema]:
         "MultiplayerSession": _object({"id": _string(), "version": _integer(), "state": _enum(["CREATED", "DISCOVERING", "INVITING", "CONFIGURING", "WAITING_FOR_PLAYERS", "READY", "STARTING", "RUNNING", "DEGRADED", "FAILED", "STOPPING", "COMPLETED"]), "host_id": _string(), "host_name": _string(), "game": freeform, "mechanism": _string(), "mechanism_label": _string(), "mechanism_reason": _string(), "emulator": freeform, "max_players": _integer(), "players": _object(additional_properties=_ref("MultiplayerPlayer")), "events": _array(freeform), "error": _string(), "manual_steps": _array(_string()), "my_steps": _array(_string()), "actions": _array(_string()), "is_host": _boolean(), "local_role": _string(), "pending_launch": _boolean(), "created_at": _string(), "updated_at": _string(), "expires_at": _string()}, ("id", "version", "state", "host_id", "players"), description="A multiplayer session as this Drone sees it. The join credential is never included."),
         "MultiplayerSessionList": _object({"sessions": _array(_ref("MultiplayerSession"))}, ("sessions",), description="Active (or all) multiplayer sessions on this Drone."),
         "MultiplayerOverview": _object({"enabled": _boolean(), "me": freeform, "peers": _array(freeform), "online_peers": _integer(), "sessions": _array(_ref("MultiplayerSession")), "invitations": _array(freeform), "recent": _array(freeform), "adapters": _array(freeform), "mechanisms": _array(freeform), "network": freeform, "settings": freeform}, ("enabled", "peers", "sessions"), description="Multiplayer dashboard."),
+        "MultiplayerDependenciesResponse": _object({"dependencies": freeform}, ("dependencies",), description="Optional dependencies Drone can install (Sunshine): installed/running state, the background install job, and what the UI may offer."),
         "MultiplayerAdaptersResponse": _object({"adapters": _array(freeform)}, ("adapters",), description="Emulator adapters with detected capabilities, readiness and limitations."),
         "MultiplayerAdapter": _object({"id": _string(), "name": _string(), "tier": _enum(["implemented", "experimental", "detect_only"]), "automation": _enum(["full", "assisted", "manual"]), "installed": _boolean(), "version": _string(), "systems": _array(_string()), "mechanisms": _array(_string()), "features": freeform, "limitations": _array(_string()), "readiness": freeform}, ("id", "name"), description="One emulator adapter's capabilities."),
         "MultiplayerPeersResponse": _object({"peers": _array(freeform)}, ("peers",), description="Paired swarm members with reachability."),
@@ -2502,6 +2521,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 )
             },
             "/admin/gameplay-logs": {"get": _operation("Get local gameplay history", {"200": _json_response("GameplayLogsResponse", "Gameplay history")}, tags=["admin"])},
+            "/admin/rgs": {
+                "get": _operation("Get RGS download manager status", {"200": _json_response("RgsStatusResponse")}, tags=["admin"]),
+                "post": _operation("Start or stop RGS and set its boot preference", {"200": _json_response("RgsStatusResponse")},
+                                   request_body=_json_request("RgsUpdateRequest"), tags=["admin"],
+                                   error_codes=("400", "401", "403", "429", "500", "503")),
+            },
             "/admin/system-info": {
                 "get": _operation(
                     "Get Batocera system information",
@@ -2947,6 +2972,19 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     error_codes=("400", "403", "429", "500"),
                 )
             },
+            "/peer/content-inventory/{asset_type}": {
+                "get": _operation(
+                    "Get a fresh identity-signed content inventory for one ROM or BIOS asset",
+                    {"200": _json_response("SignedContentInventory")},
+                    description="Mandatory for ROM/BIOS downloads. Full-file SHA-256 hashes, bound to the requesting nonce, peer, asset type, system and path. Fails closed on unsupported peers. Limited to 10,000 entries and a bounded response.",
+                    parameters=[_path_param("asset_type", "roms or bios"),
+                                _query_param("system", _string(), "ROM system; empty for BIOS"),
+                                {**_query_param("relative_path", _string()), "required": True},
+                                {**_query_param("nonce", _string(), "64 lowercase hex characters generated by the requester"), "required": True}],
+                    tags=["peer"], security=peer_security,
+                    error_codes=("400", "403", "404", "429", "500"),
+                )
+            },
             "/peer/roms/{system}/{relative_path}": {
                 "get": _operation(
                     "Download a ROM file from a peer",
@@ -3150,6 +3188,9 @@ def _multiplayer_paths() -> Dict[str, Schema]:
         f"{mp}/adapters": get("Emulator adapters and their detected capabilities", "MultiplayerAdaptersResponse"),
         f"{mp}/adapters/refresh": post("Re-run emulator detection", "MultiplayerAdaptersResponse"),
         f"{mp}/adapters/{{adapter_id}}": get("One adapter's capabilities", "MultiplayerAdapter", parameters=[_path_param("adapter_id")]),
+        f"{mp}/dependencies": get("Optional multiplayer dependencies (Sunshine) and their install state", "MultiplayerDependenciesResponse"),
+        f"{mp}/dependencies/{{name}}/{{action}}": post("Install, start, stop or uninstall an allowlisted dependency (name: sunshine; action: install, start, stop, uninstall)", "MultiplayerDependenciesResponse", code="200",
+                                                       parameters=[_path_param("name"), _path_param("action")]),
         f"{mp}/peers": get("Paired peers with reachability", "MultiplayerPeersResponse"),
         f"{mp}/games/systems": get("Systems with multiplayer adapters", "MultiplayerSystemsResponse"),
         f"{mp}/games/shared": get("Multiplayer games that online peers also own", "MultiplayerSharedGamesResponse"),

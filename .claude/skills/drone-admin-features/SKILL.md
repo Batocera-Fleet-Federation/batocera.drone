@@ -87,6 +87,12 @@ gateway's own session expired." See
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
 
+There is **no default password**: with no persisted credentials and no
+`DRONE_APP_PASSWORD`, `create_server()` → `DroneCredentialStore.ensure_initial_password()`
+generates a random one-time password (hash in the state DB, plaintext in a 0600
+`initial-password.txt` beside `credentials.json`, removed by the next credentials
+update). Never add a hard-coded fallback login; tests should pass `env_password=`.
+
 ## Admin menu (tiles, some of them tabbed)
 
 `renderAdminMenu()` (`drone.js`) includes **Debug, Artwork, Torrents, VPN, Email,
@@ -338,7 +344,9 @@ write instead of one per job — otherwise O(N²) under the lock), and one
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
-  other online tailnet device. Enroll/rotate (and drone startup, for a node
+  other online tailnet device. The auth key is handed to `tailscale up` via the
+  `TS_AUTHKEY` env var (`_run_cli(..., extra_env=)`), never `--authkey=` on argv
+  (visible in `ps`/`/proc`); keep it that way in the installer too. Enroll/rotate (and drone startup, for a node
   hands-free-enrolled by the installer's `TS_AUTHKEY`) also make a best-effort,
   opt-in call to Tailscale's own admin API to disable key expiry for this
   device (`disable_key_expiry`/`_maybe_disable_key_expiry`) — so an unattended
@@ -366,7 +374,8 @@ write instead of one per job — otherwise O(N²) under the lock), and one
   identity hold (`PeerIdentityHold`, a `PermissionError` subclass raised by `_local_pair_peer`) is 503,
   not "unreachable" (issue #223); a local failure reading/creating this Drone's own certificate or
   key (`PairingLocalError`, wrapped around `ensure_certificate`) is a 500 with the OS reason and no
-  path (issue #266); other `PermissionError`s stay a 502 connection failure. A peer
+  path (issue #266); every other `PermissionError` — even an errno-less one carrying the hold wording, and whatever
+  the identity gate says — is a 502 connection failure, because only the `PeerIdentityHold` type is the hold (issue #403). A peer
   that answers 200 without `status=paired` (or with a non-JSON / mismatched body) raises
   `PeerPairingRejected` from `transfer/peer_connectivity.py` and is also a fixed-message 502 (issue #224).
   That includes a 200 with `status=paired` and a matching id but no `certificate_pem` (issue #279): the

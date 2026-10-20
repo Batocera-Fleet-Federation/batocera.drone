@@ -16,6 +16,7 @@ from threading import Thread
 from typing import Any, Optional
 
 try:
+    from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -23,6 +24,7 @@ try:
     from .device_control import _apply_audio_volume, _get_audio_volume, _kill_running_emulator
     from .game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -442,9 +444,10 @@ def _run_idle_game_exit_automation_once(settings: Settings) -> None:
 
 def _start_automation_poller(settings: Settings) -> None:
     poll_seconds = max(5, int(os.environ.get("AUTOMATION_POLL_SECONDS", str(AUTOMATION_POLL_SECONDS))))
+    generation = poller_generation()
 
     def loop() -> None:
-        while True:
+        while not poller_retired(generation):
             try:
                 _run_idle_volume_automation_once(settings)
             except Exception as error:

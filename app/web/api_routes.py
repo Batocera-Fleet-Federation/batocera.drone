@@ -108,6 +108,10 @@ class ApiRoutesMixin:
                 self._handle_peer_health()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "content-inventory":
+                self._handle_peer_content_inventory(parts[2], query_params)
+                return
+
             if len(parts) == 3 and parts[0] == "peer" and parts[1] == "inventory":
                 self._handle_peer_inventory(parts[2], query_params)
                 return
@@ -442,6 +446,10 @@ class ApiRoutesMixin:
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "system-info":
                 include_speed = str(query_params.get("speed", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
                 self._handle_admin_system_info(include_speed=include_speed)
+                return
+
+            if parts == ["admin", "rgs"]:
+                self._handle_admin_rgs_get()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system-info" and parts[2] == "screen-mode":
@@ -974,6 +982,10 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system-info" and parts[2] == "music-volume":
                 payload = self._read_json_body()
                 self._handle_admin_music_volume_post(payload)
+                return
+
+            if parts == ["admin", "rgs"]:
+                self._handle_admin_rgs_post(self._read_json_body())
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system-info" and parts[2] == "screen-mode":

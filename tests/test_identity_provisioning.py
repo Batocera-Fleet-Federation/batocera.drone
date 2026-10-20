@@ -1,9 +1,11 @@
 """Clone detection, automatic identity provisioning, recovery, and swarm isolation."""
 
 import collections
+import dataclasses
 import hashlib
 import json
 import ast
+import os
 import shutil
 import ssl
 import subprocess
@@ -651,6 +653,19 @@ class RecoveryAndInterruptionTests(ProvisioningTestBase):
         self.assertEqual(result.state, State.READY)
         self.assertNotEqual(fingerprint_of(clone), fingerprint_of(original))
 
+    def test_invalid_utf8_journal_still_reprovisions_a_confident_clone(self) -> None:
+        # #371: invalid UTF-8 bytes must count as an unreadable journal, not raise
+        # UnicodeDecodeError out of provisioning and hold the proven clone in recovery.
+        original, _ = self.install()
+        target = self.tmp / "disk-b"
+        image_disk(self.root, target)
+        clone = settings_for(target)
+        identity._journal_path(clone).write_bytes(b"[]\xff")
+        result = identity.ensure_identity(clone, provider_for(self.hw_b))
+        self.assertEqual(result.state, State.READY)
+        self.assertNotEqual(result.reason, "provisioning_failed")
+        self.assertNotEqual(fingerprint_of(clone), fingerprint_of(original))
+
     def test_concurrent_initialization_creates_a_single_identity(self) -> None:
         results = []
 
@@ -834,7 +849,9 @@ class SwarmIsolationTests(ProvisioningTestBase):
         identity._publish(State.RECOVERY_REQUIRED, identity.STATUS_RECOVERY, "x", False)
         with self.assertRaises(PermissionError):
             _drone_client_ssl_context(settings, "https://10.0.0.5:8543")
-        self.assertIsNone(_drone_client_ssl_context(settings, "http://10.0.0.5"))
+        # Cleartext http:// peers are held too (#411).
+        with self.assertRaises(PermissionError):
+            _drone_client_ssl_context(settings, "http://10.0.0.5")
 
     def test_peer_routes_are_closed_while_identity_unresolved(self) -> None:
         from app.web.api_routes import ApiRoutesMixin
@@ -1207,13 +1224,63 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
                 identity._choose_device_id(settings, journal), "02:11:22:33:44:55"
             )
 
+    def test_record_journal_serializes_mapping_implementations_as_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp)
+            expected = {"state": "PROVISIONING", "reason": "clone"}
+            for journal in (
+                collections.UserDict(expected),
+                collections.ChainMap({"state": "PROVISIONING"}, {"reason": "clone"}),
+                types.MappingProxyType(expected),
+            ):
+                with self.subTest(journal=type(journal).__name__):
+                    identity._record_journal(settings, journal)
+                    self.assertEqual(
+                        json.loads(identity._journal_path(settings).read_text(encoding="utf-8")),
+                        expected,
+                    )
+
+    def test_choose_device_id_rejects_mapping_with_inconsistent_key_lookup(self) -> None:
+        class InconsistentMapping(collections.abc.Mapping):
+            def __contains__(self, key: object) -> bool:
+                return key == "new_device_id"
+
+            def __getitem__(self, key: str) -> object:
+                raise KeyError(key)
+
+            def __iter__(self):
+                return iter(())
+
+            def __len__(self) -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            with self.assertRaisesRegex(identity.IdentityError, "journaled device id"):
+                identity._choose_device_id(settings, InconsistentMapping())
+            self.assertFalse(identity._device_id_path(Path(tmp)).exists())
+
     def test_choose_device_id_rejects_non_string_resumed_id_instead_of_stringifying_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
-            for value in (mock.MagicMock(), 12345, ["02:aa:bb:cc:dd:ee"], "bad id with spaces!"):
+            for value in (mock.MagicMock(), 0, False, [], {}, 12345, ["02:aa:bb:cc:dd:ee"], "bad id with spaces!"):
                 with self.subTest(value=type(value)):
                     with self.assertRaises(identity.IdentityError):
                         identity._choose_device_id(settings, {"new_device_id": value})
+                    self.assertFalse(identity._device_id_path(Path(tmp)).exists())
+
+    def test_choose_device_id_treats_none_as_no_resumed_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            chosen = identity._choose_device_id(settings, {"new_device_id": None})
+            self.assertEqual(identity._device_id_path(Path(tmp)).read_text(encoding="utf-8").strip(), chosen)
+
+    def test_choose_device_id_rejects_empty_string_as_invalid_resumed_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = types.SimpleNamespace(userdata_root=tmp, device_id="AA:BB:CC:DD:EE:FF")
+            with self.assertRaises(identity.IdentityError):
+                identity._choose_device_id(settings, {"new_device_id": ""})
+            self.assertFalse(identity._device_id_path(Path(tmp)).exists())
 
     def test_retire_device_id_rejects_mock_root(self) -> None:
         with self.assertRaises(TypeError):
@@ -1224,3 +1291,27 @@ class MockUserdataRootRejectionTests(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             swarm_reset._clear_pinned_peer_certificates(self._mock_settings())
+
+
+class RelativeUserdataRootTests(ProvisioningTestBase):
+    """A relative USERDATA_ROOT must hold identity with a named reason and write nothing."""
+
+    def test_relative_root_holds_with_named_reason_and_writes_nothing(self) -> None:
+        cwd = self.tmp / "cwd"
+        cwd.mkdir()
+        settings = dataclasses.replace(settings_for(self.root), userdata_root=Path("rel-root"))
+        original_cwd = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, original_cwd)
+        with mock.patch.object(identity, "_log") as log:
+            result = identity.ensure_identity(settings, provider_for(self.hw_a))
+        self.assertEqual(result.state, State.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason, "relative_userdata_root")
+        self.assertFalse(result.swarm_networking_enabled)
+        self.assertTrue(any("USERDATA_ROOT must be an absolute path" in str(c.args[0]) for c in log.call_args_list))
+        self.assertEqual(list(cwd.iterdir()), [])
+        self.assertFalse((self.root / "system" / "drone-app" / "identity").exists())
+
+    def test_absolute_root_still_provisions(self) -> None:
+        _, result = self.install()
+        self.assertEqual(result.state, State.READY)

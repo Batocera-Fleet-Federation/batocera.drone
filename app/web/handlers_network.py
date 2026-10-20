@@ -19,7 +19,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote
 
 try:
-    from ..common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed
     from ..device.device_control import _ensure_rom_write_access
     from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
@@ -37,7 +36,6 @@ try:
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.peer_connectivity import (
         _fetch_peer_info,
-        PAIRING_IDENTITY_HOLD_MESSAGE,
         PairingLocalError,
         PeerIdentityHold,
         PeerPairingRejected,
@@ -53,7 +51,6 @@ try:
     )
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed  # type: ignore
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
@@ -71,7 +68,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         _fetch_peer_info,
-        PAIRING_IDENTITY_HOLD_MESSAGE,
         PairingLocalError,
         PeerIdentityHold,
         PeerPairingRejected,
@@ -113,11 +109,6 @@ PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
 # response reports ``truncated`` so the caller knows to run it again.
 SYNC_BULK_MAX_JOBS = max(1, int(os.environ.get("DRONE_SYNC_BULK_MAX_JOBS", "2000")))
 SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "10"))
-
-# Raised by ``_local_pair_peer`` when the identity-provisioning gate refuses an
-# outbound pairing attempt. Keep this exact text stable: it is an actionable
-# local-state response, rather than a diagnosis of the remote Drone.
-_PAIRING_IDENTITY_HOLD_MESSAGE = PAIRING_IDENTITY_HOLD_MESSAGE
 
 # The health fallback's own guaranteed budget, never taken from the summary's.
 # Liveness and inventory are different questions: /peer/health is ~150 bytes
@@ -315,24 +306,24 @@ class HandlersNetworkMixin:
         discovered = local_match or _local_network.record_discovered_peer(self.settings, tailnet_peer, tailnet_ip)
         existing = _local_network.get_paired_peer(self.settings, peer_id)
         if existing:
-            # A LAN announce may have arrived while the peer's tailscaled was
-            # temporarily down and cleared its tailnet_ip. A successful probe
-            # over the authenticated tailnet is authoritative reachability
-            # evidence, so restore the route without replacing the preferred
-            # LAN URL or requiring the already-paired Drone to pair again.
-            expected_fingerprint = str(existing.get("certificate_fingerprint") or "").strip().lower()
-            observed_fingerprint = str(info.get("certificate_fingerprint") or "").strip().lower()
-            if expected_fingerprint and observed_fingerprint and expected_fingerprint != observed_fingerprint:
+            # The initial response only identifies a candidate pin. Re-fetch over
+            # TLS authenticated by that persisted pin before accepting any fields.
+            # Even a copied public fingerprint in the first body proves nothing.
+            try:
+                info = _fetch_peer_info(
+                    _normalize_peer_address(tailnet_ip), timeout=3.0,
+                    expected_fingerprint=str(existing.get("certificate_fingerprint") or ""),
+                )
+                if str(info.get("drone_id") or "").strip() != peer_id:
+                    raise ValueError("authenticated tailnet peer returned a different Drone id")
+            except Exception:
                 return _public_local_peer(
                     {
                         **existing,
-                        "tailnet_identity_error": "Tailnet peer certificate fingerprint does not match paired Drone",
+                        "tailnet_identity_error": "Tailnet peer certificate fingerprint could not be authenticated for paired Drone",
                     }
                 )
-            # Refresh the connection metadata from this probe too, not just
-            # the tailnet route. ``info`` was fetched from the peer moments
-            # ago and its certificate fingerprint matched the pinned one
-            # above, so it is authoritative.
+            # Only the authenticated response is authoritative for route/port repair.
             #
             # This is what repairs a record paired before peer_mtls_port
             # existed: _peer_api_port() falls back to api_port for such
@@ -644,12 +635,12 @@ class HandlersNetworkMixin:
         or being unreachable is an upstream failure, not a server bug, so it must
         not escape as a generic 500. The peer's own error text is shown truncated.
         A local identity hold (``PeerIdentityHold`` from ``_local_pair_peer``) is
-        this Drone's own state, so it replies 503 rather than "unreachable"; a
-        bare errno-less ``PermissionError`` with the hold text is still treated
-        as the hold for callers that surface the older exception. A failure to
+        this Drone's own state, so it replies 503 rather than "unreachable".
+        Only that dedicated type counts as the hold: a plain ``PermissionError``,
+        whatever its text or errno, is never matched heuristically. A failure to
         access this Drone's own certificate (``PairingLocalError``) is a local
-        fault and replies 500. Any other ``PermissionError`` is still a
-        connection failure.
+        fault and replies 500. Any other ``PermissionError`` is a connection
+        failure.
 
         The pairing code is a secret, so over HTTPS it is only sent to a server
         that proves the certificate the operator confirmed (the fingerprint
@@ -658,7 +649,8 @@ class HandlersNetworkMixin:
         the peer-info response comes from the same untrusted source as the
         address and is never a substitute.
         """
-        if pairing_code and not self._pairing_certificate_anchored(peer, confirmed_fingerprint):
+        cleartext = not (_peer_address(peer) or "").startswith("https://")
+        if (pairing_code or cleartext) and not self._pairing_certificate_anchored(peer, confirmed_fingerprint):
             self._send_json(
                 400,
                 {
@@ -701,28 +693,13 @@ class HandlersNetworkMixin:
             if isinstance(error, PeerIdentityHold):
                 self._send_json(503, {"error": str(error)})
                 return None
-            if (
-                isinstance(error, PermissionError)
-                and error.errno is None
-                and (
-                    not _identity_swarm_networking_allowed()
-                    # Keep the direct helper contract recognizable for callers
-                    # that surface its documented hold exception unchanged.
-                    or str(error) == _PAIRING_IDENTITY_HOLD_MESSAGE
-                )
-            ):
-                # The identity gate raises this bare PermissionError. Check the
-                # current gate as well: arbitrary errno-less PermissionErrors
-                # from a network stack are 502 once identity is resolved.
-                self._send_json(503, {"error": str(error)})
-                return None
             self._send_json(502, {"error": f"Could not reach that drone: {error}"})
         return None
 
     def _pairing_certificate_anchored(self, peer: dict, confirmed_fingerprint: str) -> bool:
-        address = _peer_address(peer) or ""
-        if not address.startswith("https://"):
-            return True  # cleartext address: nothing to pin, the operator typed it
+        # A cleartext address is no exception: the answering certificate is
+        # pinned, so it must match a fingerprint the operator confirmed (or one
+        # already pinned) or an on-path attacker could substitute its own.
         confirmed = str(confirmed_fingerprint or "").strip()
         if confirmed:
             # Malformed input must not count as an anchor: it normalizes to

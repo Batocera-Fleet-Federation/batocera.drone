@@ -1,18 +1,8 @@
-"""Out-of-scope evidence for #227: Path('') / Path('.') persist under cwd.
+"""Adjudication for #286: cwd-relative roots must be rejected without touching cwd.
 
-Issue #227 is the unscoped helper default: ``_fake_machine_id()`` and
-``_fake_machine_id(None)`` used to return ``uuid.getnode()``. A related leftover
-is a caller that *does* pass a Path, but that Path names the current directory.
-
-Evidence: ``_require_real_path`` accepts ``Path('')`` and ``Path('.')`` because
-they are ``os.PathLike``. ``_machine_id`` then treats them as a real userdata
-root, creates ``./system/drone-app/``, and writes ``device-id`` there. The
-returned value is a fresh logical id, not getnode, so this is not the #227
-regression. It is a cwd-write blast radius for a relative/empty Path.
-
-Why outside scope: the issue names the Optional/None default. Production
-``Settings.from_env()`` always passes the ``USERDATA_ROOT`` Path. These
-assertions pin the current write so the finding has an executable reproduction.
+This test previously pinned the failing behavior as an out-of-scope #227 finding.
+Issue #286 specifically asks to remove that behavior, so the assertion is inverted:
+both empty and dot paths must be rejected and leave the cwd unchanged.
 """
 
 from __future__ import annotations
@@ -45,18 +35,15 @@ class EmptyPathCwdEvidenceTests(unittest.TestCase):
         self._env.stop()
         self._tmpdir.cleanup()
 
-    def test_empty_and_dot_paths_write_device_id_under_cwd(self) -> None:
+    def test_empty_and_dot_paths_are_rejected_without_writing_under_cwd(self) -> None:
         target = self.cwd / "system" / "drone-app" / "device-id"
         with mock.patch.object(device_identity.uuid, "getnode", return_value=GETNODE):
-            empty_value = _fake_machine_id(Path(""))
-        self.assertTrue(target.is_file(), "Path('') persisted a device-id under the process cwd")
-        self.assertEqual(target.read_text(encoding="utf-8").strip(), empty_value)
-        self.assertNotEqual(empty_value, RUNTIME_MAC)
-        target.write_text("keep-227\n", encoding="utf-8")
-        with mock.patch.object(device_identity.uuid, "getnode", return_value=GETNODE):
-            dot_value = _fake_machine_id(Path("."))
-        self.assertEqual(dot_value, "keep-227")
-        self.assertEqual(target.read_text(encoding="utf-8").strip(), "keep-227")
+            for root in (Path(""), Path("."), Path("relative-root")):
+                with self.subTest(root=repr(root)):
+                    with self.assertRaises(TypeError):
+                        _fake_machine_id(root)
+        self.assertFalse(target.exists(), "cwd-relative root persisted a device-id under cwd")
+        self.assertEqual(sorted(path.name for path in self.cwd.iterdir()), [])
 
 
 if __name__ == "__main__":

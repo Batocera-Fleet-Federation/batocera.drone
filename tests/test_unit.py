@@ -87,7 +87,7 @@ from urllib.error import HTTPError, URLError
 class SessionAuthTests(unittest.TestCase):
     def _auth(self, tmp: str) -> SessionAuth:
         credentials_path = Path(tmp) / "credentials.json"
-        store = DroneCredentialStore(credentials_path)
+        store = DroneCredentialStore(credentials_path, env_password="linux")  # operator-provided secret
         db_path = database_path_for_legacy_file(credentials_path)
         return SessionAuth(credential_store=store, session_store=SessionStore(db_path))
 
@@ -99,6 +99,52 @@ class SessionAuthTests(unittest.TestCase):
             session = auth.authenticate_request({"Cookie": f"drone_session={token}"})
             self.assertIsNotNone(session)
             self.assertEqual(session["username"], "batocera")
+
+    def test_no_universal_default_password_without_operator_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials_path = Path(tmp) / "credentials.json"
+            store = DroneCredentialStore(credentials_path)
+            auth = SessionAuth(credential_store=store, session_store=SessionStore(database_path_for_legacy_file(credentials_path)))
+            self.assertTrue(store.setup_required())
+            for password in ("linux", "", "batocera", "changeme"):
+                self.assertIsNone(auth.login("batocera", password))
+            self.assertFalse(store.check("", ""))
+
+    def test_initial_password_is_random_hashed_and_root_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            credentials_path = Path(tmp) / "credentials.json"
+            db_path = database_path_for_legacy_file(credentials_path)
+            store = DroneCredentialStore(credentials_path)
+            target = store.ensure_initial_password()
+            self.assertEqual(target, Path(tmp) / "initial-password.txt")
+            self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+            fields = dict(line.split(": ", 1) for line in target.read_text().splitlines())
+            self.assertEqual(fields["username"], "batocera")
+            self.assertGreaterEqual(len(fields["password"]), 20)
+            auth = SessionAuth(credential_store=store, session_store=SessionStore(db_path))
+            self.assertIsNone(auth.login("batocera", "linux"))
+            self.assertIsNotNone(auth.login("batocera", fields["password"]))
+            saved = load_payload(db_path, "credentials", {})
+            self.assertNotIn(fields["password"], str(saved))
+            self.assertFalse(store.setup_required())
+            # Stable across restarts: no regeneration while the file is present.
+            self.assertIsNone(DroneCredentialStore(credentials_path).ensure_initial_password())
+            self.assertIsNotNone(auth.login("batocera", fields["password"]))
+            # Deleting the file before changing the password is the recovery path.
+            target.unlink()
+            regenerated = DroneCredentialStore(credentials_path).ensure_initial_password()
+            self.assertIsNotNone(regenerated)
+            # Setting real credentials removes the plaintext and ends regeneration.
+            store.update("arcade-admin", "BetterPass123")
+            self.assertFalse(regenerated.exists())
+            self.assertIsNone(DroneCredentialStore(credentials_path).ensure_initial_password())
+
+    def test_env_password_skips_initial_password_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DroneCredentialStore(Path(tmp) / "credentials.json", env_password="operator-secret")
+            self.assertIsNone(store.ensure_initial_password())
+            self.assertFalse((Path(tmp) / "initial-password.txt").exists())
+            self.assertTrue(store.check("batocera", "operator-secret"))
 
     def test_login_rejects_wrong_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +165,7 @@ class SessionAuthTests(unittest.TestCase):
             for loopback_ip in ("127.0.0.1", "::1"):
                 session = auth.authenticate_request({}, loopback_ip)
                 self.assertIsNotNone(session)
-                self.assertEqual(session["username"], "batocera")  # DroneCredentialStore's default
+                self.assertEqual(session["username"], "batocera")  # DroneCredentialStore's default username
                 self.assertIsNone(session["token"])
 
     def test_authenticate_request_does_not_trust_non_loopback_with_no_cookie(self) -> None:
@@ -1362,7 +1408,7 @@ class SettingsTests(unittest.TestCase):
             }
             with mock.patch(
                 "app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context
-            ), mock.patch(
+            ), mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 7, "sha256": hashlib.sha256(b"ROMDATA").hexdigest()}]}), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
@@ -1427,7 +1473,7 @@ class SettingsTests(unittest.TestCase):
                 def read(self, _size=-1):
                     return self.chunks.pop(0)
 
-            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 11, "sha256": hashlib.sha256(b"replacement").hexdigest()}]}), mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
                 result = _download_rom_from_peer(
                     settings, {}, {"drone_id": "source-a", "reachable_url": "http://source-a:8080"},
                     "nes", "Game.nes", overwrite=True,
@@ -1496,7 +1542,7 @@ class SettingsTests(unittest.TestCase):
                 cancel.set()
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value={"files": [{"file_size": 14}]}), mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
                 with self.assertRaises(DownloadCancelled):
                     _download_rom_from_peer(
                         settings,
@@ -1529,8 +1575,8 @@ class SettingsTests(unittest.TestCase):
                 "file_size": 10,
                 "directories": ["PS3_GAME", "PS3_GAME/USRDIR"],
                 "files": [
-                    {"relative_path": "PS3_GAME/PARAM.SFO", "file_size": 5},
-                    {"relative_path": "PS3_GAME/USRDIR/EBOOT.BIN", "file_size": 5},
+                    {"relative_path": "PS3_GAME/PARAM.SFO", "file_size": 5, "sha256": hashlib.sha256(b"param").hexdigest()},
+                    {"relative_path": "PS3_GAME/USRDIR/EBOOT.BIN", "file_size": 5, "sha256": hashlib.sha256(b"eboot").hexdigest()},
                 ],
             }
 
@@ -1557,7 +1603,7 @@ class SettingsTests(unittest.TestCase):
                 raise AssertionError(url)
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ), mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("folder sync should not hash")):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "ps3", "Game.ps3", expected_size=10)
@@ -1593,8 +1639,8 @@ class SettingsTests(unittest.TestCase):
                 "file_size": len(marker_bytes) + len(track_bytes),
                 "directories": [],
                 "files": [
-                    {"relative_path": "Game.gdi", "file_size": len(marker_bytes)},
-                    {"relative_path": "track01.bin", "file_size": len(track_bytes)},
+                    {"relative_path": "Game.gdi", "file_size": len(marker_bytes), "sha256": hashlib.sha256(marker_bytes).hexdigest()},
+                    {"relative_path": "track01.bin", "file_size": len(track_bytes), "sha256": hashlib.sha256(track_bytes).hexdigest()},
                 ],
             }
 
@@ -1630,7 +1676,7 @@ class SettingsTests(unittest.TestCase):
                 expected_fingerprint=expected_fingerprint,
                 marker_relative_path="Game/Game.gdi",
             )
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
@@ -1645,7 +1691,7 @@ class SettingsTests(unittest.TestCase):
 
             # Present marker (matching fingerprint) -> skipped without touching the peer.
             with mock.patch(
-                "app.transfer.peer_download._peer_get_json", side_effect=AssertionError("must not fetch manifest")
+                "app.transfer.peer_download.fetch_inventory", side_effect=AssertionError("must not fetch manifest")
             ), mock.patch("app.transfer.peer_download.urlopen", side_effect=AssertionError("must not download")):
                 skipped = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
             self.assertEqual(skipped["status"], "skipped")
@@ -1655,7 +1701,7 @@ class SettingsTests(unittest.TestCase):
             # so the present-check cannot accept the bad folder later.
             bad_kwargs = dict(kwargs, expected_fingerprint="0" * 32)
             (game_dir / "Game.gdi").unlink()  # fresh marker so the present-check passes through
-            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+            with mock.patch("app.transfer.peer_download.fetch_inventory", return_value=manifest), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ):
                 with self.assertRaises(RuntimeError):
@@ -7079,6 +7125,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             cert_path = Path(tmp) / "local-a.crt"
             cert_path.write_text("certificate", encoding="utf-8")
             with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer._local_network, "get_paired_peer", return_value=None), \
                     mock.patch.object(handlers_peer, "tailnet_peer_ips", return_value={"100.64.0.5"}), \
                     mock.patch.object(handlers_peer._local_network, "validate_pairing_code") as validate, \
                     mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
@@ -7119,6 +7166,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             cert_path = Path(tmp) / "local-a.crt"
             cert_path.write_text("certificate", encoding="utf-8")
             with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer._local_network, "get_paired_peer", return_value=None), \
                     mock.patch.object(handlers_peer._local_network, "validate_pairing_code", return_value=True), \
                     mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
                     mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
@@ -7196,7 +7244,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7229,7 +7278,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "cc:dd",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", side_effect=ssl.SSLError("pin mismatch")), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(handlers_network._local_network, "save_paired_peer") as saved:
@@ -7280,7 +7330,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "reachable_url": "https://cabinet-b.local",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -7316,7 +7367,8 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
             "drone_id": "local-b",
             "certificate_fingerprint": "aa:bb",
         }
-        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+        with mock.patch.object(handlers_network, "_fetch_peer_info", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
                 mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
                 mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
                 mock.patch.object(
@@ -8243,9 +8295,11 @@ class TailnetServiceTests(unittest.TestCase):
         from app.device import tailnet_service
 
         commands = []
+        envs = []
 
         def fake_run(command, **kwargs):
             commands.append(command)
+            envs.append(kwargs.get("env"))
             if "up" in command:
                 return mock.Mock(returncode=1, stdout="", stderr="backend error: invalid key\n")
             return mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
@@ -8259,7 +8313,14 @@ class TailnetServiceTests(unittest.TestCase):
         up_command = next(cmd for cmd in commands if "up" in cmd)
         self.assertIn("--accept-dns=false", up_command)
         self.assertIn("--netfilter-mode=off", up_command)
-        self.assertTrue(any(arg.startswith("--authkey=") for arg in up_command))
+        # The reusable key must reach tailscale via the environment, never argv.
+        self.assertFalse(any("authkey" in arg or "SECRET" in arg for arg in up_command))
+        up_env = envs[commands.index(up_command)]
+        self.assertEqual(up_env["TS_AUTHKEY"], "tskey-auth-SECRET")
+        # Other CLI calls (status, set) do not receive the key.
+        for command, env in zip(commands, envs):
+            if "up" not in command:
+                self.assertTrue(env is None or "TS_AUTHKEY" not in env or env["TS_AUTHKEY"] != "tskey-auth-SECRET")
 
     def test_startup_repairs_existing_tailnet_netfilter_preference(self) -> None:
         from app.device import tailnet_service
@@ -8573,7 +8634,9 @@ class InstallerTailscaleTests(unittest.TestCase):
     def test_installer_supports_hands_free_and_skip_paths(self) -> None:
         self.assertIn("DRONE_SKIP_TAILSCALE", self.install)
         self.assertIn("TS_AUTHKEY", self.install)
-        self.assertIn("--authkey=", self.install)
+        # The key is passed through the environment, never on the argv.
+        self.assertNotIn("--authkey", self.install)
+        self.assertIn('TS_AUTHKEY="$TS_AUTH"', self.install)
         self.assertIn("--netfilter-mode=off", self.install)
         # Keep Batocera's DNS untouched; the integration works on raw 100.x IPs.
         self.assertIn("--accept-dns=false", self.install)
