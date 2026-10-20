@@ -111,7 +111,8 @@ a new module and compose it — `class RomRepository(SomeMixin, ...):`. Methods 
 call that aren't `self.*`) are imported in the mixin module; anything still in `drone_api`
 is lazy-imported. First done: `roms/rom_artwork_apply.py`.
 `Settings.from_env()` (now `common/settings.py`, re-exported) reads `*_ROOT` env vars
-(default `/userdata/{roms,bios,saves,movies,shows,music}`).
+(default `/userdata/{roms,bios,saves,movies,shows,music}`). A blank `USERDATA_ROOT` means unset
+(`/userdata`); a relative `USERDATA_ROOT` raises a named `ValueError` at config time (#454).
 
 **Extracting more:** move the code to the right subpackage, add the dual re-export to
 `drone_api.py`, then **repoint test monkeypatches** — tests patch `app.drone_api.X`,
