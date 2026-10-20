@@ -190,7 +190,7 @@ provisioning (retire old key first, `transfer/swarm_reset.py` targeted SQLite/pi
 `tailnet_service.reset_local_node_identity()` — local state only, **never `tailscale logout`**,
 fresh random device id, fresh cert via `DroneCertificateManager`, journaled/resumable);
 missing/contradictory → `RECOVERY_REQUIRED` with `swarm_networking_allowed()` False (listener,
-workers, pollers, `/peer/*` and outbound peer TLS all gated). That includes the pair-by-address peer-info fetch (`_fetch_peer_info`, any scheme) and each live
+workers, pollers, `/peer/*` and outbound peer TLS all gated). `_drone_client_ssl_context` checks the hold before its scheme test, so `http://` peer GET/POST/download calls raise `PeerIdentityHold` too (the failover loops re-raise it rather than trying the next address). That includes the pair-by-address peer-info fetch (`_fetch_peer_info`, any scheme) and each live
 dial in `_pairing_tls_context`: they raise `PeerIdentityHold` (503 from the handlers) before connecting. Admin overrides (`/admin/identity/*`,
 `web/handlers_identity.py`) need a real session **and** password re-entry. Rules: a clone never
 broadcasts a removal/rotation for the original; a peer can never force an identity reset
