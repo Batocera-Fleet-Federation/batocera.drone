@@ -28,9 +28,6 @@ class NulRootOutOfScopeTests(unittest.TestCase):
         self.addCleanup(env.stop)
         os.environ.pop("DRONE_DEVICE_ID_FILE", None)
 
-    # Tracked as #461 (NUL-containing identity root escapes as ValueError). Expected failure keeps
-    # the evidence running on schedule without blocking #287; remove the decorator when #461 lands.
-    @unittest.expectedFailure
     def test_nul_containing_absolute_str_root_is_rejected_as_a_non_path(self):
         hostile = f"{self.base / 'root'}\x00suffix"
         with mock.patch.object(device_identity.uuid, "getnode", return_value=HOST_NIC) as getnode:
