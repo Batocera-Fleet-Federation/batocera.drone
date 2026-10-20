@@ -118,11 +118,19 @@ def require_legacy_file_path(path: PathLike[str] | str) -> Path:
     (or the root): deriving a database from them would land beside the parent, and callers
     that later unlink the legacy file would target the directory itself. A final name made only
     of whitespace or invisible characters (U+3164, U+2800, U+200B, ...) is just as unnameable.
+
+    A path that already is a directory is refused too: it is lexically fine, but unlinking it
+    fails *after* the caller has committed its database write. A symlink is never a directory here,
+    wherever it points (including a link to a directory or a dangling one): ``unlink`` removes only
+    the link and leaves the target untouched. This is a point-in-time check, so callers that mutate
+    state should call it again immediately before writing.
     """
     _require_filesystem_path(path, "path")
     legacy = Path(path)
     if not _is_file_shaped(legacy):
         raise ValueError("path must name a file")
+    if legacy.is_dir() and not legacy.is_symlink():
+        raise ValueError("path must name a file, not a directory")
     return legacy
 
 
