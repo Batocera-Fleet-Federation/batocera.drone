@@ -50,6 +50,7 @@ try:
     from ..common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.logtail import _tail_lines
+    from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -59,6 +60,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed  # type: ignore
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
+    from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -1000,8 +1002,11 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     and wipe credentials even if nobody is looking at the VPN page.
     """
     interval = max(30.0, float(os.environ.get("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", "300")))
+    generation = poller_generation()
     while True:
         time.sleep(interval)
+        if poller_retired(generation):
+            return
         check_sharing_revocation(settings)
 
 
@@ -1157,6 +1162,9 @@ def run_self_heal_poller(settings: Settings) -> None:
     loop per concern rather than one combined poller, matching this module's
     existing style.
     """
+    generation = poller_generation()
     while True:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
+        if poller_retired(generation):
+            return
         check_and_self_heal(settings)

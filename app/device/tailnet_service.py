@@ -38,6 +38,7 @@ from typing import Any, Iterable, Optional
 
 try:
     from ..common.http_errors import _format_http_error
+    from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -45,6 +46,7 @@ try:
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_errors import _format_http_error  # type: ignore
+    from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -1020,6 +1022,9 @@ def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
     revoked -- mirrors ``vpn_manager.run_sharing_revocation_poller()``
     exactly. Started as its own daemon thread from ``create_server()``."""
     interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
+    generation = poller_generation()
     while True:
         time.sleep(interval)
+        if poller_retired(generation):
+            return
         check_tailnet_sharing_revocation(settings)

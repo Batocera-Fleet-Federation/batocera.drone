@@ -906,6 +906,7 @@ try:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
+        retire_pollers as _retire_pollers,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -915,6 +916,7 @@ except ImportError:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
+        retire_pollers as _retire_pollers,
     )
 _DOWNLOAD_MANAGER = None
 _TORRENT_MANAGER = None
@@ -2540,6 +2542,28 @@ def _abandon_listeners(listeners) -> None:
         listener.server_close()
 
 
+def retire_background_pollers() -> None:
+    """Retire the forever-loop pollers ``create_server`` latched on and allow a restart.
+
+    The pollers cannot be interrupted mid-sleep: each returns, before any I/O, the first time it
+    wakes after this call. Like ``stop_local_network_workers`` this is owner-driven (a plain HTTP
+    shutdown does not call it); harnesses and ``main()`` call it so a poller left behind by a
+    closed server cannot keep resolving the environment-selected state database and write into
+    whichever one a later server selects.
+    """
+    global _AUTOMATION_POLLER_STARTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED
+    global _NETWORK_SHARE_WATCHDOG_STARTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
+    global _TAILNET_SHARING_POLLER_STARTED
+    _retire_pollers()
+    _AUTOMATION_POLLER_STARTED = False
+    _VPN_SHARING_POLLER_STARTED = False
+    _VPN_SELF_HEAL_POLLER_STARTED = False
+    _NETWORK_SHARE_WATCHDOG_STARTED = False
+    _SMTP_SHARING_POLLER_STARTED = False
+    _AUDIT_EMAIL_POLLER_STARTED = False
+    _TAILNET_SHARING_POLLER_STARTED = False
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
     # Identity validation (main()) decides whether this Drone may take part in the swarm at
@@ -2910,6 +2934,7 @@ def main() -> None:
             # Retire any local-network generation created during startup, including
             # failures before the server enters its serve loop.
             stop_local_network_workers()
+            retire_background_pollers()
             if previous_sigterm is not None:
                 signal.signal(signal.SIGTERM, previous_sigterm)
     except KeyboardInterrupt:

@@ -101,6 +101,9 @@ class _ThreadExceptionGuard:
 
 class CreateServerTeardownUAT(unittest.TestCase):
     def setUp(self) -> None:
+        # Pollers left behind by an earlier harness's create_server() re-resolve the env-selected
+        # state DB on every tick; retire them so they cannot write into this test's database (#420).
+        drone_api.retire_background_pollers()
         identity.reset_runtime_state_for_tests()
         self.addCleanup(identity.reset_runtime_state_for_tests)
         self._tmp = tempfile.TemporaryDirectory(prefix="issue-212-uat-")
