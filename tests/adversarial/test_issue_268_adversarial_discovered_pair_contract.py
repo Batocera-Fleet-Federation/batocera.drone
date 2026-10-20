@@ -10,7 +10,7 @@ Expected behavior, derived from the issue before reading the implementation:
   module-level spec, and the error responses reference a schema that exists.
 * At runtime, through the discovered-peer route itself (not only the shared helper), an
   identity hold is 503 and never 502, a peer HTTP rejection is 502, and an errno-less
-  ``PermissionError`` that is not the hold is a peer failure (502).
+  ``PermissionError`` (whatever its text) that is not ``PeerIdentityHold`` is a peer failure (502).
 """
 
 from __future__ import annotations
@@ -103,7 +103,6 @@ class DiscoveredPairRuntimeTests(unittest.TestCase):
         local_network.discovered_peers.return_value = [self.peer]
         patches = [
             mock.patch.object(handlers_network, "_local_network", local_network),
-            mock.patch.object(handlers_network, "_identity_swarm_networking_allowed", return_value=True),
         ]
         for patcher in patches:
             patcher.start()
@@ -120,11 +119,13 @@ class DiscoveredPairRuntimeTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"], HOLD_TEXT)
 
-    def test_bare_hold_permission_error_is_503_not_502(self):
+    def test_bare_hold_text_permission_error_is_not_an_identity_hold(self):
+        # Only PeerIdentityHold is the hold; matching on the text would misreport a
+        # stray PermissionError as identity verification holding pairing (issue #403).
         status, payload = self._run_pair(PermissionError(HOLD_TEXT))
 
-        self.assertEqual(status, 503)
-        self.assertNotIn("Could not reach that drone", payload["error"])
+        self.assertEqual(status, 502)
+        self.assertIn("Could not reach that drone", payload["error"])
 
     def test_peer_http_rejection_is_502_naming_the_peer_status(self):
         rejected = HTTPError("https://peer.example", 403, "Forbidden", {}, io.BytesIO(b'{"error": "wrong pairing code"}'))

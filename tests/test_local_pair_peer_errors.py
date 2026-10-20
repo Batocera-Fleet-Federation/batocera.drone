@@ -67,7 +67,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
         self.assertIn("Could not reach that drone", payload["error"])
 
     def test_identity_hold_becomes_503_not_unreachable(self) -> None:
-        hold = PermissionError("peer pairing is held pending Drone identity verification")
+        hold = handlers_network.PeerIdentityHold("peer pairing is held pending Drone identity verification")
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=hold):
             self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
 
