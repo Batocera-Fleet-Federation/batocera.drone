@@ -71,6 +71,15 @@ class HttpPeerCallsHonourIdentityHoldTests(unittest.TestCase):
         urlopen_mock.assert_not_called()
         self.assertFalse(destination.exists())
 
+    def test_held_http_peer_download_helpers_share_the_gated_context(self) -> None:
+        # peer_download builds its urlopen context through the same helper, so an http://
+        # direct download is refused before any request is opened while the identity is held.
+        from app.transfer import peer_download
+
+        self.assertIs(peer_download._drone_client_ssl_context, peer_connectivity._drone_client_ssl_context)
+        with self.assertRaises(peer_connectivity.PeerIdentityHold):
+            peer_download._drone_client_ssl_context(self.settings, "http://10.0.0.5:8080/v1/api/peer/roms/nes/a.zip")
+
     def test_http_peer_calls_still_work_when_not_held(self) -> None:
         identity_provisioning.reset_runtime_state_for_tests()
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response()) as urlopen_mock:
