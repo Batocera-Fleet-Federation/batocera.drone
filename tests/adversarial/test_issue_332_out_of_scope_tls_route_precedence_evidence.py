@@ -27,11 +27,9 @@ class TlsRoutePrecedenceEvidenceTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"USERDATA_ROOT": str(Path(tmp.name)), "DRONE_DEVICE_ID": "local"}, clear=True):
             self.settings = Settings.from_env()
 
-    @unittest.expectedFailure
     def test_single_address_helper_offers_the_https_route_that_candidates_offer(self) -> None:
-        # Evidence: _peer_address returns None (pairing then says "no reachable address") even
-        # though the same record yields an https tailnet/LAN candidate, because it stops at a
-        # cleartext pre-baked reachable_url instead of skipping it.
+        # Fixed by #507: _peer_address now falls back to the first https candidate instead of
+        # returning None when the pre-baked reachable_url is cleartext.
         peer = {
             "drone_id": "victim", "scheme": "HTTPS", "reachable_url": "HTTP://peer.example:8443",
             "api_port": 8443, "tailnet_ip": "100.64.0.9", "certificate_fingerprint": PIN,
