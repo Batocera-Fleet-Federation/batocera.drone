@@ -60,6 +60,26 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 # still resident there); both read the same env var, so the value is identical.
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 
+# Byte caps for peer JSON bodies. A peer (or, on the plaintext pair-by-address
+# path, an on-path attacker) must not make the Drone buffer an unbounded body.
+# Pairing and bootstrap-info answers are a few KB (one certificate PEM); the
+# general cap leaves room for the largest legitimate peer payloads (VPN/SMTP
+# config, swarm summaries).
+MAX_PEER_PAIRING_RESPONSE_BYTES = 64 * 1024
+MAX_PEER_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class PeerResponseTooLarge(ValueError):
+    """A peer answered with a body larger than the cap for that request."""
+
+
+def _read_capped(response, limit: int) -> bytes:
+    """Read at most ``limit`` bytes; raise ``PeerResponseTooLarge`` for a longer body."""
+    raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise PeerResponseTooLarge(f"peer response exceeds {limit} bytes")
+    return raw
+
 # Name resolution is the one part of an outbound peer dial that no socket
 # timeout can bound: urlopen's ``timeout`` only starts applying once there is
 # a socket, and getaddrinfo() runs before that. On a Batocera box with avahi,
@@ -273,7 +293,7 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
     try:
         with urlopen(request, timeout=timeout, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
@@ -314,7 +334,7 @@ def _peer_post_json(
             timeout=timeout,
             context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
         ) as response:
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
@@ -567,7 +587,10 @@ def _local_pair_peer(
         context = _pinned_pairing_context("")
     _require_swarm_networking()
     with urlopen(request, timeout=10, context=context) as response:
-        raw = response.read()
+        try:
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
+        except PeerResponseTooLarge as error:
+            raise PeerPairingRejected("peer did not accept pairing request") from error
     try:
         result = json.loads(raw.decode("utf-8")) if raw else {}
     except ValueError as error:  # UnicodeDecodeError is a ValueError too
@@ -729,14 +752,14 @@ def _fetch_peer_info(
             response = connection.getresponse()
             if response.status != 200:
                 raise ValueError("authenticated peer info request did not return HTTP 200")
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
         finally:
             connection.close()
     else:
         context = ssl._create_unverified_context() if urlparse(base).scheme == "https" else None
         _require_swarm_networking()
         with urlopen(request, timeout=timeout, context=context) as response:
-            raw = response.read()
+            raw = _read_capped(response, MAX_PEER_PAIRING_RESPONSE_BYTES)
     payload = json.loads(raw.decode("utf-8")) if raw else {}
     if not isinstance(payload, dict) or str(payload.get("service") or "") != _local_network.DISCOVERY_SERVICE:
         raise ValueError("address did not answer as a Batocera Drone peer")

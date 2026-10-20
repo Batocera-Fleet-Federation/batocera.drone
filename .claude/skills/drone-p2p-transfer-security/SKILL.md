@@ -108,6 +108,12 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     `ValueError`); with one, the answer's certificate must match it before the pin is written. The code
     itself still crosses a cleartext link, so prefer `https://`. Only code-free `tailnet_auto_pair` (WireGuard,
     source-address authorised) may pair over `http://` unanchored.
+  - **Peer JSON bodies are size-capped (#437):** every peer JSON read in `peer_connectivity.py` goes through
+    `_read_capped` (reads `limit + 1`, raises `PeerResponseTooLarge`, a `ValueError`). Pairing answers and the
+    `_fetch_peer_info` bootstrap fetch use `MAX_PEER_PAIRING_RESPONSE_BYTES` (64 KiB; `_local_pair_peer` turns an
+    oversize body into `PeerPairingRejected` before any pin is written); `_peer_get_json`/`_peer_post_json` use
+    `MAX_PEER_JSON_RESPONSE_BYTES` (8 MiB). Never add a bare `response.read()` for a peer JSON body.
+    Tests: `tests/test_peer_response_size_cap.py`.
   - **No plaintext for TLS-paired peers (#246):** `_local_pair_peer` records
     `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers). It is sticky: `save_paired_peer` keeps it True for a TLS-pinned peer and `_handle_peer_pair` refuses (409) a `scheme=http` re-pair before touching the pinned cert, even with a valid pairing code or tailnet auto-pair.
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and
