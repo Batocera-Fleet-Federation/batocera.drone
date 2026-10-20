@@ -140,7 +140,7 @@ class PairPeerErrorMappingTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
             self.assertIsNone(
-                self.handler._pair_peer_or_reply({"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}, "x", "")
+                self.handler._pair_peer_or_reply({"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}, "x", FINGERPRINT)
             )
 
         status, payload = self.handler._send_json.call_args.args
@@ -180,7 +180,9 @@ class PairingMalformedPortTests(unittest.TestCase):
         peer = {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}
         with mock.patch.object(peer_connectivity._local_network, "save_paired_peer") as save_paired:
             with self.assertRaises(PeerPairingRejected):
-                peer_connectivity._local_pair_peer(mock.MagicMock(device_id="drone-self"), peer, "CODE")
+                peer_connectivity._local_pair_peer(
+                    mock.MagicMock(device_id="drone-self"), peer, "CODE", confirmed_fingerprint=FINGERPRINT
+                )
         return pin, save_paired
 
     def test_non_numeric_api_port_is_rejected_before_the_pin_is_written(self) -> None:

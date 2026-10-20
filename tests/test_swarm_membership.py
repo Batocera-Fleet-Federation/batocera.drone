@@ -514,6 +514,7 @@ class SwarmMembershipHttpTests(unittest.TestCase):
                 "pairing_source": "local_network",
             },
             code,
+            confirmed_fingerprint=str(certificate.get("fingerprint") or ""),
         )
 
     def test_http_join_through_non_central_member_and_removal(self) -> None:

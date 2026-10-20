@@ -547,6 +547,13 @@ def _local_pair_peer(
             # The pairing code must never travel in cleartext to a peer that
             # was paired over TLS.
             raise PeerPairingRejected("refusing to pair with a TLS-pinned Drone over plaintext http")
+        if not anchor and not tailnet_auto_pair:
+            # Without an out-of-band anchor, nothing on the plaintext path
+            # distinguishes the target from an on-path attacker, and the answer
+            # would be pinned on its own say-so. Refuse before anything is sent.
+            raise ValueError(
+                "pairing over plaintext http requires the certificate fingerprint shown on that Drone's pairing screen"
+            )
         context = None
     elif anchor:
         context = _pairing_tls_context(address, anchor)

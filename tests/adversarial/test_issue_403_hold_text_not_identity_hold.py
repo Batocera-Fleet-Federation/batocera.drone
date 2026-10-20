@@ -23,7 +23,7 @@ class HoldTextIsNotIdentityHoldTests(unittest.TestCase):
 
     def _pair(self, error: BaseException):
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=error):
-            self.assertIsNone(self.handler._pair_peer_or_reply(dict(PEER), "x", ""))
+            self.assertIsNone(self.handler._pair_peer_or_reply(dict(PEER), "x", "ab" * 32))
         return self.handler._send_json.call_args.args
 
     def test_hold_text_without_errno_is_a_connection_failure(self) -> None:
@@ -43,10 +43,10 @@ class HoldTextIsNotIdentityHoldTests(unittest.TestCase):
         settings = mock.MagicMock()
         with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=False):
             with self.assertRaises(PeerIdentityHold):
-                peer_connectivity._local_pair_peer(settings, dict(PEER), "x")
+                peer_connectivity._local_pair_peer(settings, dict(PEER), "x", confirmed_fingerprint="ab" * 32)
         # Through the handler, with the real _local_pair_peer, the closed gate is a 503.
         with mock.patch.object(peer_connectivity, "_identity_swarm_networking_allowed", return_value=False):
-            self.assertIsNone(self.handler._pair_peer_or_reply(dict(PEER), "", ""))
+            self.assertIsNone(self.handler._pair_peer_or_reply(dict(PEER), "", "ab" * 32))
         status, payload = self.handler._send_json.call_args.args
         self.assertEqual(status, 503)
         self.assertEqual(payload["error"], HOLD_TEXT)

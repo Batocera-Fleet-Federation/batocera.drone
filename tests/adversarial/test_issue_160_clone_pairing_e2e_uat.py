@@ -165,7 +165,8 @@ class Process:
         return self.request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": f"http://127.0.0.1:{other.main_port}", "pairing_code": other.pairing_code()},
+            {"address": f"http://127.0.0.1:{other.main_port}", "pairing_code": other.pairing_code(),
+             "certificate_fingerprint": other.info()["certificate_fingerprint"]},
             headers=self.login(),
         )
 

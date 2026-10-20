@@ -349,7 +349,8 @@ class FlatEntrypointPairingUAT(unittest.TestCase):
         status, payload = beta.request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": code},
+            {"address": f"http://127.0.0.1:{alpha.main_port}", "pairing_code": code,
+             "certificate_fingerprint": alpha.info()["certificate_fingerprint"]},
             headers=beta.login(),
         )
         self.assertEqual(status, 200, msg=f"{payload}\n{alpha.text()[-2000:]}\n{beta.text()[-2000:]}")
