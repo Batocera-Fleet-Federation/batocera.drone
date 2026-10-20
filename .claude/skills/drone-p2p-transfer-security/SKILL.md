@@ -118,6 +118,11 @@ Peer candidates come from **direct pairing**, not a third-party directory:
 - **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
   other online tailnet devices can pair code-free — accepted only when the pairing
   request's source IP is itself an online tailnet address, never from an arbitrary IP.
+  Code-free pairing may only **add** a peer: `_handle_peer_pair` refuses (409) a tailnet-authorised
+  request whose certificate differs from any pin already held for that Drone id (paired row or
+  `local-peer-certs/<id>.crt`, via `_pinned_peer_fingerprints`) before anything is written; changing
+  a pinned certificate needs the pairing code. A rejected fingerprint mismatch restores the previous
+  cache file rather than unlinking it (issue #430).
 - A drone appearing through both LAN and tailnet discovery **deduplicates to one
   paired-peer entry**; local discovery wins when both agree on the same peer.
 - Forgetting a peer (`forget_peer`) is sticky — an explicitly forgotten tailnet peer
