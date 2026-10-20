@@ -803,7 +803,7 @@ def _peer_address(peer: dict) -> Optional[str]:
 
 
 def _peer_address_unchecked(peer: dict) -> Optional[str]:
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
+    scheme = _local_network.peer_scheme(peer) or "https"
     port = _peer_api_port(peer)
     # reachable_url/public_reachable_url are pre-baked strings built (and kept
     # refreshed by the LAN discovery beacon) using the admin/browser api_port.
@@ -899,7 +899,7 @@ def _peer_address_candidates(
         if value and value not in discovered:
             discovered.append(value)
 
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip().lower() or "https"
+    scheme = _local_network.peer_scheme(peer) or "https"
     port = _peer_api_port(peer)
     port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
 
