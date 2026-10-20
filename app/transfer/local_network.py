@@ -321,6 +321,21 @@ def normalize_peer_url(value: object) -> str:
         return ""
 
 
+def peer_scheme(peer: Optional[dict]) -> str:
+    """Return the explicitly recorded route scheme, or "" when neither alias is set.
+
+    ``scheme`` and ``protocol`` are both read as evidence of the transport. If
+    either names https the peer is treated as https, so a conflicting or
+    mixed-case alias can never make a TLS-pinned peer look cleartext. An unset
+    scheme stays "" so callers keep their own default.
+    """
+    record = dict(peer or {})
+    values = [str(record.get(key) or "").strip().lower() for key in ("scheme", "protocol")]
+    if "https" in values:
+        return "https"
+    return next((value for value in values if value), "")
+
+
 def peer_requires_tls(peer: Optional[dict]) -> bool:
     """True for a peer that must never be dialed or rewritten to cleartext.
 
@@ -333,7 +348,7 @@ def peer_requires_tls(peer: Optional[dict]) -> bool:
         return True
     if not str(record.get("certificate_fingerprint") or "").strip():
         return False
-    if str(record.get("scheme") or record.get("protocol") or "").strip().lower() == "https":
+    if peer_scheme(record) == "https":
         return True
     return any(str(record.get(key) or "").strip().lower().startswith("https://") for key in _PEER_URL_KEYS)
 
