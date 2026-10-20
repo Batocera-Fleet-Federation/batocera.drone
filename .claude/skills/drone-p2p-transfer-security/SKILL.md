@@ -129,6 +129,10 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   A newer removal beats an older add and is forwarded the same way. Gossip must
   not replace a fingerprint already pinned for that drone id. An explicit re-pair
   is a new approval and can rejoin; a stale add cannot.
+- A trust pin is only ever a parseable X.509 certificate. `_certificate_pem_fingerprint`
+  (`transfer/drone_network.py`) hands the PEM to OpenSSL via `load_verify_locations`
+  before hashing; base64 decoding alone is not validation. Malformed input raises
+  `ValueError` before `_save_local_peer_certificate` writes anything (#423).
 
 Peer metadata should be refreshed periodically and stored locally; never treat a
 cached address as proof of live connectivity — that's what connectivity checks are for.

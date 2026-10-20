@@ -78,5 +78,12 @@ def _network_mode(settings: Settings) -> str:
 
 
 def _certificate_pem_fingerprint(pem: str) -> str:
-    der = ssl.PEM_cert_to_DER_cert(str(pem or ""))
+    # Base64-decoding alone accepts any blob between the PEM markers; the trust pin
+    # must be an X.509 certificate, so let OpenSSL parse it before hashing.
+    text = str(pem or "")
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=text)
+        der = ssl.PEM_cert_to_DER_cert(text)
+    except (ssl.SSLError, ValueError) as error:
+        raise ValueError("peer certificate is not a valid X.509 certificate") from error
     return hashlib.sha256(der).hexdigest()
