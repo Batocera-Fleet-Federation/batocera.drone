@@ -7,6 +7,7 @@ removal converges so the removed Drone is no longer an active member.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import socket
@@ -215,6 +216,31 @@ class SwarmMembershipTests(unittest.TestCase):
             )
             self.assertNotIn("drone-c", _roster(drones["drone-a"]))
         self.assertNotEqual(real_fingerprint, "0" * 64)
+
+    def test_zero_length_certificate_card_is_not_pinned_by_gossip(self) -> None:
+        # #424: a body that base64-decodes to zero bytes must not hash to the empty-input
+        # digest and be pinned, even when the card claims that digest itself.
+        drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c")}
+        self._approve(drones["drone-a"], drones["drone-b"])
+        empty_digest = hashlib.sha256(b"").hexdigest()
+        card = {
+            "reachable_url": "https://127.0.0.1/drone-c",
+            "scheme": "https",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
+            "certificate_fingerprint": empty_digest,
+        }
+        with mock.patch("app.transfer.peer_connectivity._save_local_peer_certificate") as save_cert:
+            swarm_membership.handle_membership_request(
+                drones["drone-a"],
+                {"records": [{"peer_id": "drone-c", "op": "add", "epoch": 5, "origin": "drone-b", "card": card}]},
+                "drone-b",
+            )
+        save_cert.assert_not_called()
+        self.assertNotIn("drone-c", _roster(drones["drone-a"]))
+        self.assertNotIn(
+            empty_digest,
+            {str(peer.get("certificate_fingerprint") or "") for peer in local_network.paired_peers(drones["drone-a"])},
+        )
 
     def test_gossip_cannot_replace_a_pinned_fingerprint(self) -> None:
         drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c", "drone-d")}
