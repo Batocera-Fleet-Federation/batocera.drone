@@ -9,6 +9,7 @@ cannot be persisted, the physical NIC MAC (or ``uuid.getnode()``) is used as bef
 Pure stdlib, no Drone-internal dependencies.
 """
 
+import hashlib
 import os
 import re
 import secrets
@@ -146,7 +147,15 @@ def _runtime_machine_id() -> str:
     return ":".join(f"{(node >> shift) & 0xff:02x}" for shift in range(40, -1, -8))
 
 
-def _machine_id(userdata_root: Optional[Path] = None) -> str:
+def _path_derived_machine_id(userdata_root: Path) -> str:
+    """A stable, MAC-shaped, locally administered id derived from the root path (never the NIC)."""
+    digest = hashlib.sha256(f"drone-fake-identity:{userdata_root}".encode("utf-8")).digest()
+    octets = bytearray(digest[:6])
+    octets[0] = (octets[0] | 0x02) & 0xFE
+    return ":".join(f"{octet:02x}" for octet in octets)
+
+
+def _machine_id(userdata_root: Optional[Path] = None, *, host_fallback: bool = True) -> str:
     if userdata_root is None:
         return _runtime_machine_id()
     path = _device_id_path(userdata_root)
@@ -156,7 +165,8 @@ def _machine_id(userdata_root: Optional[Path] = None) -> str:
     # The first boot must not adopt the NIC's MAC: installs on one host would share it and
     # refuse each other as "this Drone itself". The random id is persisted before use so
     # every later start agrees. If it cannot be persisted, fall back to the NIC-derived id
-    # instead of one that would change on every start.
+    # instead of one that would change on every start. Fake-data callers opt out of that
+    # host-derived fallback and get a stable root-derived id instead.
     generated = random_device_id()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +174,8 @@ def _machine_id(userdata_root: Optional[Path] = None) -> str:
         pass
     if _write_persisted_machine_id(userdata_root, generated):
         return generated
+    if not host_fallback:
+        return _path_derived_machine_id(userdata_root)
     return next(iter(_physical_mac_candidates()), None) or _runtime_machine_id()
 
 
@@ -177,4 +189,5 @@ def _fake_machine_id(userdata_root: Path) -> str:
     # cwd guard here so an empty/dot root is rejected before identity generation.
     normalized_root = Path(os.fspath(userdata_root))
     _device_id_path(normalized_root)
-    return _machine_id(normalized_root)
+    # Never the NIC-derived fallback: an unwritable root must not leak the host's MAC.
+    return _machine_id(normalized_root, host_fallback=False)

@@ -77,6 +77,12 @@ class FakeDataIdentityBoundaryTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="issue-199-fake-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
+    def assert_not_host_derived(self, value: str) -> None:
+        # #452: an unpersistable fake-data root must never hand out the NIC or runtime node id.
+        self.assertRegex(value, MAC_SHAPED)
+        self.assertNotEqual(value, HOST_MAC)
+        self.assertNotEqual(value, RUNTIME_MAC)
+
     def assert_fresh_logical_id(self, value: str, label: str = "device_id") -> None:
         self.assertRegex(value, MAC_SHAPED, f"{label} {value!r} is not MAC-shaped")
         self.assertEqual(
@@ -198,7 +204,7 @@ class FakeDataIdentityBoundaryTests(unittest.TestCase):
         self.assertEqual(custom.read_text(encoding="utf-8").strip(), settings.device_id)
         self.assertFalse(persist_path(root).exists())
 
-    def test_device_id_path_that_is_a_directory_falls_back_to_the_nic(self) -> None:
+    def test_device_id_path_that_is_a_directory_never_falls_back_to_the_nic(self) -> None:
         root = self.tmp / "dir-collision"
         path = persist_path(root)
         path.mkdir(parents=True)
@@ -207,9 +213,9 @@ class FakeDataIdentityBoundaryTests(unittest.TestCase):
             return_value=[HOST_MAC],
         ), mock.patch("app.common.device_identity._runtime_machine_id", return_value=RUNTIME_MAC):
             value = _fake_machine_id(root)
-        self.assertEqual(value, HOST_MAC)
+        self.assert_not_host_derived(value)
 
-    def test_unwritable_parent_falls_back_to_the_nic(self) -> None:
+    def test_unwritable_parent_never_falls_back_to_the_nic(self) -> None:
         root = self.tmp / "readonly"
         parent = persist_path(root).parent
         parent.mkdir(parents=True)
@@ -226,9 +232,9 @@ class FakeDataIdentityBoundaryTests(unittest.TestCase):
                 return
         if os.access(parent, os.W_OK):
             self.skipTest("host allowed writes to a user-readonly directory")
-        self.assertEqual(value, HOST_MAC)
+        self.assert_not_host_derived(value)
 
-    def test_empty_nic_list_falls_back_to_runtime_id_when_persist_fails(self) -> None:
+    def test_empty_nic_list_never_falls_back_to_runtime_id_when_persist_fails(self) -> None:
         root = self.tmp / "no-nic"
         root.mkdir()
         with mock.patch.dict("os.environ", fake_env(root), clear=True), mock.patch(
@@ -238,7 +244,9 @@ class FakeDataIdentityBoundaryTests(unittest.TestCase):
             "app.common.device_identity._write_persisted_machine_id",
             return_value=False,
         ), mock.patch("app.common.device_identity._runtime_machine_id", return_value=RUNTIME_MAC):
-            self.assertEqual(_fake_machine_id(root), RUNTIME_MAC)
+            value = _fake_machine_id(root)
+            self.assertEqual(value, _fake_machine_id(root))
+        self.assert_not_host_derived(value)
 
     def test_fake_machine_id_without_userdata_root_is_not_the_settings_path(self) -> None:
         """Settings always passes USERDATA_ROOT; the no-root helper must not be what from_env uses."""
