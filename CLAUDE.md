@@ -212,6 +212,9 @@ password, persists only its hash, and writes the plaintext to a 0600 `initial-pa
 credentials file (never logged/returned over HTTP; `update()` deletes it; deleting it before the first
 change regenerates). Loopback stays pre-authenticated, so the on-device UI can set real credentials. Tests
 that need to log in pass `env_password=` or call `update()`.
+The legacy credentials path must be file-shaped **and not an existing directory**
+(`require_legacy_file_path`, checked in `__init__` and again at the top of `update()` before any write, so a
+failed update never leaves new credentials behind); a symlink is accepted wherever it points because `unlink` removes only the link.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
 

@@ -212,6 +212,9 @@ class DroneCredentialStore:
         if len(password) < 8:
             raise ValueError("password must be at least 8 characters")
         with self._lock:
+            # Re-validate right before mutating: the entry may have become a directory since
+            # __init__, and unlinking it after the database write would fail a changed update.
+            _require_legacy_file_path(self.path)
             data = {
                 "username": username,
                 "password_hash": self._hash_password(password),
