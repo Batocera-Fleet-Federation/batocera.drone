@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -60,6 +62,32 @@ def test_ci_workflow_does_not_duplicate_main_push_release():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     assert "pull_request:" in workflow
     assert "  push:" not in workflow
+
+
+def test_docker_publish_survives_slow_multi_line_tag_listing():
+    # Regression: `git tag ... | head -n 1` exited 141 under pipefail when git was
+    # still writing after head closed the pipe (CI run on ai-main, #575). A slow
+    # multi-line `git` stand-in reproduces that race deterministically.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_git = Path(tmp) / "git"
+        fake_git.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'v0.1.1\\n'\n"
+            "sleep 0.3\n"
+            "printf 'v0.1.0\\n'\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        # Other suites can leave os.environ without PATH; fall back to the default search path.
+        env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', os.defpath)}"}
+        result = subprocess.run(
+            ["bash", str(DOCKER_SCRIPT), "--dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    assert "Version: v0.1.2" in result.stdout
 
 
 def test_docker_publish_accepts_release_workflow_version():

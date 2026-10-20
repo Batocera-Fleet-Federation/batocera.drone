@@ -33,7 +33,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$VERSION" ]]; then
-  latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+  # Capture all tags before taking the first line: `git | head -n 1` can SIGPIPE
+  # git once head exits, which pipefail turns into a failed validation (exit 141).
+  tags="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname)"
+  latest_tag="${tags%%$'\n'*}"
   if [[ -z "$latest_tag" ]]; then
     VERSION="v0.1.0"
   else
