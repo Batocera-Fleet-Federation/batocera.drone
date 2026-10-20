@@ -71,11 +71,14 @@ class MixedCaseAnchorAndSchemeRecordingTests(unittest.TestCase):
         peer = {"drone_id": "victim", "reachable_url": "HtTpS://cabinet.local", "certificate_fingerprint": ""}
         self.assertTrue(self.handler._pairing_certificate_anchored(peer, ""))
 
-    def test_plaintext_route_in_any_case_has_nothing_to_pin(self) -> None:
+    def test_plaintext_route_in_any_case_still_needs_an_anchor(self) -> None:
+        # Issue #431: the answering certificate is pinned on first contact, so a
+        # cleartext route is anchored only by a confirmed or already-pinned fingerprint.
         for spelling in CLEARTEXT:
             with self.subTest(spelling=spelling):
                 peer = {"drone_id": "lan", "reachable_url": f"{spelling}://192.168.1.20:8080"}
-                self.assertTrue(self.handler._pairing_certificate_anchored(peer, ""))
+                self.assertFalse(self.handler._pairing_certificate_anchored(peer, ""))
+                self.assertTrue(self.handler._pairing_certificate_anchored(peer, PIN))
 
     def test_operator_typed_https_address_is_recorded_as_tls_in_any_case(self) -> None:
         for spelling in SPELLINGS:

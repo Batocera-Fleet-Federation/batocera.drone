@@ -80,7 +80,7 @@ class LocalCertificateWriteAfterPeerAcceptsTests(_PairingSetupCase):
         cache_dir.chmod(0o500)
         self.addCleanup(cache_dir.chmod, 0o700)
 
-        result = self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "")
+        result = self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ee" * 32)
 
         self.assertIsNone(result)
         status, payload = self._reply()
@@ -94,7 +94,7 @@ class LocalCertificateWriteAfterPeerAcceptsTests(_PairingSetupCase):
         denied = PermissionError(errno.EACCES, "Permission denied", str(cache_path))
         self._patch(peer_connectivity, "_save_local_peer_certificate", side_effect=denied)
 
-        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
         status, payload = self._reply()
         self.assertNotIn(UNREACHABLE, payload["error"])
@@ -113,7 +113,7 @@ class LocalFailureBeforeContactingPeerTests(_PairingSetupCase):
                     code, os.strerror(code), str(self.root / "drone.key")
                 )
 
-                self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+                self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
                 status, payload = self._reply()
                 self.assertEqual(status, 500)
@@ -125,7 +125,7 @@ class LocalFailureBeforeContactingPeerTests(_PairingSetupCase):
     def test_errno_less_permission_error_from_certificate_setup_is_not_unreachable(self) -> None:
         self.certificate_manager.return_value.ensure_certificate.side_effect = PermissionError("denied")
 
-        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
         status, payload = self._reply()
         self.assertEqual(status, 500)
@@ -138,7 +138,7 @@ class LocalFailureBeforeContactingPeerTests(_PairingSetupCase):
         denied = PermissionError(errno.EACCES, "Permission denied", str(self.root / "identity" / "binding.json"))
         self._patch(peer_connectivity._local_network, "discovery_payload", side_effect=denied)
 
-        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
         status, payload = self._reply()
         self.assertNotIn(UNREACHABLE, payload["error"])
@@ -150,7 +150,7 @@ class ClassificationGuardTests(_PairingSetupCase):
     def test_genuine_network_failure_is_still_unreachable(self) -> None:
         self.urlopen.side_effect = URLError("timed out")
 
-        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
         status, payload = self._reply()
         self.assertEqual(status, 502)
@@ -162,7 +162,7 @@ class ClassificationGuardTests(_PairingSetupCase):
             errno.EACCES, "Permission denied", str(self.root / "drone.key")
         )
 
-        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, ""))
+        self.assertIsNone(self.handler._pair_peer_or_reply(PEER, PAIRING_CODE, "ab" * 32))
 
         status, payload = self._reply()
         self.assertEqual(status, 503)

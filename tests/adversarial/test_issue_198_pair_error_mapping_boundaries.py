@@ -234,7 +234,7 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
             return error.code, parsed
 
     def _pair_by_address(self, pairing_code="not-a-code", address=None, **extra):
-        payload = {"address": address or self.peer.url, "pairing_code": pairing_code}
+        payload = {"address": address or self.peer.url, "pairing_code": pairing_code, "certificate_fingerprint": "ab" * 32}
         payload.update(extra)
         return self._request("POST", "/v1/api/admin/local-network/pair-by-address", payload)
 
@@ -266,10 +266,10 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
 
     def test_empty_and_missing_and_whitespace_codes_are_peer_rejects_not_500(self) -> None:
         for body in (
-            {"address": self.peer.url, "pairing_code": ""},
-            {"address": self.peer.url},
-            {"address": self.peer.url, "pairing_code": "   "},
-            {"address": self.peer.url, "pairing_code": ["not-a-code"]},
+            {"address": self.peer.url, "pairing_code": "", "certificate_fingerprint": "ab" * 32},
+            {"address": self.peer.url, "certificate_fingerprint": "ab" * 32},
+            {"address": self.peer.url, "pairing_code": "   ", "certificate_fingerprint": "ab" * 32},
+            {"address": self.peer.url, "pairing_code": ["not-a-code"], "certificate_fingerprint": "ab" * 32},
         ):
             with self.subTest(body=body):
                 status, payload = self._request(
@@ -337,7 +337,7 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
         status, payload = self._request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": self.peer.url, "pairing_code": "not-a-code"},
+            {"address": self.peer.url, "pairing_code": "not-a-code", "certificate_fingerprint": "ab" * 32},
             auth=False,
         )
         # Loopback callers are pre-authenticated; the wrong code is still a
@@ -400,7 +400,7 @@ class PairErrorMappingBoundaryTests(unittest.TestCase):
         with mock.patch.object(
             handlers_network, "_local_pair_peer", side_effect=URLError("timed out")
         ):
-            result = handler._pair_peer_or_reply({"drone_id": PEER_ID, "reachable_url": self.peer.url}, "x")
+            result = handler._pair_peer_or_reply({"drone_id": PEER_ID, "reachable_url": self.peer.url}, "x", "ab" * 32)
         self.assertIsNone(result)
         status, payload = handler._send_json.call_args.args
         self.assertEqual(status, 502)

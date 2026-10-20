@@ -210,7 +210,7 @@ class PairRejectionBoundaryTests(unittest.TestCase):
         return self._request(
             "POST",
             "/v1/api/admin/local-network/pair-by-address",
-            {"address": self.peer.url, "pairing_code": pairing_code},
+            {"address": self.peer.url, "pairing_code": pairing_code, "certificate_fingerprint": "ab" * 32},
         )
 
     def _paired_ids(self) -> set[str]:

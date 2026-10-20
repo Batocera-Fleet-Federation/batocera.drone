@@ -649,7 +649,8 @@ class HandlersNetworkMixin:
         the peer-info response comes from the same untrusted source as the
         address and is never a substitute.
         """
-        if pairing_code and not self._pairing_certificate_anchored(peer, confirmed_fingerprint):
+        cleartext = not (_peer_address(peer) or "").startswith("https://")
+        if (pairing_code or cleartext) and not self._pairing_certificate_anchored(peer, confirmed_fingerprint):
             self._send_json(
                 400,
                 {
@@ -696,9 +697,9 @@ class HandlersNetworkMixin:
         return None
 
     def _pairing_certificate_anchored(self, peer: dict, confirmed_fingerprint: str) -> bool:
-        address = _peer_address(peer) or ""
-        if not address.startswith("https://"):
-            return True  # cleartext address: nothing to pin, the operator typed it
+        # A cleartext address is no exception: the answering certificate is
+        # pinned, so it must match a fingerprint the operator confirmed (or one
+        # already pinned) or an on-path attacker could substitute its own.
         confirmed = str(confirmed_fingerprint or "").strip()
         if confirmed:
             # Malformed input must not count as an anchor: it normalizes to

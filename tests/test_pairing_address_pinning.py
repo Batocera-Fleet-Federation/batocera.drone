@@ -120,11 +120,22 @@ class PairCodeRequiresCertificateAnchorTests(unittest.TestCase):
             self.handler._pair_peer_or_reply(self.peer, "12345678")
         pair.assert_called_once()
 
-    def test_cleartext_address_has_nothing_to_pin(self) -> None:
+    def test_cleartext_address_still_needs_a_confirmed_fingerprint(self) -> None:
         peer = {**self.peer, "reachable_url": "http://127.0.0.1:8080"}
-        with mock.patch.object(handlers_network, "_local_pair_peer", return_value={"drone_id": "peer-a"}) as pair:
+        with mock.patch.object(handlers_network, "_local_pair_peer") as pair, \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=None):
             self.handler._pair_peer_or_reply(peer, "12345678")
-        pair.assert_called_once()
+        pair.assert_not_called()
+        status, payload = self.handler._send_json.call_args.args
+        self.assertEqual(status, 400)
+        self.assertTrue(payload["certificate_fingerprint_required"])
+
+    def test_cleartext_address_with_confirmed_fingerprint_is_forwarded(self) -> None:
+        peer = {**self.peer, "reachable_url": "http://127.0.0.1:8080"}
+        with mock.patch.object(handlers_network, "_local_pair_peer", return_value={"drone_id": "peer-a"}) as pair, \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=None):
+            self.handler._pair_peer_or_reply(peer, "12345678", FINGERPRINT)
+        self.assertEqual(pair.call_args.kwargs["confirmed_fingerprint"], FINGERPRINT)
 
 
 class LocalPairPeerPinTests(unittest.TestCase):

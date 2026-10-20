@@ -129,7 +129,8 @@ class LocalPairPeerBranchGuardTests(_Case):
 
     def test_cleartext_http_branch(self) -> None:
         self._assert_held_before_post(
-            {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080", "scheme": "http"}
+            {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080", "scheme": "http"},
+            confirmed_fingerprint=FINGERPRINT,
         )
 
     def test_https_without_a_trust_anchor_branch(self) -> None:

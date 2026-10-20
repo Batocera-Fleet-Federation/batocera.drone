@@ -101,7 +101,13 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     (`certificate_fingerprint` on the pair requests; `pairing.certificate_fingerprint` in the
     status payload). `_local_pair_peer` enforces it on the same TLS connection
     (`_PinnedFingerprintContext`) and checks the returned cert before touching the pin file;
-    `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for https peers without one.
+    `_pair_peer_or_reply` returns 400 `certificate_fingerprint_required` for peers without one.
+  - **Plaintext `http://` pairing is anchored too (#431):** the answering certificate is pinned on first
+    contact, so an `http://` pair-by-address with neither a pinned record nor an operator-confirmed
+    fingerprint is refused before anything is sent (handler 400 for any code, `_local_pair_peer`
+    `ValueError`); with one, the answer's certificate must match it before the pin is written. The code
+    itself still crosses a cleartext link, so prefer `https://`. Only code-free `tailnet_auto_pair` (WireGuard,
+    source-address authorised) may pair over `http://` unanchored.
   - **No plaintext for TLS-paired peers (#246):** `_local_pair_peer` records
     `paired_over_tls` (true only when pairing used `https://`; announcements cannot set it; the inbound `_handle_peer_pair` and swarm-roster gossip also set it for https peers). It is sticky: `save_paired_peer` keeps it True for a TLS-pinned peer and `_handle_peer_pair` refuses (409) a `scheme=http` re-pair before touching the pinned cert, even with a valid pairing code or tailnet auto-pair.
     For such peers `_peer_address_candidates`/`_peer_address` drop non-https routes and

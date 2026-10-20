@@ -51,7 +51,7 @@ class PeerRejectionEscapesHandlerTests(unittest.TestCase):
         response.__enter__.return_value.read.return_value = json.dumps({"status": "queued"}).encode("utf-8")
         peer = {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
-            self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", ""))
+            self.assertIsNone(self.handler._pair_peer_or_reply(peer, "x", "ab" * 32))
 
         status, payload = self.handler._send_json.call_args.args
         self.assertEqual(status, 502)
