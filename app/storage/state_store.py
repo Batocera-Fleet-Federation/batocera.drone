@@ -102,8 +102,13 @@ def database_path(userdata_root: PathLike[str] | str) -> Path:
 
 
 def _is_file_shaped(legacy: Path) -> bool:
-    """Return whether *legacy* has a final file name (not '', '.', '..' or a bare root)."""
-    return not (legacy.name in ("", "..") or not legacy.parts or legacy == legacy.anchor)
+    """Return whether *legacy* has a visible final file name (not '', '.', '..', a bare root or invisible text)."""
+    return not (
+        legacy.name in ("", "..")
+        or not legacy.parts
+        or legacy == legacy.anchor
+        or _is_blank_path_text(legacy.name)
+    )
 
 
 def require_legacy_file_path(path: PathLike[str] | str) -> Path:
@@ -111,7 +116,8 @@ def require_legacy_file_path(path: PathLike[str] | str) -> Path:
 
     A legacy file must have a file name. '', '.', './', '/' and '..' normalize to a directory
     (or the root): deriving a database from them would land beside the parent, and callers
-    that later unlink the legacy file would target the directory itself.
+    that later unlink the legacy file would target the directory itself. A final name made only
+    of whitespace or invisible characters (U+3164, U+2800, U+200B, ...) is just as unnameable.
     """
     _require_filesystem_path(path, "path")
     legacy = Path(path)
