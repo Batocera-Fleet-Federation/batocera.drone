@@ -990,6 +990,14 @@ def resolve_recovery(settings: Any, action: str, provider: Optional[HardwareIden
 # ------------------------------------------------------------------ main entry
 
 
+def _relative_userdata_root(settings: Any) -> bool:
+    """True only for a real path string/PathLike that is not absolute (mocks are left to _require_real_path)."""
+    root = getattr(settings, "userdata_root", None)
+    if _is_mock_path(root) or not isinstance(root, (str, os.PathLike)):
+        return False
+    return not Path(root).is_absolute()
+
+
 def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] = None) -> IdentityResult:
     """Validate (or provision) this Drone's identity. Idempotent; call before any networking."""
     _publish(State.VALIDATING, "", "", False)
@@ -999,6 +1007,12 @@ def ensure_identity(settings: Any, provider: Optional[HardwareIdentityProvider] 
         _publish(State.READY, STATUS_MANAGED, managed, True)
         _log(f"Identity lifecycle is managed externally ({managed}); clone detection skipped")
         return IdentityResult(settings, State.READY, STATUS_MANAGED, reason=managed)
+    if _relative_userdata_root(settings):
+        # A relative root would resolve identity and key files against the process working
+        # directory. Hold with a named misconfiguration instead of writing anywhere.
+        _log("USERDATA_ROOT must be an absolute path; identity provisioning is held and nothing was written")
+        _publish(State.RECOVERY_REQUIRED, STATUS_RECOVERY, "relative_userdata_root", False)
+        return IdentityResult(settings, State.RECOVERY_REQUIRED, STATUS_RECOVERY, reason="relative_userdata_root", swarm_networking_enabled=False)
     provider = provider or HardwareIdentityProvider()
     try:
         with _ProvisioningLock(settings):
