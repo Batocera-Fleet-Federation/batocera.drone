@@ -792,7 +792,13 @@ def _url_host(value: object) -> str:
 def _peer_address(peer: dict) -> Optional[str]:
     address = _local_network.normalize_peer_url(_peer_address_unchecked(peer)) or None
     if address and _peer_requires_tls(peer) and urlparse(address).scheme != "https":
-        return None
+        # The pre-baked route is cleartext and must never be dialed, but the record
+        # may still carry an https route (tailnet/LAN/IP). Offer the same first
+        # https route that _peer_address_candidates would, instead of giving up.
+        return next(
+            (value for value in _peer_address_candidates(peer) if urlparse(value).scheme == "https"),
+            None,
+        )
     return address
 
 
