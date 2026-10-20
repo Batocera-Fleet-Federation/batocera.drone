@@ -34,6 +34,7 @@ from urllib.error import HTTPError, URLError
 from app.mock_data import seed_mock_userdata
 from app.storage.state_store import database_path, load_payload
 from app.transfer import local_network
+from app.transfer.peer_connectivity import PeerIdentityHold
 from app.transfer.peer_workers import stop_local_network_workers
 from app.web import handlers_network
 
@@ -299,7 +300,7 @@ class PairHelperMappingTests(unittest.TestCase):
         self.assertEqual(payload["error"], "That drone did not accept the pairing request.")
 
     def test_identity_hold_is_still_503_not_a_peer_rejection(self) -> None:
-        hold = PermissionError(HOLD_MESSAGE)
+        hold = PeerIdentityHold(HOLD_MESSAGE)
         with mock.patch.object(handlers_network, "_local_pair_peer", side_effect=hold):
             self.assertIsNone(self.handler._pair_peer_or_reply(self.peer, "x", FINGERPRINT))
         status, payload = self.handler._send_json.call_args.args
