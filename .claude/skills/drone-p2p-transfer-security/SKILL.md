@@ -244,7 +244,8 @@ Rules:
     log (`record_collision`). A cloned disk must reprovision its own identity automatically and
     must never publish a membership removal/tombstone for the original.
 14. While identity is unresolved (`RECOVERY_REQUIRED`) no `/peer/*` route is served on any
-    listener and `_drone_client_ssl_context` refuses to present the client certificate.
+    listener and `_drone_client_ssl_context` refuses to present the client certificate. The check
+    precedes the scheme test, so cleartext `http://` peer calls are held as well (`PeerIdentityHold`).
 
 The application-created certificate system defines:
 

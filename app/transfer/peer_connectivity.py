@@ -160,12 +160,14 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     callers decide ``verify``/``cafile`` based on what trust material (if any) they
     have for the destination.
     """
+    if not _identity_swarm_networking_allowed():
+        # Identity unresolved (clone suspected / recovery required): no outbound peer
+        # traffic at all -- cleartext http:// peers included, and the inherited client
+        # certificate must not be presented to any peer. Checked before the scheme test so
+        # http:// peer GET/POST/download calls cannot bypass the hold.
+        raise PeerIdentityHold("peer connections are held pending Drone identity verification")
     if urlparse(url).scheme != "https":
         return None
-    if not _identity_swarm_networking_allowed():
-        # Identity unresolved (clone suspected / recovery required): the inherited client
-        # certificate must not be presented to any peer.
-        raise PeerIdentityHold("peer connections are held pending Drone identity verification")
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
     if verify and cafile:
         # The pinned peer certificate was captured directly at pairing time; its
@@ -1029,7 +1031,7 @@ def _peer_get_json_for_peer(
             )
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return payload, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             # The peer answered and rejected the request; changing routes
             # cannot make an authorization or endpoint error succeed.
             raise
@@ -1094,7 +1096,7 @@ def _peer_post_json_for_peer(
             )
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return response, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             raise
         except (OSError, URLError, ssl.SSLError) as error:
             last_error = _more_diagnostic_error(last_error, error)
@@ -1157,7 +1159,7 @@ def _peer_download_file_for_peer(
                     output.write(chunk)
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return total, address
-        except HTTPError:
+        except (HTTPError, PeerIdentityHold):
             raise
         except ValueError:
             try:
