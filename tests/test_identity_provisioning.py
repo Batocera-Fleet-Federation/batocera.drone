@@ -847,7 +847,9 @@ class SwarmIsolationTests(ProvisioningTestBase):
         identity._publish(State.RECOVERY_REQUIRED, identity.STATUS_RECOVERY, "x", False)
         with self.assertRaises(PermissionError):
             _drone_client_ssl_context(settings, "https://10.0.0.5:8543")
-        self.assertIsNone(_drone_client_ssl_context(settings, "http://10.0.0.5"))
+        # Cleartext http:// peers are held too (#411).
+        with self.assertRaises(PermissionError):
+            _drone_client_ssl_context(settings, "http://10.0.0.5")
 
     def test_peer_routes_are_closed_while_identity_unresolved(self) -> None:
         from app.web.api_routes import ApiRoutesMixin
