@@ -244,7 +244,7 @@ let tailnetDiscoveryCachedAt = 0;
 let tailnetDiscoveryPromise = null;
 // This Drone's own configured peer ROM references (NFS-preferred, SMB fallback),
 // keyed by peer_id -- populated by renderSwarmPage(), read by
-// renderSwarmDroneCard() so each peer's card can show whether it's currently
+// renderSwarmDroneCard() so each peer's row can show whether it's currently
 // referenced and by the system-info pill in loadSystemInfoBar().
 let swarmNetworkSharesByPeer = {};
 let vpnTimer = null;
@@ -506,10 +506,9 @@ async function apiPost(url, payload) {
 }
 
 // probe=false asks the server to skip peer probing and answer immediately
-// from stored state. Only the Swarm page uses it (it probes each peer itself
-// afterwards); every other caller keeps the probing default, and the two
-// shapes are cached separately so an unprobed payload can never be served to
-// a caller that needs live online/offline state.
+// from stored state. Swarm probes each peer in the background and shares the
+// completed result with Downloads. Unprobed payloads are never cached as live
+// online/offline state.
 async function loadSwarmOverview(force = false, { probe = true } = {}) {
   const now = Date.now();
   if (!probe) {
@@ -519,16 +518,18 @@ async function loadSwarmOverview(force = false, { probe = true } = {}) {
     // message instead of leaving the page spinning on a busy Drone.
     return await api("/admin/swarm/overview?probe=0", { timeoutMs: 20000 });
   }
+  if (swarmOverviewPromise) return swarmOverviewPromise;
   if (!force && swarmOverviewCache && now - swarmOverviewCachedAt < SWARM_DATA_CACHE_TTL_MS) {
     return swarmOverviewCache;
   }
-  if (swarmOverviewPromise) return swarmOverviewPromise;
   const request = api("/admin/swarm/overview");
   swarmOverviewPromise = request;
   try {
     const overview = await request;
-    swarmOverviewCache = overview;
-    swarmOverviewCachedAt = Date.now();
+    if (swarmOverviewPromise === request) {
+      swarmOverviewCache = overview;
+      swarmOverviewCachedAt = Date.now();
+    }
     return overview;
   } finally {
     if (swarmOverviewPromise === request) swarmOverviewPromise = null;
@@ -542,22 +543,18 @@ function swarmProbeMayUpdate(generation) {
   return !!(grid && grid.isConnected && String(grid.dataset.swarmGeneration || "") === String(generation));
 }
 
-// Probe every pending peer in parallel. Each result patches the existing card
-// (badge, stats, buttons) and never replaces the card node or the page, so
+// Probe every pending peer in parallel. Each result patches the existing row
+// (badge, stats, buttons) and never replaces the row node or the page, so
 // scroll position and anything the user is interacting with stay put. Each
 // probe is independently bounded server-side, so a dead peer resolves to an
-// Offline card instead of holding the page.
+// Offline row instead of holding the page.
 async function probeSwarmPeersAsync(drones, generation) {
   const pending = (Array.isArray(drones) ? drones : []).filter(
     (drone) => drone && !drone.is_self && String(drone.drone_id || ""),
   );
-  if (!swarmProbeMayUpdate(generation)) return;
-  if (!pending.length) {
-    swarmSetProbeProgress(0, 0);
-    return;
-  }
+  const resolvedDrones = new Map(drones.map(drone => [String(drone.drone_id || ""), drone]));
   let done = 0;
-  swarmSetProbeProgress(0, pending.length);
+  if (swarmProbeMayUpdate(generation)) swarmSetProbeProgress(0, pending.length);
   await Promise.all(
     pending.map(async (drone) => {
       const droneId = String(drone.drone_id || "");
@@ -568,14 +565,33 @@ async function probeSwarmPeersAsync(drones, generation) {
       } catch (err) {
         resolved = { ...drone, pending: false, online: false, error: err.message || "probe failed" };
       }
-      if (!swarmProbeMayUpdate(generation)) return;
+      resolvedDrones.set(droneId, resolved);
       done += 1;
+      if (!swarmProbeMayUpdate(generation)) return;
       swarmDronesById[droneId] = resolved;
       swarmSetProbeProgress(done, pending.length);
       patchSwarmDroneCard(resolved);
-      syncTailnetPullPeerOptions();
     }),
   );
+  return Array.from(resolvedDrones.values());
+}
+
+// Share Swarm's background probes with Downloads, including across navigation.
+// Only the latest request may publish cached state after a rerender or removal.
+function preloadSwarmConnectedDrones(overview, generation) {
+  const request = probeSwarmPeersAsync(overview.drones || [], generation)
+    .then(drones => {
+      const resolved = { ...overview, drones };
+      if (swarmOverviewPromise === request) {
+        swarmOverviewCache = resolved;
+        swarmOverviewCachedAt = Date.now();
+      }
+      return resolved;
+    })
+    .finally(() => {
+      if (swarmOverviewPromise === request) swarmOverviewPromise = null;
+    });
+  swarmOverviewPromise = request;
 }
 
 function swarmSetProbeProgress(done, total) {
@@ -634,6 +650,8 @@ async function loadTailnetDiscovery(force = false) {
 }
 
 function invalidateSwarmDataCache() {
+  swarmOverviewPromise = null;
+  swarmOverviewCache = null;
   swarmOverviewCachedAt = 0;
   tailnetDiscoveryCachedAt = 0;
 }
@@ -6247,7 +6265,7 @@ function renderArtworkTabBar(active) {
 function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
-    ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
+    ["transfers", "Downloads", "bi-cloud-arrow-down", "#admin/transfers"],
     ...(REFERENCE_ROMS_UI_ENABLED ? [["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"]] : []),
   ]);
 }
@@ -6999,7 +7017,7 @@ async function renderDownloadsPage() {
   try {
     const payload = await api("/admin/downloads");
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Transfers</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Downloads</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
         ${renderDownloadsPanel(payload)}
       </div></div>`;
@@ -8620,67 +8638,6 @@ async function pullVpnConfigFromPeer() {
     await renderVpnPage();
   } catch (err) {
     showToast(`Failed to pull VPN configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
-    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
-  }
-}
-
-// -------------------------------------------------------------- Tailnet sharing
-// No toggle here -- share-eligibility is computed from key provenance, not
-// an operator switch (see renderTailnetShareSection's comment). Peer-picker
-// source is the same as VPN/SMTP's (GET /admin/swarm/overview via loadSwarmOverview).
-function syncTailnetPullPeerOptions() {
-  const select = document.getElementById("tailnetPullPeer");
-  const button = document.getElementById("tailnetPullBtn");
-  if (!select || select === document.activeElement) return;
-  const onlinePeers = Object.values(swarmDronesById).filter((drone) => drone && !drone.is_self && drone.online);
-  const signature = onlinePeers.map((drone) => `${drone.drone_id || ""}\t${drone.name || drone.hostname || ""}`).join("\n");
-  if (button) button.disabled = !onlinePeers.length;
-  if (select.dataset.peerSignature === signature) return;
-  const previous = select.value;
-  select.dataset.peerSignature = signature;
-  const optionsHtml = onlinePeers.length
-    ? onlinePeers.map((drone) => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
-    : '<option value="">No paired drones online</option>';
-  preservePageScroll(() => {
-    select.innerHTML = optionsHtml;
-    if (previous && Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
-  });
-}
-async function loadTailnetPullPeerOptions() {
-  const select = document.getElementById("tailnetPullPeer");
-  const button = document.getElementById("tailnetPullBtn");
-  if (!select) return;
-  // The Swarm page already probes each peer itself and keeps the results in
-  // swarmDronesById. Fetching the probing overview here would dial every
-  // machine a second time and redraw this control as that batch returned.
-  if (Object.keys(swarmDronesById).length) {
-    syncTailnetPullPeerOptions();
-    return;
-  }
-  try {
-    const overview = await loadSwarmOverview();
-    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
-    select.innerHTML = onlinePeers.length
-      ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
-      : '<option value="">No paired drones online</option>';
-    if (button) button.disabled = !onlinePeers.length;
-  } catch (err) {
-    select.innerHTML = '<option value="">Failed to load drones</option>';
-    if (button) button.disabled = true;
-  }
-}
-async function pullTailnetConfigFromPeer() {
-  const select = document.getElementById("tailnetPullPeer");
-  const peerId = select ? select.value : "";
-  if (!peerId) return;
-  const button = document.getElementById("tailnetPullBtn");
-  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Pulling...'; }
-  try {
-    await apiPost("/admin/tailnet/pull-from-peer", { peer_id: peerId });
-    showToast("Enrolled using the auth key shared by that drone.", "success");
-    await renderSwarmPage();
-  } catch (err) {
-    showToast(`Failed to pull the Tailscale auth key: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
     if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
   }
 }
@@ -10900,7 +10857,7 @@ function renderLocalAssetsPagination() {
 async function renderTransfersPage() {
   currentSystemContext = null;
   clearSystemTheme();
-  titleNode.textContent = "Transfers";
+  titleNode.textContent = "Downloads";
   subtitleNode.textContent = "Request and monitor drone-to-drone asset transfers";
   // No loading toast here: it stayed up until the peer probe behind the
   // request panel finished, and it lingered on the Swarm page we navigate to.
@@ -10946,10 +10903,8 @@ function _networkShareStatusBadge(share) {
   return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || `This Drone is referencing this peer's ROM library${transportSuffix}.${fallback}`)}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
 }
 
-// A peer card has three states, not two: online, offline, and *not probed
-// yet*. The Swarm page paints immediately from stored state with every peer
-// pending, then swaps each card in as its own probe returns -- so one drone
-// that has moved networks never delays the page or the other cards.
+// Peer rows start pending and update individually as their probes return, so
+// a Drone that moved networks never delays the table or the other rows.
 function swarmDroneCardId(droneId) {
   return `swarmDroneCard-${cssSafeId(String(droneId || ""))}`;
 }
@@ -10991,52 +10946,32 @@ function renderSwarmDroneCard(drone) {
     const skippedNote = skippedCount ? `; ${skippedCount} local item${skippedCount === 1 ? "" : "s"} kept` : "";
     addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(countNote + skippedNote)}</span></div>`);
   }
-  const stats = pending
-    ? `<div class="mt-2" aria-label="Checking this Drone">
-        <div class="progress" style="height: 4px;" role="progressbar" aria-valuetext="Checking">
-          <div class="progress-bar progress-bar-striped progress-bar-animated w-100"></div>
-        </div>
-      </div>`
-    : drone.online && drone.summary
-    ? `<div class="d-flex flex-wrap gap-3 small mt-2">
-        <span><strong>${Number(counts.roms || 0)}</strong> ROMs</span>
-        <span><strong>${Number(counts.bios || 0)}</strong> BIOS</span>
-        <span><strong>${Number(counts.artwork || 0)}</strong> artwork</span>
-        <span><strong>${systems.length}</strong> systems</span>
-      </div>`
-    : drone.online && drone.summary_error
-      ? `<div class="small text-warning mt-2"><i class="bi bi-hourglass-split me-1" aria-hidden="true"></i>Online; inventory is delayed: ${escapeHtml(drone.summary_error)}</div>`
-    : drone.error
-      ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${drone.offline_hint ? `${escapeHtml(drone.offline_hint)} ` : ""}<span class="text-muted">${escapeHtml(drone.error)}</span></div>`
-      : "";
+  const inventoryAvailable = drone.online && drone.summary;
+  const inventoryNote = pending ? "Checking inventory..."
+    : drone.online && drone.summary_error ? `Online; inventory is delayed: ${drone.summary_error}`
+    : drone.error ? `${drone.offline_hint ? `${drone.offline_hint} ` : ""}${drone.error}` : "";
+  const inventoryCells = [counts.roms, counts.bios, counts.artwork, systems.length]
+    .map(value => `<td class="text-end" data-swarm-count>${inventoryAvailable ? Number(value || 0) : "&mdash;"}</td>`).join("");
   const networkShareButton = !REFERENCE_ROMS_UI_ENABLED ? "" : share
-    ? `<button class="btn btn-sm btn-outline-secondary" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Manage Reference" : "Manage Reference"}</button>`
-    : `<button class="btn btn-sm btn-outline-info" onclick="setHash('#admin/reference-roms/${droneToken}')" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Choose which systems to reference from this machine's ROM library" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
+    ? `<button type="button" class="btn btn-sm btn-outline-secondary" title="Manage Reference" aria-label="Manage Reference" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network" aria-hidden="true"></i></button>`
+    : `<button type="button" class="btn btn-sm btn-outline-info" onclick="setHash('#admin/reference-roms/${droneToken}')" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference ROMs" : "Reference ROMs: requires a known LAN or Tailscale address"}" aria-label="Reference ROMs"><i class="bi bi-hdd-network" aria-hidden="true"></i></button>`;
   const actions = drone.is_self
-    ? `<div class="d-flex flex-wrap gap-2 mt-3">
-        <button class="btn btn-sm btn-outline-danger" onclick="leaveSwarm()"><i class="bi bi-box-arrow-right me-1"></i>Leave Swarm</button>
-      </div>`
-    : `<div class="d-flex flex-wrap gap-2 mt-3">
-        ${networkShareButton}
-        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Download ROMs</button>
-        <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
-      </div>`;
+    ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Leave Swarm" aria-label="Leave Swarm" onclick="leaveSwarm()"><i class="bi bi-box-arrow-right" aria-hidden="true"></i></button>`
+    : `${networkShareButton}
+        <button type="button" class="btn btn-sm btn-outline-success" title="Download ROMs" aria-label="Download ROMs" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down" aria-hidden="true"></i></button>
+        <button type="button" class="btn btn-sm btn-outline-danger" title="Forget Drone" aria-label="Forget Drone" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle" aria-hidden="true"></i></button>`;
   return `
-    <div class="col" id="${swarmDroneCardId(drone.drone_id)}"><div class="card log-card h-100">
-      <div class="card-header d-flex justify-content-between align-items-center gap-2">
-        <span class="text-truncate"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</span>
-        <span class="d-flex align-items-center gap-2" data-swarm-meta>${latency}${badge}</span>
-      </div>
-      <div class="card-body">
-        <div data-swarm-addresses>${addressLines.join("") || '<div class="small text-muted">No address recorded.</div>'}</div>
-        <div data-swarm-stats>${stats}</div>
-        <div data-swarm-actions>${actions}</div>
-      </div>
-    </div></div>`;
+    <tr id="${swarmDroneCardId(drone.drone_id)}">
+      <th scope="row"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</th>
+      <td><div class="d-flex flex-wrap align-items-center gap-2" data-swarm-meta>${badge}${latency}</div></td>
+      <td><div class="swarm-addresses" data-swarm-addresses>${addressLines.join("") || '<div class="small text-muted">No address recorded.</div>'}${inventoryNote ? `<div class="small text-warning">${escapeHtml(inventoryNote)}</div>` : ""}</div></td>
+      ${inventoryCells}
+      <td class="swarm-actions"><div class="d-flex justify-content-end gap-2" data-swarm-actions>${actions}</div></td>
+    </tr>`;
 }
 
-// Swap only the regions of an existing card whose text actually changed.
-// Replacing the card node (or the page) drops scroll position and any
+// Swap only the regions of an existing row whose text actually changed.
+// Replacing the row node (or the page) drops scroll position and any
 // control the user is in the middle of using.
 function patchSwarmDroneCard(drone) {
   const node = document.getElementById(swarmDroneCardId(drone && drone.drone_id));
@@ -11046,12 +10981,13 @@ function patchSwarmDroneCard(drone) {
   const next = holder.content.firstElementChild;
   if (!next) return;
   const updates = [];
-  ["[data-swarm-meta]", "[data-swarm-addresses]", "[data-swarm-stats]", "[data-swarm-actions]"].forEach((selector) => {
-    const current = node.querySelector(selector);
-    const updated = next.querySelector(selector);
-    if (!current || !updated || current.innerHTML === updated.innerHTML) return;
-    if (current.contains(document.activeElement)) return;
-    updates.push([current, updated.innerHTML]);
+  ["[data-swarm-meta]", "[data-swarm-addresses]", "[data-swarm-count]", "[data-swarm-actions]"].forEach((selector) => {
+    node.querySelectorAll(selector).forEach((current, index) => {
+      const updated = next.querySelectorAll(selector)[index];
+      if (!updated || current.innerHTML === updated.innerHTML) return;
+      if (current.contains(document.activeElement)) return;
+      updates.push([current, updated.innerHTML]);
+    });
   });
   if (!updates.length) return;
   preservePageScroll(() => {
@@ -11339,42 +11275,6 @@ function copyInviteToken() {
   );
 }
 
-// Share-eligibility has no operator toggle: a self-owned key is always
-// offered to paired drones automatically, and an imported key never is --
-// single-hop-only sharing is a property of the key's provenance, not a
-// switch anyone could leave off (or on and not realize it does nothing on
-// an imported key -- the exact confusing state this replaced). Enforced
-// server-side in export_tailnet_payload(); this is read-only status text.
-// Plus a "Pull Configuration" peer picker, always available even before
-// this drone is enrolled -- a fresh drone can join by pulling a peer's
-// shared key instead of pasting one of its own. Only works end-to-end if
-// the key was created as *reusable* in the Tailscale admin console (the
-// same guidance already given in the "Connect" steps below); a single-use
-// key will fail on the second drone with whatever error tailscale itself
-// returns.
-function renderTailnetShareSection(state) {
-  const sharingStatus = !state.enrolled
-    ? ""
-    : state.source_peer_id
-    ? `<p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>This auth key was imported from <strong>${escapeHtml(state.source_peer_name || state.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally connected with it can share it with the swarm.</p>`
-    : `<p class="text-muted small mb-2"><i class="bi bi-check-circle me-1"></i>This is a self-owned key, so it's automatically shared with every paired drone.</p>`;
-  return `
-    <hr>
-    <div class="small text-muted mb-2">
-      <strong>Share with Swarm.</strong>
-      ${state.enrolled
-        ? "This drone's auth key is offered to paired drones over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser."
-        : "Already enrolled on another drone in your swarm? Pull its auth key here instead of pasting your own."}
-    </div>
-    ${sharingStatus}
-    <div class="d-flex flex-wrap align-items-end gap-2">
-      <div>
-        <label class="form-label mb-1" for="tailnetPullPeer">Paired Drone</label>
-        <select id="tailnetPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
-      </div>
-      <button class="btn btn-outline-primary btn-sm" type="button" id="tailnetPullBtn" disabled onclick="pullTailnetConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
-    </div>`;
-}
 // "Invite Drone to Swarm": needs a one-time Tailscale OAuth client (scoped
 // to minting auth keys) pasted in here; after that, every invite is one
 // click -- no trip to Tailscale's site, no key to dig up and copy by hand.
@@ -11403,13 +11303,11 @@ function renderSwarmTailnetCard(tailnet) {
   const state = tailnet || {};
   let body;
   if (state.enrolled) {
-    const address = state.tailnet_ip ? `https://${escapeHtml(state.tailnet_ip)}` : "";
     body = `
       <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
         <span class="badge text-bg-success">Connected</span>
         ${state.tailnet_ip ? `<code>${escapeHtml(state.tailnet_ip)}</code>` : ""}
       </div>
-      <div class="small text-muted">This Drone is on your tailnet. Your phone (with the Tailscale app signed in to the same account) and Drones in other homes can reach it${address ? ` at <a href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>` : ""} from anywhere -- no port forwarding.</div>
       <div class="d-none mt-3" id="swarmTailnetRotateForm">
         <label class="form-label small" for="swarmTailnetRotateKey">Replacement auth key</label>
         <div class="d-flex flex-column flex-sm-row gap-2">
@@ -11418,7 +11316,6 @@ function renderSwarmTailnetCard(tailnet) {
           <button class="btn btn-outline-secondary" type="button" onclick="swarmToggleTailnetAuthRotation(false)">Cancel</button>
         </div>
       </div>
-      ${renderTailnetShareSection(state)}
       ${renderTailnetInviteSection(state)}`;
   } else if (!state.installed) {
     body = `
@@ -11447,7 +11344,7 @@ function renderSwarmTailnetCard(tailnet) {
         <div class="col-12 col-md-8"><label class="form-label small" for="swarmTailnetKey">Auth key</label><input id="swarmTailnetKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="off"></div>
         <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" onclick="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>
       </div>
-      ${renderTailnetShareSection(state)}`;
+      `;
   }
   return `
     <div class="card log-card h-100">
@@ -11646,7 +11543,7 @@ async function renderSwarmPage() {
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
     swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
-    const cardsHtml = drones.map(renderSwarmDroneCard).join("");
+    const rowsHtml = drones.map(renderSwarmDroneCard).join("") || '<tr><td colspan="8" class="text-muted">No Drones in this swarm.</td></tr>';
     const tailnetHtml = renderSwarmTailnetCard(tailnet);
     if (!document.getElementById("swarmPageShell")) {
       content.innerHTML = `
@@ -11660,8 +11557,12 @@ async function renderSwarmPage() {
           <span class="small text-muted text-nowrap" id="swarmProbeProgressLabel">Checking Drones...</span>
         </div>
       </div>
-      <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid" data-swarm-generation="${generation}">
-        ${cardsHtml}
+      <div class="table-responsive mb-3">
+        <table class="table table-sm themed-table align-middle swarm-drones-table">
+          <caption class="visually-hidden">Drones in your swarm and their asset inventories</caption>
+          <thead><tr><th scope="col">Drone</th><th scope="col">Status</th><th scope="col">Addresses</th><th scope="col" class="text-end">ROMs</th><th scope="col" class="text-end">BIOS</th><th scope="col" class="text-end">Artwork</th><th scope="col" class="text-end">Systems</th><th scope="col" class="text-end">Actions</th></tr></thead>
+          <tbody id="swarmDroneGrid" data-swarm-generation="${generation}">${rowsHtml}</tbody>
+        </table>
       </div>
       <div class="row g-3 mb-3 align-items-stretch">
         <div class="col-12 col-lg-6" id="swarmTailnetSlot">${tailnetHtml}</div>
@@ -11683,13 +11584,13 @@ async function renderSwarmPage() {
         const grid = document.getElementById("swarmDroneGrid");
         if (grid) {
           grid.dataset.swarmGeneration = String(generation);
-          grid.innerHTML = cardsHtml;
+          grid.innerHTML = rowsHtml;
         }
         const tailnetSlot = document.getElementById("swarmTailnetSlot");
         if (tailnetSlot) tailnetSlot.innerHTML = tailnetHtml;
       });
     }
-    loadTailnetPullPeerOptions();
+    preloadSwarmConnectedDrones(overview, generation);
 
     async function refreshPairing(status = null, includeTailnet = false) {
       if (!status) {
@@ -11723,10 +11624,6 @@ async function renderSwarmPage() {
     }
     await refreshPairing(discovery.network || null);
     if (!stillCurrent()) return;
-    // Deliberately not awaited before the page is usable: each card's status
-    // fills in as its own probe lands, without redrawing the page or moving
-    // the viewport.
-    probeSwarmPeersAsync(drones, generation);
   } catch (err) {
     if (!stillCurrent()) return;
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -12225,9 +12122,20 @@ async function renderLocalTransferRequestPanel(target) {
     // peer in the dropdown is a dead end. Nothing is selected by default; the
     // user picks a drone, its systems load, then Request fetches asset data.
     const peerSelect = document.getElementById("localAssetPeer");
-    peerSelect.innerHTML = '<option value="">&lt;Select Drone&gt;</option>';
+    peerSelect.disabled = true;
+    peerSelect.innerHTML = '<option value="">Loading connected Drones...</option>';
     updateRequestButtons();
-    const overview = await loadSwarmOverview();
+    let overview;
+    try {
+      overview = await loadSwarmOverview();
+    } catch (err) {
+      if (!target.isConnected || document.getElementById("localAssetPeer") !== peerSelect) return;
+      peerSelect.innerHTML = '<option value="">Could not load Drones</option>';
+      document.getElementById("localAssetsBody").innerHTML = `<div class="themed-empty">Could not load connected Drones: ${escapeHtml(err.message || "unknown error")}. Refresh Downloads to retry.</div>`;
+      return;
+    }
+    if (!target.isConnected || document.getElementById("localAssetPeer") !== peerSelect) return;
+    peerSelect.disabled = false;
     const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
     const preselect = localPeerAssetContext.peerId;
     peerSelect.innerHTML = [
@@ -12290,7 +12198,7 @@ async function renderLocalTransferRequestPanel(target) {
   // Deep link from a Swarm card ("Request Assets") preselects the drone and
   // loads its systems, but never auto-requests asset data -- fetching stays
   // behind an explicit Request click.
-  if (localPeerAssetContext.peerId && document.getElementById("localAssetPeer").value === localPeerAssetContext.peerId) {
+  if (target.isConnected && localPeerAssetContext.peerId && document.getElementById("localAssetPeer")?.value === localPeerAssetContext.peerId) {
     await onPeerSelected();
     document.getElementById("localAssetsCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }

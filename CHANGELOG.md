@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Swarm now lists Drones in a table with status, addresses, inventory counts, and icon actions.
+  Rename its Transfers tab to Downloads and preload the Connected Drone list using Swarm's
+  background peer checks, including when navigating while checks are still running.
+  Remove the Tailnet Share with Swarm section and its configuration pull control.
+
 - Background pollers (automation, outbound mail, VPN/SMTP/tailnet revocation, network-share watchdog) can now be
   retired with `retire_background_pollers()`; a retired poller exits on its next wake without touching storage,
   so one that outlived its server no longer writes into a later server's state database.

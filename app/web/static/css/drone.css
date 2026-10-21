@@ -582,6 +582,24 @@
       --bs-table-bg-state: rgba(0, 194, 255, 0.18);
       color: var(--admin-text);
     }
+    .swarm-drones-table {
+      min-width: 960px;
+      font-size: 0.85rem;
+    }
+    .swarm-drones-table tbody th {
+      min-width: 10rem;
+      overflow-wrap: anywhere;
+    }
+    .swarm-drones-table .swarm-addresses {
+      width: 18rem;
+    }
+    .swarm-drones-table .swarm-actions {
+      width: 1%;
+      white-space: nowrap;
+    }
+    .swarm-drones-table .swarm-actions .btn {
+      min-width: 2rem;
+    }
     .local-assets-table,
     #localPeersBody .themed-table {
       font-size: 0.82rem;

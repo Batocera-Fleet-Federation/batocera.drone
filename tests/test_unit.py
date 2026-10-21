@@ -9279,7 +9279,7 @@ class SwarmAsyncProbeTests(unittest.TestCase):
         page_body = self.js[page_start:self.js.index("// Issue #35", page_start)]
         self.assertIn("loadSwarmOverview(false, { probe: false })", page_body)
         # Not awaited: the cards must fill in after the page is usable.
-        self.assertIn("probeSwarmPeersAsync(drones, generation);", page_body)
+        self.assertIn("preloadSwarmConnectedDrones(overview, generation);", page_body)
         self.assertNotIn("await probeSwarmPeersAsync(", page_body)
         # The loading toast was the flicker: every re-render showed
         # "Loading swarm..." and router() scrolled to the top to match.
@@ -9310,21 +9310,18 @@ class SwarmAsyncProbeTests(unittest.TestCase):
         # A failed probe must still resolve the card, never leave it spinning.
         self.assertIn("pending: false, online: false", body)
 
-    def test_tailnet_peer_picker_reuses_probed_drones_instead_of_a_second_overview(self) -> None:
-        # Opening Swarm must not dial every machine again just to fill the
-        # Tailnet "pull configuration" dropdown.
-        start = self.js.index("async function loadTailnetPullPeerOptions(")
-        body = self.js[start:self.js.index("async function pullTailnetConfigFromPeer(", start)]
-        self.assertIn("Object.keys(swarmDronesById).length", body)
-        self.assertIn("syncTailnetPullPeerOptions()", body)
-        self.assertLess(body.index("Object.keys(swarmDronesById).length"), body.index("loadSwarmOverview()"))
+    def test_tailnet_share_section_is_removed(self) -> None:
+        self.assertNotIn("renderTailnetShareSection", self.js)
+        self.assertNotIn('id="tailnetPullPeer"', self.js)
+        self.assertNotIn("This auth key was imported from", self.js)
+        self.assertNotIn("This Drone is on your tailnet. Your phone", self.js)
 
     def test_pending_cards_render_a_checking_state(self) -> None:
         start = self.js.index("function renderSwarmDroneCard(")
-        body = self.js[start:self.js.index("\n}", self.js.index("return `\n    <div class=\"col\" id=", start))]
+        body = self.js[start:self.js.index("function patchSwarmDroneCard(", start)]
         self.assertIn("drone.pending === true || drone.online == null", body)
         self.assertIn("Checking...", body)
-        self.assertIn("progress-bar-animated", body)
+        self.assertIn("spinner-border", body)
 
     def test_unprobed_overview_marks_peers_pending_without_dialing(self) -> None:
         self.assertIn('probe_raw = str(((query_params or {}).get("probe") or ["1"])[0])', self.handlers)
