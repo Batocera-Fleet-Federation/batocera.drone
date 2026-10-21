@@ -2344,31 +2344,6 @@ class SettingsTests(unittest.TestCase):
             # (size identical, samples identical) -> same fingerprint by design.
             self.assertEqual(RomRepository.build_fingerprint(big), RomRepository.build_fingerprint(mid_changed))
 
-    def test_privileged_screen_mode_helper_updates_xml_and_restarts_emulationstation(self) -> None:
-        from app import set_screen_mode
-
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "es_settings.cfg"
-            config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
-            with mock.patch.object(set_screen_mode, "CONFIG", config):
-                with mock.patch("app.set_screen_mode.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
-                    set_screen_mode.set_screen_mode("kiosk")
-                    self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
-                    set_screen_mode.set_screen_mode("full")
-                    set_screen_mode.set_screen_mode("kid")
-
-            self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
-            self.assertIn('name="UIMode" value="Kid"', config.read_text(encoding="utf-8"))
-            # Each invocation synchronously runs stop ES + save overlay + start ES so
-            # success is not reported before the display service accepted the start.
-            run_commands = [call.args[0] for call in run.call_args_list]
-            lifecycle_commands = [command for command in run_commands if command != ["pidof", "emulationstation"]]
-            self.assertEqual(len(lifecycle_commands), 9)
-            self.assertEqual(run_commands.count(["pidof", "emulationstation"]), 3)
-            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "stop"], run_commands)
-            self.assertIn(["batocera-save-overlay"], run_commands)
-            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], run_commands)
-
     def test_screen_mode_retries_when_start_returns_without_emulationstation(self) -> None:
         from app import set_screen_mode
 

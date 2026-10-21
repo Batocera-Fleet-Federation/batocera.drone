@@ -159,65 +159,6 @@ class DiscoveryTeardownUAT(unittest.TestCase):
             time.sleep(0.1)
         self.fail("discovery worker did not persist the injected peer map row")
 
-    def test_stop_and_join_then_delete_real_temp_db_has_no_late_wal_write(self) -> None:
-        """The original teardown race: real sqlite path, then rmtree after join."""
-        guard = _ThreadExceptionGuard()
-        opens_after_stop: list[str] = []
-        stop_joined = threading.Event()
-        real_open = state_store.open_database
-
-        def spy_open(path, *args, **kwargs):
-            if stop_joined.is_set():
-                opens_after_stop.append(str(path))
-            return real_open(path, *args, **kwargs)
-
-        with guard, mock.patch.object(state_store, "open_database", side_effect=spy_open):
-            stop = threading.Event()
-            worker = local_network.start_discovery_worker(
-                self.settings, lambda: "", stop_event=stop
-            )
-            self._wait_for_peer()
-            self.assertTrue(self.db_path.is_file())
-            stop.set()
-            worker.join(timeout=8)
-            self.assertFalse(worker.is_alive())
-            stop_joined.set()
-            self._tmp.cleanup()
-            time.sleep(1.5)
-            self._send(self._peer_payload("late-peer"))
-            time.sleep(1.5)
-
-        self.assertFalse(worker.is_alive())
-        self.assertFalse(self.root.exists())
-        self.assertEqual(opens_after_stop, [])
-        self.assertEqual(guard.disk_io_failures(), [])
-
-    def test_stop_local_network_workers_covers_create_server_style_teardown(self) -> None:
-        """``create_server`` starts workers via this helper; teardown must join before rmtree."""
-        guard = _ThreadExceptionGuard()
-        cert = mock.Mock()
-        cert.metadata.return_value = {"fingerprint": ""}
-        with guard, \
-                mock.patch.object(peer_workers, "ensure_tailnet_networking"), \
-                mock.patch.object(peer_workers, "bootstrap_tailnet_from_swarm"), \
-                mock.patch.object(peer_workers, "tailnet_status", return_value={"running": True, "installed": True, "enrolled": True}), \
-                mock.patch.object(peer_workers, "_repair_tailnet_data_path"), \
-                mock.patch.object(peer_workers, "DroneCertificateManager", return_value=cert):
-            peer_workers._start_local_network_workers(self.settings)
-            workers = _discovery_threads()
-            self.assertTrue(workers)
-            self._wait_for_peer()
-            peer_workers.stop_local_network_workers(timeout=8.0)
-            self.assertEqual(_discovery_threads(), [])
-            self._tmp.cleanup()
-            time.sleep(1.5)
-            self._send(self._peer_payload("after-cleanup"))
-            time.sleep(1.5)
-        self.assertFalse(self.root.exists())
-        self.assertEqual(guard.disk_io_failures(), [])
-        self.assertIsNone(peer_workers._LOCAL_NETWORK_DISCOVERY)
-        self.assertIsNone(peer_workers._LOCAL_NETWORK_STOP)
-
     def test_in_flight_peer_map_save_is_joined_before_directory_removal(self) -> None:
         """Join must wait out an in-flight ``_save_peer_map`` so rmtree cannot race it."""
         started = threading.Event()

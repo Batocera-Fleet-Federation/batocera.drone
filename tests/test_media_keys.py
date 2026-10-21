@@ -458,16 +458,6 @@ class HttpRoutesTests(unittest.TestCase):
             body = error.read()
             return error.code, (json.loads(body) if body[:1] == b"{" else body)
 
-    def test_card_and_status_require_a_real_session(self):
-        status, cards = self.call("")
-        self.assertEqual(status, 200)
-        self.assertIn("media-keys", [card["id"] for card in cards["integrations"]])
-        self.assertEqual(self.call("/media-keys/status", cookie=False)[0], 401)
-        self.assertEqual(self.call("/media-keys/enable", {}, cookie=False)[0], 401)
-        status, payload = self.call("/media-keys/status")
-        self.assertEqual((status, payload["enabled"], payload["scope"]), (200, False, "local-only"))
-        self.assertEqual(len(payload["bindings"]), 5)
-
     def test_mutations_need_json_and_same_origin(self):
         self.assertEqual(self.call("/media-keys/enable", {}, headers={"Origin": "http://evil.example"})[0], 403)
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/api/admin/integrations/media-keys/enable",

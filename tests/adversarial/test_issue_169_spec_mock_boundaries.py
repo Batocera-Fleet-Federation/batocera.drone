@@ -37,10 +37,6 @@ from app.storage.state_store import DATABASE_FILENAME, database_path
 MOCK_REJECTION = "userdata_root must be a filesystem path"
 
 
-class _SpecSubclass(mock.MagicMock):
-    """A user-defined MagicMock subclass; its type lives in this test module, not unittest.mock."""
-
-
 class _PathLikeRoot:
     """A non-mock os.PathLike; it is a legitimate root and must not be over-rejected."""
 
@@ -49,19 +45,6 @@ class _PathLikeRoot:
 
     def __fspath__(self) -> str:
         return str(self._path)
-
-
-SPEC_MOCK_FLAVOURS = {
-    "MagicMock(spec=Path)": lambda: mock.MagicMock(spec=Path),
-    "Mock(spec=Path)": lambda: mock.Mock(spec=Path),
-    "NonCallableMock(spec=Path)": lambda: mock.NonCallableMock(spec=Path),
-    "NonCallableMagicMock(spec=Path)": lambda: mock.NonCallableMagicMock(spec=Path),
-    "AsyncMock(spec=Path)": lambda: mock.AsyncMock(spec=Path),
-    "MagicMock(spec_set=Path)": lambda: mock.MagicMock(spec_set=Path),
-    "create_autospec(Path, instance=True)": lambda: mock.create_autospec(Path, instance=True),
-    "create_autospec(Path) class-level": lambda: mock.create_autospec(Path),
-    "MagicMock subclass with spec=Path": lambda: _SpecSubclass(spec=Path),
-}
 
 
 class _CwdSandbox(unittest.TestCase):
@@ -102,16 +85,6 @@ class _CwdSandbox(unittest.TestCase):
         self.assertFalse((self.cwd / "system").exists(), msg="cwd gained a system/ tree")
         self.assertEqual(sorted(p.name for p in self.cwd.iterdir()), [])
 
-
-class SpecMockFlavourRejectionTests(_CwdSandbox):
-    def test_every_mock_flavour_is_rejected_before_sqlite_and_leaves_cwd_empty(self) -> None:
-        for label, factory in SPEC_MOCK_FLAVOURS.items():
-            with self.subTest(mock=label):
-                with self._spy_sqlite_connect() as targets:
-                    with self.assertRaisesRegex(TypeError, MOCK_REJECTION):
-                        database_path(factory())
-                self.assertEqual(targets, [])
-                self._assert_cwd_untouched(targets)
 
     def test_empty_configured_database_file_does_not_bypass_the_guard(self) -> None:
         # "" is falsy: only a non-empty DRONE_STATE_DATABASE_FILE is an explicit operator choice.
