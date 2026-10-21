@@ -15,6 +15,8 @@ from app.transfer.peer_connectivity import PeerPairingRejected
 
 
 PEER_ID = "bb:bb:bb:bb:02:79"
+# The operator-confirmed anchor an unpinned http:// pairing needs before anything is sent.
+OPERATOR_CONFIRMED_FINGERPRINT = "cd" * 32
 # Two distinct, valid self-signed fixture certificates (test-only keys, discarded).
 # Their concatenation passes the single-certificate fingerprint check because the
 # decoded base64 happens to align, so the stored pin carries two trust anchors.
@@ -100,6 +102,7 @@ class RejectMultiCertificatePemTests(unittest.TestCase):
                     self.settings,
                     {"drone_id": PEER_ID, "reachable_url": "http://peer.example:8080"},
                     "operator-code",
+                    confirmed_fingerprint=OPERATOR_CONFIRMED_FINGERPRINT,
                 )
 
         self.assertFalse(self.cache_path.exists())

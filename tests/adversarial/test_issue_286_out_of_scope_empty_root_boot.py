@@ -1,10 +1,8 @@
-"""Out-of-scope #286 evidence: an empty USERDATA_ROOT aborts boot instead of meaning "unset".
+"""Issue #286 / #454 contract: a blank USERDATA_ROOT is unset and falls back to ``/userdata``.
 
-Not blocking. The issue only requires that nothing lands under the cwd. The fix achieves that by
-making ``Settings.from_env`` raise ``TypeError`` for an empty root. The same function treats every
-other empty env value as unset (``os.environ.get(...) or None``), and an unset ``USERDATA_ROOT``
-falls back to ``/userdata``. Whether an empty value should fall back the same way is a product
-decision, so these tests are expected failures that document the gap for the worker to file.
+The #286 fix first refused an empty root with ``TypeError``, which aborted boot. #454 settled the
+product decision: a blank value means "unset" (the same as every other blank override), and only a
+relative root is a named configuration error. This test now pins that contract.
 """
 
 from __future__ import annotations
@@ -43,14 +41,10 @@ class OutOfScopeEmptyRootBootTests(unittest.TestCase):
             "DRONE_STATE_DATABASE_FILE": str(self.base / "state.db"),
         }
 
-    @unittest.expectedFailure
     def test_empty_userdata_root_is_treated_as_unset(self):
-        # Expected (judgment, see module docstring): empty means unset, so the default applies.
+        # Empty means unset, so the default applies and boot is not aborted.
         with mock.patch.dict(os.environ, self._env(""), clear=True):
-            try:
-                settings = Settings.from_env()
-            except TypeError as error:
-                self.fail(f"empty USERDATA_ROOT aborts boot: {error}")
+            settings = Settings.from_env()
         self.assertEqual(settings.userdata_root, Path("/userdata"))
 
 

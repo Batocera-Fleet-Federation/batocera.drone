@@ -1,15 +1,14 @@
 """Issue #279 boundary on the unpinned (operator-typed http://) path: rejected answers keep the pin.
 
-On the unpinned path there is no trust anchor until the answer arrives, so the only defence
-against a rejected answer overwriting a live pin is the post-save rollback that compares the
-offered certificate with the discovery fingerprint. The #279 fix adds an early check for a
-missing certificate; this suite proves the rollback still protects an existing pin when the
-answer carries a certificate that does not match discovery.
+The unpinned path is anchored by the fingerprint the operator confirmed on the target Drone's own
+pairing screen; without it nothing is sent. The answer's certificate must match that anchor before
+anything is written, so a rejected answer can never overwrite a live pin. This suite proves that an
+existing pin survives a mismatched answer, and that a matching answer is accepted.
 
 Expected behaviour, derived from the issue and the pin invariants before reading the fix:
 
-* A status=paired answer whose certificate fingerprint does not match the discovery
-  fingerprint is a rejected pairing (``PeerPairingRejected``, the 502 mapping).
+* A status=paired answer whose certificate fingerprint does not match the confirmed anchor is a
+  rejected pairing (``PeerPairingRejected``, the 502 mapping).
 * The live certificate cache file is restored byte-for-byte; a rejection with no prior pin
   leaves no file behind.
 * No paired-peer row is saved for a rejected answer.
@@ -19,9 +18,7 @@ Expected behaviour, derived from the issue and the pin invariants before reading
 
 from __future__ import annotations
 
-import hashlib
 import json
-import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,14 +27,14 @@ from unittest import mock
 
 from app.transfer import peer_connectivity, swarm_membership
 from app.transfer.peer_connectivity import PeerPairingRejected
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT as OFFERED_FINGERPRINT
+from pairing_certificate_fixture import REAL_CERT_PEM as OFFERED_PEM
 
 
 OPERATOR_ID = "aa:aa:aa:aa:02:79"
 PEER_ID = "bb:bb:bb:bb:02:79"
 PEER_URL = "http://192.168.1.44:8080"
-OFFERED_PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-OFFERED_FINGERPRINT = hashlib.sha256(ssl.PEM_cert_to_DER_cert(OFFERED_PEM)).hexdigest()
-MISMATCHED_DISCOVERY = "ee" * 32
+MISMATCHED_ANCHOR = "ee" * 32
 PREVIOUS_PIN = "-----BEGIN CERTIFICATE-----\nPREVIOUSLY-PINNED\n-----END CERTIFICATE-----\n"
 
 
@@ -79,35 +76,36 @@ class UnpinnedRejectionKeepsPreviousPinTests(unittest.TestCase):
         }
         self.save_paired_peer = mocks[4]
 
-    def _pair(self, discovery_fingerprint: str) -> dict:
-        peer = {
-            "drone_id": PEER_ID,
-            "reachable_url": PEER_URL,
-            "certificate_fingerprint": discovery_fingerprint,
-        }
+    def _pair(self, confirmed_fingerprint: str) -> dict:
+        peer = {"drone_id": PEER_ID, "reachable_url": PEER_URL}
         body = {"status": "paired", "drone_id": PEER_ID, "certificate_pem": OFFERED_PEM}
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
-            return peer_connectivity._local_pair_peer(self.settings, peer, "operator-code")
+            return peer_connectivity._local_pair_peer(
+                self.settings,
+                peer,
+                "operator-code",
+                confirmed_fingerprint=confirmed_fingerprint,
+            )
 
     def test_mismatched_offer_restores_the_previous_pin_byte_for_byte(self) -> None:
         self.cache_dir.mkdir(parents=True)
         self.cache_path.write_text(PREVIOUS_PIN, encoding="utf-8")
         with self.assertRaises(PeerPairingRejected) as raised:
-            self._pair(MISMATCHED_DISCOVERY)
+            self._pair(MISMATCHED_ANCHOR)
         self.assertEqual(str(raised.exception), "paired peer certificate fingerprint did not match discovery")
         self.assertEqual(self.cache_path.read_text(encoding="utf-8"), PREVIOUS_PIN)
         self.save_paired_peer.assert_not_called()
 
     def test_mismatched_offer_without_a_prior_pin_leaves_no_file(self) -> None:
         with self.assertRaises(PeerPairingRejected):
-            self._pair(MISMATCHED_DISCOVERY)
+            self._pair(MISMATCHED_ANCHOR)
         self.assertFalse(self.cache_path.exists(), "a rejected offer must not leave a trust pin behind")
         self.save_paired_peer.assert_not_called()
 
     def test_control_matching_offer_is_pinned_and_saved(self) -> None:
         self.cache_dir.mkdir(parents=True)
         self.cache_path.write_text(PREVIOUS_PIN, encoding="utf-8")
-        self._pair(OFFERED_FINGERPRINT)
+        self._pair(OFFERED_FINGERPRINT)  # operator confirmed the fingerprint this offer actually has
         self.assertEqual(self.cache_path.read_text(encoding="utf-8"), OFFERED_PEM)
         self.save_paired_peer.assert_called_once()
 

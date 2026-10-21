@@ -12,8 +12,9 @@ Each check below therefore expects:
 * the host-derived ``uuid.getnode()`` value is never returned,
 * a second start reads the same id back.
 
-The fix in ``device_identity._device_id_path`` validates the root before it looks at the override,
-so these checks currently fail with TypeError. That is the regression this suite pins.
+At the Settings boot level the #454 contract applies first: a relative ``USERDATA_ROOT`` is refused
+by name (ValueError) before any identity is read, even when an absolute override is pinned. A blank
+root is unset, so the absolute override keeps the id. The settings-boot check below pins both halves.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from app.common.settings import Settings
 with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002):
     try:
         print("ID=" + Settings.from_env().device_id)
-    except TypeError as error:
+    except ValueError as error:
         print("REJECTED=" + str(error))
 """
 
@@ -84,7 +85,7 @@ class AbsoluteOverrideRelativeRootTests(unittest.TestCase):
         self.assertEqual(device_identity._machine_id(Path("")), first)
         self.assertEqual(self._cwd_tree(), [], "relative root wrote under the cwd")
 
-    def test_settings_boot_with_relative_root_and_absolute_override_keeps_identity(self):
+    def test_settings_boot_with_absolute_override_refuses_relative_root_and_keeps_blank_identity(self):
         side = self.base / "side"
         side.mkdir()
         for userdata_value in ("", ".", "rel-root"):
@@ -114,6 +115,11 @@ class AbsoluteOverrideRelativeRootTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, f"child crashed: {result.stderr}")
                 lines = [line for line in result.stdout.splitlines() if line.startswith(("ID=", "REJECTED="))]
                 self.assertTrue(lines, f"child printed neither an id nor a rejection: {result.stdout!r}")
+                if userdata_value:
+                    self.assertTrue(lines[-1].startswith("REJECTED="), f"relative root was not refused: {lines[-1]}")
+                    self.assertFalse(self.override.exists(), "a refused boot must not mint an id")
+                    self.assertEqual(self._cwd_tree(), [], "relative USERDATA_ROOT wrote under the cwd")
+                    continue
                 self.assertTrue(lines[-1].startswith("ID="), f"absolute override boot was rejected: {lines[-1]}")
                 booted = lines[-1][len("ID="):]
                 self.assertNotEqual(booted, HOST_DERIVED)

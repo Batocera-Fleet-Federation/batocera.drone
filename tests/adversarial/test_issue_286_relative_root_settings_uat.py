@@ -3,8 +3,10 @@
 Expected, from the issue (not from any patch):
 
 * Each check runs ``Settings.from_env()`` in a fresh interpreter whose process cwd is an empty
-  directory, with ``USERDATA_ROOT`` set to ``''``, ``.`` or a relative name. The Drone must either
-  refuse the root (TypeError) or mint an id without leaving any file or directory under the cwd.
+  directory, with ``USERDATA_ROOT`` set to ``''``, ``.`` or a relative name. A relative root is
+  refused by name (ValueError, the #454 contract). A blank root is unset and resolves to
+  ``/userdata``; its device id is pinned so the check never writes to the real ``/userdata``.
+  Nothing may appear under the cwd in any case.
 * A ``system/drone-app/device-id`` planted in that cwd must not be adopted.
 * ``uuid.getnode()`` is patched to 0x0242AC110002 in the child; that host-derived value must never
   be returned in fake-data mode.
@@ -24,6 +26,7 @@ REPO = Path(__file__).resolve().parents[2]
 TIMEOUT_SECONDS = 120
 HOST_DERIVED = "02:42:ac:11:00:02"
 PLANTED = "aa:bb:cc:dd:ee:01"
+PINNED_BLANK_ID = "aa:bb:cc:dd:ee:02"
 
 CHILD = r"""
 from unittest import mock
@@ -32,7 +35,7 @@ from app.common.settings import Settings
 with mock.patch.object(device_identity.uuid, "getnode", return_value=0x0242AC110002):
     try:
         print("ID=" + Settings.from_env().device_id)
-    except TypeError as error:
+    except ValueError as error:
         print("REJECTED=" + str(error))
 """
 
@@ -68,6 +71,9 @@ class RelativeRootSettingsUatTests(unittest.TestCase):
             "SAVES_ROOT": str(side / "saves"),
             "DRONE_STATE_DATABASE_FILE": str(side / "state.db"),
         }
+        if not userdata_value:
+            # A blank root resolves to the real /userdata; pin the id so nothing is written there.
+            env["DRONE_DEVICE_ID"] = PINNED_BLANK_ID
         return subprocess.run(
             [sys.executable, "-c", CHILD],
             cwd=str(cwd),
@@ -95,6 +101,10 @@ class RelativeRootSettingsUatTests(unittest.TestCase):
                     before = _tree(cwd)
                     value = self._child_id(self._run_child(cwd, userdata_value, fake))
                     self.assertEqual(_tree(cwd), before, "Settings wrote under the process cwd")
+                    if userdata_value:
+                        self.assertIsNone(value, "a relative USERDATA_ROOT must be refused by name")
+                    else:
+                        self.assertEqual(value, PINNED_BLANK_ID, "a blank USERDATA_ROOT must mean unset")
                     if fake == "1":
                         self.assertNotEqual(value, HOST_DERIVED)
 
@@ -104,7 +114,7 @@ class RelativeRootSettingsUatTests(unittest.TestCase):
         planted_path.parent.mkdir(parents=True)
         planted_path.write_text(PLANTED + "\n", encoding="utf-8")
         value = self._child_id(self._run_child(cwd, ".", "1"))
-        self.assertNotEqual(value, PLANTED, "Settings adopted a device-id planted in the cwd")
+        self.assertIsNone(value, "a relative USERDATA_ROOT must be refused, so a planted cwd id is never read")
         self.assertEqual(planted_path.read_text(encoding="utf-8"), PLANTED + "\n")
 
     def test_absolute_userdata_root_control_persists_under_root_only(self):
