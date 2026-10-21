@@ -11244,6 +11244,100 @@ async function swarmRotateTailnetAuthKey() {
   }
 }
 
+async function saveTailnetOauthClient() {
+  const clientId = (document.getElementById("tailnetOauthClientId")?.value || "").trim();
+  const clientSecret = (document.getElementById("tailnetOauthClientSecret")?.value || "").trim();
+  if (!clientId || !clientSecret) {
+    showToast("Enter both the client ID and client secret.", "warning");
+    return;
+  }
+  try {
+    await apiPost("/admin/tailnet/oauth-client/set", { client_id: clientId, client_secret: clientSecret });
+    showToast("OAuth client saved.", "success");
+    invalidateSwarmDataCache();
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Failed to save the OAuth client: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function clearTailnetOauthClient() {
+  if (!window.confirm("Remove the saved OAuth client? Invite Drone to Swarm won't work again until a new one is added.")) return;
+  await apiPost("/admin/tailnet/oauth-client/clear", {});
+  invalidateSwarmDataCache();
+  await renderSwarmPage();
+}
+
+async function inviteDroneToSwarm() {
+  const button = document.getElementById("tailnetInviteBtn");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Generating...';
+  }
+  try {
+    const result = await apiPost("/admin/tailnet/invite", {});
+    showInviteTokenModal(result.key || "", result.expiry_seconds);
+  } catch (err) {
+    showToast(`Failed to generate an invite: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-person-plus me-1"></i>Invite Drone to Swarm';
+    }
+  }
+}
+
+function showInviteTokenModal(token, expirySeconds) {
+  const modalId = "tailnetInviteTokenModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  const minutes = Math.max(1, Math.round((Number(expirySeconds) || 3600) / 60));
+  const expiryText = minutes >= 60 ? `${Math.round(minutes / 60)} hour${Math.round(minutes / 60) === 1 ? "" : "s"}` : `${minutes} minutes`;
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-person-plus me-2"></i>Invite token</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="small text-muted mb-2">Send this to whoever is setting up the new Drone. They paste it into their own Tailnet card and click Connect -- that's all they need to do.</div>
+          <div class="input-group">
+            <input type="text" class="form-control mono" id="tailnetInviteTokenValue" value="${escapeHtml(token)}" readonly>
+            <button class="btn btn-outline-primary" type="button" onclick="copyInviteToken()"><i class="bi bi-clipboard me-1"></i>Copy</button>
+          </div>
+          <div class="small text-muted mt-2"><i class="bi bi-clock-history me-1"></i>Expires in about ${expiryText} if unused.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
+
+function copyInviteToken() {
+  const input = document.getElementById("tailnetInviteTokenValue");
+  if (!input) return;
+  input.select();
+  navigator.clipboard?.writeText(input.value).then(
+    () => showToast("Copied.", "success"),
+    () => showToast("Couldn't copy automatically -- select and copy manually.", "warning"),
+  );
+}
+
 // Share-eligibility has no operator toggle: a self-owned key is always
 // offered to paired drones automatically, and an imported key never is --
 // single-hop-only sharing is a property of the key's provenance, not a
@@ -11280,6 +11374,26 @@ function renderTailnetShareSection(state) {
       <button class="btn btn-outline-primary btn-sm" type="button" id="tailnetPullBtn" disabled onclick="pullTailnetConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
     </div>`;
 }
+// "Invite Drone to Swarm": needs a one-time Tailscale OAuth client (scoped
+// to minting auth keys) pasted in here; after that, every invite is one
+// click -- no trip to Tailscale's site, no key to dig up and copy by hand.
+function renderTailnetInviteSection(state) {
+  const oauth = state.oauth_client || {};
+  const body = oauth.configured
+    ? `<div class="small text-muted mb-2"><i class="bi bi-check-circle me-1"></i>OAuth client configured (<code>${escapeHtml(oauth.client_id || "")}</code>). <a href="#" onclick="clearTailnetOauthClient(); return false;" class="text-danger">Remove</a></div>
+      <button class="btn btn-success" type="button" id="tailnetInviteBtn" onclick="inviteDroneToSwarm()"><i class="bi bi-person-plus me-1"></i>Invite Drone to Swarm</button>`
+    : `<div class="small text-muted mb-2">One-time setup: create an OAuth client scoped to <strong>Auth Keys</strong> (write) on Tailscale's admin console, then paste it here.</div>
+      <div class="row g-2 align-items-end mb-2">
+        <div class="col-12 col-md-5"><label class="form-label small" for="tailnetOauthClientId">Client ID</label><input id="tailnetOauthClientId" class="form-control form-control-sm" type="text" autocomplete="off"></div>
+        <div class="col-12 col-md-5"><label class="form-label small" for="tailnetOauthClientSecret">Client secret</label><input id="tailnetOauthClientSecret" class="form-control form-control-sm" type="password" autocomplete="new-password"></div>
+        <div class="col-12 col-md-2"><button class="btn btn-primary btn-sm w-100" type="button" onclick="saveTailnetOauthClient()">Save</button></div>
+      </div>
+      <a class="small" href="https://login.tailscale.com/admin/settings/oauth" target="_blank" rel="noopener noreferrer">Create an OAuth client &rarr;</a>`;
+  return `
+    <hr>
+    <div class="small text-muted mb-2"><strong>Invite Drone to Swarm.</strong> Generate a ready-to-use token here and send it to whoever is setting up a new machine -- they just paste it in, no Tailscale account needed on their end.</div>
+    ${body}`;
+}
 function renderSwarmTailnetCard(tailnet) {
   const state = tailnet || {};
   let body;
@@ -11299,7 +11413,8 @@ function renderSwarmTailnetCard(tailnet) {
           <button class="btn btn-outline-secondary" type="button" onclick="swarmToggleTailnetAuthRotation(false)">Cancel</button>
         </div>
       </div>
-      ${renderTailnetShareSection(state)}`;
+      ${renderTailnetShareSection(state)}
+      ${renderTailnetInviteSection(state)}`;
   } else if (!state.installed) {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-secondary">Not installed</span></div>
@@ -11311,17 +11426,18 @@ function renderSwarmTailnetCard(tailnet) {
   } else {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-warning text-dark">Not connected</span></div>
-      <div class="small text-muted mb-2">
-        Drones in different homes -- and your phone when you're away -- can't normally reach each other through home routers.
-        A <strong>tailnet</strong> (a free private mesh network from <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>) fixes that:
-        every device gets a private <code>100.x</code> address that works from anywhere, encrypted device-to-device, with no router changes or port forwarding.
-        The account is only used so your devices can recognize each other; game traffic flows directly between your machines.
-      </div>
-      <ol class="small text-muted mb-3">
-        <li>Create a free Tailscale account: <a href="https://login.tailscale.com/start" target="_blank" rel="noopener noreferrer">login.tailscale.com/start</a></li>
-        <li>Generate an auth key (mark it <em>reusable</em> so one key can enroll every Drone): <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">login.tailscale.com/admin/settings/keys</a></li>
-        <li>Paste the key below. To reach your Drones from your phone, install the Tailscale app and sign in to the same account.</li>
-      </ol>
+      <div class="small text-muted mb-2">Ask the swarm owner for a token (they get one from <strong>Invite Drone to Swarm</strong> on their own Drone's Tailnet card, no Tailscale account needed on your end) and paste it below.</div>
+      <details class="small text-muted mb-3">
+        <summary style="cursor:pointer">Setting up the very first Drone instead?</summary>
+        <div class="mt-2">
+          A <strong>tailnet</strong> (a free private mesh network from <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>) lets Drones in different homes, and your phone when you're away, reach each other -- no router changes or port forwarding.
+        </div>
+        <ol class="mt-2 mb-0">
+          <li>Create a free Tailscale account: <a href="https://login.tailscale.com/start" target="_blank" rel="noopener noreferrer">login.tailscale.com/start</a></li>
+          <li>Generate an auth key (mark it <em>reusable</em>): <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">login.tailscale.com/admin/settings/keys</a></li>
+          <li>Paste the key below. To reach this Drone from your phone, install the Tailscale app and sign in to the same account.</li>
+        </ol>
+      </details>
       <div class="row g-2 align-items-end">
         <div class="col-12 col-md-8"><label class="form-label small" for="swarmTailnetKey">Auth key</label><input id="swarmTailnetKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="off"></div>
         <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" onclick="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>

@@ -694,6 +694,10 @@ class ApiRoutesMixin:
                 self._handle_admin_tailnet_status()
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "oauth-client" and parts[3] == "status":
+                self._handle_admin_tailnet_oauth_client_status()
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "assets":
                 self._handle_admin_local_peer_assets(parts[3], query_params)
                 return
@@ -896,6 +900,19 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "pull-from-peer":
                 payload = self._read_json_body()
                 self._handle_admin_tailnet_pull_from_peer(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "oauth-client" and parts[3] == "set":
+                payload = self._read_json_body()
+                self._handle_admin_tailnet_oauth_client_set(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "oauth-client" and parts[3] == "clear":
+                self._handle_admin_tailnet_oauth_client_clear()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "invite":
+                self._handle_admin_tailnet_invite()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "network-reference" and parts[2] == "selection":

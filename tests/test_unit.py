@@ -7531,8 +7531,12 @@ class SwarmPageTests(unittest.TestCase):
     def test_tailnet_card_explains_and_links_the_account_setup(self) -> None:
         card_start = self.js.index("function renderSwarmTailnetCard(")
         card_body = self.js[card_start:self.js.index("async function renderSwarmPage()", card_start)]
-        # Why it's needed, where to sign up, where to fetch the key.
-        self.assertIn("can't normally reach each other through home routers", card_body)
+        # Why it's needed, where to sign up, where to fetch the key -- now
+        # tucked behind a "Setting up the very first Drone instead?" details
+        # disclosure, since the primary instruction for joining an existing
+        # swarm is just "ask the owner for a token."
+        self.assertIn("Ask the swarm owner for a token", card_body)
+        self.assertIn("no router changes or port forwarding", card_body)
         self.assertIn('href="https://login.tailscale.com/start"', card_body)
         self.assertIn('href="https://login.tailscale.com/admin/settings/keys"', card_body)
         # The three states: connected / not installed / ready to enroll.

@@ -27,6 +27,10 @@ try:
         tailscale_install_status as _tailscale_install_status,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
+        oauth_client_status as _oauth_client_status,
+        set_tailnet_oauth_client as _set_tailnet_oauth_client,
+        clear_tailnet_oauth_client as _clear_tailnet_oauth_client,
+        create_invite_auth_key as _create_invite_auth_key,
     )
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
     from ..storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts
@@ -58,6 +62,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         tailscale_install_status as _tailscale_install_status,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
+        oauth_client_status as _oauth_client_status,
+        set_tailnet_oauth_client as _set_tailnet_oauth_client,
+        clear_tailnet_oauth_client as _clear_tailnet_oauth_client,
+        create_invite_auth_key as _create_invite_auth_key,
     )
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
     from storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts  # type: ignore
@@ -849,6 +857,7 @@ class HandlersNetworkMixin:
         # version / running without a second round trip, and decide between
         # an "Install" and an "Update" label.
         payload["install"] = _tailscale_install_status()
+        payload["oauth_client"] = _oauth_client_status(self.settings)
         self._send_json(200, payload)
 
     def _handle_admin_tailnet_install(self, payload: dict) -> None:
@@ -881,6 +890,7 @@ class HandlersNetworkMixin:
         _reset_peer_dns_cache()
         status = tailnet_status()
         status.update(_tailnet_sharing_status(self.settings))
+        status["oauth_client"] = _oauth_client_status(self.settings)
         tailnet_devices = self._sync_tailnet_peers(status)
         self._send_json(
             200,
@@ -944,6 +954,40 @@ class HandlersNetworkMixin:
             self._send_json(502, {"error": str(error)})
             return
         self._send_json(200, {"status": "enrolled" if status.get("enrolled") else "pending", **status})
+
+    def _handle_admin_tailnet_oauth_client_status(self) -> None:
+        self._send_json(200, _oauth_client_status(self.settings))
+
+    def _handle_admin_tailnet_oauth_client_set(self, payload: dict) -> None:
+        """Persist an OAuth client (Tailscale admin console -> Settings ->
+        OAuth clients) so this Drone can mint invite keys on demand. Neither
+        the client secret nor any later-minted key is ever logged."""
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            result = _set_tailnet_oauth_client(
+                self.settings, str(payload.get("client_id") or ""), str(payload.get("client_secret") or "")
+            )
+        except ValueError:
+            raise
+        self._send_json(200, result)
+
+    def _handle_admin_tailnet_oauth_client_clear(self) -> None:
+        self._send_json(200, _clear_tailnet_oauth_client(self.settings))
+
+    def _handle_admin_tailnet_invite(self) -> None:
+        """Mint a fresh auth key for the owner to copy and hand to whoever is
+        setting up a new Drone -- see create_invite_auth_key's docstring for
+        why it's reusable, pre-authorized, and short-lived. The key is a
+        one-time secret the operator chose to generate and is about to copy
+        elsewhere anyway, so (unlike every other credential in this app) it
+        is the one thing this response is allowed to return to the browser.
+        """
+        try:
+            result = _create_invite_auth_key(self.settings)
+        except RuntimeError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        self._send_json(200, result)
 
     def _handle_admin_tailnet_pull_from_peer(self, payload: dict) -> None:
         """Pull a Tailscale auth key from a paired peer and enroll with it.

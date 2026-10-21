@@ -668,8 +668,7 @@ def _maybe_disable_key_expiry(settings: Optional[Any]) -> None:
     succeeded on the tailnet side by the time this runs."""
     if settings is None:
         return
-    client_id = getattr(settings, "tailscale_oauth_client_id", None)
-    client_secret = getattr(settings, "tailscale_oauth_client_secret", None)
+    client_id, client_secret = _resolve_oauth_client(settings)
     if not client_id or not client_secret:
         return
     if not tailnet_status().get("enrolled"):
@@ -832,6 +831,127 @@ def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> di
         raise RuntimeError(
             "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")
         ) from error
+
+
+# ------------------------------------------------------------ invite keys
+#
+# "Invite Drone to Swarm": the swarm owner mints a fresh, ready-to-use auth
+# key from this Drone's own admin UI and copies it to whoever is setting up
+# a new machine -- that person never visits Tailscale's site at all. This
+# needs an OAuth client (Tailscale admin console -> Settings -> OAuth
+# clients) configured once, the same credential _maybe_disable_key_expiry()
+# already supports via settings.tailscale_oauth_client_id/_secret (env
+# vars, set at deploy time) -- but minting keys interactively from the
+# browser needs a credential an operator can paste in after the fact, so
+# this adds a second, persisted storage path (_load_oauth_client_state/
+# set_tailnet_oauth_client, mirrors _load_sharing_state's shape exactly) and
+# _resolve_oauth_client() prefers that persisted value, falling back to the
+# env vars so a Drone already configured that way keeps working unchanged.
+
+TAILNET_OAUTH_CLIENT_STATE_NAMESPACE = "tailnet_oauth_client.json"
+
+
+def _load_oauth_client_state(settings: Settings) -> dict:
+    stored = _load_state_payload(_state_database_path(settings.userdata_root), TAILNET_OAUTH_CLIENT_STATE_NAMESPACE, {})
+    stored = stored if isinstance(stored, dict) else {}
+    return {
+        "client_id": str(stored.get("client_id") or ""),
+        "client_secret": str(stored.get("client_secret") or ""),
+    }
+
+
+def set_tailnet_oauth_client(settings: Settings, client_id: str, client_secret: str) -> dict:
+    """Persist an OAuth client for minting invite keys. Never returns the
+    secret back (mirrors every other credential store in this app)."""
+    client_id = str(client_id or "").strip()
+    client_secret = str(client_secret or "").strip()
+    if not client_id or not client_secret:
+        raise ValueError("both the OAuth client ID and client secret are required")
+    _save_state_payload(
+        _state_database_path(settings.userdata_root),
+        TAILNET_OAUTH_CLIENT_STATE_NAMESPACE,
+        {"client_id": client_id, "client_secret": client_secret},
+    )
+    return oauth_client_status(settings)
+
+
+def clear_tailnet_oauth_client(settings: Settings) -> dict:
+    _save_state_payload(
+        _state_database_path(settings.userdata_root),
+        TAILNET_OAUTH_CLIENT_STATE_NAMESPACE,
+        {"client_id": "", "client_secret": ""},
+    )
+    return oauth_client_status(settings)
+
+
+def _resolve_oauth_client(settings: Settings) -> tuple[str, str]:
+    # The persisted-state read is best-effort: a caller passing a bare
+    # mock/stub settings object (or a genuinely unreadable state DB) must
+    # still fall back to the env-var pair cleanly, not raise, since this
+    # whole path backs an already best-effort feature
+    # (_maybe_disable_key_expiry never raises either).
+    try:
+        stored = _load_oauth_client_state(settings)
+    except Exception:
+        stored = {"client_id": "", "client_secret": ""}
+    if stored["client_id"] and stored["client_secret"]:
+        return stored["client_id"], stored["client_secret"]
+    return (
+        str(getattr(settings, "tailscale_oauth_client_id", "") or ""),
+        str(getattr(settings, "tailscale_oauth_client_secret", "") or ""),
+    )
+
+
+def oauth_client_status(settings: Settings) -> dict:
+    """Never includes the secret -- just enough for the admin UI to show
+    whether inviting is available and, if so, which client ID is active."""
+    client_id, client_secret = _resolve_oauth_client(settings)
+    return {"configured": bool(client_id and client_secret), "client_id": client_id}
+
+
+def create_invite_auth_key(settings: Settings) -> dict:
+    """Mint a fresh, reusable, pre-authorized Tailscale auth key for inviting
+    a new Drone into this tailnet.
+
+    Deliberately short-lived (``DRONE_TAILNET_INVITE_KEY_EXPIRY_SECONDS``,
+    default 1 hour, floor 5 minutes) -- unlike the OAuth client secret itself
+    (held long-term), this key is meant to be copied, sent to someone, and
+    used once shortly after. ``preauthorized: true`` means the recipient's
+    device skips the interactive device-approval step entirely (see
+    ``TailnetApprovalRequired``) -- the owner approved it implicitly by
+    choosing to hand it out. ``reusable: true`` so one invite can still cover
+    more than one new machine if the owner reuses it within the expiry
+    window, matching how a manually-created key is normally used here.
+
+    Raises RuntimeError (never containing either secret) if no OAuth client
+    is configured or Tailscale's API rejects the request.
+    """
+    client_id, client_secret = _resolve_oauth_client(settings)
+    if not client_id or not client_secret:
+        raise RuntimeError(
+            "No Tailscale OAuth client is configured. Add one from Tailscale's admin "
+            "console (Settings -> OAuth clients) first."
+        )
+    token = _tailscale_oauth_access_token(client_id, client_secret)
+    expiry_seconds = max(300, int(os.environ.get("DRONE_TAILNET_INVITE_KEY_EXPIRY_SECONDS", "3600")))
+    payload = _tailscale_api_request(
+        f"{TAILSCALE_API_BASE}/tailnet/-/keys",
+        method="POST",
+        data=json.dumps(
+            {
+                "capabilities": {
+                    "devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": []}}
+                },
+                "expirySeconds": expiry_seconds,
+                "description": "Drone swarm invite",
+            }
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    key = str(payload.get("key") or "")
+    if not key:
+        raise RuntimeError("Tailscale did not return a new auth key")
+    return {"key": key, "expires": payload.get("expires") or "", "expiry_seconds": expiry_seconds}
 
 
 # ------------------------------------------------------------ peer sharing
