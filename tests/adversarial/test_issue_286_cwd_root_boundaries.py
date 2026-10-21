@@ -88,22 +88,27 @@ class CwdRootBoundaryTests(unittest.TestCase):
 
     def test_settings_boot_with_relative_or_empty_root_writes_nothing_under_cwd(self):
         # main() calls Settings.from_env() before anything else, so this is the real boot path.
+        # #454 contract: a relative root is refused by name (ValueError); a blank root is unset and
+        # resolves to /userdata. The device id is pinned so the blank case never touches the real
+        # /userdata; the cwd must stay empty in every case.
         for fake in ("0", "1"):
             for root in ("", ".", "relative-root"):
                 with self.subTest(use_fake_data=fake, userdata_root=root):
                     env = {
                         "USE_FAKE_DATA": fake,
                         "USERDATA_ROOT": root,
+                        "DRONE_DEVICE_ID": "aa:bb:cc:dd:ee:01",
                         "ROMS_ROOT": str(self.base / "roms"),
                         "BIOS_ROOT": str(self.base / "bios"),
                         "SAVES_ROOT": str(self.base / "saves"),
                         "DRONE_STATE_DATABASE_FILE": str(self.base / "state.db"),
                     }
                     with mock.patch.dict(os.environ, env, clear=True):
-                        try:
-                            Settings.from_env()
-                        except TypeError:
-                            pass
+                        if root:
+                            with self.assertRaisesRegex(ValueError, "USERDATA_ROOT must be an absolute path"):
+                                Settings.from_env()
+                        else:
+                            self.assertEqual(Settings.from_env().userdata_root, Path("/userdata"))
                     self.assertEqual(self._tree(self.cwd), [])
                     self.assertEqual(sorted(path.name for path in self.base.iterdir()), ["cwd"])
 

@@ -107,7 +107,9 @@ Peer candidates come from **direct pairing**, not a third-party directory:
     fingerprint is refused before anything is sent (handler 400 for any code, `_local_pair_peer`
     `ValueError`); with one, the answer's certificate must match it before the pin is written. The code
     itself still crosses a cleartext link, so prefer `https://`. Only code-free `tailnet_auto_pair` (WireGuard,
-    source-address authorised) may pair over `http://` unanchored.
+    source-address authorised) may pair over `http://` unanchored. Tests that exercise the answer path on
+    an unpinned `http://` peer (`tests/adversarial/test_issue_279_*`, `tests/test_local_pair_peer_errors.py`)
+    must pass a confirmed fingerprint; without one they test the refusal instead (#578).
   - **Peer JSON bodies are size-capped (#437):** every peer JSON read in `peer_connectivity.py` goes through
     `_read_capped` (reads `limit + 1`, raises `PeerResponseTooLarge`, a `ValueError`). Pairing answers and the
     `_fetch_peer_info` bootstrap fetch use `MAX_PEER_PAIRING_RESPONSE_BYTES` (64 KiB; `_local_pair_peer` turns an

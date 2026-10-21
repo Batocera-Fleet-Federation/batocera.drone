@@ -17,6 +17,7 @@ from unittest import mock
 from app.mock_data import seed_mock_userdata
 from app.storage.state_store import database_path, load_payload
 from app.transfer import local_network
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT
 from app.transfer.peer_workers import stop_local_network_workers
 
 
@@ -143,7 +144,7 @@ class PairedResponseCertificateBoundaryUAT(unittest.TestCase):
     def _pair_by_address(self) -> tuple[int, dict]:
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/v1/api/admin/local-network/pair-by-address",
-            data=json.dumps({"address": self.peer.url, "pairing_code": "operator-code"}).encode(),
+            data=json.dumps({"address": self.peer.url, "pairing_code": "operator-code", "certificate_fingerprint": REAL_CERT_FINGERPRINT}).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Cookie": self.cookie},
         )

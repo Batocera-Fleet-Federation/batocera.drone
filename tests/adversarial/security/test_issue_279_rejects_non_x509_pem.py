@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,10 @@ from unittest import mock
 
 from app.transfer import peer_connectivity, swarm_membership
 from app.transfer.peer_connectivity import PeerPairingRejected
+
+# The shared pairing fixture lives one directory up, beside the adversarial suites.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT  # noqa: E402
 
 
 PEER_ID = "bb:bb:bb:bb:02:79"
@@ -67,6 +72,7 @@ class RejectNonX509PairingCertificateTests(unittest.TestCase):
                         "certificate_fingerprint": NON_X509_FINGERPRINT,
                     },
                     "operator-code",
+                    confirmed_fingerprint=REAL_CERT_FINGERPRINT,
                 )
 
         self.assertFalse(self.cache_path.exists())

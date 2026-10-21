@@ -7,6 +7,9 @@ certificate-cache save step underneath.
 Expected behaviour, derived from the issue (a 200 ``status=paired`` answer must never surface
 as a client 400) and the pairing invariants before reading the fix:
 
+* The unpinned path is an operator-typed http:// pairing, so it carries the operator-confirmed
+  fingerprint as its trust anchor. Without an anchor ``_local_pair_peer`` refuses before anything
+  is sent, which is covered by its own tests, not by these answer-shape cases.
 * Any ``certificate_pem`` that does not yield certificate material is a rejected pairing:
   ``PeerPairingRejected``, never ``ValueError``.
 * A rejected answer writes nothing: no trust pin file, no paired-peer row, and a previously
@@ -33,6 +36,7 @@ from app.transfer.peer_connectivity import PeerPairingRejected
 OPERATOR_ID = "aa:aa:aa:aa:02:79"
 PEER_ID = "bb:bb:bb:bb:02:79"
 PINNED_FINGERPRINT = "ab" * 32
+OPERATOR_CONFIRMED_FINGERPRINT = "cd" * 32
 PREVIOUS_PIN = "-----BEGIN CERTIFICATE-----\nPREVIOUSLY-PINNED\n-----END CERTIFICATE-----\n"
 REJECTION = "paired peer returned an unreadable certificate"
 
@@ -95,7 +99,12 @@ class PairingAnswerShapeMatrixTests(unittest.TestCase):
         }
         self.save_paired_peer = mocks[4]
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
-            return peer_connectivity._local_pair_peer(self.settings, peer, "operator-code")
+            return peer_connectivity._local_pair_peer(
+                self.settings,
+                peer,
+                "operator-code",
+                confirmed_fingerprint="" if pinned else OPERATOR_CONFIRMED_FINGERPRINT,
+            )
 
     def _assert_rejected_without_writes(self, certificate_pem, *, pinned: bool) -> None:
         with self.assertRaises(PeerPairingRejected) as raised:

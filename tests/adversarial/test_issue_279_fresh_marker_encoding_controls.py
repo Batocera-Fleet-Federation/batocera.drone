@@ -21,6 +21,7 @@ from unittest import mock
 
 from app.transfer import peer_connectivity, swarm_membership
 from app.transfer.peer_connectivity import PeerPairingRejected
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT
 
 
 OPERATOR_ID = "aa:aa:aa:aa:27:91"
@@ -79,7 +80,12 @@ class MarkerEncodingBoundaryTests(unittest.TestCase):
         peer = {"drone_id": PEER_ID, "reachable_url": url}
         body = {"status": "paired", "drone_id": PEER_ID, "certificate_pem": certificate_pem}
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
-            peer_connectivity._local_pair_peer(self.settings, peer, "operator-code")
+            peer_connectivity._local_pair_peer(
+                self.settings,
+                peer,
+                "operator-code",
+                confirmed_fingerprint="" if pinned else REAL_CERT_FINGERPRINT,
+            )
 
     def test_every_non_certificate_encoding_is_rejected_on_both_paths_without_a_pin(self) -> None:
         for pinned in (False, True):

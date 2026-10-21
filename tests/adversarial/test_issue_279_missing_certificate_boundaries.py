@@ -24,6 +24,7 @@ from unittest import mock
 
 from app.transfer import peer_connectivity
 from app.transfer.peer_connectivity import PeerPairingRejected
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT, REAL_CERT_PEM
 
 
 OPERATOR_ID = "aa:aa:aa:aa:02:79"
@@ -75,7 +76,13 @@ class MissingCertificateBoundaryTests(unittest.TestCase):
         }
         self.save_paired_peer = mocks[4]
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
-            return peer_connectivity._local_pair_peer(self.settings, peer, "operator-code")
+            # The unpinned path needs the operator-confirmed anchor before anything is sent.
+            return peer_connectivity._local_pair_peer(
+                self.settings,
+                peer,
+                "operator-code",
+                confirmed_fingerprint="" if pinned else REAL_CERT_FINGERPRINT,
+            )
 
     def _assert_rejected_without_writes(self, body: dict, *, pinned: bool) -> PeerPairingRejected:
         with self.assertRaises(PeerPairingRejected) as raised:
@@ -137,7 +144,7 @@ class MissingCertificateBoundaryTests(unittest.TestCase):
                     {
                         "status": "paired",
                         "drone_id": PEER_ID,
-                        "certificate_pem": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+                        "certificate_pem": REAL_CERT_PEM,
                     },
                     pinned=False,
                 )

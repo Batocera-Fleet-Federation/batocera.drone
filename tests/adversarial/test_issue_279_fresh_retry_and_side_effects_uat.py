@@ -14,7 +14,6 @@ Expected behaviour, derived from the issue and the pairing invariants before rea
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -25,13 +24,12 @@ from unittest import mock
 from app.transfer import peer_connectivity, swarm_membership
 from app.transfer.peer_connectivity import PeerPairingRejected
 from app.web import handlers_network
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT as REAL_FINGERPRINT
+from pairing_certificate_fixture import REAL_CERT_PEM as REAL_PEM
 
 
 OPERATOR_ID = "aa:aa:aa:aa:27:90"
 PEER_ID = "bb:bb:bb:bb:27:90"
-# base64 "AAAA" decodes to three zero bytes, so the fingerprint is computable in the test.
-REAL_PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-REAL_FINGERPRINT = hashlib.sha256(b"\x00\x00\x00").hexdigest()
 PREVIOUS_PEM = "-----BEGIN CERTIFICATE-----\nPREVIOUSLY-PINNED\n-----END CERTIFICATE-----\n"
 
 
@@ -77,7 +75,8 @@ class CertificatelessRetryUAT(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return patcher.start()
 
-    def _attempt(self, body: dict, *, url: str = "http://peer.example:8080", confirmed: str = "") -> object:
+    def _attempt(self, body: dict, *, url: str = "http://peer.example:8080", confirmed: str = REAL_FINGERPRINT) -> object:
+        # The default is the operator-confirmed anchor an unpinned http:// attempt needs.
         peer = {"drone_id": PEER_ID, "reachable_url": url}
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
             return self.handler._pair_peer_or_reply(peer, "operator-code", confirmed)

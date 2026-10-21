@@ -14,9 +14,7 @@ Kept in a separate suite so it does not block #279 delivery.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,13 +23,14 @@ from unittest import mock
 
 from app.transfer import peer_connectivity, swarm_membership
 from app.transfer.peer_connectivity import PeerPairingRejected
+from pairing_certificate_fixture import REAL_CERT_FINGERPRINT, REAL_CERT_PEM
 
 
 OPERATOR_ID = "aa:aa:aa:aa:02:79"
 PEER_ID = "bb:bb:bb:bb:02:79"
 PEER_URL = "http://192.168.1.45:8080"
-OFFERED_PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
-OFFERED_FINGERPRINT = hashlib.sha256(ssl.PEM_cert_to_DER_cert(OFFERED_PEM)).hexdigest()
+OFFERED_PEM = REAL_CERT_PEM
+OFFERED_FINGERPRINT = REAL_CERT_FINGERPRINT
 
 
 def _response(body: dict) -> mock.MagicMock:
@@ -79,7 +78,12 @@ class MalformedPortAfterPinTests(unittest.TestCase):
             "api_port": api_port,
         }
         with mock.patch.object(peer_connectivity, "urlopen", return_value=_response(body)):
-            peer_connectivity._local_pair_peer(self.settings, peer, "operator-code")
+            peer_connectivity._local_pair_peer(
+                self.settings,
+                peer,
+                "operator-code",
+                confirmed_fingerprint=OFFERED_FINGERPRINT,
+            )
 
     def test_malformed_port_is_a_rejected_pairing_that_leaves_no_pin(self) -> None:
         try:
