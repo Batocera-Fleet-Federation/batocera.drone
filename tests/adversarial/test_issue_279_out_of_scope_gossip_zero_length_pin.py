@@ -20,12 +20,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from app.transfer import swarm_membership
+from pairing_certificate_fixture import REAL_CERT_PEM
 
 
 PEER_ID = "bb:bb:bb:bb:02:79"
 ZERO_LENGTH_PEM = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n"
-# "AAAA" decodes to three bytes: passes the guards and reaches the save step.
-DECODABLE_PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+# A real certificate: it parses as X.509, so it passes the guards and reaches the save step.
+DECODABLE_PEM = REAL_CERT_PEM
 
 
 def _record(pem: str) -> dict:

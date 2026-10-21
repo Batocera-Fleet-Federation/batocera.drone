@@ -150,6 +150,8 @@ class PairPeerErrorMappingTests(unittest.TestCase):
     def test_peer_200_paired_without_certificate_is_502_and_nothing_is_saved(self) -> None:
         # Unpinned pair-by-address: a status=paired answer with a matching id but no
         # certificate must be a rejected pairing (502), not a ValueError from the save step.
+        # The operator-confirmed fingerprint is the trust anchor an unpinned http:// pairing
+        # needs before anything is sent (see _pairing_certificate_anchored), so it is supplied.
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({"status": "paired", "drone_id": "peer-a"}).encode("utf-8")
         self.handler.settings.device_id = "drone-self"
@@ -169,7 +171,11 @@ class PairPeerErrorMappingTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
             self.assertIsNone(
-                self.handler._pair_peer_or_reply({"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"}, "x", "")
+                self.handler._pair_peer_or_reply(
+                    {"drone_id": "peer-a", "reachable_url": "http://peer.example:8080"},
+                    "x",
+                    "ab" * 32,
+                )
             )
 
         status, payload = self.handler._send_json.call_args.args
