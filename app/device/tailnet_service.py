@@ -680,7 +680,7 @@ def _maybe_disable_key_expiry(settings: Optional[Any]) -> None:
     succeeded on the tailnet side by the time this runs."""
     if settings is None:
         return
-    client_id, client_secret = _resolve_oauth_client(settings)
+    client_id, client_secret, _tag = _resolve_oauth_client(settings)
     if not client_id or not client_secret:
         return
     if not tailnet_status().get("enrolled"):
@@ -863,26 +863,41 @@ def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> di
 TAILNET_OAUTH_CLIENT_STATE_NAMESPACE = "tailnet_oauth_client.json"
 
 
+_TAG_RE = re.compile(r"^tag:[a-zA-Z][a-zA-Z0-9-]*$")
+
+
 def _load_oauth_client_state(settings: Settings) -> dict:
     stored = _load_state_payload(_state_database_path(settings.userdata_root), TAILNET_OAUTH_CLIENT_STATE_NAMESPACE, {})
     stored = stored if isinstance(stored, dict) else {}
     return {
         "client_id": str(stored.get("client_id") or ""),
         "client_secret": str(stored.get("client_secret") or ""),
+        "tag": str(stored.get("tag") or ""),
     }
 
 
-def set_tailnet_oauth_client(settings: Settings, client_id: str, client_secret: str) -> dict:
+def set_tailnet_oauth_client(settings: Settings, client_id: str, client_secret: str, tag: str) -> dict:
     """Persist an OAuth client for minting invite keys. Never returns the
-    secret back (mirrors every other credential store in this app)."""
+    secret back (mirrors every other credential store in this app).
+
+    ``tag`` is required: Tailscale rejects a key created by an OAuth client
+    with no tag ("tailnet-owned auth key must have tags set") -- found live
+    against a real account. It must already exist in this tailnet's own ACL
+    policy (the ``tagOwners`` section in Tailscale's admin console); this
+    app has no way to create or validate that policy entry, only to check
+    the ``tag:name`` shape before sending it anywhere.
+    """
     client_id = str(client_id or "").strip()
     client_secret = str(client_secret or "").strip()
-    if not client_id or not client_secret:
-        raise ValueError("both the OAuth client ID and client secret are required")
+    tag = str(tag or "").strip()
+    if not client_id or not client_secret or not tag:
+        raise ValueError("the OAuth client ID, client secret, and tag are all required")
+    if not _TAG_RE.match(tag):
+        raise ValueError('tag must look like "tag:something" (letters, digits, and hyphens only)')
     _save_state_payload(
         _state_database_path(settings.userdata_root),
         TAILNET_OAUTH_CLIENT_STATE_NAMESPACE,
-        {"client_id": client_id, "client_secret": client_secret},
+        {"client_id": client_id, "client_secret": client_secret, "tag": tag},
     )
     return oauth_client_status(settings)
 
@@ -891,34 +906,38 @@ def clear_tailnet_oauth_client(settings: Settings) -> dict:
     _save_state_payload(
         _state_database_path(settings.userdata_root),
         TAILNET_OAUTH_CLIENT_STATE_NAMESPACE,
-        {"client_id": "", "client_secret": ""},
+        {"client_id": "", "client_secret": "", "tag": ""},
     )
     return oauth_client_status(settings)
 
 
-def _resolve_oauth_client(settings: Settings) -> tuple[str, str]:
+def _resolve_oauth_client(settings: Settings) -> tuple[str, str, str]:
     # The persisted-state read is best-effort: a caller passing a bare
     # mock/stub settings object (or a genuinely unreadable state DB) must
     # still fall back to the env-var pair cleanly, not raise, since this
     # whole path backs an already best-effort feature
-    # (_maybe_disable_key_expiry never raises either).
+    # (_maybe_disable_key_expiry never raises either). There is no env-var
+    # fallback for the tag (it's new, invite-only) -- a legacy env-var-only
+    # setup still works for _maybe_disable_key_expiry, just not for minting
+    # invite keys, which raises its own clear error when the tag is blank.
     try:
         stored = _load_oauth_client_state(settings)
     except Exception:
-        stored = {"client_id": "", "client_secret": ""}
+        stored = {"client_id": "", "client_secret": "", "tag": ""}
     if stored["client_id"] and stored["client_secret"]:
-        return stored["client_id"], stored["client_secret"]
+        return stored["client_id"], stored["client_secret"], stored["tag"]
     return (
         str(getattr(settings, "tailscale_oauth_client_id", "") or ""),
         str(getattr(settings, "tailscale_oauth_client_secret", "") or ""),
+        "",
     )
 
 
 def oauth_client_status(settings: Settings) -> dict:
     """Never includes the secret -- just enough for the admin UI to show
-    whether inviting is available and, if so, which client ID is active."""
-    client_id, client_secret = _resolve_oauth_client(settings)
-    return {"configured": bool(client_id and client_secret), "client_id": client_id}
+    whether inviting is available and, if so, which client ID/tag are active."""
+    client_id, client_secret, tag = _resolve_oauth_client(settings)
+    return {"configured": bool(client_id and client_secret and tag), "client_id": client_id, "tag": tag}
 
 
 def create_invite_auth_key(settings: Settings) -> dict:
@@ -936,13 +955,17 @@ def create_invite_auth_key(settings: Settings) -> dict:
     window, matching how a manually-created key is normally used here.
 
     Raises RuntimeError (never containing either secret) if no OAuth client
-    is configured or Tailscale's API rejects the request.
+    (with a tag) is configured or Tailscale's API rejects the request.
+    Tailscale requires a tag on any key an OAuth client creates -- found
+    live ("tailnet-owned auth key must have tags set") against a real
+    account; an empty tags list is rejected outright, so the configured tag
+    is always included.
     """
-    client_id, client_secret = _resolve_oauth_client(settings)
-    if not client_id or not client_secret:
+    client_id, client_secret, tag = _resolve_oauth_client(settings)
+    if not client_id or not client_secret or not tag:
         raise RuntimeError(
-            "No Tailscale OAuth client is configured. Add one from Tailscale's admin "
-            "console (Settings -> OAuth clients) first."
+            "No Tailscale OAuth client (with a tag) is configured. Add one, including a tag "
+            "that already exists in this tailnet's ACL policy, on the Tailnet card first."
         )
     token = _tailscale_oauth_access_token(client_id, client_secret)
     expiry_seconds = max(300, int(os.environ.get("DRONE_TAILNET_INVITE_KEY_EXPIRY_SECONDS", "3600")))
@@ -952,7 +975,7 @@ def create_invite_auth_key(settings: Settings) -> dict:
         data=json.dumps(
             {
                 "capabilities": {
-                    "devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": []}}
+                    "devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": [tag]}}
                 },
                 "expirySeconds": expiry_seconds,
                 "description": "Drone swarm invite",

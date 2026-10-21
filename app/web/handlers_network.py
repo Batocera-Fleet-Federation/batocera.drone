@@ -965,7 +965,10 @@ class HandlersNetworkMixin:
         payload = payload if isinstance(payload, dict) else {}
         try:
             result = _set_tailnet_oauth_client(
-                self.settings, str(payload.get("client_id") or ""), str(payload.get("client_secret") or "")
+                self.settings,
+                str(payload.get("client_id") or ""),
+                str(payload.get("client_secret") or ""),
+                str(payload.get("tag") or ""),
             )
         except ValueError:
             raise

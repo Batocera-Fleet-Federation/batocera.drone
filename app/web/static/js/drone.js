@@ -11247,12 +11247,13 @@ async function swarmRotateTailnetAuthKey() {
 async function saveTailnetOauthClient() {
   const clientId = (document.getElementById("tailnetOauthClientId")?.value || "").trim();
   const clientSecret = (document.getElementById("tailnetOauthClientSecret")?.value || "").trim();
-  if (!clientId || !clientSecret) {
-    showToast("Enter both the client ID and client secret.", "warning");
+  const tag = (document.getElementById("tailnetOauthClientTag")?.value || "").trim();
+  if (!clientId || !clientSecret || !tag) {
+    showToast("Enter the client ID, client secret, and tag.", "warning");
     return;
   }
   try {
-    await apiPost("/admin/tailnet/oauth-client/set", { client_id: clientId, client_secret: clientSecret });
+    await apiPost("/admin/tailnet/oauth-client/set", { client_id: clientId, client_secret: clientSecret, tag });
     showToast("OAuth client saved.", "success");
     invalidateSwarmDataCache();
     await renderSwarmPage();
@@ -11380,15 +11381,19 @@ function renderTailnetShareSection(state) {
 function renderTailnetInviteSection(state) {
   const oauth = state.oauth_client || {};
   const body = oauth.configured
-    ? `<div class="small text-muted mb-2"><i class="bi bi-check-circle me-1"></i>OAuth client configured (<code>${escapeHtml(oauth.client_id || "")}</code>). <a href="#" onclick="clearTailnetOauthClient(); return false;" class="text-danger">Remove</a></div>
+    ? `<div class="small text-muted mb-2"><i class="bi bi-check-circle me-1"></i>OAuth client configured (<code>${escapeHtml(oauth.client_id || "")}</code>, tags new devices <code>${escapeHtml(oauth.tag || "")}</code>). <a href="#" onclick="clearTailnetOauthClient(); return false;" class="text-danger">Remove</a></div>
       <button class="btn btn-success" type="button" id="tailnetInviteBtn" onclick="inviteDroneToSwarm()"><i class="bi bi-person-plus me-1"></i>Invite Drone to Swarm</button>`
-    : `<div class="small text-muted mb-2">One-time setup: create an OAuth client scoped to <strong>Auth Keys</strong> (write) on Tailscale's admin console, then paste it here.</div>
-      <div class="row g-2 align-items-end mb-2">
-        <div class="col-12 col-md-5"><label class="form-label small" for="tailnetOauthClientId">Client ID</label><input id="tailnetOauthClientId" class="form-control form-control-sm" type="text" autocomplete="off"></div>
-        <div class="col-12 col-md-5"><label class="form-label small" for="tailnetOauthClientSecret">Client secret</label><input id="tailnetOauthClientSecret" class="form-control form-control-sm" type="password" autocomplete="new-password"></div>
-        <div class="col-12 col-md-2"><button class="btn btn-primary btn-sm w-100" type="button" onclick="saveTailnetOauthClient()">Save</button></div>
+    : `<div class="small text-muted mb-2">One-time setup: create an OAuth client scoped to <strong>Auth Keys</strong> (write) on Tailscale's admin console. Tailscale also requires a <strong>tag</strong> on any key an OAuth client creates -- pick one already defined in this tailnet's ACL policy (<em>Access Controls</em> -&gt; <code>tagOwners</code>), or add one there first.</div>
+      <div class="row g-2 mb-2">
+        <div class="col-12 col-md-6"><label class="form-label small" for="tailnetOauthClientId">Client ID</label><input id="tailnetOauthClientId" class="form-control form-control-sm" type="text" autocomplete="off"></div>
+        <div class="col-12 col-md-6"><label class="form-label small" for="tailnetOauthClientSecret">Client secret</label><input id="tailnetOauthClientSecret" class="form-control form-control-sm" type="password" autocomplete="new-password"></div>
       </div>
-      <a class="small" href="https://login.tailscale.com/admin/settings/oauth" target="_blank" rel="noopener noreferrer">Create an OAuth client &rarr;</a>`;
+      <div class="row g-2 align-items-end mb-2">
+        <div class="col-12 col-md-9"><label class="form-label small" for="tailnetOauthClientTag">Tag for new devices</label><input id="tailnetOauthClientTag" class="form-control form-control-sm" type="text" placeholder="tag:drone" autocomplete="off"></div>
+        <div class="col-12 col-md-3"><button class="btn btn-primary btn-sm w-100" type="button" onclick="saveTailnetOauthClient()">Save</button></div>
+      </div>
+      <a class="small" href="https://login.tailscale.com/admin/settings/oauth" target="_blank" rel="noopener noreferrer">Create an OAuth client &rarr;</a> &middot;
+      <a class="small" href="https://login.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Edit ACL policy &rarr;</a>`;
   return `
     <hr>
     <div class="small text-muted mb-2"><strong>Invite Drone to Swarm.</strong> Generate a ready-to-use token here and send it to whoever is setting up a new machine -- they just paste it in, no Tailscale account needed on their end.</div>
