@@ -603,10 +603,22 @@ def _tailscale_api_request(
     timeout: float = TAILSCALE_API_TIMEOUT_SECONDS,
 ) -> dict:
     """Minimal stdlib JSON client for Tailscale's admin API. Only ever used for
-    the OAuth token exchange and the device key-expiry update below."""
+    the OAuth token exchange and the device key-expiry update below.
+
+    A non-2xx response is re-raised as a RuntimeError carrying Tailscale's own
+    rejection reason (via _format_http_error, which reads the response body --
+    e.g. "tags are required for keys created by an OAuth client") instead of
+    letting the bare urllib.error.HTTPError escape uncaught. Every caller here
+    only ever catches RuntimeError; without this, a 4xx/5xx from Tailscale's
+    API surfaced as a bare "HTTP Error 400: Bad Request" with the actual
+    reason discarded, both to the admin UI and to this process's own logs.
+    """
     request = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except (urllib.error.HTTPError, urllib.error.URLError) as error:
+        raise RuntimeError(f"Tailscale API request failed: {_format_http_error(error)}") from error
     return json.loads(raw.decode("utf-8")) if raw else {}
 
 

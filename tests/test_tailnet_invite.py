@@ -4,15 +4,27 @@ instead of visiting Tailscale's site each time. Mirrors
 test_tailnet_sharing.py's shapes closely.
 """
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 import app.device.tailnet_service as tailnet_service
 from app.drone_api import Settings
 from app.web import handlers_network
+
+
+def _http_error(code: int, body: dict) -> HTTPError:
+    return HTTPError(
+        url="https://api.tailscale.com/api/v2/tailnet/-/keys",
+        code=code,
+        msg="Bad Request",
+        hdrs=None,
+        fp=io.BytesIO(json.dumps(body).encode("utf-8")),
+    )
 
 
 def _build_settings(root: Path, **env_overrides) -> Settings:
@@ -128,6 +140,23 @@ class CreateInviteAuthKeyTests(unittest.TestCase):
                     mock.patch.object(tailnet_service, "_tailscale_api_request", return_value={}):
                 with self.assertRaises(RuntimeError):
                     tailnet_service.create_invite_auth_key(settings)
+
+    def test_tailscale_rejection_reason_is_surfaced_not_discarded(self) -> None:
+        # A non-2xx from Tailscale's API used to escape as a bare
+        # urllib.error.HTTPError (str() == "HTTP Error 400: Bad Request"),
+        # caught by nothing here (every caller only catches RuntimeError) --
+        # the actual reason Tailscale gave was silently thrown away. Covers
+        # _tailscale_api_request's fix directly, at the real urlopen boundary.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            tailnet_service.set_tailnet_oauth_client(settings, "client-abc", "secret-xyz")
+            error = _http_error(400, {"message": "tags are required for keys created by an OAuth client"})
+            with mock.patch.object(tailnet_service, "_tailscale_oauth_access_token", return_value="tok-123"), \
+                    mock.patch.object(tailnet_service.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaises(RuntimeError) as ctx:
+                    tailnet_service.create_invite_auth_key(settings)
+        self.assertIn("tags are required", str(ctx.exception))
+        self.assertNotIn("secret-xyz", str(ctx.exception))
 
     def test_expiry_seconds_has_a_five_minute_floor(self) -> None:
         # DRONE_TAILNET_INVITE_KEY_EXPIRY_SECONDS is read live at call time
