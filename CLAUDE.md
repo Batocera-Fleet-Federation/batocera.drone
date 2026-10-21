@@ -281,7 +281,15 @@ A peer paired over TLS (`paired_over_tls` on the paired record) is never dialed 
 (filters in `_peer_address_candidates`/`_peer_address`, refusal in `_local_pair_peer`; the flag is sticky — `save_paired_peer` never lets any writer clear it, and `_handle_peer_pair` answers 409 to a non-https re-pair of such a peer, even with a valid code; set by `_local_pair_peer`, `_handle_peer_pair` and swarm gossip, never by announcements).
 Tailnet enrollment follows the same peer-shared path: `bootstrap_tailnet_from_swarm`
 runs at startup and is retried every `DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS`
-(default 300) while a Drone is not enrolled.
+(default 300) while a Drone is not enrolled. Once enrolled, a second background
+worker (`drone-tailnet-peer-autopair` in `transfer/peer_workers.py`, retried every
+`DRONE_TAILNET_PEER_SYNC_INTERVAL_SECONDS`, default 300) runs the same
+discover-and-code-free-auto-pair pass the Swarm page's Discover/Refresh button
+triggers, so a Drone converges onto every reachable tailnet peer with no human
+opening the admin page. It calls `HandlersNetworkMixin._sync_tailnet_peers` on a
+bare instance (`.settings` only, no live HTTP request); `_activate_local_peer_certificate`
+falls back to the live-TLS-servers registry (`activate_peer_certificate`) rather
+than `self.server` whenever `.server` is absent, same as swarm-gossip cert activation.
 Local-network shutdown joins discovery and peer-health workers before clearing
 their generation. If the timeout expires, `stop_local_network_workers()` raises
 `TimeoutError` and retains the stopped generation for retry; do not delete peer

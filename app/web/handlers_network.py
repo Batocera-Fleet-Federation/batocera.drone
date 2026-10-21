@@ -49,7 +49,7 @@ try:
         _is_tls_identity_error,
         reset_peer_dns_cache as _reset_peer_dns_cache,
     )
-    from .server_tls import load_peer_cert_everywhere
+    from .server_tls import load_peer_cert_everywhere, activate_peer_certificate
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device import nfs_export_manager as _nfs_exports  # type: ignore
@@ -81,7 +81,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _is_tls_identity_error,
         reset_peer_dns_cache as _reset_peer_dns_cache,
     )
-    from web.server_tls import load_peer_cert_everywhere  # type: ignore
+    from web.server_tls import load_peer_cert_everywhere, activate_peer_certificate  # type: ignore
 
 # Local copy (drone_api keeps its own; same env). Not test-patched.
 PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
@@ -229,7 +229,15 @@ class HandlersNetworkMixin:
         cert_path = Path(raw_path)
         if not cert_path.is_file():
             return
-        load_peer_cert_everywhere(self.server, cert_path)
+        # A real HTTP handler has a live ``.server`` to pin every listener on
+        # directly. The periodic background tailnet-peer sync (no request in
+        # flight) has none, so it falls back to the same live-TLS-servers
+        # registry swarm-gossip cert activation already uses.
+        server = getattr(self, "server", None)
+        if server is not None:
+            load_peer_cert_everywhere(server, cert_path)
+        else:
+            activate_peer_certificate(cert_path)
 
     @staticmethod
     def _tailnet_device_row(device: dict) -> dict:

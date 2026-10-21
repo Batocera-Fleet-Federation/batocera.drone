@@ -31,6 +31,7 @@ _WORKER_NAMES = (
     "drone-tailnet-networking",
     "drone-tailnet-watchdog",
     "drone-tailnet-bootstrap-retry",
+    "drone-tailnet-peer-autopair",
     "drone-local-peer-health",
     _FAKE_DISCOVERY_NAME,
 )

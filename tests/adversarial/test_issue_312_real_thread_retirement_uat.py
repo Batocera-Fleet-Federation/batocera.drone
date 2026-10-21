@@ -22,6 +22,7 @@ GENERATION_THREADS = (
     "drone-local-discovery",
     "drone-tailnet-watchdog",
     "drone-tailnet-bootstrap-retry",
+    "drone-tailnet-peer-autopair",
 )
 
 
@@ -42,6 +43,7 @@ class RealThreadRetirementTests(unittest.TestCase):
                 {
                     "DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS": "3600",
                     "DRONE_TAILNET_BOOTSTRAP_INTERVAL_SECONDS": "3600",
+                    "DRONE_TAILNET_PEER_SYNC_INTERVAL_SECONDS": "3600",
                     "DRONE_LOCAL_HEALTH_INTERVAL_SECONDS": "3600",
                 },
             ),

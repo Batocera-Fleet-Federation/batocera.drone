@@ -18,12 +18,14 @@ try:
     from . import local_network as _local_network
     from .drone_tls import DroneCertificateManager
     from .peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address
+    from ..web.handlers_network import HandlersNetworkMixin
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from device.tailnet_service import ensure_tailnet_networking, bootstrap_tailnet_from_swarm, tailnet_status, _repair_tailnet_data_path  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import _peer_get_json_for_peer, _preferred_peer_address  # type: ignore
+    from web.handlers_network import HandlersNetworkMixin  # type: ignore
 
 
 _LOCAL_NETWORK_STOP: Optional[Event] = None
@@ -175,6 +177,34 @@ def _start_local_network_generation(settings: Settings) -> None:
                 )
 
     Thread(target=tailnet_bootstrap_retry, name="drone-tailnet-bootstrap-retry", daemon=True).start()
+
+    def tailnet_peer_autopair_retry() -> None:
+        # Mirrors the Swarm page's Discover/Refresh button: probe this Drone's
+        # tailnet peers and auto-pair (code-free, tailnet-membership-authorized)
+        # with any that are Drones not yet paired. Without this, a Drone only
+        # ever ran that pass when a human opened the Swarm page and clicked
+        # Discover/Refresh -- enrollment converged on its own via the bootstrap
+        # retry above, but the actual pairing never did unless someone visited
+        # the page. A throwaway HandlersNetworkMixin needs only ``.settings``
+        # for this path (no in-flight HTTP request); its one cert-trust call
+        # already falls back to the live-TLS-servers registry when ``.server``
+        # is absent.
+        interval = max(60, int(os.environ.get("DRONE_TAILNET_PEER_SYNC_INTERVAL_SECONDS", "300")))
+        helper = HandlersNetworkMixin()
+        helper.settings = settings
+        while not _wait_for_generation_stop(stop, interval):
+            try:
+                status = tailnet_status()
+                if status.get("enrolled"):
+                    helper._sync_tailnet_peers(status)
+            except Exception as error:
+                print(
+                    f"Tailnet peer auto-pair retry failed: {error.__class__.__name__}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    Thread(target=tailnet_peer_autopair_retry, name="drone-tailnet-peer-autopair", daemon=True).start()
 
     def fingerprint() -> str:
         return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")
