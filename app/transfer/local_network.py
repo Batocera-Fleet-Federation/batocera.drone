@@ -8,6 +8,7 @@ import secrets
 import socket
 import sqlite3
 import struct
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -146,8 +147,52 @@ def _is_self_source_ip(source_ip: Optional[str]) -> bool:
     return not source or source.startswith("127.") or source in set(_local_ipv4_addresses())
 
 
+# Devices that carry VPN/overlay traffic, not LAN discovery traffic.
+_TUNNEL_INTERFACE_PREFIXES = ("tun", "tap", "tailscale", "wg", "ppp", "utun", "zt", "ipsec", "docker", "veth", "br-", "virbr")
+_SIOCGIFADDR = 0x8915  # Linux only; other platforms return no LAN interfaces.
+
+
+def _lan_ipv4_interfaces() -> list[tuple[str, str]]:
+    """Return ``(ifname, ipv4)`` for LAN-facing interfaces, skipping tunnels.
+
+    A VPN that redirects the default route (OpenVPN ``redirect-gateway`` adds
+    ``0.0.0.0/1`` and ``128.0.0.0/1`` via ``tun0``) also captures multicast and
+    the 255.255.255.255 broadcast. Announcements sent without an explicit
+    interface then leave through the tunnel and never reach the LAN, and the
+    listener joins the group on the tunnel too. Pinning sends and joins to the
+    physical interfaces keeps discovery on the LAN. An empty list means the
+    interfaces could not be enumerated, and callers keep the previous behaviour.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        import fcntl
+        names = [name for _, name in socket.if_nameindex()]
+    except (ImportError, OSError):
+        return []
+    found: list[tuple[str, str]] = []
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        for name in names:
+            if name == "lo" or name.startswith(_TUNNEL_INTERFACE_PREFIXES):
+                continue
+            try:
+                # struct ifreq: 16-byte name, then sockaddr_in whose address starts at offset 20.
+                raw = fcntl.ioctl(probe.fileno(), _SIOCGIFADDR, struct.pack("256s", name.encode("utf-8")[:15]))
+            except OSError:
+                continue  # no IPv4 address on this interface
+            address = socket.inet_ntoa(raw[20:24])
+            if address.startswith(("127.", "169.254.")):
+                continue
+            found.append((name, address))
+    finally:
+        probe.close()
+    return found
+
+
 def _join_multicast_group(sock: socket.socket) -> None:
-    interfaces = ["0.0.0.0", *_local_ipv4_addresses()]
+    lan_addresses = [address for _, address in _lan_ipv4_interfaces()]
+    interfaces = lan_addresses or ["0.0.0.0", *_local_ipv4_addresses()]
     joined = set()
     for interface in interfaces:
         if interface in joined:
@@ -532,6 +577,9 @@ def announce(settings: Any, certificate_fingerprint: str = "") -> bool:
     if not is_local_mode(settings):
         return False
     data = json.dumps(discovery_payload(settings, certificate_fingerprint)).encode("utf-8")
+    lan = _lan_ipv4_interfaces()
+    if lan:
+        return _announce_on_lan(data, lan)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sent = False
     try:
@@ -551,6 +599,47 @@ def announce(settings: Any, certificate_fingerprint: str = "") -> bool:
         return sent
     finally:
         sock.close()
+
+
+def _announce_on_lan(data: bytes, lan: list[tuple[str, str]]) -> bool:
+    """Send one announcement out each LAN interface, never through a tunnel.
+
+    Multicast egress is pinned with IP_MULTICAST_IF. Broadcast is pinned with
+    SO_BINDTODEVICE, which needs privileges; if that is refused the broadcast
+    is skipped for that interface rather than leaking through the default route.
+    """
+    sent = False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        for _, address in lan:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(address))
+                sock.sendto(data, (DISCOVERY_GROUP, DISCOVERY_PORT))
+                sent = True
+            except OSError:
+                continue
+    finally:
+        sock.close()
+    bind_to_device = getattr(socket, "SO_BINDTODEVICE", None)
+    for ifname, _ in lan:
+        if bind_to_device is None:
+            break
+        bcast = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            bcast.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            bcast.setsockopt(socket.SOL_SOCKET, bind_to_device, ifname.encode("utf-8"))
+            for address in DISCOVERY_BROADCAST_ADDRESSES:
+                try:
+                    bcast.sendto(data, (address, DISCOVERY_PORT))
+                    sent = True
+                except OSError:
+                    continue
+        except OSError:
+            continue  # no SO_BINDTODEVICE privilege: skip rather than route via a tunnel
+        finally:
+            bcast.close()
+    return sent
 
 
 def start_discovery_worker(

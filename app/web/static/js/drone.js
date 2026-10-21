@@ -10676,7 +10676,7 @@ function localPeerStatusBadge(peer) {
 function renderLocalPeerRows(peers) {
   if (!peers.length) return '<div class="themed-empty">No nearby Drones discovered yet.</div>';
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table bff-stack">
-    <thead><tr><th>Drone</th><th>Drone ID</th><th>Source</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
+    <thead><tr><th>Drone</th><th>Drone ID</th><th>Source</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th title="From this Drone's own unauthenticated announcement -- informational only. Use the fingerprint shown on THAT Drone's own Pairing card to confirm it when pairing."><i class="bi bi-info-circle me-1" aria-hidden="true"></i>Certificate</th><th></th></tr></thead>
     <tbody>${peers.map(peer => {
       const rawPeerId = String(peer.drone_id || "");
       const peerId = escapeHtml(rawPeerId);
@@ -10703,7 +10703,8 @@ function renderLocalPeerRows(peers) {
       } else if (insecure) {
         actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>${dismissBtn}</div>`;
       } else {
-        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>${dismissBtn}</div>`;
+        const peerNameToken = encodeURIComponent(peer.name || peer.hostname || rawPeerId).replace(/'/g, "%27");
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'), decodeURIComponent('${peerNameToken}'))">Pair</button>${dismissBtn}</div>`;
       }
       return `<tr>
         <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}${peer.identity_conflict ? '<span class="badge text-bg-danger ms-2" title="This peer is advertising the same Drone id as this machine">Same ID</span>' : ""}</td>
@@ -11469,7 +11470,7 @@ async function renderSwarmPage() {
       }
       if (!stillCurrent()) return;
       const pairingHtml = status.active
-        ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}.</div></div>`
+        ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}.</div></div>${status.pairing?.certificate_fingerprint ? `<div class="mt-2"><div class="small text-muted">Certificate fingerprint (enter this on the other Drone)</div><div class="mono small text-break">${escapeHtml(status.pairing.certificate_fingerprint)}</div></div>` : ""}`
         : '<div class="themed-empty">Local networking is disabled; enable it above to pair Drones.</div>';
       const peersHtml = renderLocalPeerRows(status.peers || []);
       preservePageScroll(() => {
@@ -12179,10 +12180,83 @@ async function requestLocalPeerAssets() {
   await loadLocalPeerAssets();
 }
 
-async function pairLocalPeer(peerId) {
-  const code = window.prompt("Enter the 8-digit pairing code shown on the other Drone:");
-  if (!code) return;
-  await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/pair`, { pairing_code: code.trim() });
+function promptPairingCredentials(peerName) {
+  return new Promise(resolve => {
+    const modalId = "localPairPromptModal";
+    document.getElementById(modalId)?.remove();
+    const modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = `
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content themed-modal">
+          <div class="modal-header">
+            <h5 class="modal-title">Pair with ${escapeHtml(peerName)}</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="form-label small text-muted" for="localPairPromptCode">Pairing code shown on that Drone's own Pairing card</label>
+              <input type="text" class="form-control mono" id="localPairPromptCode" autocomplete="off" maxlength="8">
+            </div>
+            <div class="mb-1">
+              <label class="form-label small text-muted" for="localPairPromptFingerprint">Certificate fingerprint shown on that same Pairing card</label>
+              <input type="text" class="form-control mono" id="localPairPromptFingerprint" autocomplete="off">
+            </div>
+            <div class="small text-muted"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>Both values come from the *other* Drone's own Swarm page -- not from this Drone's Nearby Drones list, which cannot prove the other Drone's identity.</div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-primary" id="localPairPromptBtn" disabled>Pair</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+    let settled = false;
+    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    modal.addEventListener("hidden.bs.modal", () => { finish(null); modal.remove(); });
+    if (bsModal) bsModal.show(); else { modal.classList.add("show"); modal.style.display = "block"; }
+    const hide = () => { if (bsModal) bsModal.hide(); else { modal.classList.remove("show"); modal.style.display = "none"; finish(null); modal.remove(); } };
+    modal.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => button.addEventListener("click", hide));
+
+    const codeInput = document.getElementById("localPairPromptCode");
+    const fingerprintInput = document.getElementById("localPairPromptFingerprint");
+    const confirmBtn = document.getElementById("localPairPromptBtn");
+    const updateConfirm = () => {
+      confirmBtn.disabled = !codeInput.value.trim() || !fingerprintInput.value.trim();
+    };
+    codeInput.addEventListener("input", updateConfirm);
+    fingerprintInput.addEventListener("input", updateConfirm);
+    const submit = () => {
+      if (confirmBtn.disabled) return;
+      finish({ code: codeInput.value.trim(), fingerprint: fingerprintInput.value.trim() });
+      hide();
+    };
+    confirmBtn.addEventListener("click", submit);
+    fingerprintInput.addEventListener("keydown", (event) => { if (event.key === "Enter") submit(); });
+    codeInput.focus();
+  });
+}
+
+async function pairLocalPeer(peerId, peerName) {
+  // The server only sends the code to a certificate the operator confirmed
+  // (never to whatever this discovered row claims), so both values must come
+  // from the other Drone's own Pairing card, not from this page.
+  const credentials = await promptPairingCredentials(peerName || peerId);
+  if (!credentials) return;
+  try {
+    await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/pair`, {
+      pairing_code: credentials.code,
+      certificate_fingerprint: credentials.fingerprint,
+    });
+  } catch (err) {
+    // The click handler does not catch, so a rejected pairing must be shown here.
+    showToast(`Pairing failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    return;
+  }
   invalidateSwarmDataCache();
   showToast("Drone paired.", "success");
   if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
