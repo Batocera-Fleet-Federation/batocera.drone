@@ -7508,7 +7508,7 @@ class SwarmPageTests(unittest.TestCase):
 
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
-        for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets"):
+        for expected in (">This Drone<", ">Online<", ">Offline<", "Download ROMs"):
             self.assertIn(expected, card_body)
         # No "open this peer's own UI" link -- the address is shown as plain
         # text, not a navigable link to a separately-hosted UI.
@@ -7627,7 +7627,11 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn("Nearby Drones", body)
         self.assertIn("renderLocalPeerRows(status.peers || [])", body)
         self.assertIn('class="col-12 col-lg-6"', body)
-        self.assertNotIn("Enter this code on the other Drone", body)
+        # The long inline explanation moved into a "How does this work?"
+        # modal (showPairingGuideModal) -- the card itself keeps only a
+        # short one-line summary now, not the old multi-sentence paragraph.
+        self.assertNotIn("pick this Drone from that Drone's Nearby Drones list and enter this code when prompted", body)
+        self.assertIn("showPairingGuideModal()", body)
         self.assertNotIn("Add Drone by Address", body)
         self.assertNotIn('onclick="renderSwarmPage()"><i class="bi bi-arrow-repeat', body)
 

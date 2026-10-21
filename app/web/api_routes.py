@@ -861,6 +861,10 @@ class ApiRoutesMixin:
                 self._handle_admin_local_network_discover()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "leave-swarm":
+                self._handle_admin_leave_swarm()
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "pairing-code" and parts[3] == "rotate":
                 self._handle_admin_local_pairing_code_rotate()
                 return
@@ -887,11 +891,6 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "discover":
                 self._handle_admin_tailnet_discover()
-                return
-
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "sharing":
-                payload = self._read_json_body()
-                self._handle_admin_tailnet_sharing(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "pull-from-peer":

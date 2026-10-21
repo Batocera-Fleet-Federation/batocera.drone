@@ -1,9 +1,11 @@
 """HTTP-level tests for the Tailscale sharing routes added to
-HandlersNetworkMixin (admin: sharing toggle, pull-from-peer) and
-HandlersPeerMixin (_handle_peer_tailnet_config). Business logic itself is
-covered in test_tailnet_sharing.py -- these just verify the handler layer
-calls into it correctly and maps results to the right HTTP status codes.
-Mirrors test_vpn_handlers.py's shape closely.
+HandlersNetworkMixin (admin: pull-from-peer) and HandlersPeerMixin
+(_handle_peer_tailnet_config). There is no sharing on/off route -- a
+self-owned key is always offered to paired peers automatically, an imported
+key never is (see tailnet_service.export_tailnet_payload). Business logic
+itself is covered in test_tailnet_sharing.py -- these just verify the
+handler layer calls into it correctly and maps results to the right HTTP
+status codes. Mirrors test_vpn_handlers.py's shape closely.
 """
 
 import json
@@ -76,33 +78,6 @@ def _handler(settings: Settings, **kwargs) -> _FakeHandler:
         pass
 
     return Handler(settings, **kwargs)
-
-
-class TailnetSharingHandlerTests(unittest.TestCase):
-    def test_enables_sharing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
-                    mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
-                tailnet_service.tailnet_enroll("tskey-auth-fake", settings)
-            handler = _handler(settings)
-            handler._handle_admin_tailnet_sharing({"enabled": True})
-            status, payload = handler.response
-            self.assertEqual(status, 200)
-            self.assertTrue(payload["sharing_enabled"])
-            self.assertTrue(tailnet_service._load_sharing_state(settings)["sharing_enabled"])
-
-    def test_rejects_sharing_for_imported_key(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
-                    mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
-                tailnet_service.import_tailnet_from_peer(
-                    settings, {"auth_key": "tskey-auth-shared", "enrolled": True}, source_peer_id="peer-1",
-                )
-            handler = _handler(settings)
-            with self.assertRaises(ValueError):
-                handler._handle_admin_tailnet_sharing({"enabled": True})
 
 
 class TailnetPullFromPeerHandlerTests(unittest.TestCase):
@@ -198,31 +173,34 @@ class TailnetPeerConfigHandlerTests(unittest.TestCase):
             handler._handle_peer_tailnet_config()
             self.assertIsNone(handler.response)
 
-    def test_404_when_sharing_disabled(self) -> None:
+    def test_404_for_an_imported_key(self) -> None:
+        # Single-hop-only: a key this drone imported from someone else can
+        # never be re-offered, regardless of anything else about its state.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
                     mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
-                tailnet_service.tailnet_enroll("tskey-auth-fake", settings)
+                tailnet_service.import_tailnet_from_peer(
+                    settings, {"auth_key": "tskey-auth-shared", "enrolled": True}, source_peer_id="peer-1",
+                )
             handler = _peer_handler(settings)
             handler._handle_peer_tailnet_config()
             self.assertEqual(handler.response[0], 404)
 
-    def test_404_when_never_enrolled_even_if_sharing_enabled(self) -> None:
+    def test_404_when_never_enrolled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            tailnet_service._save_sharing_state(settings, sharing_enabled=True)  # bypass the normal setter
             handler = _peer_handler(settings)
             handler._handle_peer_tailnet_config()
             self.assertEqual(handler.response[0], 404)
 
-    def test_200_with_auth_key_when_sharing_enabled(self) -> None:
+    def test_200_with_auth_key_for_a_self_owned_enrolled_key(self) -> None:
+        # No toggle to flip: a self-owned key is offered automatically.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
                     mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
                 tailnet_service.tailnet_enroll("tskey-auth-reusable", settings)
-                tailnet_service.set_tailnet_sharing_enabled(settings, True)
                 handler = _peer_handler(settings)
                 handler._handle_peer_tailnet_config()
             status, payload = handler.response

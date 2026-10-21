@@ -80,39 +80,45 @@ def _enroll(settings: Settings, auth_key: str = "tskey-auth-fake-reusable-key") 
         return tailnet_service.tailnet_enroll(auth_key, settings)
 
 
-class SharingEnabledTests(unittest.TestCase):
-    def test_defaults_to_disabled(self) -> None:
+class ShareEligibilityTests(unittest.TestCase):
+    """There is no on/off switch: share-eligibility is computed from the
+    key's provenance alone (see tailnet_service.tailnet_sharing_status's
+    docstring for why)."""
+
+    def test_never_enrolled_is_not_shareable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            self.assertFalse(tailnet_service.tailnet_sharing_status(settings)["sharing_enabled"])
+            self.assertFalse(tailnet_service.tailnet_sharing_status(settings)["shareable"])
 
-    def test_set_sharing_enabled_persists(self) -> None:
+    def test_self_owned_enrolled_key_is_shareable_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             _enroll(settings)
-            result = tailnet_service.set_tailnet_sharing_enabled(settings, True)
-            self.assertTrue(result["sharing_enabled"])
-            self.assertTrue(tailnet_service.tailnet_sharing_status(settings)["sharing_enabled"])
+            self.assertTrue(tailnet_service.tailnet_sharing_status(settings)["shareable"])
+
+    def test_imported_key_is_never_shareable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
+                    mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
+                tailnet_service.import_tailnet_from_peer(
+                    settings, {"auth_key": "tskey-auth-shared", "enrolled": True},
+                    source_peer_id="peer-1", source_peer_name="Peer One",
+                )
+            self.assertFalse(tailnet_service.tailnet_sharing_status(settings)["shareable"])
 
 
 class ExportTailnetPayloadTests(unittest.TestCase):
-    def test_none_when_sharing_disabled(self) -> None:
+    def test_none_when_never_enrolled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            _enroll(settings)
             self.assertIsNone(tailnet_service.export_tailnet_payload(settings))
 
-    def test_none_when_never_enrolled_even_if_sharing_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            tailnet_service._save_sharing_state(settings, sharing_enabled=True)  # bypass the normal setter on purpose
-            self.assertIsNone(tailnet_service.export_tailnet_payload(settings))
-
-    def test_returns_auth_key_and_enrolled_when_shared(self) -> None:
+    def test_returns_auth_key_and_enrolled_for_a_self_owned_key(self) -> None:
+        # No toggle to flip -- enrolling with a fresh key is enough.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             _enroll(settings, auth_key="tskey-auth-reusable-abc")
-            tailnet_service.set_tailnet_sharing_enabled(settings, True)
             with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
                     mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
                 payload = tailnet_service.export_tailnet_payload(settings)
@@ -175,44 +181,6 @@ class ImportTailnetFromPeerTests(unittest.TestCase):
             self.assertEqual(tailnet_service._load_sharing_state(settings)["source_peer_id"], "")
 
 
-class SharingProvenanceGateTests(unittest.TestCase):
-    def _imported_settings(self, tmp: str) -> Settings:
-        settings = _build_settings(Path(tmp))
-        with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
-                mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run):
-            tailnet_service.import_tailnet_from_peer(
-                settings, {"auth_key": "tskey-auth-shared", "enrolled": True},
-                source_peer_id="peer-1", source_peer_name="Peer One",
-            )
-        return settings
-
-    def test_set_sharing_enabled_rejected_for_imported_key(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = self._imported_settings(tmp)
-            with self.assertRaises(ValueError):
-                tailnet_service.set_tailnet_sharing_enabled(settings, True)
-            self.assertFalse(tailnet_service._load_sharing_state(settings)["sharing_enabled"])
-
-    def test_disabling_sharing_is_always_allowed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = self._imported_settings(tmp)
-            result = tailnet_service.set_tailnet_sharing_enabled(settings, False)
-            self.assertFalse(result["sharing_enabled"])
-
-    def test_export_payload_none_for_imported_key_even_if_sharing_somehow_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = self._imported_settings(tmp)
-            tailnet_service._save_sharing_state(settings, sharing_enabled=True)  # bypass the normal setter
-            self.assertIsNone(tailnet_service.export_tailnet_payload(settings))
-
-    def test_self_enrolled_key_can_be_shared(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            _enroll(settings)
-            result = tailnet_service.set_tailnet_sharing_enabled(settings, True)
-            self.assertTrue(result["sharing_enabled"])
-
-
 class CheckSharingRevocationTests(unittest.TestCase):
     def _imported_settings(self, tmp: str) -> Settings:
         settings = _build_settings(Path(tmp))
@@ -246,7 +214,6 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 self.assertTrue(tailnet_service.check_tailnet_sharing_revocation(settings))
             state = tailnet_service._load_sharing_state(settings)
             self.assertEqual(state["auth_key"], "")
-            self.assertFalse(state["sharing_enabled"])
             self.assertIn("no longer paired", state["revoked_reason"])
             self.assertEqual(state["source_peer_id"], "peer-1")  # provenance persists
 

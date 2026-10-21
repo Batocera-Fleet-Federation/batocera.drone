@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -683,11 +684,42 @@ def _maybe_disable_key_expiry(settings: Optional[Any]) -> None:
         )
 
 
+_AUTH_URL_RE = re.compile(r"https://login\.tailscale\.com/a/\S+")
+
+
+class TailnetApprovalRequired(RuntimeError):
+    """`tailscale up` is waiting on a human to approve this device.
+
+    Some Tailscale accounts (device approval turned on tenant-wide, or an
+    auth key created without "Pre-authenticated") never auto-authorize a new
+    device from the key alone: the control server issues a one-time approval
+    URL instead, and `up --timeout=...` just times out waiting for a state
+    that can't be reached without a human visiting it. Without this, that
+    URL was only ever visible by SSHing in and reading tailscaled's own log
+    -- surfaced here as a structured field so the admin UI can render it as
+    a real link instead of a dead-end "timed out" message.
+    """
+
+    def __init__(self, message: str, auth_url: str) -> None:
+        super().__init__(message)
+        self.auth_url = auth_url
+
+
+def _find_tailscale_auth_url(*texts: str) -> str:
+    for text in texts:
+        match = _AUTH_URL_RE.search(text or "")
+        if match:
+            return match.group(0)
+    return ""
+
+
 def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
     """Enroll this device in the tailnet with an auth key from the admin console.
 
-    Raises ValueError for bad input and RuntimeError with a user-facing message
-    (never containing the key) when enrollment fails.
+    Raises ValueError for bad input, TailnetApprovalRequired when the control
+    server is waiting on a human to approve the device (carries the approval
+    URL), and RuntimeError with a user-facing message (never containing the
+    key) for every other failure.
     """
     key = str(auth_key or "").strip()
     if not key:
@@ -726,6 +758,19 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
     except (OSError, subprocess.SubprocessError) as error:
         raise RuntimeError(f"Tailnet enrollment could not run: {error}") from error
     if proc.returncode != 0:
+        # A pending-approval device never reaches Running within --timeout,
+        # so `up` reports its own generic timeout line as the failure -- the
+        # actually useful fact (a one-time approval URL) was emitted earlier
+        # in the same output and would otherwise be discarded by only ever
+        # keeping the last line. Found looking for exactly this URL, never
+        # the key, so the "never log/echo the key" contract is unaffected.
+        auth_url = _find_tailscale_auth_url(proc.stdout or "", proc.stderr or "")
+        if auth_url:
+            raise TailnetApprovalRequired(
+                "This Tailscale account requires a human to approve new devices. "
+                "Open the approval link to finish enrolling this Drone.",
+                auth_url,
+            )
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise RuntimeError(
             "Tailnet enrollment failed: " + (detail[-1] if detail else f"exit code {proc.returncode}")
@@ -779,6 +824,10 @@ def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> di
         raise RuntimeError(f"Tailnet auth token rotation could not disconnect: {message.replace(key, '[redacted]')}")
     try:
         return tailnet_enroll(key, settings)
+    except TailnetApprovalRequired:
+        # Re-raise unchanged: the caller needs auth_url, which a generic
+        # RuntimeError wrapper below would discard.
+        raise
     except RuntimeError as error:
         raise RuntimeError(
             "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")
@@ -809,7 +858,6 @@ def _load_sharing_state(settings: Settings) -> dict:
     stored = stored if isinstance(stored, dict) else {}
     return {
         "auth_key": str(stored.get("auth_key") or ""),
-        "sharing_enabled": bool(stored.get("sharing_enabled", False)),
         "source_peer_id": str(stored.get("source_peer_id") or ""),
         "source_peer_name": str(stored.get("source_peer_name") or ""),
         "revoked_reason": str(stored.get("revoked_reason") or ""),
@@ -827,10 +875,18 @@ def _save_sharing_state(settings: Settings, **updates) -> dict:
 def tailnet_sharing_status(settings: Settings) -> dict:
     """Sharing/provenance fields for the admin status payload -- never
     includes the raw ``auth_key`` (mirrors ``vpn_manager.status()`` never
-    returning the VPN password), just whether one is on file to share."""
+    returning the VPN password), just whether one is on file to share.
+
+    There is no on/off switch: a self-owned key is always offered to paired
+    peers (``shareable``), and an imported key never is, regardless of any
+    stored preference -- single-hop-only sharing is a property of the key's
+    provenance, not an operator toggle. ``shareable`` is computed fresh here
+    from the same two fields ``export_tailnet_payload()`` checks, so the two
+    can never drift apart the way a separately-stored flag could.
+    """
     state = _load_sharing_state(settings)
     return {
-        "sharing_enabled": state["sharing_enabled"],
+        "shareable": bool(state["auth_key"]) and not state["source_peer_id"],
         "has_shared_key": bool(state["auth_key"]),
         "source_peer_id": state["source_peer_id"],
         "source_peer_name": state["source_peer_name"],
@@ -839,39 +895,20 @@ def tailnet_sharing_status(settings: Settings) -> dict:
     }
 
 
-def set_tailnet_sharing_enabled(settings: Settings, enabled: bool) -> dict:
-    """Mirrors ``vpn_manager.set_sharing_enabled()`` exactly: an imported key
-    can never be re-shared -- only the drone that originally enrolled with
-    it (a real paste into ``tailnet_enroll()``, not an import) can turn
-    sharing on. Enforced here *and* independently in
-    ``export_tailnet_payload()``, same belt-and-suspenders reasoning as
-    VPN/SMTP -- don't remove either check on the assumption the other
-    covers it."""
-    if enabled and _load_sharing_state(settings)["source_peer_id"]:
-        raise ValueError(
-            "This Tailscale auth key was imported from another drone and cannot be re-shared. "
-            "Only the drone that originally connected with it can share it with the swarm."
-        )
-    state = _save_sharing_state(settings, sharing_enabled=bool(enabled))
-    return {"sharing_enabled": state["sharing_enabled"]}
-
-
 def export_tailnet_payload(settings: Settings) -> Optional[dict]:
     """This drone's Tailscale auth key for a paired peer to pull.
 
     ``None`` means "don't share" -- the caller (``GET /peer/tailnet/config``)
     turns that into a 404. Mirrors ``vpn_manager.export_payload()``: only
-    ever served over the cert-pinned mTLS ``/peer/*`` channel, gated by
-    pairing (checked by the caller) plus ``sharing_enabled`` here, never
-    returned to a browser. The redundant ``source_peer_id`` check is kept
-    here too even though ``set_tailnet_sharing_enabled()`` already refuses
-    to enable sharing on an imported key -- this is the actual point the
-    key would leave the drone, so it's the right place to enforce
-    single-hop-only even if a future bug ever let ``sharing_enabled`` get
-    set some other way.
+    ever served over the cert-pinned mTLS ``/peer/*`` channel, never returned
+    to a browser. A self-owned key (``source_peer_id`` empty) is always
+    offered, with no operator toggle to forget to flip -- single-hop-only
+    sharing (an imported key is never re-offered) is the actual security
+    boundary and is enforced unconditionally right here, the one place the
+    key would actually leave the drone.
     """
     state = _load_sharing_state(settings)
-    if not state["sharing_enabled"] or not state["auth_key"] or state["source_peer_id"]:
+    if not state["auth_key"] or state["source_peer_id"]:
         return None
     return {"auth_key": state["auth_key"], "enrolled": tailnet_status().get("enrolled")}
 
@@ -888,8 +925,7 @@ def import_tailnet_from_peer(settings: Settings, payload: dict, *, source_peer_i
     ``source_peer_id`` is supplied by the *caller* (the drone_id it just
     successfully mTLS-authenticated against), never trusted from the wire
     payload -- this becomes the key's permanent provenance marker, checked
-    by ``set_tailnet_sharing_enabled()``/``export_tailnet_payload()`` to
-    enforce single-hop-only sharing.
+    by ``export_tailnet_payload()`` to enforce single-hop-only sharing.
     """
     source_peer_id = str(source_peer_id or "").strip()
     if not source_peer_id:
@@ -982,7 +1018,7 @@ def _revoke_local_sharing(settings: Settings, reason: str) -> None:
     now-orphaned entry pass the single-hop sharing gate as if it were
     self-owned. Only a genuine fresh ``tailnet_enroll()`` call clears it.
     """
-    _save_sharing_state(settings, auth_key="", sharing_enabled=False, revoked_reason=reason, revoked_at=_now_iso())
+    _save_sharing_state(settings, auth_key="", revoked_reason=reason, revoked_at=_now_iso())
 
 
 def check_tailnet_sharing_revocation(settings: Settings) -> bool:

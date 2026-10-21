@@ -1,3 +1,7 @@
+// Reference ROMs (live NFS/SMB peer-library referencing) isn't reliable enough
+// yet for outside testers. The backend/route are untouched -- this only hides
+// the UI entry points. Flip back to true to restore them.
+const REFERENCE_ROMS_UI_ENABLED = false;
 const content = document.getElementById("content");
 const backBtn = document.getElementById("backBtn") || {
   classList: { add() {}, remove() {} },
@@ -444,8 +448,10 @@ async function api(url, { timeoutMs = API_DEFAULT_TIMEOUT_MS } = {}) {
   }
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
+    let body = null;
     try {
       const data = await res.json();
+      body = data;
       // Most handlers return {"error": "..."}; a few (e.g. VPN connect)
       // return {"errors": [...]} instead -- without this fallback those
       // calls threw a bare "Request failed: 400" and silently discarded the
@@ -454,7 +460,12 @@ async function api(url, { timeoutMs = API_DEFAULT_TIMEOUT_MS } = {}) {
       if (data.error) msg = data.error;
       else if (Array.isArray(data.errors) && data.errors.length) msg = data.errors.join(" ");
     } catch (_) {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    // A few handlers (e.g. tailnet enroll pending approval) attach extra
+    // structured fields alongside "error" -- callers that need them (rather
+    // than just the message) read err.body instead of re-parsing the response.
+    err.body = body;
+    throw err;
   }
   return await res.json();
 }
@@ -472,8 +483,10 @@ async function apiPost(url, payload) {
   }
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
+    let body = null;
     try {
       const data = await res.json();
+      body = data;
       // Most handlers return {"error": "..."}; a few (e.g. VPN connect)
       // return {"errors": [...]} instead -- without this fallback those
       // calls threw a bare "Request failed: 400" and silently discarded the
@@ -482,7 +495,12 @@ async function apiPost(url, payload) {
       if (data.error) msg = data.error;
       else if (Array.isArray(data.errors) && data.errors.length) msg = data.errors.join(" ");
     } catch (_) {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    // A few handlers (e.g. tailnet enroll pending approval) attach extra
+    // structured fields alongside "error" -- callers that need them (rather
+    // than just the message) read err.body instead of re-parsing the response.
+    err.body = body;
+    throw err;
   }
   return await res.json();
 }
@@ -6230,7 +6248,7 @@ function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
     ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
-    ["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"],
+    ...(REFERENCE_ROMS_UI_ENABLED ? [["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"]] : []),
   ]);
 }
 
@@ -8607,19 +8625,9 @@ async function pullVpnConfigFromPeer() {
 }
 
 // -------------------------------------------------------------- Tailnet sharing
-// Direct structural copies of setVpnSharing/loadVpnPullPeerOptions/
-// pullVpnConfigFromPeer just above -- same single-hop-only sharing model,
-// same peer-picker source (GET /admin/swarm/overview via loadSwarmOverview).
-async function setTailnetSharing(enabled) {
-  const checkbox = document.getElementById("tailnetSharingEnabled");
-  try {
-    await apiPost("/admin/tailnet/sharing", { enabled });
-    showToast(`Tailnet auth-key sharing with paired drones ${enabled ? "enabled" : "disabled"}.`, "success");
-  } catch (err) {
-    if (checkbox) checkbox.checked = !enabled;
-    showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  }
-}
+// No toggle here -- share-eligibility is computed from key provenance, not
+// an operator switch (see renderTailnetShareSection's comment). Peer-picker
+// source is the same as VPN/SMTP's (GET /admin/swarm/overview via loadSwarmOverview).
 function syncTailnetPullPeerOptions() {
   const select = document.getElementById("tailnetPullPeer");
   const button = document.getElementById("tailnetPullBtn");
@@ -11001,14 +11009,16 @@ function renderSwarmDroneCard(drone) {
     : drone.error
       ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${drone.offline_hint ? `${escapeHtml(drone.offline_hint)} ` : ""}<span class="text-muted">${escapeHtml(drone.error)}</span></div>`
       : "";
-  const networkShareButton = share
+  const networkShareButton = !REFERENCE_ROMS_UI_ENABLED ? "" : share
     ? `<button class="btn btn-sm btn-outline-secondary" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Manage Reference" : "Manage Reference"}</button>`
     : `<button class="btn btn-sm btn-outline-info" onclick="setHash('#admin/reference-roms/${droneToken}')" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Choose which systems to reference from this machine's ROM library" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
-    ? ""
+    ? `<div class="d-flex flex-wrap gap-2 mt-3">
+        <button class="btn btn-sm btn-outline-danger" onclick="leaveSwarm()"><i class="bi bi-box-arrow-right me-1"></i>Leave Swarm</button>
+      </div>`
     : `<div class="d-flex flex-wrap gap-2 mt-3">
         ${networkShareButton}
-        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
+        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Download ROMs</button>
         <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;
   return `
@@ -11154,6 +11164,23 @@ async function installTailscale(button, mode = "ensure") {
   }
 }
 
+function showTailnetErrorToast(prefix, err) {
+  const authUrl = err?.body?.auth_url;
+  if (authUrl) {
+    // A structured auth_url means the account needs a human to approve this
+    // device -- a plain error string here would be a dead end with nothing
+    // to click, same failure mode this was built to fix.
+    showToast(
+      `${escapeHtml(prefix)}: this Tailscale account requires approving new devices. ` +
+        `<a href="${escapeHtml(authUrl)}" target="_blank" rel="noopener noreferrer" class="link-light text-decoration-underline">Open the approval link</a>, then try again.`,
+      "danger",
+      15000,
+    );
+    return;
+  }
+  showToast(`${escapeHtml(prefix)}: ${escapeHtml(err?.message || "unknown error")}`, "danger");
+}
+
 async function swarmEnrollTailnet() {
   const input = document.getElementById("swarmTailnetKey");
   const button = document.getElementById("swarmTailnetEnrollBtn");
@@ -11175,7 +11202,7 @@ async function swarmEnrollTailnet() {
     invalidateSwarmDataCache();
     await renderSwarmPage();
   } catch (err) {
-    showToast(`Tailnet enrollment failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showTailnetErrorToast("Tailnet enrollment failed", err);
     button.disabled = false;
     button.innerHTML = '<i class="bi bi-link-45deg me-1"></i>Connect';
   }
@@ -11211,41 +11238,40 @@ async function swarmRotateTailnetAuthKey() {
     invalidateSwarmDataCache();
     await renderSwarmPage();
   } catch (err) {
-    showToast(`Tailnet auth token rotation failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showTailnetErrorToast("Tailnet auth token rotation failed", err);
     button.disabled = false;
     button.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Rotate';
   }
 }
 
-// The "Share with Swarm" toggle (or, for an imported key, a notice that it
-// can't be re-shared -- single-hop-only, exactly like VPN/SMTP: enforced
-// both here (hiding the toggle) and independently server-side in
-// export_tailnet_payload()) plus a "Pull Configuration" peer picker, always
-// available even before this drone is enrolled -- a fresh drone can join by
-// pulling a peer's shared key instead of pasting one of its own. Only works
-// end-to-end if the key was created as *reusable* in the Tailscale admin
-// console (the same guidance already given in the "Connect" steps below);
-// a single-use key will fail on the second drone with whatever error
-// tailscale itself returns.
+// Share-eligibility has no operator toggle: a self-owned key is always
+// offered to paired drones automatically, and an imported key never is --
+// single-hop-only sharing is a property of the key's provenance, not a
+// switch anyone could leave off (or on and not realize it does nothing on
+// an imported key -- the exact confusing state this replaced). Enforced
+// server-side in export_tailnet_payload(); this is read-only status text.
+// Plus a "Pull Configuration" peer picker, always available even before
+// this drone is enrolled -- a fresh drone can join by pulling a peer's
+// shared key instead of pasting one of its own. Only works end-to-end if
+// the key was created as *reusable* in the Tailscale admin console (the
+// same guidance already given in the "Connect" steps below); a single-use
+// key will fail on the second drone with whatever error tailscale itself
+// returns.
 function renderTailnetShareSection(state) {
-  const sharingControl = !state.enrolled
+  const sharingStatus = !state.enrolled
     ? ""
     : state.source_peer_id
     ? `<p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>This auth key was imported from <strong>${escapeHtml(state.source_peer_name || state.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally connected with it can share it with the swarm.</p>`
-    : `
-      <div class="form-check form-switch mb-2">
-        <input class="form-check-input" type="checkbox" role="switch" id="tailnetSharingEnabled" ${state.sharing_enabled ? "checked" : ""} onchange="setTailnetSharing(this.checked)">
-        <label class="form-check-label" for="tailnetSharingEnabled">Allow paired drones to pull this auth key</label>
-      </div>`;
+    : `<p class="text-muted small mb-2"><i class="bi bi-check-circle me-1"></i>This is a self-owned key, so it's automatically shared with every paired drone.</p>`;
   return `
     <hr>
     <div class="small text-muted mb-2">
       <strong>Share with Swarm.</strong>
       ${state.enrolled
-        ? "Share this drone's auth key with paired drones over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser."
+        ? "This drone's auth key is offered to paired drones over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser."
         : "Already enrolled on another drone in your swarm? Pull its auth key here instead of pasting your own."}
     </div>
-    ${sharingControl}
+    ${sharingStatus}
     <div class="d-flex flex-wrap align-items-end gap-2">
       <div>
         <label class="form-label mb-1" for="tailnetPullPeer">Paired Drone</label>
@@ -11379,6 +11405,88 @@ function showTailnetGuideModal() {
   }
 }
 
+function showPairingGuideModal() {
+  const modalId = "pairingGuideModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-key me-2"></i>How pairing works</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="text-uppercase small text-muted fw-bold mb-2">What the code proves</h6>
+          <p class="small">This code proves you have access to this Drone right now. It rotates periodically on its own, purely for security -- once two Drones are paired, they stay linked until one of them is unpaired, whether or not the code has rotated since.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Pairing two Drones on the same network</h6>
+          <p class="small">On the Drone you want to add, find the other Drone in its <strong>Nearby Drones</strong> list and click <strong>Pair</strong>. You'll be asked for two things from the <em>other</em> Drone's own Pairing card: its code, and its certificate fingerprint. Both have to come from that Drone's own screen -- never from the Nearby Drones row here, which is just an unauthenticated announcement and can't prove anything on its own. The fingerprint is what stops the code from ever being sent to the wrong machine, even if something on the network tried to impersonate the Drone you meant to pair with.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Pairing over a tailnet</h6>
+          <p class="small mb-0">Two Drones already on the same tailnet (see "How does this work?" on the Tailnet card) pair automatically, with no code and no fingerprint -- the tailnet membership itself is the proof, since only a device signed into your Tailscale account can reach that address at all. This happens on its own in the background; you don't need to click anything for it.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
+
+function showNearbyDronesGuideModal() {
+  const modalId = "nearbyDronesGuideModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-radar me-2"></i>How Nearby Drones works</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="text-uppercase small text-muted fw-bold mb-2">What shows up here</h6>
+          <p class="small">This list is every other Drone this one has noticed on the same local network -- it listens for a small "I'm here" message each Drone sends out on its own every so often. Nothing in this list is trusted yet; it's just "someone out there says they're a Drone."</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Discover vs. Refresh</h6>
+          <p class="small"><strong>Discover</strong> asks every Drone on the network to announce itself right now, instead of waiting for its next scheduled announcement -- useful right after you've just turned a new Drone on. <strong>Refresh</strong> (the circular-arrow button) just reloads this list from what's already been heard; it doesn't ask anything new to announce itself.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Turning a listing into a real pairing</h6>
+          <p class="small mb-0">Seeing a Drone here doesn't connect anything by itself -- click <strong>Pair</strong> and you'll need the code and fingerprint from that Drone's own Pairing card (see "How does this work?" there) to actually trust it. A Drone already on the same Tailscale network as this one (see the Tailnet card) skips this list entirely and pairs itself automatically, with no clicking needed.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
+
 async function renderSwarmPage() {
   const generation = ++swarmPageGeneration;
   const navToken = routerNavToken;
@@ -11437,15 +11545,15 @@ async function renderSwarmPage() {
       <div class="row g-3 mb-3 align-items-stretch">
         <div class="col-12 col-lg-6" id="swarmTailnetSlot">${tailnetHtml}</div>
         <div class="col-12 col-lg-6"><div class="card log-card h-100">
-          <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
+          <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><div class="d-flex align-items-center gap-2"><button class="help-term" type="button" onclick="showPairingGuideModal()"><i class="bi bi-question-circle-fill"></i>How does this work?</button><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div></div>
           <div class="card-body">
-            <div class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>This code proves you have access to this Drone. To pair it with another Drone on the same network, pick this Drone from that Drone's Nearby Drones list and enter this code when prompted (or enter that Drone's own code here, if pairing from this side instead). It rotates periodically for security -- once paired, the two Drones stay linked until you unpair them.</div>
+            <div class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>Enter this code on the other Drone's Nearby Drones list (or enter its code here) to pair them.</div>
             <div id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
           </div>
         </div></div>
       </div>
       <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
+        <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex align-items-center gap-2"><button class="help-term" type="button" onclick="showNearbyDronesGuideModal()"><i class="bi bi-question-circle-fill"></i>How does this work?</button><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
       </div>
       </div>`;
@@ -12280,6 +12388,24 @@ async function forgetLocalPeer(peerId) {
   }
   if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
   if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
+}
+
+async function leaveSwarm() {
+  if (!window.confirm("Leave the swarm? This forgets every paired Drone on this machine -- each one will need to be paired again before browsing or syncing. This Drone's own identity is not affected.")) return;
+  try {
+    const result = await apiPost("/admin/local-network/leave-swarm", {});
+    showToast(
+      result.peers_forgotten
+        ? `Left the swarm. Forgot ${result.peers_forgotten} paired Drone${result.peers_forgotten === 1 ? "" : "s"}.`
+        : "Left the swarm (no paired Drones to forget).",
+      "success",
+    );
+  } catch (err) {
+    showToast(`Failed to leave the swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    return;
+  }
+  invalidateSwarmDataCache();
+  await renderSwarmPage();
 }
 
 async function dismissLocalPeer(peerId) {

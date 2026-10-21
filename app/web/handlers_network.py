@@ -21,11 +21,10 @@ from urllib.parse import quote, unquote
 try:
     from ..device.device_control import _ensure_rom_write_access
     from ..device import nfs_export_manager as _nfs_exports
-    from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
+    from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired
     from ..device.tailnet_service import (
         install_tailscale as _install_tailscale,
         tailscale_install_status as _tailscale_install_status,
-        set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
     )
@@ -53,11 +52,10 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device import nfs_export_manager as _nfs_exports  # type: ignore
-    from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
+    from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired  # type: ignore
     from device.tailnet_service import (  # type: ignore
         install_tailscale as _install_tailscale,
         tailscale_install_status as _tailscale_install_status,
-        set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
         import_tailnet_from_peer as _import_tailnet_from_peer,
         tailnet_sharing_status as _tailnet_sharing_status,
     )
@@ -911,14 +909,20 @@ class HandlersNetworkMixin:
         The key is a secret: it goes straight to the tailscale CLI and is
         never logged or included in any response/error text. It *is*
         persisted locally (see tailnet_service.tailnet_enroll) so this
-        drone can later choose to share it with paired peers -- a separate,
-        explicit opt-in via _handle_admin_tailnet_sharing, off by default,
-        same as VPN/SMTP.
+        drone -- if this is a fresh, self-owned key, not an import -- is
+        automatically offered to paired peers afterward. There is no
+        operator toggle for this: see export_tailnet_payload()'s docstring
+        for why share-eligibility is computed from provenance, not a switch.
         """
         try:
             status = tailnet_enroll(str(payload.get("auth_key") or ""), self.settings)
         except ValueError:
             raise
+        except TailnetApprovalRequired as error:
+            # Structured, not just a string: the UI renders auth_url as a
+            # real clickable link instead of dead-end error text.
+            self._send_json(502, {"error": str(error), "auth_url": error.auth_url})
+            return
         except RuntimeError as error:
             self._send_json(502, {"error": str(error)})
             return
@@ -933,15 +937,13 @@ class HandlersNetworkMixin:
             status = tailnet_rotate_auth_key(str(payload.get("auth_key") or ""), self.settings)
         except ValueError:
             raise
+        except TailnetApprovalRequired as error:
+            self._send_json(502, {"error": str(error), "auth_url": error.auth_url})
+            return
         except RuntimeError as error:
             self._send_json(502, {"error": str(error)})
             return
         self._send_json(200, {"status": "enrolled" if status.get("enrolled") else "pending", **status})
-
-    def _handle_admin_tailnet_sharing(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        result = _set_tailnet_sharing_enabled(self.settings, bool(payload.get("enabled")))
-        self._send_json(200, result)
 
     def _handle_admin_tailnet_pull_from_peer(self, payload: dict) -> None:
         """Pull a Tailscale auth key from a paired peer and enroll with it.
@@ -1121,6 +1123,33 @@ class HandlersNetworkMixin:
         removed = _swarm_membership.publish_forget(self.settings, peer_id)
         _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
         self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})
+
+    def _handle_admin_leave_swarm(self) -> None:
+        """Forget every currently paired peer -- exactly what the single
+        Forget button does, just for all of them. Deliberately a loop over
+        the same per-peer path (NFS revoke, peer notify, cert cleanup,
+        membership-removal gossip) rather than a separate bulk code path, so
+        it can never drift from what a single Forget click already does.
+        This Drone's own identity/certificate is untouched; it can be paired
+        again afterward like any fresh Drone.
+        """
+        peer_ids = [
+            str(peer.get("drone_id") or peer.get("device_id") or "").strip()
+            for peer in _local_network.paired_peers(self.settings)
+        ]
+        removed = 0
+        for peer_id in peer_ids:
+            if not peer_id:
+                continue
+            _nfs_exports.revoke_peer(self.settings, peer_id)
+            try:
+                from ..transfer import swarm_membership as _swarm_membership
+            except ImportError:  # pragma: no cover - direct script execution fallback
+                from transfer import swarm_membership as _swarm_membership  # type: ignore
+            if _swarm_membership.publish_forget(self.settings, peer_id):
+                removed += 1
+            _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
+        self._send_json(200, {"status": "left", "peers_forgotten": removed})
 
     def _handle_admin_local_peer_dismiss(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)

@@ -997,7 +997,10 @@ class TailnetCloneTests(unittest.TestCase):
         self.assertTrue(read_binding(settings_for(target))["tailnet_reset_pending"])
         sharing = load_payload(database_path(target), "tailnet_sharing.json", {})
         self.assertEqual(sharing["auth_key"], "")
-        self.assertFalse(sharing["sharing_enabled"])
+        # No cleared key means nothing left to share -- there's no separate
+        # sharing_enabled flag to check; shareable is computed from auth_key
+        # and source_peer_id alone (see tailnet_sharing_status's docstring).
+        self.assertFalse(self.ts.tailnet_sharing_status(settings_for(target))["shareable"])
 
     def test_unclearable_and_unholdable_tailnet_node_holds_the_swarm(self) -> None:
         target, result = self._clone_with_tailnet_failure(hold_result=False)
