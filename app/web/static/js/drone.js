@@ -1678,10 +1678,9 @@ function startTransfersAutoRefresh() {
       if (
         window.location.hash === "#admin/transfers" &&
         transfersBody.isConnected &&
-        document.getElementById("transfersBody") === transfersBody &&
-        !transfersBody.contains(document.activeElement)
+        document.getElementById("transfersBody") === transfersBody
       ) {
-        transfersBody.innerHTML = renderTransfersPanel(downloads, uploads);
+        updateTransfersLive(transfersBody, downloads, uploads);
       }
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
@@ -6868,7 +6867,8 @@ function renderTransferRows(rows, options = {}) {
           retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
         ].filter(Boolean).join(" ");
       }
-      return `<tr>
+      const rowKey = `${row._direction || "download"}:${row.job_id || row.upload_id || row.id || row.sync_id || filePath}`;
+      return `<tr data-transfer-key="${escapeHtml(rowKey)}">
         <td>${directionIcon}</td>
         <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
         <td class="small mono">${escapeHtml(peerLabel)}</td>
@@ -6990,19 +6990,56 @@ function renderTransfersPanel(payload, uploads) {
   const queuedNotice = queuedHidden
     ? `<div class="small text-muted mb-2">Showing the next ${queued.length.toLocaleString()} of ${Number(transferPayload.queued_total).toLocaleString()} queued transfers.</div>`
     : "";
-  return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}
-    ${queuedNotice}${currentPager.html}
-    ${renderTransferRows(currentPager.page.rows, { emptyText: "No pending, downloading, or uploading transfers." })}
+  return `<div data-transfer-region="eta">${renderQueueEta(transferPayload)}</div>
+    <div data-transfer-region="controls">${renderTransferControls(transferPayload, active, queued)}</div>
+    <div data-transfer-region="queued-notice">${queuedNotice}</div>
+    <div data-transfer-region="active-pager">${currentPager.html}</div>
+    <div data-transfer-region="active-rows">${renderTransferRows(currentPager.page.rows, { emptyText: "No pending, downloading, or uploading transfers." })}</div>
     <div class="download-section mt-3 mb-0">
-      <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
-      ${recentPager.html}
-      ${renderTransferRows(recentPager.page.rows, { showActions: false, assetTableText: true })}
+      <div data-transfer-region="recent-title" class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
+      <div data-transfer-region="recent-pager">${recentPager.html}</div>
+      <div data-transfer-region="recent-rows">${renderTransferRows(recentPager.page.rows, { showActions: false, assetTableText: true })}</div>
     </div>`;
+}
+
+// A focused search, pager, or action must not freeze the whole queue. Keep that
+// control in place while updating every other region; within its table, patch
+// cells by job identity so progress and speed still advance without moving it.
+function updateTransfersLive(target, downloads, uploads) {
+  const html = renderTransfersPanel(downloads, uploads);
+  if (!target.contains(document.activeElement) || !target.querySelector("[data-transfer-region]")) {
+    target.innerHTML = html;
+    return;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const nextRegions = new Map(Array.from(template.content.querySelectorAll("[data-transfer-region]"),
+    region => [region.dataset.transferRegion, region]));
+  target.querySelectorAll("[data-transfer-region]").forEach(region => {
+    const next = nextRegions.get(region.dataset.transferRegion);
+    if (!next || region.innerHTML === next.innerHTML) return;
+    if (!region.contains(document.activeElement)) {
+      region.innerHTML = next.innerHTML;
+      return;
+    }
+    const nextRows = new Map(Array.from(next.querySelectorAll("[data-transfer-key]"),
+      row => [row.dataset.transferKey, row]));
+    region.querySelectorAll("[data-transfer-key]").forEach(row => {
+      const nextRow = nextRows.get(row.dataset.transferKey);
+      if (!nextRow) return;
+      Array.from(row.cells).forEach((cell, index) => {
+        const nextCell = nextRow.cells[index];
+        if (nextCell && !cell.contains(document.activeElement) && cell.innerHTML !== nextCell.innerHTML) {
+          cell.innerHTML = nextCell.innerHTML;
+        }
+      });
+    });
+  });
 }
 
 function refreshTransfersPanel() {
   const node = document.getElementById("transfersBody");
-  if (node) node.innerHTML = renderTransfersPanel(transferPayload, uploadPayload);
+  if (node) updateTransfersLive(node, transferPayload, uploadPayload);
 }
 function setTransferSearch(kind, value) { transferViews[kind].query = value; transferViews[kind].page = 1; refreshTransfersPanel(); }
 function setTransferLimit(kind, value) { transferViews[kind].limit = Number(value) || 10; transferViews[kind].page = 1; refreshTransfersPanel(); }
@@ -12070,7 +12107,7 @@ async function renderIntegrationTransfersPanel(target) {
   async function loadTransfers() {
     const [downloads, uploads] = await Promise.all([api(TRANSFERS_POLL_PATH), api("/admin/uploads")]);
     const body = document.getElementById("transfersBody");
-    if (body) body.innerHTML = renderTransfersPanel(downloads, uploads);
+    if (body) updateTransfersLive(body, downloads, uploads);
   }
   window.refreshTransfers = loadTransfers;
   document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {

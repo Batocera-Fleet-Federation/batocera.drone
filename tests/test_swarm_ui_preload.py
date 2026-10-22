@@ -99,3 +99,60 @@ assert.match(self, /aria-label="Leave Swarm"/);
 assert.doesNotMatch(self, /aria-label="Forget Drone"/);
 `);
 ''')
+
+    def test_transfer_progress_updates_while_search_or_actions_have_focus(self):
+        self.run_js(r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const source = fs.readFileSync("app/web/static/js/drone.js", "utf8");
+const updater = source.slice(source.indexOf("function updateTransfersLive("), source.indexOf("function refreshTransfersPanel("));
+const cell = (html, focus = null) => ({ innerHTML: html, contains: element => focus !== null && element === focus });
+const row = (key, cells) => ({ dataset: { transferKey: key }, cells });
+const region = (name, html, rows = [], focus = null) => ({
+  dataset: { transferRegion: name }, innerHTML: html,
+  contains: element => focus !== null && element === focus,
+  querySelectorAll: () => rows,
+});
+const action = {}, search = {};
+const oldRow = row("download:job-1", [cell("0.0%"), cell(""), cell("pause button", action)]);
+// An unrelated job appears first in the next snapshot: patch by identity.
+const newRow = row("download:job-1", [cell("42.5%"), cell("3 MB/s"), cell("new pause button")]);
+const nextRegions = [region("active-pager", "new pager"), region("active-rows", "new rows", [row("download:other", [cell("99%")]), newRow]), region("eta", "2m remaining")];
+const document = {
+  activeElement: action,
+  createElement: () => ({ content: { querySelectorAll: () => nextRegions } }),
+};
+const renderTransfersPanel = () => "new snapshot";
+eval(updater + `
+const pager = region("active-pager", "old pager");
+const rows = region("active-rows", "old rows", [oldRow], action);
+const eta = region("eta", "4m remaining");
+const target = {
+  contains: () => true,
+  querySelector: () => rows,
+  querySelectorAll: () => [pager, rows, eta],
+};
+updateTransfersLive(target, {}, {});
+assert.equal(oldRow.cells[0].innerHTML, "42.5%");
+assert.equal(oldRow.cells[1].innerHTML, "3 MB/s");
+assert.equal(oldRow.cells[2].innerHTML, "pause button", "the focused action stays intact");
+assert.equal(eta.innerHTML, "2m remaining");
+assert.equal(rows.innerHTML, "old rows", "the focused row is not reordered");
+
+document.activeElement = search;
+pager.innerHTML = "typed search";
+pager.contains = element => element === search;
+updateTransfersLive(target, {}, {});
+assert.equal(pager.innerHTML, "typed search", "typing is preserved");
+assert.equal(rows.innerHTML, "new rows", "the table still updates during typing");
+
+document.activeElement = null;
+target.contains = () => false;
+updateTransfersLive(target, {}, {});
+assert.equal(target.innerHTML, "new snapshot");
+`);
+// The actual poll must use the updater without skipping focused controls.
+const poll = source.slice(source.indexOf("function startTransfersAutoRefresh("), source.indexOf("function startLogAutoRefresh("));
+assert.match(poll, /updateTransfersLive\(transfersBody, downloads, uploads\)/);
+assert.doesNotMatch(poll, /contains\(document.activeElement\)/);
+''')

@@ -1946,6 +1946,32 @@ class SettingsTests(unittest.TestCase):
             self.assertGreater(restored["reconnect_after_epoch"], time.time())
             self.assertIn("reconnecting", restored["resume_reason"])
 
+    def test_download_snapshot_exposes_incremental_progress_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            queued = manager.enqueue_rom(
+                {}, {"drone_id": "source-a"}, "ps2", "Game.iso", expected_size=400
+            )
+            with manager._lock:
+                job = manager._jobs[queued["job_id"]]
+                job["status"] = "downloading"
+                job["_started_mono"] = time.monotonic() - 1
+
+            observed = []
+
+            def transfer(_request, context):
+                for downloaded in (100, 200, 300):
+                    context.progress_callback(downloaded, 400)
+                    snapshot = manager.snapshot(compact=True)
+                    active = snapshot["active"][0]
+                    observed.append((active["downloaded_bytes"], active["percentage"]))
+                    self.assertGreater(active["transfer_speed_bps"], 0)
+                return {"status": "cancelled"}
+
+            with mock.patch.object(manager._selector, "fetch", side_effect=transfer):
+                manager._run_job(queued["job_id"])
+            self.assertEqual(observed, [(100, 25.0), (200, 50.0), (300, 75.0)])
+
     def test_download_completion_notification_is_created_by_backend_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = self._make_download_manager(Path(tmp) / "userdata")

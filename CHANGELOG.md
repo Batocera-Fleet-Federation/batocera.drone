@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Keep Downloads progress, byte counts, and speed updating while a transfer search field,
+  pager, or action button is focused, preserving the active control during queue refreshes.
+
 - Swarm now lists Drones in a table with status, addresses, inventory counts, and icon actions.
   Rename its Transfers tab to Downloads and preload the Connected Drone list using Swarm's
   background peer checks, including when navigating while checks are still running.
