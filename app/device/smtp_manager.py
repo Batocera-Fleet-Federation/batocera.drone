@@ -437,7 +437,7 @@ def check_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"SMTP sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("SMTP sharing revocation check failed", error)
         return False
 
 
@@ -464,7 +464,9 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     """Forever-loop, mirrors ``vpn_manager.run_sharing_revocation_poller()``:
     started as its own daemon thread from ``create_server()``. A periodic
     background check is the only way to learn about revocation at all --
-    Drones are outbound-only with no push channel.
+    Drones are outbound-only with no push channel. Each tick is wrapped so
+    an unexpected Exception is logged via ``_log_poller_failure`` and the
+    loop continues; a BaseException still propagates.
     """
     interval = max(30.0, SMTP_SHARING_CHECK_INTERVAL_SECONDS)
     generation = poller_generation()

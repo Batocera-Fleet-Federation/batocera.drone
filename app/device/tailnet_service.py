@@ -1212,7 +1212,7 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"Tailnet sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("Tailnet sharing revocation check failed", error)
         return False
 
 
@@ -1238,7 +1238,9 @@ def _log_poller_failure(message: str, error: Exception) -> None:
 def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
     """Forever-loop checking whether an imported auth key's sharing was
     revoked -- mirrors ``vpn_manager.run_sharing_revocation_poller()``
-    exactly. Started as its own daemon thread from ``create_server()``."""
+    exactly, including the per-tick Exception guard and
+    ``_log_poller_failure`` isolation. Started as its own daemon thread
+    from ``create_server()``."""
     interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
     generation = poller_generation()
     while True:

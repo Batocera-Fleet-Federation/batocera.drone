@@ -998,7 +998,11 @@ def check_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"VPN sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        # The naive f-string print used to raise on unprintable/surrogate
+        # exception text or a closed stderr, which is the one way this
+        # "never raises" helper actually escaped. Isolate the report the
+        # same way the poller does.
+        _log_poller_failure("VPN sharing revocation check failed", error)
         return False
 
 
@@ -1012,6 +1016,12 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     outbound-only with no push channel, and unlike ``status()`` this cannot be
     a passive on-demand recompute, because the whole point is to disconnect
     and wipe credentials even if nobody is looking at the VPN page.
+
+    Each tick is wrapped so an unexpected Exception from
+    ``check_sharing_revocation`` (including a report that itself fails) is
+    logged via ``_log_poller_failure`` and the loop continues. Only
+    ``Exception`` is absorbed; a ``BaseException`` such as KeyboardInterrupt
+    is a shutdown signal and propagates.
     """
     interval = max(30.0, float(os.environ.get("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", "300")))
     generation = poller_generation()
