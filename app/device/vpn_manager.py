@@ -1197,7 +1197,9 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
         if not rgs.get("available"):
             return None  # Cannot tell yet (or RGS is not installed); look again next tick.
         if not rgs.get("enabled"):
-            _save_state(settings, rgs_tunnel_ip=tunnel_ip)
+            # Forget the address rather than recording it: a later enable while
+            # stopped must still be started on this tunnel (boot recovery).
+            _save_state(settings, rgs_tunnel_ip="")
             return None
 
         running = bool(rgs.get("running"))
@@ -1218,8 +1220,8 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
                 elapsed = (now - datetime.fromisoformat(last_at)).total_seconds()
                 if elapsed < RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS:
                     return {"action": "deferred", "reason": reason}
-            except ValueError:
-                pass
+            except (TypeError, ValueError):
+                pass  # Malformed bookkeeping must not block the rebind itself.
 
         _save_state(settings, rgs_restart_last_at=now.replace(microsecond=0).isoformat())
         try:

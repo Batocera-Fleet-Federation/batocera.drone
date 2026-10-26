@@ -527,7 +527,8 @@ loop of its own. Rules:
 - Address changed + RGS enabled + running -> `rgs_manager.restart()`
   (stop/start). Enabled + not running (e.g. VPN came up after boot) ->
   `rgs_manager.start()`.
-- RGS disabled -> never started or restarted here; the address is just recorded.
+- RGS disabled -> never started or restarted here; the recorded address is cleared,
+  so a later enable that finds RGS stopped on the same tunnel is still started.
 - Restarts and starts share one rate limit (`DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS`,
   default 600). A deferred or failed action does not record the new address, so
   it is retried after the limit passes.

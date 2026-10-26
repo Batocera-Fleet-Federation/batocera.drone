@@ -1456,7 +1456,7 @@ class RgsTunnelReconcileTests(unittest.TestCase):
             self.assertIsNone(result)
             restart.assert_not_called()
             start.assert_not_called()
-            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "10.96.0.18")
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "")
 
     def test_enabled_but_stopped_rgs_is_started_when_tunnel_comes_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
