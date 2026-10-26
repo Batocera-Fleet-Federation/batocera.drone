@@ -10736,6 +10736,37 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-587-live-thread-recovery-uat",
+      "name": "Issue #587 real VPN poller thread survives an unexpected tick and revokes on a later tick",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_587_live_thread_tick_recovery_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_587_live_thread_tick_recovery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
