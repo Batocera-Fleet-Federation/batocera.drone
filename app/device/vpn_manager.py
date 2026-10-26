@@ -1179,8 +1179,9 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
     * RGS enabled but not running (for example after boot, when the VPN came
       up late) -> started.
 
-    Restarts and starts share one rate limit. A deferred or failed action does
-    not record the new address, so it is retried after the limit passes.
+    Only restarts of a running RGS are rate-limited; a start is never deferred.
+    A deferred or failed action does not record the new address, so it is
+    retried after the limit passes.
     Never raises -- intended for an unattended background poller.
     """
     try:
@@ -1213,12 +1214,16 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
             if running else "RGS is enabled but not running while the VPN tunnel is up"
         )
 
+        # Only restarts of a running RGS are throttled: a start of stopped RGS
+        # is recovery, not churn, so a recent restart must never delay it.
         now = datetime.now(timezone.utc)
         last_at = state["rgs_restart_last_at"]
-        if last_at:
+        if running and last_at:
             try:
                 elapsed = (now - datetime.fromisoformat(last_at)).total_seconds()
-                if elapsed < RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS:
+                # A future-dated stamp (clock rollback, corrupt state) is not a
+                # live lease; it must not block the rebind forever.
+                if 0 <= elapsed < RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS:
                     return {"action": "deferred", "reason": reason}
             except (TypeError, ValueError):
                 pass  # Malformed bookkeeping must not block the rebind itself.
