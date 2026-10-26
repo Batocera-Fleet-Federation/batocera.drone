@@ -1264,14 +1264,26 @@ def run_self_heal_poller(settings: Settings) -> None:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
+        self_heal_failed = False
         try:
             check_and_self_heal(settings)
         except Exception as error:
+            self_heal_failed = True
             # One unexpected failure must not kill the poller (and RGS reconcile with it).
             print(f"VPN self-heal tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
-        # Self-heal can perform slow I/O. If shutdown retired this poller while
-        # that work was in progress, do not let the stale generation perform
-        # the additional RGS service action.
+        # Self-heal can perform slow I/O. Preserve the shutdown gate before
+        # reconciliation after a successful check; on failure, still make the
+        # independent RGS attempt so it cannot be starved by this tick.
+        if not self_heal_failed and poller_retired(generation):
+            return
+        # Reconcile independently of self-heal success: the two concerns share
+        # a cadence, but a failed watchdog check must not skip RGS recovery.
+        try:
+            reconcile_rgs_with_tunnel(settings)
+        except Exception as error:
+            # Keep a transient RGS failure from permanently stopping VPN healing.
+            print(f"RGS reconcile tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        # If shutdown retired this poller during either operation, stop before
+        # starting another tick.
         if poller_retired(generation):
             return
-        reconcile_rgs_with_tunnel(settings)
