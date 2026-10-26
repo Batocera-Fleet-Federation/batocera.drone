@@ -1259,6 +1259,18 @@ def _poller_error_detail(error: Exception) -> str:
     return f"{error.__class__.__name__}: {detail}"
 
 
+def _log_poller_failure(message: str, error: Exception) -> None:
+    """Report a poller tick failure without letting the report stop the poller."""
+    try:
+        text = f"{message}: {_poller_error_detail(error)}"
+        # Escape lone surrogates (os.fsdecode paths) so strict UTF-8 stderr can encode them.
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+        print(text, file=sys.stderr, flush=True)
+    except Exception:
+        # A closed or broken stderr is not a reason to retire the VPN/RGS poller.
+        pass
+
+
 def run_self_heal_poller(settings: Settings) -> None:
     """Forever-loop calling check_and_self_heal on a fixed cadence.
 
@@ -1279,7 +1291,7 @@ def run_self_heal_poller(settings: Settings) -> None:
         except Exception as error:
             self_heal_failed = True
             # One unexpected failure must not kill the poller (and RGS reconcile with it).
-            print(f"VPN self-heal tick failed: {_poller_error_detail(error)}", file=sys.stderr, flush=True)
+            _log_poller_failure("VPN self-heal tick failed", error)
         # Self-heal can perform slow I/O. Preserve the shutdown gate before
         # reconciliation after a successful check; on failure, still make the
         # independent RGS attempt so it cannot be starved by this tick.
@@ -1291,7 +1303,7 @@ def run_self_heal_poller(settings: Settings) -> None:
             reconcile_rgs_with_tunnel(settings)
         except Exception as error:
             # Keep a transient RGS failure from permanently stopping VPN healing.
-            print(f"RGS reconcile tick failed: {_poller_error_detail(error)}", file=sys.stderr, flush=True)
+            _log_poller_failure("RGS reconcile tick failed", error)
         # If shutdown retired this poller during either operation, stop before
         # starting another tick.
         if poller_retired(generation):
