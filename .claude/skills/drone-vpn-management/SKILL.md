@@ -45,7 +45,11 @@ revocation disconnects and removes credentials even when nobody opens the VPN
 page. `check_sharing_revocation()` handles expected lookup and peer failures;
 the poller must also catch and log unexpected exceptions around each tick so a
 single failure cannot permanently stop future revocation checks. It uses the
-shared poller-generation retirement gate, like other background pollers.
+shared poller-generation retirement gate, like other background pollers. The
+SMTP (`smtp_manager.run_sharing_revocation_poller`) and tailnet
+(`tailnet_service.run_tailnet_sharing_revocation_poller`) sharing-revocation
+pollers use the same guarded shape and the same `_log_poller_failure`
+isolation (surrogate-safe, closed-stderr-safe).
 
 ## Design: stateless status, separate background pollers
 
