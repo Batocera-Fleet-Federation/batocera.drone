@@ -46,6 +46,35 @@ class RgsManagerTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in run.call_args_list],
                                  [["batocera-services", action, "rgs_download"] for action in actions])
 
+    def test_restart_cycles_a_running_service_and_waits_for_it(self):
+        before = dict(installed=True, available=True, enabled=True, running=True)
+        after = dict(before)
+        with mock.patch.object(rgs_manager, "status", side_effect=[before, after]), \
+             mock.patch.object(rgs_manager.shutil, "which", return_value="batocera-services"), \
+             mock.patch.object(rgs_manager.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="")) as run:
+            self.assertEqual(rgs_manager.restart(self.settings), after)
+        self.assertEqual([call.args[0] for call in run.call_args_list],
+                         [["batocera-services", "stop", "rgs_download"], ["batocera-services", "start", "rgs_download"]])
+
+    def test_restart_refuses_disabled_service(self):
+        disabled = dict(installed=True, available=True, enabled=False, running=False)
+        with mock.patch.object(rgs_manager, "status", return_value=disabled), \
+             mock.patch.object(rgs_manager.subprocess, "run") as run:
+            with self.assertRaises(OSError):
+                rgs_manager.restart(self.settings)
+            with self.assertRaises(OSError):
+                rgs_manager.start(self.settings)
+        run.assert_not_called()
+
+    def test_start_only_runs_when_enabled_and_stopped(self):
+        stopped = dict(installed=True, available=True, enabled=True, running=False)
+        running = dict(stopped, running=True)
+        with mock.patch.object(rgs_manager, "status", side_effect=[stopped, running]), \
+             mock.patch.object(rgs_manager.shutil, "which", return_value="batocera-services"), \
+             mock.patch.object(rgs_manager.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="")) as run:
+            self.assertEqual(rgs_manager.start(self.settings), running)
+        self.assertEqual(run.call_args.args[0], ["batocera-services", "start", "rgs_download"])
+
     def test_rejects_non_boolean_without_commands(self):
         for value in (None, "false", 0, 1):
             with self.assertRaises(ValueError):

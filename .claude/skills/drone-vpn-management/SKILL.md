@@ -514,6 +514,31 @@ Key design decisions, and why:
   transfer). Only the terminal outcome is logged: which peer's config was
   adopted, or nothing at startup.
 
+## RGS follows the tunnel after a reconnect (`reconcile_rgs_with_tunnel`, #581)
+
+RGS binds its sockets to the Proton tunnel address. When a reconnect hands out a
+new address (e.g. `10.96.0.17` -> `10.96.0.18`), the RGS service stays up but its
+portal shows "Disconnected" until it restarts. The same self-heal poller calls
+`reconcile_rgs_with_tunnel()` after each `check_and_self_heal()` tick; it adds no
+loop of its own. Rules:
+
+- Only while the tunnel is up and an address is readable. The first look after the
+  process starts only records the address; it does not restart a running RGS.
+- Address changed + RGS enabled + running -> `rgs_manager.restart()`
+  (stop/start). Enabled + not running (e.g. VPN came up after boot) ->
+  `rgs_manager.start()`, even when the recorded address is unchanged.
+- RGS disabled -> never started or restarted here; the recorded address is cleared,
+  so a later enable that finds RGS stopped on the same tunnel is still started.
+- Only restarts of a running RGS are rate-limited (and only they arm the limit) (`DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS`,
+  default 600); a start of stopped RGS is never deferred. A future-dated
+  `rgs_restart_last_at` is not a live lease and does not block a restart. A
+  deferred or failed action does not record the new address, so it is retried
+  after the limit passes.
+- State lives in the `vpn_manager.json` namespace: `rgs_tunnel_ip`,
+  `rgs_restart_last_at`. Outcomes are logged to the Drone activity log.
+- Tests: `RgsTunnelReconcileTests` in `tests/test_vpn_manager.py`; the RGS helpers
+  are covered in `tests/test_rgs_manager.py`.
+
 ## Self-heal: detect a broken tunnel and reconnect automatically
 
 Added 2026-07-28 after a real live incident: two Drones behind the same home
