@@ -10767,6 +10767,60 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-587-out-of-scope-disconnect-exception-blocks-wipe",
+      "name": "Out-of-scope #587 probe: disconnect() exception blocks VPN credential wipe after peer leaves roster",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "tests.adversarial.test_issue_587_out_of_scope_revocation_ordering_uat.OutOfScopeRevocationOrderingUAT.test_disconnect_exception_does_not_block_credential_wipe_when_peer_gone"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_587_out_of_scope_revocation_ordering_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-587-out-of-scope-stale-revocation-wipes-reimported-credentials",
+      "name": "Out-of-scope #587 probe: stale 404 revocation from source A wipes credentials re-imported from source B",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "tests.adversarial.test_issue_587_out_of_scope_revocation_ordering_uat.OutOfScopeRevocationOrderingUAT.test_stale_revocation_does_not_wipe_credentials_reimported_from_another_peer"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_587_out_of_scope_revocation_ordering_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
