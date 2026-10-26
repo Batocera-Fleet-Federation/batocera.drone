@@ -1390,5 +1390,139 @@ class IdentityHoldTests(unittest.TestCase):
                 self.assertEqual(vpn_manager.disconnect(settings)["status"], "not_running")
 
 
+class RgsTunnelReconcileTests(unittest.TestCase):
+    """RGS follows the tunnel address after a VPN reconnect (issue #581)."""
+
+    def _ready(self, tmp: str) -> Settings:
+        settings = _build_settings(self, Path(tmp))
+        vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+        vpn_manager.save_credentials(settings, "user", "pass")
+        return settings
+
+    def _rgs(self, **overrides):
+        state = {"available": True, "installed": True, "enabled": True, "running": True}
+        state.update(overrides)
+        return state
+
+    def _reconcile(self, settings, *, address, rgs, restart=None, start=None):
+        restart = restart or mock.Mock(return_value=rgs)
+        start = start or mock.Mock(return_value=rgs)
+        with mock.patch.object(vpn_manager, "tunnel_is_up", return_value=True), \
+                mock.patch.object(vpn_manager, "_tunnel_ip", return_value=address), \
+                mock.patch.object(vpn_manager._rgs_manager, "status", return_value=rgs), \
+                mock.patch.object(vpn_manager._rgs_manager, "restart", restart), \
+                mock.patch.object(vpn_manager._rgs_manager, "start", start):
+            result = vpn_manager.reconcile_rgs_with_tunnel(settings)
+        return result, restart, start
+
+    def test_address_change_restarts_running_rgs_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            result, restart, start = self._reconcile(settings, address="10.96.0.18", rgs=self._rgs())
+            self.assertEqual(result["action"], "restart")
+            restart.assert_called_once()
+            start.assert_not_called()
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "10.96.0.18")
+            # The same address on the next tick is a no-op.
+            result, restart, _ = self._reconcile(settings, address="10.96.0.18", rgs=self._rgs())
+            self.assertIsNone(result)
+            restart.assert_not_called()
+
+    def test_unchanged_address_does_not_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            result, restart, start = self._reconcile(settings, address="10.96.0.17", rgs=self._rgs())
+            self.assertIsNone(result)
+            restart.assert_not_called()
+            start.assert_not_called()
+
+    def test_first_observation_records_address_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            result, restart, start = self._reconcile(settings, address="10.96.0.17", rgs=self._rgs())
+            self.assertIsNone(result)
+            restart.assert_not_called()
+            start.assert_not_called()
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "10.96.0.17")
+
+    def test_disabled_rgs_is_never_started_or_restarted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            rgs = self._rgs(enabled=False, running=False)
+            result, restart, start = self._reconcile(settings, address="10.96.0.18", rgs=rgs)
+            self.assertIsNone(result)
+            restart.assert_not_called()
+            start.assert_not_called()
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "")
+
+    def test_enabled_but_stopped_rgs_is_started_when_tunnel_comes_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            rgs = self._rgs(running=False)
+            result, restart, start = self._reconcile(settings, address="10.96.0.17", rgs=rgs)
+            self.assertEqual(result["action"], "start")
+            start.assert_called_once()
+            restart.assert_not_called()
+
+    def test_stopped_rgs_is_started_even_when_address_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            result, restart, start = self._reconcile(settings, address="10.96.0.17", rgs=self._rgs(running=False))
+            self.assertEqual(result["action"], "start")
+            start.assert_called_once()
+            restart.assert_not_called()
+            # A start does not arm the restart throttle.
+            self.assertIsNone(vpn_manager._load_state(settings)["rgs_restart_last_at"])
+
+    def test_restarts_are_rate_limited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            recent = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17", rgs_restart_last_at=recent)
+            result, restart, _ = self._reconcile(settings, address="10.96.0.18", rgs=self._rgs())
+            self.assertEqual(result["action"], "deferred")
+            restart.assert_not_called()
+            # Deferred changes are not recorded, so the next eligible tick still acts.
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "10.96.0.17")
+
+    def test_failed_restart_is_reported_and_retried_later(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            restart = mock.Mock(side_effect=OSError("RGS service restart failed"))
+            result, _, _ = self._reconcile(settings, address="10.96.0.18", rgs=self._rgs(), restart=restart)
+            self.assertEqual(result["action"], "failed")
+            self.assertEqual(vpn_manager._load_state(settings)["rgs_tunnel_ip"], "10.96.0.17")
+
+    def test_noop_without_tunnel_or_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager._rgs_manager, "restart") as restart:
+                self.assertIsNone(vpn_manager.reconcile_rgs_with_tunnel(settings))
+            restart.assert_not_called()
+            settings = self._ready(tmp)
+            with mock.patch.object(vpn_manager, "tunnel_is_up", return_value=False), \
+                    mock.patch.object(vpn_manager._rgs_manager, "restart") as restart:
+                self.assertIsNone(vpn_manager.reconcile_rgs_with_tunnel(settings))
+            restart.assert_not_called()
+
+    def test_retired_self_heal_poller_does_not_reconcile_rgs_after_slow_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "poller_generation", return_value=7), \
+                    mock.patch.object(vpn_manager, "poller_retired", side_effect=[False, True]), \
+                    mock.patch.object(vpn_manager.time, "sleep"), \
+                    mock.patch.object(vpn_manager, "check_and_self_heal") as check, \
+                    mock.patch.object(vpn_manager, "reconcile_rgs_with_tunnel") as reconcile:
+                vpn_manager.run_self_heal_poller(settings)
+
+            check.assert_called_once_with(settings)
+            reconcile.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

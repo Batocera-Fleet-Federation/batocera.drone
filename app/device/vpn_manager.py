@@ -49,6 +49,7 @@ from urllib.error import HTTPError
 try:
     from ..common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed
     from ..common.install_paths import drone_install_root as _drone_install_root
+    from ..common.logging_setup import _drone_log
     from ..common.logtail import _tail_lines
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
@@ -56,9 +57,11 @@ try:
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from . import notifications as _notifications
+    from . import rgs_manager as _rgs_manager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.identity_provisioning import swarm_networking_allowed as _swarm_networking_allowed  # type: ignore
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
+    from common.logging_setup import _drone_log  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
@@ -66,6 +69,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from device import notifications as _notifications  # type: ignore
+    from device import rgs_manager as _rgs_manager  # type: ignore
 
 VPN_STATE_NAMESPACE = "vpn_manager.json"
 OPENVPN_CONFIG_FILENAME = "client.ovpn"
@@ -93,6 +97,10 @@ VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL
 VPN_SELF_HEAL_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_MIN_INTERVAL_SECONDS", "120"))
 VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW = int(os.environ.get("DRONE_VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW", "5"))
 VPN_SELF_HEAL_WINDOW_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_WINDOW_SECONDS", "1800"))
+# RGS binds its sockets to the tunnel address, so a reconnect that hands out a
+# new address leaves it looking disconnected until it restarts. Restarts are
+# rate-limited so a flapping VPN cannot churn RGS (and interrupt downloads).
+RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS", "600"))
 
 # A healthy, already-connected tunnel logs almost nothing -- openvpn only
 # writes on events. So if the *most recent* log lines are dominated by this
@@ -187,6 +195,10 @@ def _load_state(settings: Settings) -> dict:
         "self_heal_last_at": stored.get("self_heal_last_at"),
         "self_heal_last_reason": str(stored.get("self_heal_last_reason") or ""),
         "self_heal_attempts": [str(item) for item in (stored.get("self_heal_attempts") or []) if str(item or "").strip()],
+        # Tunnel address RGS was last reconciled against, and when RGS was last
+        # restarted/started by that reconcile (rate limit). Bookkeeping only.
+        "rgs_tunnel_ip": str(stored.get("rgs_tunnel_ip") or ""),
+        "rgs_restart_last_at": stored.get("rgs_restart_last_at"),
         # Last connection_state status() itself observed -- used only to fire
         # vpn_connected/vpn_disconnected notifications on a genuine edge,
         # never on repeated polls of an unchanged status. Not surfaced in the
@@ -1154,17 +1166,112 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
         return None
 
 
+def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
+    """Keep RGS bound to the live tunnel after the VPN reconnects.
+
+    Runs on the self-heal cadence, so it never adds a loop of its own. While the
+    tunnel is up it compares the tunnel address with the one RGS was last
+    reconciled against:
+
+    * RGS running and address unchanged -> nothing to do;
+    * RGS disabled -> never started here; the address is just recorded;
+    * RGS enabled and running -> restarted so its sockets rebind;
+    * RGS enabled but not running (for example after boot, when the VPN came
+      up late) -> started.
+
+    Only restarts of a running RGS are rate-limited; a start is never deferred.
+    A deferred or failed action does not record the new address, so it is
+    retried after the limit passes.
+    Never raises -- intended for an unattended background poller.
+    """
+    try:
+        if not _swarm_networking_allowed():
+            return None
+        state = _load_state(settings)
+        if not state["has_config"] or not tunnel_is_up(settings):
+            return None
+        tunnel_ip = _tunnel_ip()
+        if not tunnel_ip:
+            return None
+
+        rgs = _rgs_manager.status(settings)
+        if not rgs.get("available"):
+            return None  # Cannot tell yet (or RGS is not installed); look again next tick.
+        if not rgs.get("enabled"):
+            # Forget the address rather than recording it: a later enable while
+            # stopped must still be started on this tunnel (boot recovery).
+            _save_state(settings, rgs_tunnel_ip="")
+            return None
+
+        running = bool(rgs.get("running"))
+        if running and tunnel_ip == state["rgs_tunnel_ip"]:
+            return None  # Already bound to this tunnel address.
+        if running and not state["rgs_tunnel_ip"]:
+            # First look after this process started: RGS already runs on this tunnel.
+            _save_state(settings, rgs_tunnel_ip=tunnel_ip)
+            return None
+        action = "restart" if running else "start"
+        reason = (
+            f"tunnel address changed from {state['rgs_tunnel_ip']} to {tunnel_ip}"
+            if running else "RGS is enabled but not running while the VPN tunnel is up"
+        )
+
+        # Only restarts of a running RGS are throttled: a start of stopped RGS
+        # is recovery, not churn, so a recent restart must never delay it.
+        now = datetime.now(timezone.utc)
+        last_at = state["rgs_restart_last_at"]
+        if running and last_at:
+            try:
+                elapsed = (now - datetime.fromisoformat(last_at)).total_seconds()
+                # A future-dated stamp (clock rollback, corrupt state) is not a
+                # live lease; it must not block the rebind forever.
+                if 0 <= elapsed < RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS:
+                    return {"action": "deferred", "reason": reason}
+            except (TypeError, ValueError):
+                pass  # Malformed bookkeeping must not block the rebind itself.
+
+        if running:
+            # Only a restart of a running RGS arms the throttle; a start is
+            # recovery, so a tunnel change right after it must still rebind.
+            _save_state(settings, rgs_restart_last_at=now.replace(microsecond=0).isoformat())
+        try:
+            if running:
+                _rgs_manager.restart(settings)
+            else:
+                _rgs_manager.start(settings)
+        except OSError as error:
+            _drone_log(f"RGS {action} after VPN reconnect failed ({reason}): {error}", also_stdout=True)
+            return {"action": "failed", "reason": reason, "error": str(error)}
+        _save_state(settings, rgs_tunnel_ip=tunnel_ip)
+        _drone_log(f"RGS {action}ed after VPN reconnect: {reason}", also_stdout=True)
+        return {"action": action, "reason": reason}
+    except Exception as error:
+        print(f"RGS tunnel reconcile failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        return None
+
+
 def run_self_heal_poller(settings: Settings) -> None:
     """Forever-loop calling check_and_self_heal on a fixed cadence.
 
     Started as its own daemon thread from create_server(), same pattern as
     run_sharing_revocation_poller -- a separate, narrowly-scoped background
     loop per concern rather than one combined poller, matching this module's
-    existing style.
+    existing style. Each tick also reconciles RGS with the tunnel address
+    (see reconcile_rgs_with_tunnel).
     """
     generation = poller_generation()
     while True:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
-        check_and_self_heal(settings)
+        try:
+            check_and_self_heal(settings)
+        except Exception as error:
+            # One unexpected failure must not kill the poller (and RGS reconcile with it).
+            print(f"VPN self-heal tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        # Self-heal can perform slow I/O. If shutdown retired this poller while
+        # that work was in progress, do not let the stale generation perform
+        # the additional RGS service action.
+        if poller_retired(generation):
+            return
+        reconcile_rgs_with_tunnel(settings)
