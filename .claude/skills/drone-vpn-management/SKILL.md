@@ -518,9 +518,12 @@ Key design decisions, and why:
 
 RGS binds its sockets to the Proton tunnel address. When a reconnect hands out a
 new address (e.g. `10.96.0.17` -> `10.96.0.18`), the RGS service stays up but its
-portal shows "Disconnected" until it restarts. The same self-heal poller calls
-`reconcile_rgs_with_tunnel()` after each `check_and_self_heal()` tick; it adds no
-loop of its own. Rules:
+portal shows "Disconnected" until it restarts. The self-heal poller attempts
+`reconcile_rgs_with_tunnel()` on every tick, even if
+`check_and_self_heal()` unexpectedly raises. Each operation has its own
+exception guard so a transient failure cannot retire the shared poller; if the
+poller is retired during a successful slow check, it stops before starting the
+RGS service action. It adds no loop of its own. Rules:
 
 - Only while the tunnel is up and an address is readable. The first look after the
   process starts only records the address; it does not restart a running RGS.
