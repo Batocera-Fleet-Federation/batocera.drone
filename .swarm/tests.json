@@ -10578,6 +10578,70 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-586-fresh-surrogate-stderr-uat",
+      "name": "Issue #586 a surrogate-escaped sharing-revocation tick failure on strict UTF-8 stderr must not stop the poller",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_586_fresh_surrogate_stderr_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_586_fresh_surrogate_stderr_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-586-out-of-scope-interval-overflow-startup",
+      "name": "Out-of-scope evidence for #586 (extends #592): a parseable but unrepresentable sharing-check interval (inf, 1e10, 1e400) ends the VPN poller on its first sleep",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_586_out_of_scope_interval_overflow_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_586_out_of_scope_interval_overflow_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
