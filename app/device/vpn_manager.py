@@ -1173,7 +1173,7 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
     tunnel is up it compares the tunnel address with the one RGS was last
     reconciled against:
 
-    * address unchanged -> nothing to do;
+    * RGS running and address unchanged -> nothing to do;
     * RGS disabled -> never started here; the address is just recorded;
     * RGS enabled and running -> restarted so its sockets rebind;
     * RGS enabled but not running (for example after boot, when the VPN came
@@ -1191,7 +1191,7 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
         if not state["has_config"] or not tunnel_is_up(settings):
             return None
         tunnel_ip = _tunnel_ip()
-        if not tunnel_ip or tunnel_ip == state["rgs_tunnel_ip"]:
+        if not tunnel_ip:
             return None
 
         rgs = _rgs_manager.status(settings)
@@ -1204,6 +1204,8 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
             return None
 
         running = bool(rgs.get("running"))
+        if running and tunnel_ip == state["rgs_tunnel_ip"]:
+            return None  # Already bound to this tunnel address.
         if running and not state["rgs_tunnel_ip"]:
             # First look after this process started: RGS already runs on this tunnel.
             _save_state(settings, rgs_tunnel_ip=tunnel_ip)
@@ -1228,7 +1230,10 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
             except (TypeError, ValueError):
                 pass  # Malformed bookkeeping must not block the rebind itself.
 
-        _save_state(settings, rgs_restart_last_at=now.replace(microsecond=0).isoformat())
+        if running:
+            # Only a restart of a running RGS arms the throttle; a start is
+            # recovery, so a tunnel change right after it must still rebind.
+            _save_state(settings, rgs_restart_last_at=now.replace(microsecond=0).isoformat())
         try:
             if running:
                 _rgs_manager.restart(settings)
@@ -1259,7 +1264,11 @@ def run_self_heal_poller(settings: Settings) -> None:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
-        check_and_self_heal(settings)
+        try:
+            check_and_self_heal(settings)
+        except Exception as error:
+            # One unexpected failure must not kill the poller (and RGS reconcile with it).
+            print(f"VPN self-heal tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
         # Self-heal can perform slow I/O. If shutdown retired this poller while
         # that work was in progress, do not let the stale generation perform
         # the additional RGS service action.

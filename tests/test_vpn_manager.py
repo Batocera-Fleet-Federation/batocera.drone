@@ -1467,6 +1467,17 @@ class RgsTunnelReconcileTests(unittest.TestCase):
             start.assert_called_once()
             restart.assert_not_called()
 
+    def test_stopped_rgs_is_started_even_when_address_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready(tmp)
+            vpn_manager._save_state(settings, rgs_tunnel_ip="10.96.0.17")
+            result, restart, start = self._reconcile(settings, address="10.96.0.17", rgs=self._rgs(running=False))
+            self.assertEqual(result["action"], "start")
+            start.assert_called_once()
+            restart.assert_not_called()
+            # A start does not arm the restart throttle.
+            self.assertIsNone(vpn_manager._load_state(settings)["rgs_restart_last_at"])
+
     def test_restarts_are_rate_limited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._ready(tmp)

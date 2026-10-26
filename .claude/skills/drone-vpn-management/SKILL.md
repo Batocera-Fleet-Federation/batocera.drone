@@ -526,10 +526,10 @@ loop of its own. Rules:
   process starts only records the address; it does not restart a running RGS.
 - Address changed + RGS enabled + running -> `rgs_manager.restart()`
   (stop/start). Enabled + not running (e.g. VPN came up after boot) ->
-  `rgs_manager.start()`.
+  `rgs_manager.start()`, even when the recorded address is unchanged.
 - RGS disabled -> never started or restarted here; the recorded address is cleared,
   so a later enable that finds RGS stopped on the same tunnel is still started.
-- Only restarts of a running RGS are rate-limited (`DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS`,
+- Only restarts of a running RGS are rate-limited (and only they arm the limit) (`DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS`,
   default 600); a start of stopped RGS is never deferred. A future-dated
   `rgs_restart_last_at` is not a live lease and does not block a restart. A
   deferred or failed action does not record the new address, so it is retried
