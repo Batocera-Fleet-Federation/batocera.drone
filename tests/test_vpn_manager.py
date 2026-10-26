@@ -1014,6 +1014,19 @@ class CheckSharingRevocationTests(unittest.TestCase):
             with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("boom")):
                 self.assertFalse(vpn_manager.check_sharing_revocation(settings))
 
+    def test_poller_continues_after_unexpected_check_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "poller_generation", return_value=7), \
+                    mock.patch.object(vpn_manager, "poller_retired", side_effect=[False, False, True]), \
+                    mock.patch.object(vpn_manager.time, "sleep"), \
+                    mock.patch.object(vpn_manager, "check_sharing_revocation", side_effect=[RuntimeError("boom"), False]) as check, \
+                    mock.patch.object(vpn_manager, "_log_poller_failure") as log_failure:
+                vpn_manager.run_sharing_revocation_poller(settings)
+
+            self.assertEqual(check.call_count, 2)
+            log_failure.assert_called_once()
+
 
 class BootstrapVpnFromSwarmTests(unittest.TestCase):
     """bootstrap_vpn_from_swarm's own peer-search/skip/import logic, in
