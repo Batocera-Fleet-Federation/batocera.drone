@@ -91,17 +91,52 @@ def set_enabled(settings, enabled):
         # Use the original launcher so its Proton VPN pre-start guard still applies.
         for action in (("enable", "start") if enabled else ("stop", "disable")):
             _run(tool, action)
-        deadline = time.monotonic() + _STATE_TIMEOUT_SECONDS
-        while True:
-            state = status(settings)
-            if state["available"] and state["running"] == enabled and state["enabled"] == enabled:
-                return state
-            if time.monotonic() >= deadline:
-                if state.get("error"):
-                    raise OSError(state["error"])
-                raise OSError(
-                    f"RGS did not reach the requested state within {_STATE_TIMEOUT_SECONDS} seconds "
-                    f"(running={state.get('running')}, enabled={state.get('enabled')}); "
-                    "check its service logs"
-                )
-            time.sleep(0.25)
+        return _await_state(settings, running=enabled, enabled=enabled)
+
+
+def restart(settings):
+    """Restart an enabled, running RGS so its sockets rebind to the current tunnel."""
+    with _LOCK:
+        before = _require_available(settings)
+        if not before["enabled"]:
+            raise OSError("RGS is disabled; refusing to restart it")
+        tool = shutil.which("batocera-services")
+        for action in (("stop", "start") if before["running"] else ("start",)):
+            _run(tool, action)
+        return _await_state(settings, running=True, enabled=True)
+
+
+def start(settings):
+    """Start RGS that is enabled but not running, for example after boot."""
+    with _LOCK:
+        before = _require_available(settings)
+        if not before["enabled"]:
+            raise OSError("RGS is disabled; refusing to start it")
+        if before["running"]:
+            return before
+        _run(shutil.which("batocera-services"), "start")
+        return _await_state(settings, running=True, enabled=True)
+
+
+def _require_available(settings):
+    state = status(settings)
+    if not state["available"]:
+        raise OSError(state.get("error", "RGS download manager is not installed"))
+    return state
+
+
+def _await_state(settings, *, running, enabled):
+    deadline = time.monotonic() + _STATE_TIMEOUT_SECONDS
+    while True:
+        state = status(settings)
+        if state["available"] and state["running"] == running and state["enabled"] == enabled:
+            return state
+        if time.monotonic() >= deadline:
+            if state.get("error"):
+                raise OSError(state["error"])
+            raise OSError(
+                f"RGS did not reach the requested state within {_STATE_TIMEOUT_SECONDS} seconds "
+                f"(running={state.get('running')}, enabled={state.get('enabled')}); "
+                "check its service logs"
+            )
+        time.sleep(0.25)
