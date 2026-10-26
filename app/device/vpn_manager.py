@@ -1260,4 +1260,9 @@ def run_self_heal_poller(settings: Settings) -> None:
         if poller_retired(generation):
             return
         check_and_self_heal(settings)
+        # Self-heal can perform slow I/O. If shutdown retired this poller while
+        # that work was in progress, do not let the stale generation perform
+        # the additional RGS service action.
+        if poller_retired(generation):
+            return
         reconcile_rgs_with_tunnel(settings)

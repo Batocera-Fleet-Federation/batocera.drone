@@ -1499,6 +1499,19 @@ class RgsTunnelReconcileTests(unittest.TestCase):
                 self.assertIsNone(vpn_manager.reconcile_rgs_with_tunnel(settings))
             restart.assert_not_called()
 
+    def test_retired_self_heal_poller_does_not_reconcile_rgs_after_slow_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "poller_generation", return_value=7), \
+                    mock.patch.object(vpn_manager, "poller_retired", side_effect=[False, True]), \
+                    mock.patch.object(vpn_manager.time, "sleep"), \
+                    mock.patch.object(vpn_manager, "check_and_self_heal") as check, \
+                    mock.patch.object(vpn_manager, "reconcile_rgs_with_tunnel") as reconcile:
+                vpn_manager.run_self_heal_poller(settings)
+
+            check.assert_called_once_with(settings)
+            reconcile.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
