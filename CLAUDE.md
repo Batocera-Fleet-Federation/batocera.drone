@@ -166,7 +166,9 @@ bumps the generation and clears their `*_STARTED` latches; `main()` calls it bes
 `stop_local_network_workers()`. A plain HTTP shutdown does not (owner-driven, like the LAN workers). Any
 test harness that calls `create_server` should call both on teardown: a leftover poller re-resolves
 `DRONE_STATE_DATABASE_FILE` every tick, so it writes into (and re-creates the temp tree of) whatever later test
-selected that env. New forever-loop pollers must follow the same capture-and-check shape.
+selected that env. New forever-loop pollers must follow the same capture-and-check
+shape and catch/log unexpected per-tick exceptions so one transient failure does not
+permanently stop the poller.
 
 **Poll loop:** `_start_rom_metadata_poller` + `RomFilesystemWatcher` (inotify,
 debounced) wake on file changes; `_poll_rom_metadata_once` scans ROM/BIOS metadata,

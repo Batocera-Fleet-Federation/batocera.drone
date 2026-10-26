@@ -38,7 +38,16 @@ app/common/
                        # <install root>/vpn, fixed, not user-configurable
 ```
 
-## Design: stateless, no background thread
+## Sharing revocation poller
+
+Imported VPN credentials are checked on a dedicated forever-loop poller so a
+revocation disconnects and removes credentials even when nobody opens the VPN
+page. `check_sharing_revocation()` handles expected lookup and peer failures;
+the poller must also catch and log unexpected exceptions around each tick so a
+single failure cannot permanently stop future revocation checks. It uses the
+shared poller-generation retirement gate, like other background pollers.
+
+## Design: stateless status, separate background pollers
 
 Unlike `transfer/torrent_manager.py`'s `TorrentManager` (which runs its own
 worker thread because a torrent queue has real scheduling work to do),

@@ -1019,7 +1019,12 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         time.sleep(interval)
         if poller_retired(generation):
             return
-        check_sharing_revocation(settings)
+        try:
+            check_sharing_revocation(settings)
+        except Exception as error:
+            # Keep this background poller alive even if a check unexpectedly
+            # raises outside its own error handling.
+            _log_poller_failure("VPN sharing revocation check failed", error)
 
 
 # ------------------------------------------------------------ self-heal
