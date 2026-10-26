@@ -10106,6 +10106,99 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-581-fresh-boot-persisted-address-uat",
+      "name": "Issue #581 RGS reboot recovery starts enabled-but-stopped RGS even when the persisted tunnel address is unchanged",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_581_fresh_boot_persisted_address_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_581_fresh_boot_persisted_address_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-581-fresh-start-rebind-throttle-uat",
+      "name": "Issue #581 a boot start does not arm the restart throttle, and restarts are logged with reason",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_581_fresh_start_rebind_throttle_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_581_fresh_start_rebind_throttle_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-581-out-of-scope-poller-exception-uat",
+      "name": "Out-of-scope evidence: a self-heal exception stops the VPN poller, so RGS reconcile stops too",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_581_out_of_scope_poller_exception_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_581_out_of_scope_poller_exception_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
