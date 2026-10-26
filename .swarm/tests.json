@@ -10514,6 +10514,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-586-real-check-revocation-recovery-uat",
+      "name": "Issue #586 real sharing-revocation check under the poller loop: closed stderr, interrupted revocation retry, transient peer errors, BaseException propagation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_586_real_check_revocation_recovery_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_586_real_check_revocation_recovery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
