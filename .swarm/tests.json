@@ -4803,6 +4803,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-616-security-suite-empty-discovery",
+      "name": "Issue #616 reported security suites reject empty test discovery",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_616_security_suite_empty_discovery.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "scripts/run_security_tests.py",
+          "tests/adversarial/test_issue_616_security_suite_empty_discovery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1

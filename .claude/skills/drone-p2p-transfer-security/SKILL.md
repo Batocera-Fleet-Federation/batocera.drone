@@ -531,6 +531,16 @@ If adding transfer tracking, prefer relational tables.
 
 ## Security Review Checklist
 
+Security acceptance suites registered in `.swarm/tests.json` must run through
+`python3 scripts/run_security_tests.py -s <directory> -p <pattern>` so empty
+discovery fails rather than reporting a false pass (#616). Include the runner
+and test files in each suite's required files. When changing registrations, run
+`python3 -m unittest discover -s tests -p test_security_suite_validation.py` to
+check required files and actual collection. Do not delete hostile-input tests
+solely because their line coverage overlaps other tests; their assertions protect
+distinct security boundaries. Remove or replace a suite's registration together
+with any intentionally retired test.
+
 When reviewing P2P transfer code, verify:
 
 - Does peer discovery come from direct pairing (LAN or tailnet), not an untrusted address?
