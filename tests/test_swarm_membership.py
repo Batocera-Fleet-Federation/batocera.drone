@@ -2,7 +2,7 @@
 
 An approved pairing is shared with Drones that are already trusted. Discovery
 does not grant access, a certificate pin is not replaced by gossip, and a
-removal converges so the removed Drone is no longer an active member.
+operator removal is local, while authenticated self-departure removes the caller.
 """
 
 from __future__ import annotations
@@ -341,17 +341,19 @@ class SwarmMembershipTests(unittest.TestCase):
         swarm_membership.propagate_membership(drones["drone-c"])
         self.assertTrue(swarm_membership.publish_forget(drones["drone-a"], "drone-c"))
         self.assertNotIn("drone-c", _roster(drones["drone-a"]))
-        self.assertNotIn("drone-c", _roster(drones["drone-b"]))
-        self.assertEqual(_roster(drones["drone-c"]), set())
+        self.assertEqual(_roster(drones["drone-b"]), {"drone-a", "drone-c"})
+        self.assertEqual(_roster(drones["drone-c"]), {"drone-a", "drone-b"})
 
-        self._approve(drones["drone-b"], drones["drone-c"])
-        self._approve(drones["drone-c"], drones["drone-b"])
-        swarm_membership.propagate_membership(drones["drone-b"])
+        # Rejoin through the operator who forgot C; another roster's approval
+        # is not a replacement for this fresh local pairing approval.
+        self._approve(drones["drone-a"], drones["drone-c"])
+        self._approve(drones["drone-c"], drones["drone-a"])
+        swarm_membership.propagate_membership(drones["drone-a"])
         self.assertEqual(_roster(drones["drone-a"]), {"drone-b", "drone-c"})
         self.assertEqual(_roster(drones["drone-b"]), {"drone-a", "drone-c"})
         self.assertEqual(_roster(drones["drone-c"]), {"drone-a", "drone-b"})
 
-    def test_removal_converges_without_ejecting_remaining_members(self) -> None:
+    def test_operator_removal_only_changes_its_own_roster(self) -> None:
         drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c")}
         for left, right in (("drone-a", "drone-b"), ("drone-b", "drone-c")):
             self._approve(drones[left], drones[right])
@@ -360,17 +362,17 @@ class SwarmMembershipTests(unittest.TestCase):
         swarm_membership.propagate_membership(drones["drone-c"])
         self.assertTrue(swarm_membership.publish_forget(drones["drone-b"], "drone-c"))
 
-        self.assertEqual(_roster(drones["drone-a"]), {"drone-b"})
+        self.assertEqual(_roster(drones["drone-a"]), {"drone-b", "drone-c"})
         self.assertEqual(_roster(drones["drone-b"]), {"drone-a"})
-        self.assertEqual(_roster(drones["drone-c"]), set())
+        self.assertEqual(_roster(drones["drone-c"]), {"drone-a", "drone-b"})
         removed = swarm_membership.handle_membership_request(
-            drones["drone-a"],
+            drones["drone-b"],
             {"records": []},
             "drone-c",
         )
         self.assertEqual(removed["status"], "removed")
         self.assertEqual([record["peer_id"] for record in removed["records"]], ["drone-c"])
-        self.assertEqual(_roster(drones["drone-a"]), {"drone-b"})
+        self.assertEqual(_roster(drones["drone-a"]), {"drone-b", "drone-c"})
 
     def _remove_record(self, peer_id: str, origin: str, epoch: int = 5) -> dict:
         return {"peer_id": peer_id, "op": "remove", "epoch": epoch, "origin": origin, "card": {}}
@@ -417,22 +419,80 @@ class SwarmMembershipTests(unittest.TestCase):
         )
         self.assertEqual(_roster(drones["drone-v"]), {"drone-m"})
 
-    def test_introducer_own_removal_of_a_peer_is_still_honored(self) -> None:
+    def test_introducer_origin_does_not_authorize_removal_of_a_peer(self) -> None:
         drones = self._mesh(("drone-v", "drone-m", "drone-s"))
         swarm_membership.handle_membership_request(
             drones["drone-v"],
             {"records": [self._remove_record("drone-s", "drone-m", 1_000)]},
             "drone-m",
         )
-        self.assertEqual(_roster(drones["drone-v"]), {"drone-m"})
+        self.assertEqual(_roster(drones["drone-v"]), {"drone-m", "drone-s"})
 
-    def test_removal_converges_when_remover_pushes_to_every_peer(self) -> None:
+    def test_operator_removal_stays_local_in_a_full_mesh(self) -> None:
         drones = self._mesh(("drone-a", "drone-b", "drone-c", "drone-d"))
         self._install_poster(drones)
         self.assertTrue(swarm_membership.publish_forget(drones["drone-b"], "drone-d"))
-        for name in ("drone-a", "drone-b", "drone-c"):
-            self.assertNotIn("drone-d", _roster(drones[name]))
-        self.assertEqual(_roster(drones["drone-d"]), set())
+        self.assertNotIn("drone-d", _roster(drones["drone-b"]))
+        for name in ("drone-a", "drone-c"):
+            self.assertIn("drone-d", _roster(drones[name]))
+        self.assertEqual(_roster(drones["drone-d"]), {"drone-a", "drone-b", "drone-c"})
+
+    def test_tombstones_are_retained_locally_but_not_relayed_in_requests_or_replies(self) -> None:
+        drones = self._mesh(("drone-v", "drone-m", "drone-s"))
+        victim = drones["drone-v"]
+        sent = []
+
+        def poster(settings, peer, payload):
+            sent.append((peer["drone_id"], payload))
+            return {"records": []}
+
+        swarm_membership.set_membership_poster(poster)
+        response = swarm_membership.handle_membership_request(
+            victim, {"records": [self._remove_record("drone-m", "drone-m")]}, "drone-m",
+        )
+        self.assertEqual(_roster(victim), {"drone-s"})
+        self.assertTrue(any(r["op"] == "remove" for r in swarm_membership.membership_view(victim)["records"]))
+        self.assertTrue(sent)
+        self.assertTrue(all(peer_id == "drone-s" for peer_id, _ in sent))
+        for payload in [response] + [payload for _, payload in sent]:
+            self.assertFalse(any(r["op"] == "remove" for r in payload["records"]))
+
+        sent.clear()
+        self.assertTrue(swarm_membership.publish_forget(victim, "drone-s"))
+        self.assertEqual(sent, [], "operator forget must not contact the forgotten peer")
+        response = swarm_membership.handle_membership_request(victim, {"records": []}, "drone-s")
+        self.assertEqual(response["status"], "removed")
+
+    def test_sync_reply_self_departure_unlinks_pin_and_does_not_relay_removal(self) -> None:
+        drones = self._mesh(("drone-v", "drone-m", "drone-s"))
+        victim = drones["drone-v"]
+        cert_path = Path(local_network.get_paired_peer(victim, "drone-m")["certificate_path"])
+        sent = []
+
+        def poster(settings, peer, payload):
+            sent.append(payload)
+            return {"records": [self._remove_record("drone-m", "drone-m")]} if peer["drone_id"] == "drone-m" else {"records": []}
+
+        swarm_membership.set_membership_poster(poster)
+        swarm_membership.propagate_membership(victim)
+        self.assertEqual(_roster(victim), {"drone-s"})
+        self.assertFalse(cert_path.exists())
+        self.assertTrue(all(r["op"] != "remove" for payload in sent for r in payload["records"]))
+
+    def test_removed_reply_cannot_stop_sync_to_other_members(self) -> None:
+        drones = self._mesh(("drone-v", "drone-m", "drone-s"))
+        victim = drones["drone-v"]
+        contacted = []
+
+        def poster(settings, peer, payload):
+            contacted.append(peer["drone_id"])
+            return {"status": "removed", "records": [self._remove_record("drone-v", peer["drone_id"])]}
+
+        swarm_membership.set_membership_poster(poster)
+        swarm_membership.propagate_membership(victim)
+        self.assertEqual(set(contacted), {"drone-m", "drone-s"})
+        self.assertEqual(_roster(victim), {"drone-m", "drone-s"})
+        self.assertTrue(swarm_membership._is_dirty(victim))
 
     def test_removed_caller_is_recognized_by_pinned_fingerprint(self) -> None:
         local = self._settings("drone-a")
@@ -593,9 +653,9 @@ class SwarmMembershipHttpTests(unittest.TestCase):
         self.assertEqual(_roster(drone_c), {"drone-a", "drone-b"})
 
         self.assertTrue(swarm_membership.publish_forget(drone_b, "drone-c"))
-        self.assertEqual(_roster(drone_a), {"drone-b"})
+        self.assertEqual(_roster(drone_a), {"drone-b", "drone-c"})
         self.assertEqual(_roster(drone_b), {"drone-a"})
-        self.assertEqual(_roster(drone_c), set())
+        self.assertEqual(_roster(drone_c), {"drone-a", "drone-b"})
 
 
 if __name__ == "__main__":
