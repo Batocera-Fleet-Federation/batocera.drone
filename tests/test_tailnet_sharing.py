@@ -13,6 +13,7 @@ is exercised for real, not assumed.
 """
 
 import importlib
+import io
 import json
 import os
 import tempfile
@@ -253,6 +254,35 @@ class CheckSharingRevocationTests(unittest.TestCase):
                     mock.patch.object(tailnet_service.subprocess, "run") as run_mock:
                 self.assertTrue(tailnet_service.check_tailnet_sharing_revocation(settings))
             run_mock.assert_not_called()
+
+    def test_never_raises_when_stderr_rejects_surrogate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            raw = io.BytesIO()
+            strict_stderr = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+            with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("roster \udcff")), \
+                    mock.patch.object(tailnet_service.sys, "stderr", strict_stderr):
+                self.assertFalse(tailnet_service.check_tailnet_sharing_revocation(settings))
+            self.assertNotEqual(tailnet_service._load_sharing_state(settings)["auth_key"], "")
+            strict_stderr.flush()
+            self.assertIn(b"\\udcff", raw.getvalue())
+
+    def test_poller_continues_after_unexpected_check_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(tailnet_service, "poller_generation", return_value=7), \
+                    mock.patch.object(tailnet_service, "poller_retired", side_effect=[False, False, True]), \
+                    mock.patch.object(tailnet_service.time, "sleep"), \
+                    mock.patch.object(
+                        tailnet_service,
+                        "check_tailnet_sharing_revocation",
+                        side_effect=[RuntimeError("boom"), False],
+                    ) as check, \
+                    mock.patch.object(tailnet_service, "_log_poller_failure") as log_failure:
+                tailnet_service.run_tailnet_sharing_revocation_poller(settings)
+
+            self.assertEqual(check.call_count, 2)
+            log_failure.assert_called_once()
 
 
 class BootstrapTailnetFromSwarmTests(unittest.TestCase):

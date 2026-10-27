@@ -1212,18 +1212,42 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"Tailnet sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("Tailnet sharing revocation check failed", error)
         return False
+
+
+def _poller_error_detail(error: Exception) -> str:
+    """Format an unexpected poller exception without trusting its __str__."""
+    try:
+        detail = str(error)
+    except Exception:
+        detail = "<unprintable exception>"
+    return f"{error.__class__.__name__}: {detail}"
+
+
+def _log_poller_failure(message: str, error: Exception) -> None:
+    """Report a poller tick failure without letting the report stop the poller."""
+    try:
+        text = f"{message}: {_poller_error_detail(error)}"
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+        print(text, file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
     """Forever-loop checking whether an imported auth key's sharing was
     revoked -- mirrors ``vpn_manager.run_sharing_revocation_poller()``
-    exactly. Started as its own daemon thread from ``create_server()``."""
+    exactly, including the per-tick Exception guard and
+    ``_log_poller_failure`` isolation. Started as its own daemon thread
+    from ``create_server()``."""
     interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
     generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):
             return
-        check_tailnet_sharing_revocation(settings)
+        try:
+            check_tailnet_sharing_revocation(settings)
+        except Exception as error:
+            _log_poller_failure("Tailnet sharing revocation check failed", error)
