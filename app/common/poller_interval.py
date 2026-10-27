@@ -83,3 +83,36 @@ def poller_interval_from_env(name: str, default: float, minimum: float = 30.0) -
     except Exception:
         fallback = _sleepable(_number(default), _minimum(minimum))
         return fallback or _SLEEPABLE_FALLBACK_SECONDS
+
+
+def seconds_from_env(name: str, default: float, maximum: float = POLLER_INTERVAL_MAX_SECONDS) -> float:
+    """Read a non-negative timeout in seconds from ``name``. Never raises.
+
+    For request/command timeouts and grace periods, not pollers: no floor is applied.
+    Blank, non-numeric, non-finite, negative, or above ``maximum`` values fall back to
+    ``default``.
+    """
+    try:
+        text = os.environ.get(name)
+        if text is None or not text.strip():
+            return default
+        value = float(text.strip())
+    except Exception:
+        return default
+    if not math.isfinite(value) or not 0 <= value <= maximum:
+        return default
+    return value
+
+
+def int_from_env(name: str, default: int, minimum: int = 0, maximum: int = 1_000_000) -> int:
+    """Read a bounded integer from ``name``. Never raises; unusable values use ``default``."""
+    try:
+        text = os.environ.get(name)
+        if text is None or not text.strip():
+            return default
+        value = int(text.strip())
+    except Exception:
+        return default
+    if not minimum <= value <= maximum:
+        return default
+    return value

@@ -51,7 +51,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 
 try:
-    from ..common.poller_interval import poller_interval_from_env
+    from ..common.poller_interval import poller_interval_from_env, seconds_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
@@ -63,7 +63,7 @@ try:
     from . import crash_history as _crash_history
     from . import usb_enumeration as _usb_enumeration
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.poller_interval import poller_interval_from_env  # type: ignore
+    from common.poller_interval import poller_interval_from_env, seconds_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -76,11 +76,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device import usb_enumeration as _usb_enumeration  # type: ignore
 
 SMTP_STATE_NAMESPACE = "smtp_manager.json"
-SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECONDS", "15"))
+SMTP_SEND_TIMEOUT_SECONDS = seconds_from_env("DRONE_SMTP_SEND_TIMEOUT_SECONDS", 15.0)
 # An attachment (base64-inflated ~33%) can take far longer to transmit than a
 # plain-text digest/test email over a modest home upload link -- give it real
 # room rather than reusing the short default meant for a few KB of text.
-SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", "120"))
+SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = seconds_from_env("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", 120.0)
 try:
     SMTP_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
 except Exception:
@@ -89,7 +89,7 @@ except Exception:
 # setting below (1 minute - 24 hours, default 5 minutes) -- once a drone has
 # saved its own value via the admin UI, that stored value always wins over
 # this env var; this only seeds a fresh drone that has never saved one.
-AUDIT_EMAIL_POLL_INTERVAL_SECONDS = float(os.environ.get("DRONE_AUDIT_EMAIL_INTERVAL_SECONDS", "300"))
+AUDIT_EMAIL_POLL_INTERVAL_SECONDS = poller_interval_from_env("DRONE_AUDIT_EMAIL_INTERVAL_SECONDS", 300.0)
 DIGEST_INTERVAL_MIN_SECONDS = 60
 DIGEST_INTERVAL_MAX_SECONDS = 86400
 # How often the poller thread wakes to check whether the user's configured
@@ -466,7 +466,7 @@ def _log_poller_failure(message: str, error: Exception) -> None:
         pass
 
 
-def run_sharing_revocation_poller(settings: Settings) -> None:
+def run_sharing_revocation_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop, mirrors ``vpn_manager.run_sharing_revocation_poller()``:
     started as its own daemon thread from ``create_server()``. A periodic
     background check is the only way to learn about revocation at all --
@@ -478,7 +478,8 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         interval = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
     except Exception:
         interval = 300.0
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):
@@ -1166,7 +1167,7 @@ def send_digest_if_needed(settings: Settings) -> dict:
             return {"status": "error", "error": str(error)}
 
 
-def run_audit_email_digest_poller(settings: Settings) -> None:
+def run_audit_email_digest_poller(settings: Settings, generation: int | None = None) -> None:
     """Single backend loop for every outbound email and peer relay.
     There is no OS cron anywhere in this app; every periodic feature is an
     in-process daemon thread on this exact shape (see
@@ -1177,7 +1178,8 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
     and never touch ``smtplib``. The owner queues due digests, then the sole
     outbound-mail consumer delivers digests, tests, and attachments.
     """
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(DIGEST_POLLER_TICK_SECONDS)
         if poller_retired(generation):
