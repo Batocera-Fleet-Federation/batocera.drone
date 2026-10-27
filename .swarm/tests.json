@@ -10852,6 +10852,68 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-588-helper-no-raise-contract-uat",
+      "name": "Issue #588 inner VPN/RGS helpers never raise while reporting surrogate or broken-stderr failures",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_588_helper_no_raise_contract_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_588_helper_no_raise_contract_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-588-swallowed-failure-independence-uat",
+      "name": "Issue #588 swallowed inner helper failures still reconcile RGS and cannot kill the poller",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_588_swallowed_failure_independence_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_588_swallowed_failure_independence_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
