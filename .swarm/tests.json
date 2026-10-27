@@ -4662,6 +4662,106 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-587-real-retirement-exception-guard-uat",
+      "name": "Issue #587 VPN sharing-revocation poller survives ticks and honors real retire_pollers",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_587_real_retirement_exception_guard_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_587_real_retirement_exception_guard_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-587-baseexception-and-restart-uat",
+      "name": "Issue #587 BaseException still shuts the sharing pollers down and a later VPN poller can still revoke",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_587_baseexception_and_restart_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_587_baseexception_and_restart_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-587-out-of-scope-pre-claim-capture-race",
+      "name": "Out of scope for #587: retirement before claim_poller returns, and SMTP/tailnet capture races, still let pollers check (#615)",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_587_out_of_scope_pre_claim_capture_race.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_587_out_of_scope_pre_claim_capture_race.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
