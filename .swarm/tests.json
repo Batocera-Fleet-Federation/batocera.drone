@@ -4959,6 +4959,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_626_revocation_check_to_write_race_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-626-revocation-check-to-write-race",
+      "name": "Issue #626: SMTP and Tailnet re-import between provenance check and revocation write",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_626_revocation_check_to_write_race_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
