@@ -4597,6 +4597,39 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-600-membership-removal-boundaries-uat",
+      "name": "Issue #600 forged membership removals: HTTP route, reply side, no side effects, legitimate departure",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_600_membership_removal_boundaries_uat.py"
+      ],
+      "timeoutSeconds": 300,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_600_membership_removal_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
