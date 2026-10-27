@@ -5054,6 +5054,39 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_630_pinned_https_redirect_plaintext_404.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-630-pinned-https-redirect-plaintext-404",
+      "name": "Issue #630 pinned HTTPS redirect to plaintext 404 does not revoke sharing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_630_pinned_https_redirect_plaintext_404.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
