@@ -45,7 +45,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Optional
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -106,6 +106,8 @@ OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
 _DIGEST_SEND_LOCK = Lock()
 _OUTBOUND_MAIL_LOCK = Lock()
+_CREDENTIALS_LOCK = RLock()
+_STATE_LOCK = Lock()
 
 # Fields carried in the shared/exported payload (peer-to-peer, mirrors VPN's
 # config+credentials). Local-only fields (smtp_enabled, notify.*, last_*) are
@@ -171,10 +173,11 @@ def _load_state(settings: Settings) -> dict:
 
 
 def _save_state(settings: Settings, **updates) -> dict:
-    state = _load_state(settings)
-    state.update(updates)
-    _save_state_payload(_state_database_path(settings.userdata_root), SMTP_STATE_NAMESPACE, state)
-    return state
+    with _STATE_LOCK:
+        state = _load_state(settings)
+        state.update(updates)
+        _save_state_payload(_state_database_path(settings.userdata_root), SMTP_STATE_NAMESPACE, state)
+        return state
 
 
 def _sanitized(state: dict) -> dict:
@@ -409,6 +412,19 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     _save_state(settings, password="", revoked_reason=reason, revoked_at=_now_iso())
 
 
+def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
+    """Apply a peer's revocation only while it still owns our credentials."""
+    with _CREDENTIALS_LOCK:
+        state = _load_state(settings)
+        if state["source_peer_id"] != source_peer_id or not state["password"]:
+            return False
+        try:
+            _revoke_local_credentials(settings, reason)
+        except Exception as error:
+            _log_poller_failure("SMTP sharing revocation check failed", error)
+        return True
+
+
 def check_sharing_revocation(settings: Settings) -> bool:
     """Mirrors ``vpn_manager.check_sharing_revocation()``: only an explicit
     peer 404 (sharing off / no config) or "no longer paired" revokes;
@@ -417,10 +433,11 @@ def check_sharing_revocation(settings: Settings) -> bool:
     background poller). Returns True iff a revocation just happened.
     """
     try:
-        state = _load_state(settings)
-        source_peer_id = state["source_peer_id"]
-        if not source_peer_id or not state["has_config"]:
-            return False
+        with _CREDENTIALS_LOCK:
+            state = _load_state(settings)
+            source_peer_id = state["source_peer_id"]
+            if not source_peer_id or not state["has_config"] or not state["password"]:
+                return False
         try:
             from ..transfer import local_network as _local_network
             from ..transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated
@@ -429,16 +446,14 @@ def check_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
-            return True
+            return _revoke_credentials_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_GONE)
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/smtp/config", settings, peer_id=source_peer_id)
             return False
         except HTTPError as error:
             # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
             if error.code == 404 and peer_http_error_is_authenticated(error):
-                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
-                return True
+                return _revoke_credentials_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False
         except Exception:
             return False

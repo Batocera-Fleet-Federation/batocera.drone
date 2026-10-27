@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Iterable, Optional
 
 try:
@@ -88,6 +88,8 @@ TAILSCALE_API_TIMEOUT_SECONDS = 15.0
 
 _NETWORK_REPAIR_LOCK = Lock()
 _NETWORK_REPAIR_LAST = float("-inf")
+_CREDENTIALS_LOCK = RLock()
+_STATE_LOCK = Lock()
 
 
 def _kernel_tailnet_failure(payload: dict) -> Optional[str]:
@@ -1026,10 +1028,11 @@ def _load_sharing_state(settings: Settings) -> dict:
 
 
 def _save_sharing_state(settings: Settings, **updates) -> dict:
-    state = _load_sharing_state(settings)
-    state.update(updates)
-    _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
-    return state
+    with _STATE_LOCK:
+        state = _load_sharing_state(settings)
+        state.update(updates)
+        _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
+        return state
 
 
 def tailnet_sharing_status(settings: Settings) -> dict:
@@ -1181,6 +1184,19 @@ def _revoke_local_sharing(settings: Settings, reason: str) -> None:
     _save_sharing_state(settings, auth_key="", revoked_reason=reason, revoked_at=_now_iso())
 
 
+def _revoke_sharing_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
+    """Apply a peer's revocation only while it still owns our sharing."""
+    with _CREDENTIALS_LOCK:
+        state = _load_sharing_state(settings)
+        if state["source_peer_id"] != source_peer_id or not state["auth_key"]:
+            return False
+        try:
+            _revoke_local_sharing(settings, reason)
+        except Exception as error:
+            _log_poller_failure("Tailnet sharing revocation check failed", error)
+        return True
+
+
 def check_tailnet_sharing_revocation(settings: Settings) -> bool:
     """If this auth key was imported from a peer, verify that peer still
     shares it; revoke (clear the stored key, never the live connection) if
@@ -1192,10 +1208,11 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
     never strip a working setup. Never raises (intended to run unattended
     on a background poller)."""
     try:
-        state = _load_sharing_state(settings)
-        source_peer_id = state["source_peer_id"]
-        if not source_peer_id or not state["auth_key"]:
-            return False
+        with _CREDENTIALS_LOCK:
+            state = _load_sharing_state(settings)
+            source_peer_id = state["source_peer_id"]
+            if not source_peer_id or not state["auth_key"]:
+                return False
         try:
             from ..transfer import local_network as _local_network
             from ..transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated
@@ -1204,16 +1221,14 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_GONE)
-            return True
+            return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_GONE)
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
             return False
         except urllib.error.HTTPError as error:
             # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
             if error.code == 404 and peer_http_error_is_authenticated(error):
-                _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_OFF)
-                return True
+                return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False
         except Exception:
             return False
