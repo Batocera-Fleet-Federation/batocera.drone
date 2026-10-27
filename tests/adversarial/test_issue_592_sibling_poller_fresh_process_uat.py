@@ -242,6 +242,22 @@ class Issue592SiblingPollerFreshProcessUAT(unittest.TestCase):
             self.assertEqual(result["checks"], 1)
             self.assertEqual(result["sleeps"], [90.0, 90.0])
 
+    def test_each_poller_reads_its_own_interval_variable(self) -> None:
+        # Equal values conceal a copy/paste bug where one poller reads a sibling's
+        # variable. Distinct inputs prove all three runtime lookup paths are wired.
+        extra = {
+            "DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS": "41",
+            "DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS": "62",
+            "DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS": "83",
+        }
+        payload = self._load_json(self._run_child(CHILD_POLLER, extra, timeout=120))
+        for name, expected in (("vpn", 41.0), ("smtp", 62.0), ("tailnet", 83.0)):
+            with self.subTest(poller=name):
+                result = payload[name]
+                self.assertIsNone(result["escaped"], result)
+                self.assertEqual(result["checks"], 1)
+                self.assertEqual(result["sleeps"], [expected, expected])
+
     def test_import_app_drone_api_with_every_unusable_value_on_every_var(self) -> None:
         samples = (
             ("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", "abc"),
