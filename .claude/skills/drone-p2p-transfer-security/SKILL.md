@@ -146,11 +146,11 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   (`POST /v1/api/peer/membership`). A join through any current member fills every
   roster. Callers must already be paired (mTLS fingerprint); discovery does not.
   A newer removal beats an older add, but records are unsigned, so a remove is
-  honored only when its `origin` is the authenticated introducer (a member may
-  announce its own removal of a peer or its own departure, never relay or invent
-  one for another Drone) and its epoch is within `_MAX_REMOVAL_EPOCH_AHEAD` of the
-  local clock (#600). The remover pushes to every peer it has paired and retries
-  while dirty; removals are not relayed transitively. Gossip must
+  honored only when both its `origin` and `peer_id` are the authenticated
+  introducer, and its epoch is within `_MAX_REMOVAL_EPOCH_AHEAD` of the local
+  clock (#600). This permits a Drone to announce its own departure; it cannot
+  remove another Drone or force a receiver's departure. Removal records are
+  not relayed transitively. Gossip must
   not replace a fingerprint already pinned for that drone id. An explicit re-pair
   is a new approval and can rejoin; a stale add cannot.
 - A trust pin is only ever a parseable X.509 certificate. `_certificate_pem_fingerprint`

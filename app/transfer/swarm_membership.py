@@ -6,16 +6,15 @@ stored. Once two Drones approve a pairing, each one already trusts the
 other, so that approval is shared with the peers they already trust. Every
 Drone keeps its own paired-peer list; there is no central roster.
 
-Removals use the same path. A newer removal beats an older add, and the
-removed Drone is told with the certificate that was pinned while it was
-still a member so it drops out instead of staying on its own roster.
+Removals use the same path. A newer removal beats an older add. Because records
+are unsigned, only a Drone's own authenticated departure can be gossiped as a
+removal; a local operator removal cannot authorize other peers to evict that
+Drone.
 
 Records are unsigned, so the only authenticated identity is the paired
-introducer (the mTLS caller). A removal is therefore honored only when it is
-attributed to that introducer: a Drone may announce its own removal of a peer
-(or its own departure) but cannot relay or invent one on behalf of another
-Drone. The remover pushes to every peer it has paired, and a failed push stays
-dirty and is retried, so removals still converge without relaying.
+introducer (the mTLS caller). A removal is honored only when it names that
+introducer as both origin and peer. A paired Drone cannot revoke another
+member or force a receiver's departure.
 """
 
 from __future__ import annotations
@@ -151,7 +150,7 @@ def propagate_membership(settings: Any, *, hop: int = 0, skip_ids: Optional[set[
                 failed = True
                 continue
             if str(response.get("status") or "") == "removed":
-                _apply_departure_records(settings, response.get("records"))
+                # A peer's response cannot authorize this Drone's departure.
                 return
             try:
                 _accept_records(settings, response.get("records"), peer_id)
@@ -268,7 +267,10 @@ def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
     """
     if record["op"] != "remove":
         return True
-    if record["origin"] != introducer:
+    # mTLS authenticates only the introducer. Since records have no signature,
+    # it cannot authorize that peer to remove another member, even if the
+    # unsigned origin field claims the introducer as author.
+    if record["origin"] != introducer or record["peer_id"] != introducer:
         return False
     return int(record["epoch"]) <= int(state.get("clock") or 0) + _MAX_REMOVAL_EPOCH_AHEAD
 
@@ -341,30 +343,6 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
     _local_network.save_paired_peer(settings, peer)
     _activate_certificate(cert_path)
     return True
-
-
-def _apply_departure_records(settings: Any, records: Any) -> None:
-    own_id = str(settings.device_id)
-    chosen = None
-    for record in _parse_records(records):
-        if record["peer_id"] == own_id and record["op"] == "remove":
-            chosen = record
-            break
-    if chosen is None:
-        return
-
-    def mutate(state: dict) -> None:
-        current = state["records"].get(own_id)
-        if not _beats(chosen, current):
-            return
-        state["departed"] = True
-        state["clock"] = max(int(state.get("clock") or 0), int(chosen["epoch"]))
-        state["records"][own_id] = chosen
-        for peer in list(_local_network.paired_peers(settings)):
-            _local_network.forget_peer(settings, _peer_id(peer), publish_membership=False)
-            _unlink_cert(settings, _peer_id(peer))
-
-    _with_state(settings, mutate)
 
 
 def peer_id_for_removed_fingerprint(settings: Any, fingerprint: str) -> str:
