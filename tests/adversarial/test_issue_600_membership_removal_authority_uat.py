@@ -146,6 +146,25 @@ class MembershipRemovalAuthorityUAT(unittest.TestCase):
         self.send("member", "member", 10)
         self.assertEqual(self.roster(self.drones["victim"]), {"source"})
 
+    def test_stale_authenticated_self_removal_does_not_undo_newer_pairing(self):
+        """A real sender identity does not make an old departure current."""
+        victim = self.drones["victim"]
+        member = local_network.get_paired_peer(victim, "member")
+        pinned = member["certificate_fingerprint"]
+        current = next(
+            record
+            for record in swarm_membership.membership_view(victim)["records"]
+            if record["peer_id"] == "member"
+        )
+
+        self.send("member", "member", max(0, current["epoch"] - 1))
+
+        self.assertIn("member", self.roster(victim))
+        self.assertEqual(
+            local_network.get_paired_peer(victim, "member")["certificate_fingerprint"],
+            pinned,
+        )
+
     def test_introducer_can_still_announce_its_own_removal_of_a_peer(self):
         """Adjudicated against issue #600.
 
