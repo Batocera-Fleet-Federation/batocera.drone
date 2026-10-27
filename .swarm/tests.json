@@ -11231,6 +11231,105 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_597_disconnect_failure_wipe_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-597-disconnect-failure-wipe-uat",
+      "name": "Issue #597: VPN revocation wipes credentials and reports correctly when disconnect() raises",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/tailnet_service.py",
+          "app/device/vpn_manager.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_597_disconnect_failure_wipe_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_597_out_of_scope_failed_disconnect_not_retried_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-597-out-of-scope-failed-disconnect-not-retried",
+      "name": "Out of scope for #597: a failed disconnect of a revoked tunnel is never retried on later ticks",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/tailnet_service.py",
+          "app/device/vpn_manager.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_597_out_of_scope_failed_disconnect_not_retried_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_597_out_of_scope_unlink_failure_forgotten_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-597-out-of-scope-unlink-failure-forgotten",
+      "name": "Out of scope for #597: a failed credential unlink is recorded as a completed wipe and never retried",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/tailnet_service.py",
+          "app/device/vpn_manager.py",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_597_out_of_scope_unlink_failure_forgotten_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
