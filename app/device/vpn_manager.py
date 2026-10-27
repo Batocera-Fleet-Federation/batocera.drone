@@ -51,7 +51,7 @@ try:
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.logging_setup import _drone_log
     from ..common.logtail import _tail_lines
-    from ..common.poller_interval import poller_interval_from_env
+    from ..common.poller_interval import int_from_env, poller_interval_from_env, seconds_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logging_setup import _drone_log  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
-    from common.poller_interval import poller_interval_from_env  # type: ignore
+    from common.poller_interval import int_from_env, poller_interval_from_env, seconds_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -79,11 +79,11 @@ OPENVPN_AUTH_FILENAME = "auth.txt"
 OPENVPN_LOG_FILENAME = "vpn.log"
 VPN_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 VPN_IMPORT_DIRNAME = "vpn-import"
-VPN_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_VPN_CONNECT_TIMEOUT_SECONDS", "15"))
-VPN_AUTO_CONNECT_MAX_ATTEMPTS = int(os.environ.get("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", "4"))
-VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = float(os.environ.get("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", "15"))
-VPN_DISCONNECT_GRACE_SECONDS = float(os.environ.get("DRONE_VPN_DISCONNECT_GRACE_SECONDS", "5"))
-VPN_PUBLIC_IP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_VPN_PUBLIC_IP_TIMEOUT_SECONDS", "8"))
+VPN_CONNECT_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_CONNECT_TIMEOUT_SECONDS", 15.0)
+VPN_AUTO_CONNECT_MAX_ATTEMPTS = int_from_env("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", 4)
+VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = seconds_from_env("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", 15.0)
+VPN_DISCONNECT_GRACE_SECONDS = seconds_from_env("DRONE_VPN_DISCONNECT_GRACE_SECONDS", 5.0)
+VPN_PUBLIC_IP_CHECK_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_PUBLIC_IP_TIMEOUT_SECONDS", 8.0)
 VPN_LOG_TAIL_LINES_FOR_DISPLAY = 200
 VPN_LOG_TAIL_LINES_FOR_DETECTION = 400
 VPN_LOG_TAIL_MAX_BYTES = 256 * 1024
@@ -95,14 +95,14 @@ VPN_STATUSES = ("disconnected", "connecting", "connected", "error")
 # provider's server) forever. The cap ages out on its own as old attempts
 # fall out of the window -- this is a temporary backoff, not a permanent
 # give-up; see run_self_heal_poller()'s docstring.
-VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS", "60"))
-VPN_SELF_HEAL_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_MIN_INTERVAL_SECONDS", "120"))
-VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW = int(os.environ.get("DRONE_VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW", "5"))
-VPN_SELF_HEAL_WINDOW_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_WINDOW_SECONDS", "1800"))
+VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS", 60.0)
+VPN_SELF_HEAL_MIN_INTERVAL_SECONDS = seconds_from_env("DRONE_VPN_SELF_HEAL_MIN_INTERVAL_SECONDS", 120.0)
+VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW = int_from_env("DRONE_VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW", 5)
+VPN_SELF_HEAL_WINDOW_SECONDS = seconds_from_env("DRONE_VPN_SELF_HEAL_WINDOW_SECONDS", 1800.0)
 # RGS binds its sockets to the tunnel address, so a reconnect that hands out a
 # new address leaves it looking disconnected until it restarts. Restarts are
 # rate-limited so a flapping VPN cannot churn RGS (and interrupt downloads).
-RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS", "600"))
+RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS = seconds_from_env("DRONE_RGS_TUNNEL_REBIND_MIN_INTERVAL_SECONDS", 600.0)
 
 # A healthy, already-connected tunnel logs almost nothing -- openvpn only
 # writes on events. So if the *most recent* log lines are dominated by this
