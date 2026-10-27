@@ -41,12 +41,18 @@ def _poller_start_args(poller: Any, settings: Any) -> Tuple[Any, ...]:
 
     A few integrations replace poller callables with one-argument observers.
     Real pollers accept the captured generation; one-argument observers still
-    get their normal startup notification.
+    get their normal startup notification. Only a readable signature that
+    rejects a second argument drops the snapshot: an unreadable signature keeps
+    it, since losing it would reopen the capture-on-thread race.
     """
     generation = _poller_generation()
     try:
-        inspect.signature(poller).bind(settings, generation)
+        signature = inspect.signature(poller)
     except (TypeError, ValueError):
+        return (settings, generation)
+    try:
+        signature.bind(settings, generation)
+    except TypeError:
         return (settings,)
     return (settings, generation)
 
