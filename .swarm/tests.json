@@ -3996,8 +3996,8 @@
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-issue-597-out-of-scope-failed-disconnect-not-retried",
-      "name": "Out of scope for #597: a failed disconnect of a revoked tunnel is never retried on later ticks",
+      "id": "adversarial-issue-619-failed-disconnect-retry",
+      "name": "Issue #619: failed disconnect is retried on a later sharing-check tick",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -4010,6 +4010,37 @@
           "app/device/vpn_manager.py",
           "app/transfer/swarm_reset.py",
           "tests/adversarial/test_issue_597_out_of_scope_failed_disconnect_not_retried_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_619_stop_error_status_retry_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-619-stop-error-status-retry",
+      "name": "Issue #619: a stop that returns an error status is retried on a later sharing-check tick",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_619_stop_error_status_retry_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -4831,6 +4862,68 @@
           ".swarm/tests.json",
           "scripts/run_security_tests.py",
           "tests/adversarial/test_issue_616_security_suite_empty_discovery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-619-os-signal-stop-retry",
+      "name": "Security: an OS signal failure while revoking a VPN tunnel is retried",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_619_os_signal_failure_retry.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_619_os_signal_failure_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-619-unverified-sigkill-retry",
+      "name": "Security: a revoked VPN tunnel that survives SIGKILL is retried",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_619_unverified_sigkill_retry.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_619_unverified_sigkill_retry.py"
         ],
         "mounts": [],
         "servers": []

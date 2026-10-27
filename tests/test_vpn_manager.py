@@ -405,14 +405,40 @@ class ConnectDisconnectTests(unittest.TestCase):
             settings = self._ready_settings(tmp)
             with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=888), \
                     mock.patch.object(vpn_manager, "VPN_DISCONNECT_GRACE_SECONDS", 0.01), \
+                    mock.patch.object(vpn_manager, "VPN_DISCONNECT_KILL_WAIT_SECONDS", 0.0), \
                     mock.patch.object(vpn_manager.os, "kill") as kill, \
                     mock.patch.object(vpn_manager.time, "sleep"):
-                vpn_manager.disconnect(settings)
+                result = vpn_manager.disconnect(settings)
+            self.assertEqual(result["status"], "error")
             self.assertEqual(kill.call_count, 2)
             import signal
 
             self.assertEqual(kill.call_args_list[0].args, (888, signal.SIGTERM))
             self.assertEqual(kill.call_args_list[1].args, (888, signal.SIGKILL))
+
+    def test_disconnect_confirms_exit_after_sigkill(self) -> None:
+        for signal_error in (None, ProcessLookupError("already exited")):
+            with self.subTest(signal_error=signal_error), tempfile.TemporaryDirectory() as tmp:
+                settings = self._ready_settings(tmp)
+                with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", side_effect=[888, 888, None]), \
+                        mock.patch.object(vpn_manager, "VPN_DISCONNECT_GRACE_SECONDS", 0.0), \
+                        mock.patch.object(vpn_manager.os, "kill", side_effect=[None, signal_error]), \
+                        mock.patch.object(vpn_manager.time, "sleep") as sleep:
+                    result = vpn_manager.disconnect(settings)
+                self.assertEqual(result["status"], "disconnected")
+                sleep.assert_called_once_with(0.25)
+
+    def test_disconnect_sigkill_failure_does_not_report_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            vpn_manager._save_state(settings, connected_at="still-connected")
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=888), \
+                    mock.patch.object(vpn_manager, "VPN_DISCONNECT_GRACE_SECONDS", 0.0), \
+                    mock.patch.object(vpn_manager.os, "kill", side_effect=[None, PermissionError("denied")]):
+                result = vpn_manager.disconnect(settings)
+            self.assertEqual(result["status"], "error")
+            self.assertIn("denied", result["errors"][0])
+            self.assertEqual(vpn_manager._load_state(settings)["connected_at"], "still-connected")
 
 
 class AutoConnectTests(unittest.TestCase):

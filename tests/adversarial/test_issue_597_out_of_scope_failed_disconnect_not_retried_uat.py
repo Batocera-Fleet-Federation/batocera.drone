@@ -1,12 +1,4 @@
-"""Out-of-scope probe next to #597: a failed disconnect during revocation is never retried.
-
-Not a blocking #597 assertion. #597 is about the credential wipe still happening
-when disconnect() raises, and that is covered in test_issue_597_disconnect_failure_wipe_uat.
-This probe is a separate defect: once _revoke_local_credentials has recorded the
-revocation, has_credentials is False, so every later tick returns early and never
-calls disconnect() again. If the first stop attempt failed, the revoked openvpn
-process can stay up on the revoked credentials indefinitely.
-"""
+"""Issue #619: retry a failed disconnect on a later sharing-revocation tick."""
 
 from __future__ import annotations
 
@@ -34,7 +26,7 @@ def _payload() -> dict:
     }
 
 
-class OutOfScopeFailedDisconnectNotRetriedUAT(unittest.TestCase):
+class FailedDisconnectRetryUAT(unittest.TestCase):
     def _imported_settings(self) -> Settings:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -57,9 +49,8 @@ class OutOfScopeFailedDisconnectNotRetriedUAT(unittest.TestCase):
         return settings
 
     def test_failed_disconnect_is_retried_on_a_later_tick_while_peer_gone(self) -> None:
-        # Evidence: tick 1 disconnect() raises, the wipe lands, has_credentials becomes False.
-        # Tick 2 (peer still gone) returns False before any disconnect attempt, so the stop
-        # is never retried. Expected: a revoked tunnel whose stop failed is retried.
+        # Issue #619: "Failed stop of a revoked VPN tunnel is never retried on later sharing-check ticks"
+        # describes the defect; the expected behavior is another stop attempt on a later tick.
         settings = self._imported_settings()
         disconnect = mock.Mock(side_effect=[RuntimeError("process table unreadable"), {"status": "disconnected"}])
         with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \

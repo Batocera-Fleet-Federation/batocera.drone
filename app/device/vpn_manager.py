@@ -83,6 +83,7 @@ VPN_CONNECT_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_CONNECT_TIMEOUT_SECOND
 VPN_AUTO_CONNECT_MAX_ATTEMPTS = int_from_env("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", 4)
 VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = seconds_from_env("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", 15.0)
 VPN_DISCONNECT_GRACE_SECONDS = seconds_from_env("DRONE_VPN_DISCONNECT_GRACE_SECONDS", 5.0)
+VPN_DISCONNECT_KILL_WAIT_SECONDS = 1.0
 VPN_PUBLIC_IP_CHECK_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_PUBLIC_IP_TIMEOUT_SECONDS", 8.0)
 VPN_LOG_TAIL_LINES_FOR_DISPLAY = 200
 VPN_LOG_TAIL_LINES_FOR_DETECTION = 400
@@ -199,6 +200,8 @@ def _load_state(settings: Settings) -> dict:
         "source_peer_name": str(stored.get("source_peer_name") or ""),
         "revoked_reason": str(stored.get("revoked_reason") or ""),
         "revoked_at": stored.get("revoked_at"),
+        # A failed stop remains actionable after credential material is wiped.
+        "disconnect_retry_pending": bool(stored.get("disconnect_retry_pending", False)),
         # Default True: self-healing is opt-out, not opt-in.
         "self_heal_enabled": bool(stored.get("self_heal_enabled", True)),
         "self_heal_last_at": stored.get("self_heal_last_at"),
@@ -332,6 +335,7 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         state = _save_state(
             settings, has_config=True, config_filename=name, remotes=remotes,
             source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
+            disconnect_retry_pending=False,
         )
         return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
 
@@ -587,8 +591,18 @@ def disconnect(settings: Settings) -> dict:
         else:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except OSError:
+            except ProcessLookupError:
                 pass
+            except OSError as error:
+                return {"status": "error", "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
+            # Signal delivery is not proof of exit (for example, a process
+            # stuck in kernel teardown can survive SIGKILL). Keep revocation's
+            # stop retry pending until the managed process actually disappears.
+            deadline = time.monotonic() + VPN_DISCONNECT_KILL_WAIT_SECONDS
+            while _find_running_openvpn_pid(cfg) is not None:
+                if time.monotonic() >= deadline:
+                    return {"status": "error", "errors": ["OpenVPN is still running after SIGKILL."]}
+                time.sleep(0.25)
         _save_state(settings, connected_at=None)
         return {"status": "disconnected"}
 
@@ -970,8 +984,9 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     """
     with _CREDENTIALS_LOCK:
         stop_error: Optional[BaseException] = None
+        stop_result: Optional[dict] = None
         try:
-            disconnect(settings)
+            stop_result = disconnect(settings)
         except BaseException as error:
             stop_error = error
             raise
@@ -987,12 +1002,21 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
                 raise
             try:
-                _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+                _save_state(
+                    settings, has_credentials=False, username="", revoked_reason=reason,
+                    revoked_at=_now_iso(),
+                    disconnect_retry_pending=not _disconnect_result_confirms_stopped(stop_result),
+                )
             except Exception:
                 if stop_error is not None:
                     # The state failure is what propagates; don't lose the stop failure.
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
                 raise
+
+
+def _disconnect_result_confirms_stopped(result: object) -> bool:
+    """Only clear a revocation stop retry after disconnect confirms no tunnel remains."""
+    return isinstance(result, dict) and result.get("status") in {"disconnected", "not_running"}
 
 
 def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
@@ -1025,6 +1049,18 @@ def check_sharing_revocation(settings: Settings) -> bool:
         with _CREDENTIALS_LOCK:
             state = _load_state(settings)
             source_peer_id = state["source_peer_id"]
+            if source_peer_id and state["disconnect_retry_pending"]:
+                # The peer's revocation was already established on an earlier
+                # tick. Retry stopping the local tunnel without retaining any
+                # credentials or depending on another remote response.
+                try:
+                    stop_result = disconnect(settings)
+                except Exception as error:
+                    _log_poller_failure("VPN sharing revocation check failed", error)
+                    return False
+                if _disconnect_result_confirms_stopped(stop_result):
+                    _save_state(settings, disconnect_retry_pending=False)
+                return False
             if not source_peer_id or not state["has_credentials"]:
                 return False
         try:
