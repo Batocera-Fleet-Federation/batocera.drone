@@ -1300,14 +1300,17 @@ def run_self_heal_poller(settings: Settings) -> None:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
+        check_failed = False
         try:
             check_and_self_heal(settings)
         except Exception as error:
+            check_failed = True
             # One unexpected failure must not kill the poller.
             _log_poller_failure("VPN self-heal tick failed", error)
         # Self-heal can perform slow I/O. A generation retired while either
-        # outcome was in flight must not perform further RGS actions.
-        if poller_retired(generation):
+        # successful check was in flight must not perform further RGS actions.
+        # A failed check still gets its independent RGS attempt for this tick.
+        if not check_failed and poller_retired(generation):
             return
         # Reconcile independently of self-heal success: the two concerns share
         # a cadence, but a failed watchdog check must not skip RGS recovery.
