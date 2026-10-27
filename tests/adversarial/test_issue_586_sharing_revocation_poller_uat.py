@@ -109,6 +109,21 @@ class Issue586SharingRevocationPollerUAT(unittest.TestCase):
         self.assertEqual(check.call_count, 6)
         self.assertEqual(stderr.getvalue().count("VPN sharing revocation check failed"), 5)
 
+    def test_memory_error_from_one_check_does_not_retire_the_poller(self) -> None:
+        # MemoryError is an Exception, so a transient allocation failure in one
+        # check must be isolated like other operational tick failures. It must
+        # not be confused with process-control BaseExceptions such as
+        # KeyboardInterrupt, which are covered separately below.
+        check = mock.Mock(side_effect=[MemoryError("temporary allocation failure"), False])
+
+        _, stderr = self._run_live_ticks(live_ticks=2, check=check)
+
+        self.assertEqual(check.call_count, 2)
+        self.assertIn(
+            "VPN sharing revocation check failed: MemoryError: temporary allocation failure",
+            stderr.getvalue(),
+        )
+
     def test_failure_is_logged_with_class_and_message(self) -> None:
         check = mock.Mock(side_effect=[RuntimeError("unexpected"), False])
 
