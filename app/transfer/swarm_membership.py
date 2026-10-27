@@ -9,6 +9,13 @@ Drone keeps its own paired-peer list; there is no central roster.
 Removals use the same path. A newer removal beats an older add, and the
 removed Drone is told with the certificate that was pinned while it was
 still a member so it drops out instead of staying on its own roster.
+
+Records are unsigned, so the only authenticated identity is the paired
+introducer (the mTLS caller). A removal is therefore honored only when it is
+attributed to that introducer: a Drone may announce its own removal of a peer
+(or its own departure) but cannot relay or invent one on behalf of another
+Drone. The remover pushes to every peer it has paired, and a failed push stays
+dirty and is retried, so removals still converge without relaying.
 """
 
 from __future__ import annotations
@@ -32,6 +39,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 MEMBERSHIP_NAMESPACE = "swarm_membership"
 MAX_FORWARD_HOP = 3
 _MAX_RECORDS = 64
+# A removal outranks every add with a lower epoch, so a forged huge epoch would
+# make a member unrejoinable. Clocks tick once per event; this is far above any
+# real divergence between two Drones' clocks.
+_MAX_REMOVAL_EPOCH_AHEAD = 1_000_000
 _MAX_PEM_CHARS = 20000
 _CARD_FIELDS = (
     "name",
@@ -206,9 +217,10 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> tuple[bo
         if state.get("departed"):
             return False, []
         own_id = str(settings.device_id)
+        parsed_records = [record for record in parsed if _removal_allowed(record, introducer, state)]
         # A removal of this Drone ends its membership. Later adds in the same
         # payload must not be stored, or the next reconcile would rejoin it.
-        for record in parsed:
+        for record in parsed_records:
             if record["peer_id"] != own_id or record["op"] != "remove":
                 continue
             current = state["records"].get(own_id)
@@ -223,7 +235,7 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> tuple[bo
             return True, []
         changed = False
         removals: list[dict] = []
-        for record in parsed:
+        for record in parsed_records:
             peer_id = record["peer_id"]
             if peer_id == own_id:
                 continue
@@ -245,6 +257,20 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> tuple[bo
         return changed, removals
 
     return _with_state(settings, mutate)
+
+
+def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
+    """Whether a remove record may be honored from this authenticated introducer.
+
+    Adds are always judged by their certificate pin elsewhere. A removal carries
+    no proof, so it must at least be the introducer's own act and sit within a
+    sane distance of the local clock.
+    """
+    if record["op"] != "remove":
+        return True
+    if record["origin"] != introducer:
+        return False
+    return int(record["epoch"]) <= int(state.get("clock") or 0) + _MAX_REMOVAL_EPOCH_AHEAD
 
 
 def _apply_add(settings: Any, state: dict, record: dict) -> bool:
