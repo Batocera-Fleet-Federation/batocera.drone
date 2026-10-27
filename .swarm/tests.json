@@ -3996,8 +3996,8 @@
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-issue-597-out-of-scope-failed-disconnect-not-retried",
-      "name": "Out of scope for #597: a failed disconnect of a revoked tunnel is never retried on later ticks",
+      "id": "adversarial-issue-619-failed-disconnect-retry",
+      "name": "Issue #619: failed disconnect is retried on a later sharing-check tick",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
