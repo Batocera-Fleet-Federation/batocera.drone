@@ -466,7 +466,7 @@ def _log_poller_failure(message: str, error: Exception) -> None:
         pass
 
 
-def run_sharing_revocation_poller(settings: Settings) -> None:
+def run_sharing_revocation_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop, mirrors ``vpn_manager.run_sharing_revocation_poller()``:
     started as its own daemon thread from ``create_server()``. A periodic
     background check is the only way to learn about revocation at all --
@@ -478,7 +478,8 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         interval = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
     except Exception:
         interval = 300.0
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):
@@ -1166,7 +1167,7 @@ def send_digest_if_needed(settings: Settings) -> dict:
             return {"status": "error", "error": str(error)}
 
 
-def run_audit_email_digest_poller(settings: Settings) -> None:
+def run_audit_email_digest_poller(settings: Settings, generation: int | None = None) -> None:
     """Single backend loop for every outbound email and peer relay.
     There is no OS cron anywhere in this app; every periodic feature is an
     in-process daemon thread on this exact shape (see
@@ -1177,7 +1178,8 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
     and never touch ``smtplib``. The owner queues due digests, then the sole
     outbound-mail consumer delivers digests, tests, and attachments.
     """
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(DIGEST_POLLER_TICK_SECONDS)
         if poller_retired(generation):

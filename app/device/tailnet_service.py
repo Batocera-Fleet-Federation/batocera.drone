@@ -1241,7 +1241,7 @@ def _log_poller_failure(message: str, error: Exception) -> None:
         pass
 
 
-def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
+def run_tailnet_sharing_revocation_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop checking whether an imported auth key's sharing was
     revoked -- mirrors ``vpn_manager.run_sharing_revocation_poller()``
     exactly, including the per-tick Exception guard and
@@ -1251,7 +1251,8 @@ def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
         interval = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
     except Exception:
         interval = 300.0
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):

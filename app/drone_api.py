@@ -2,6 +2,7 @@ import base64
 import hmac
 import html
 import hashlib
+import inspect
 import ipaddress
 import json
 import os
@@ -33,6 +34,27 @@ from urllib.parse import parse_qs
 from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import urlparse
+
+
+def _poller_start_args(poller: Any, settings: Any) -> Tuple[Any, ...]:
+    """Bind a generation before starting a poller, retaining simple test hooks.
+
+    A few integrations replace poller callables with one-argument observers.
+    Real pollers accept the captured generation; one-argument observers still
+    get their normal startup notification. Only a readable signature that
+    rejects a second argument drops the snapshot: an unreadable signature keeps
+    it, since losing it would reopen the capture-on-thread race.
+    """
+    generation = _poller_generation()
+    try:
+        signature = inspect.signature(poller)
+    except (TypeError, ValueError):
+        return (settings, generation)
+    try:
+        signature.bind(settings, generation)
+    except TypeError:
+        return (settings,)
+    return (settings, generation)
 
 DRONE_REMOTE_REBOOT_EXIT_CODE = 76
 APP_DIR = Path(__file__).resolve().parent
@@ -906,6 +928,7 @@ try:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
+        poller_generation as _poller_generation,
         retire_pollers as _retire_pollers,
     )
 except ImportError:
@@ -916,6 +939,7 @@ except ImportError:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
+        poller_generation as _poller_generation,
         retire_pollers as _retire_pollers,
     )
 _DOWNLOAD_MANAGER = None
@@ -2631,14 +2655,14 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # Backgrounded forever-loop: the only way to learn a peer revoked
         # sharing is to periodically ask it (Drones are outbound-only, no push
         # channel) -- see run_sharing_revocation_poller's own docstring.
-        Thread(target=_vpn_manager.run_sharing_revocation_poller, args=(settings,), name="drone-vpn-sharing-revocation", daemon=True).start()
+        Thread(target=_vpn_manager.run_sharing_revocation_poller, args=_poller_start_args(_vpn_manager.run_sharing_revocation_poller, settings), name="drone-vpn-sharing-revocation", daemon=True).start()
     if not _VPN_SELF_HEAL_POLLER_STARTED and swarm_enabled:
         _VPN_SELF_HEAL_POLLER_STARTED = True
         # Backgrounded forever-loop: detects and recovers from a broken tunnel
         # (explicit connection errors, or a decrypt/replay-error flood) without
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
-        Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
+        Thread(target=_vpn_manager.run_self_heal_poller, args=_poller_start_args(_vpn_manager.run_self_heal_poller, settings), name="drone-vpn-self-heal", daemon=True).start()
     if not _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED and swarm_enabled:
         _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = True
         # Recreate source-side bind mounts and exact-peer exports after a
@@ -2655,7 +2679,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         _NETWORK_SHARE_WATCHDOG_STARTED = True
         # Backgrounded forever-loop: re-mounts a referenced peer's share if it
         # drops, same shape as VPN's self-heal poller above.
-        Thread(target=_network_share_manager.run_watchdog_poller, args=(settings,), name="drone-network-share-watchdog", daemon=True).start()
+        Thread(target=_network_share_manager.run_watchdog_poller, args=_poller_start_args(_network_share_manager.run_watchdog_poller, settings), name="drone-network-share-watchdog", daemon=True).start()
     if not _SMTP_BOOTSTRAP_ATTEMPTED and swarm_enabled:
         _SMTP_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a
@@ -2665,12 +2689,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         _SMTP_SHARING_POLLER_STARTED = True
         # Same reasoning as VPN's sharing-revocation poller: outbound-only,
         # no push channel, so revocation can only be learned by periodically asking.
-        Thread(target=_smtp_manager.run_sharing_revocation_poller, args=(settings,), name="drone-smtp-sharing-revocation", daemon=True).start()
+        Thread(target=_smtp_manager.run_sharing_revocation_poller, args=_poller_start_args(_smtp_manager.run_sharing_revocation_poller, settings), name="drone-smtp-sharing-revocation", daemon=True).start()
     if not _AUDIT_EMAIL_POLLER_STARTED:
         _AUDIT_EMAIL_POLLER_STARTED = True
         # One API-owned worker handles all outbound mail and satellite relay;
         # browsers/native clients only enqueue jobs through request handlers.
-        Thread(target=_smtp_manager.run_audit_email_digest_poller, args=(settings,), name="drone-outbound-mail-worker", daemon=True).start()
+        Thread(target=_smtp_manager.run_audit_email_digest_poller, args=_poller_start_args(_smtp_manager.run_audit_email_digest_poller, settings), name="drone-outbound-mail-worker", daemon=True).start()
     if not _TAILNET_BOOTSTRAP_ATTEMPTED and swarm_enabled:
         _TAILNET_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a
@@ -2682,7 +2706,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # Same reasoning as VPN's sharing-revocation poller: outbound-only,
         # no push channel, so revocation can only be learned by periodically
         # asking.
-        Thread(target=_tailnet_service.run_tailnet_sharing_revocation_poller, args=(settings,), name="drone-tailnet-sharing-revocation", daemon=True).start()
+        Thread(target=_tailnet_service.run_tailnet_sharing_revocation_poller, args=_poller_start_args(_tailnet_service.run_tailnet_sharing_revocation_poller, settings), name="drone-tailnet-sharing-revocation", daemon=True).start()
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))
