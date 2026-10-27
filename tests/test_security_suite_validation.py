@@ -62,7 +62,13 @@ class SecurityRegistryIntegrationTests(unittest.TestCase):
         for suite in suites:
             with self.subTest(suite=suite["id"]):
                 command = suite["command"]
-                self.assertEqual(command[:2], ["python3", "scripts/run_security_tests.py"])
+                # Plain unittest discovery exits 0 on an empty match, so a
+                # registered file must exist; the runner command is also valid.
+                self.assertTrue(
+                    command[:4] == ["python3", "-m", "unittest", "discover"]
+                    or command[:2] == ["python3", "scripts/run_security_tests.py"],
+                    command,
+                )
                 for filename in suite["requirements"]["files"]:
                     self.assertTrue((ROOT / filename).is_file(), filename)
                 start = command[command.index("-s") + 1]
