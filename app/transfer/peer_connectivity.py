@@ -1140,17 +1140,16 @@ def peer_http_error_is_authenticated(error: HTTPError) -> bool:
     Plain-http peer routes (``http_only`` fleets) are neither pinned nor
     authenticated, so an on-path attacker can forge any status code on them.
     Revocation decisions (a 404 meaning "sharing is off") must not act on such
-    an answer. Prefers the route ``_peer_get_json_for_peer`` recorded; falls back
-    to the error's own URL only when no route was recorded.
+    an answer. The route stamp is mandatory; an unstamped error cannot prove
+    which candidate was actually dialed.
     """
     # __dict__ lookups: HTTPError's attribute proxy raises KeyError (not
     # AttributeError) for names it does not have when built without a response.
-    route = vars(error).get("peer_route")
-    if not route:
-        # ``filename`` holds the request URL on every supported Python; geturl()
-        # needs a response body object that a bare HTTPError may not have.
-        route = vars(error).get("filename") or getattr(error, "filename", None) or ""
-    return urlparse(str(route or "")).scheme.lower() == "https"
+    attributes = vars(error)
+    route = attributes.get("peer_route")
+    if not isinstance(route, str) or urlparse(route).scheme.lower() != "https":
+        return False
+    return urlparse(route).scheme.lower() == "https"
 
 
 def _peer_post_json_for_peer(

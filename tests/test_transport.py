@@ -444,11 +444,18 @@ class PeerHttpErrorAuthenticationTests(unittest.TestCase):
 
         self.assertFalse(peer_http_error_is_authenticated(self._error("https://other/x", "http://p")))
 
-    def test_falls_back_to_error_url_without_recorded_route(self) -> None:
+    def test_unstamped_error_is_not_authenticated(self) -> None:
         from app.transfer.peer_connectivity import peer_http_error_is_authenticated
 
-        self.assertTrue(peer_http_error_is_authenticated(self._error("https://p/x")))
+        self.assertFalse(peer_http_error_is_authenticated(self._error("https://p/x")))
         self.assertFalse(peer_http_error_is_authenticated(self._error("http://p/x")))
+
+    def test_https_route_and_final_https_url_are_authenticated(self) -> None:
+        from app.transfer.peer_connectivity import peer_http_error_is_authenticated
+
+        self.assertTrue(peer_http_error_is_authenticated(
+            self._error("https://peer/x", "https://peer")
+        ))
 
     def test_peer_get_json_for_peer_records_dialed_route_on_http_error(self) -> None:
         from urllib.error import HTTPError

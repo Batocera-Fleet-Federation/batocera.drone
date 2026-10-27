@@ -967,6 +967,7 @@ class CheckSharingRevocationTests(unittest.TestCase):
             settings = self._imported_settings(tmp)
             peer = {"drone_id": "peer-1", "name": "Peer One"}
             error = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+            error.peer_route = "https://peer"
             with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
                     mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
                 self.assertTrue(vpn_manager.check_sharing_revocation(settings))
@@ -1118,6 +1119,7 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 settings = self._imported_settings(tmp)
                 peer = None if peer_gone else {"drone_id": "peer-1"}
                 rejection = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                rejection.peer_route = "https://peer"
                 failure = RuntimeError("process table unreadable")
                 with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
                         mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=rejection), \
