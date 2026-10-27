@@ -1307,6 +1307,9 @@ def run_self_heal_poller(settings: Settings) -> None:
             check_failed = True
             # One unexpected failure must not kill the poller.
             _log_poller_failure("VPN self-heal tick failed", error)
+        # A direct exception identifies an unexpectedly failed helper tick.
+        # The helper owns its operational error boundary and logs expected
+        # failures itself; its ordinary None also represents a healthy no-op.
         # Self-heal can perform slow I/O. A generation retired while either
         # successful check was in flight must not perform further RGS actions.
         # A failed check still gets its independent RGS attempt for this tick.
