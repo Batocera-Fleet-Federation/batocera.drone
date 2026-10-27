@@ -22,6 +22,7 @@ python -m pytest tests/               # unittest-style tests run under pytest
 python -m pytest tests/test_unit.py -k <expr>
 python -m pytest tests/test_transport.py    # transport/networking (transport selector, LAN/tailnet)
 python -m pytest tests/test_streamdeck_*.py # Integrations + Stream Deck (fake hardware; no device needed)
+python3 scripts/run_security_tests.py # security acceptance; fails if no tests are collected
 python app/main.py                    # run the drone locally
 ```
 
@@ -31,6 +32,16 @@ Tests build `Settings` via `Settings.from_env()` with
 `DRONE_DEVICE_ID` to temp dirs (`OVERMIND_DEVICE_ID`/`OVERMIND_LOG_FILE` still work as
 back-compat fallback names for `DRONE_DEVICE_ID`/`ACTIVITY_LOG_FILE`, but new tests
 should use the current names). Tests use `unittest.TestCase`.
+
+`scripts/run_security_tests.py` validates all enabled adversarial-security entries
+in `.swarm/tests.json` by default, then runs their collected tests. It accepts both
+legacy unittest discovery commands and runner commands with explicit `-s`/`-p`
+arguments. Missing required files or an empty individual suite fail validation,
+even when other suites still contain tests. Use `-s`/`-p` for an individual suite.
+Plain unittest discovery exits successfully even when a registered test is missing.
+Run `python3 -m unittest discover -s tests -p test_security_suite_validation.py`
+after changing this registration. Preserve security boundary tests even when they
+add no unique line coverage: different hostile inputs can exercise the same lines.
 
 ## Architecture
 
