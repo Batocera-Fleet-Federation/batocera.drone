@@ -11680,41 +11680,6 @@
         "servers": []
       },
       "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial",
-        "-p",
-        "test_issue_599_out_of_scope_tls_redirect_plaintext_404_uat.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-issue-599-out-of-scope-tls-redirect-plaintext-404",
-      "name": "Out of scope for #599: pinned HTTPS 302 onto a plaintext 404 is still treated as authenticated revocation",
-      "origin": "adversarial",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3",
-          "openssl"
-        ],
-        "files": [
-          "app/device/vpn_manager.py",
-          "app/device/smtp_manager.py",
-          "app/device/tailnet_service.py",
-          "app/transfer/peer_connectivity.py",
-          "tests/adversarial/test_issue_599_out_of_scope_tls_redirect_plaintext_404_uat.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
     }
   ],
   "version": 1
