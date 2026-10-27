@@ -1008,7 +1008,7 @@ def check_sharing_revocation(settings: Settings) -> bool:
         return False
 
 
-def run_sharing_revocation_poller(settings: Settings) -> None:
+def run_sharing_revocation_poller(settings: Settings, generation: Optional[int] = None) -> None:
     """Forever-loop checking whether an imported config's sharing was revoked.
 
     Intended to run on its own daemon thread, started by the caller exactly
@@ -1018,6 +1018,12 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     outbound-only with no push channel, and unlike ``status()`` this cannot be
     a passive on-demand recompute, because the whole point is to disconnect
     and wipe credentials even if nobody is looking at the VPN page.
+
+    ``generation`` should be captured by the caller *before* the thread starts
+    (``create_server()`` does this), so a retirement that lands between the
+    thread start and its first instruction still retires this poller. When it
+    is omitted the generation is captured on entry, which is only safe when
+    nothing can retire the pollers before the thread runs.
 
     Each tick is wrapped so an unexpected Exception from
     ``check_sharing_revocation`` (including a report that itself fails) is
@@ -1029,7 +1035,8 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
     except Exception:
         interval = 300.0
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):
