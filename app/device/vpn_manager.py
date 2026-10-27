@@ -991,6 +991,12 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
             stop_error = error
             raise
         finally:
+            # A refused OS signal (e.g. PermissionError on SIGTERM) is reported
+            # as an error-status dict, not an exception. Treat it as a failure
+            # that must be logged and retried, not silently discarded.
+            disconnect_error: Optional[Exception] = None
+            if stop_error is None:
+                disconnect_error = _disconnect_error_from_result(stop_result)
             # Revoked credentials must not survive a failure to stop OpenVPN.
             try:
                 auth_path(settings).unlink(missing_ok=True)
@@ -1000,6 +1006,8 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                 # failed unlink as completed cleanup.
                 if stop_error is not None:
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
+                elif disconnect_error is not None:
+                    _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
                 raise
             try:
                 _save_state(
@@ -1011,7 +1019,23 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                 if stop_error is not None:
                     # The state failure is what propagates; don't lose the stop failure.
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
+                elif disconnect_error is not None:
+                    _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
                 raise
+            if disconnect_error is not None:
+                _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
+
+
+def _disconnect_error_from_result(result: object) -> Optional[Exception]:
+    """Convert a disconnect() error-status dict into an exception for logging."""
+    if isinstance(result, dict) and result.get("status") == "error":
+        errors = result.get("errors")
+        if isinstance(errors, list) and errors:
+            detail = "; ".join(str(item) for item in errors if str(item or "").strip())
+            if detail:
+                return RuntimeError(detail)
+        return RuntimeError("Failed to stop openvpn")
+    return None
 
 
 def _disconnect_result_confirms_stopped(result: object) -> bool:
@@ -1060,6 +1084,10 @@ def check_sharing_revocation(settings: Settings) -> bool:
                     return False
                 if _disconnect_result_confirms_stopped(stop_result):
                     _save_state(settings, disconnect_retry_pending=False)
+                else:
+                    retry_error = _disconnect_error_from_result(stop_result)
+                    if retry_error is not None:
+                        _log_poller_failure("VPN sharing revocation check failed", retry_error)
                 return False
             if not source_peer_id or not state["has_credentials"]:
                 return False
