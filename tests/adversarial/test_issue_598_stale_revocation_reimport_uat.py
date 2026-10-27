@@ -193,6 +193,37 @@ class Issue598StaleRevocationReimportUAT(unittest.TestCase):
         self.assertEqual(state["source_peer_id"], SOURCE_A)
         self.assertEqual(state["revoked_reason"], vpn_manager._SHARING_REVOKED_PEER_OFF)
 
+    def test_404_after_independent_credential_clear_does_not_overwrite_local_state(self) -> None:
+        # Provenance alone is insufficient: once the local credentials have
+        # already gone, this delayed peer answer has no credential cleanup to
+        # authorize.  In particular it must not disconnect or replace the
+        # locally-recorded reason with the peer's stale 404 reason.
+        settings = self._settings()
+        locally_cleared_reason = "Credentials were removed locally."
+
+        def clear_then_404(*_args, **_kwargs):
+            vpn_manager.auth_path(settings).unlink()
+            vpn_manager._save_state(
+                settings,
+                has_credentials=False,
+                username="",
+                revoked_reason=locally_cleared_reason,
+                revoked_at="2026-10-27T00:00:00+00:00",
+            )
+            raise _http_404(SOURCE_A)
+
+        with mock.patch("app.transfer.local_network.get_paired_peer", return_value={"drone_id": SOURCE_A}), \
+                mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=clear_then_404), \
+                mock.patch.object(vpn_manager, "disconnect") as disconnect:
+            self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+        disconnect.assert_not_called()
+        state = vpn_manager._load_state(settings)
+        self.assertFalse(state["has_credentials"])
+        self.assertEqual(state["source_peer_id"], SOURCE_A)
+        self.assertEqual(state["revoked_reason"], locally_cleared_reason)
+        self.assertEqual(state["revoked_at"], "2026-10-27T00:00:00+00:00")
+        self.assertFalse(vpn_manager.auth_path(settings).exists())
+
     def test_urlerror_and_non_404_with_concurrent_import_leave_replacement(self) -> None:
         for label, error in (
             ("timeout", URLError("timed out")),
