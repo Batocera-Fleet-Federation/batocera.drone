@@ -22,18 +22,34 @@ import os
 POLLER_INTERVAL_MAX_SECONDS = 365.0 * 24 * 3600
 # Last-resort sleep if even ``default`` is unusable (should not happen for callers).
 _SLEEPABLE_FALLBACK_SECONDS = 300.0
+_DEFAULT_MINIMUM_SECONDS = 30.0
 
 
-def _sleepable(value: float, minimum: float) -> float | None:
-    """Return ``value`` floored at ``minimum`` if it is a portable ``time.sleep`` duration."""
+def _number(value: object) -> float | None:
+    """Convert untrusted configuration input to a float without propagating errors."""
     try:
-        if not math.isfinite(value) or value > POLLER_INTERVAL_MAX_SECONDS:
-            return None
-        if not math.isfinite(minimum) or minimum < 0 or minimum > POLLER_INTERVAL_MAX_SECONDS:
-            minimum = 30.0
-        return max(minimum, value)
-    except (TypeError, ValueError, OverflowError):
+        return float(value)
+    except (TypeError, ValueError, OverflowError, AttributeError):
         return None
+    # This is an import-time configuration boundary.  A hostile object's
+    # conversion hook must not prevent the application from starting.
+    except Exception:
+        return None
+
+
+def _minimum(value: object) -> float:
+    """Return a valid polling floor, preserving the established 30-second default."""
+    minimum = _number(value)
+    if minimum is None or not math.isfinite(minimum) or not 0 <= minimum <= POLLER_INTERVAL_MAX_SECONDS:
+        return _DEFAULT_MINIMUM_SECONDS
+    return minimum
+
+
+def _sleepable(value: float | None, minimum: float) -> float | None:
+    """Return a finite, bounded duration floored at ``minimum`` for ``time.sleep``."""
+    if value is None or not math.isfinite(value) or value > POLLER_INTERVAL_MAX_SECONDS:
+        return None
+    return max(minimum, value)
 
 
 def parse_poller_interval(raw: str | None, default: float, minimum: float = 30.0) -> float:
@@ -44,10 +60,8 @@ def parse_poller_interval(raw: str | None, default: float, minimum: float = 30.0
     clamped up to ``minimum``. Never raises: a bad ``raw`` type, ``float`` overflow,
     or unusable ``default`` still returns a sleepable number.
     """
-    try:
-        fallback = _sleepable(float(default), float(minimum)) or _SLEEPABLE_FALLBACK_SECONDS
-    except (TypeError, ValueError, OverflowError):
-        fallback = _SLEEPABLE_FALLBACK_SECONDS
+    floor = _minimum(minimum)
+    fallback = _sleepable(_number(default), floor) or _SLEEPABLE_FALLBACK_SECONDS
     try:
         if raw is None:
             return fallback
@@ -59,7 +73,7 @@ def parse_poller_interval(raw: str | None, default: float, minimum: float = 30.0
         return fallback
     except Exception:
         return fallback
-    return _sleepable(value, minimum) or fallback
+    return _sleepable(value, floor) or fallback
 
 
 def poller_interval_from_env(name: str, default: float, minimum: float = 30.0) -> float:
@@ -67,8 +81,5 @@ def poller_interval_from_env(name: str, default: float, minimum: float = 30.0) -
     try:
         return parse_poller_interval(os.environ.get(name), default, minimum)
     except Exception:
-        try:
-            fallback = _sleepable(float(default), float(minimum))
-        except (TypeError, ValueError, OverflowError):
-            fallback = None
+        fallback = _sleepable(_number(default), _minimum(minimum))
         return fallback or _SLEEPABLE_FALLBACK_SECONDS

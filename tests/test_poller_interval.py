@@ -65,6 +65,19 @@ class PollerIntervalFromEnvTests(unittest.TestCase):
         self.assertTrue(math.isfinite(value))
         self.assertLessEqual(value * 1e9, 2 ** 63)
 
+    def test_hostile_conversion_hooks_use_the_safe_fallback(self):
+        class ExplodingValue:
+            def __float__(self):
+                raise RuntimeError("conversion failed")
+
+            def __str__(self):
+                raise RuntimeError("string conversion failed")
+
+        hostile = ExplodingValue()
+        self.assertEqual(parse_poller_interval(hostile, 300.0), 300.0)
+        self.assertEqual(parse_poller_interval("abc", hostile), 300.0)
+        self.assertEqual(parse_poller_interval("120", 300.0, hostile), 120.0)
+
 
 if __name__ == "__main__":
     unittest.main()
