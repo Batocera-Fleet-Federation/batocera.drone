@@ -199,6 +199,8 @@ def _load_state(settings: Settings) -> dict:
         "source_peer_name": str(stored.get("source_peer_name") or ""),
         "revoked_reason": str(stored.get("revoked_reason") or ""),
         "revoked_at": stored.get("revoked_at"),
+        # A failed stop remains actionable after credential material is wiped.
+        "disconnect_retry_pending": bool(stored.get("disconnect_retry_pending", False)),
         # Default True: self-healing is opt-out, not opt-in.
         "self_heal_enabled": bool(stored.get("self_heal_enabled", True)),
         "self_heal_last_at": stored.get("self_heal_last_at"),
@@ -332,6 +334,7 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         state = _save_state(
             settings, has_config=True, config_filename=name, remotes=remotes,
             source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
+            disconnect_retry_pending=False,
         )
         return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
 
@@ -987,7 +990,10 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
                 raise
             try:
-                _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+                _save_state(
+                    settings, has_credentials=False, username="", revoked_reason=reason,
+                    revoked_at=_now_iso(), disconnect_retry_pending=stop_error is not None,
+                )
             except Exception:
                 if stop_error is not None:
                     # The state failure is what propagates; don't lose the stop failure.
@@ -1025,6 +1031,17 @@ def check_sharing_revocation(settings: Settings) -> bool:
         with _CREDENTIALS_LOCK:
             state = _load_state(settings)
             source_peer_id = state["source_peer_id"]
+            if source_peer_id and state["disconnect_retry_pending"]:
+                # The peer's revocation was already established on an earlier
+                # tick. Retry stopping the local tunnel without retaining any
+                # credentials or depending on another remote response.
+                try:
+                    disconnect(settings)
+                except Exception as error:
+                    _log_poller_failure("VPN sharing revocation check failed", error)
+                    return False
+                _save_state(settings, disconnect_retry_pending=False)
+                return False
             if not source_peer_id or not state["has_credentials"]:
                 return False
         try:
