@@ -42,7 +42,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import List, Optional, Tuple
 from urllib.error import HTTPError
 
@@ -114,6 +114,8 @@ _UNHEALTHY_LOG_WINDOW_LINES = 40
 _UNHEALTHY_LOG_MIN_MATCHES = 10
 
 _CONNECT_LOCK = Lock()
+# Imports call the public save helpers, so this lock must be reentrant.
+_CREDENTIALS_LOCK = RLock()
 
 # Substrings openvpn's own log uses; matched independent of version/provider
 # wording differences beyond these fairly stable phrases.
@@ -295,32 +297,33 @@ def rewrite_ovpn_config(raw_text: str, auth_file_path: Path) -> str:
 
 
 def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) -> dict:
-    name = str(filename or "").strip()
-    if not name.lower().endswith(".ovpn"):
-        raise ValueError("only .ovpn files are accepted")
-    if not raw_bytes:
-        raise ValueError("uploaded file is empty")
-    if len(raw_bytes) > VPN_UPLOAD_MAX_BYTES:
-        raise ValueError("uploaded file is larger than 5 MB")
-    try:
-        raw_text = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        raise ValueError("uploaded file is not a valid text (.ovpn) config")
-    directory = vpn_dir(settings)
-    directory.mkdir(parents=True, exist_ok=True)
-    rewritten = rewrite_ovpn_config(raw_text, auth_path(settings))
-    config_path(settings).write_text(rewritten, encoding="utf-8")
-    remotes = parsed_remotes(rewritten)
-    protocol = parsed_protocol(rewritten)
-    # A fresh config write is always "self-owned, clean slate" -- any prior
-    # peer-import provenance and any stale revocation notice no longer apply.
-    # import_from_peer() calls this function first, then re-applies its own
-    # provenance immediately afterward (see below).
-    state = _save_state(
-        settings, has_config=True, config_filename=name, remotes=remotes,
-        source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
-    )
-    return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
+    with _CREDENTIALS_LOCK:
+        name = str(filename or "").strip()
+        if not name.lower().endswith(".ovpn"):
+            raise ValueError("only .ovpn files are accepted")
+        if not raw_bytes:
+            raise ValueError("uploaded file is empty")
+        if len(raw_bytes) > VPN_UPLOAD_MAX_BYTES:
+            raise ValueError("uploaded file is larger than 5 MB")
+        try:
+            raw_text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("uploaded file is not a valid text (.ovpn) config")
+        directory = vpn_dir(settings)
+        directory.mkdir(parents=True, exist_ok=True)
+        rewritten = rewrite_ovpn_config(raw_text, auth_path(settings))
+        config_path(settings).write_text(rewritten, encoding="utf-8")
+        remotes = parsed_remotes(rewritten)
+        protocol = parsed_protocol(rewritten)
+        # A fresh config write is always "self-owned, clean slate" -- any prior
+        # peer-import provenance and any stale revocation notice no longer apply.
+        # import_from_peer() calls this function first, then re-applies its own
+        # provenance immediately afterward (see below).
+        state = _save_state(
+            settings, has_config=True, config_filename=name, remotes=remotes,
+            source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
+        )
+        return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
 
 
 def list_import_files(settings: Settings) -> dict:
@@ -363,27 +366,28 @@ def import_from_folder(settings: Settings, filename: str) -> dict:
 
 
 def save_credentials(settings: Settings, username: str, password: str) -> dict:
-    username = str(username or "").strip()
-    password = str(password or "")
-    if not username:
-        raise ValueError("username is required")
-    if not password:
-        raise ValueError("password is required")
-    if proton_port_forwarding_supported(settings) and not username.lower().endswith("+pmp"):
-        # Proton requires the +pmp suffix on the OpenVPN service username to
-        # enable NAT-PMP. Keep the browser input simple; store the effective
-        # username OpenVPN and RGS need.
-        username += "+pmp"
-    directory = vpn_dir(settings)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = auth_path(settings)
-    path.write_text(f"{username}\n{password}\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    state = _save_state(settings, has_credentials=True, username=username)
-    return {"status": "ok", "username": state["username"]}
+    with _CREDENTIALS_LOCK:
+        username = str(username or "").strip()
+        password = str(password or "")
+        if not username:
+            raise ValueError("username is required")
+        if not password:
+            raise ValueError("password is required")
+        if proton_port_forwarding_supported(settings) and not username.lower().endswith("+pmp"):
+            # Proton requires the +pmp suffix on the OpenVPN service username to
+            # enable NAT-PMP. Keep the browser input simple; store the effective
+            # username OpenVPN and RGS need.
+            username += "+pmp"
+        directory = vpn_dir(settings)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = auth_path(settings)
+        path.write_text(f"{username}\n{password}\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        state = _save_state(settings, has_credentials=True, username=username)
+        return {"status": "ok", "username": state["username"]}
 
 
 def proton_port_forwarding_supported(settings: Settings) -> bool:
@@ -920,24 +924,25 @@ def import_from_peer(settings: Settings, payload: dict, *, source_peer_id: str, 
     called first and this function re-applies the real provenance immediately
     after, in the same call.
     """
-    source_peer_id = str(source_peer_id or "").strip()
-    if not source_peer_id:
-        raise ValueError("source_peer_id is required to import a peer's VPN configuration")
-    payload = payload if isinstance(payload, dict) else {}
-    config_text = str(payload.get("config_text") or "")
-    if not config_text.strip():
-        raise ValueError("peer did not return a VPN configuration")
-    filename = str(payload.get("config_filename") or OPENVPN_CONFIG_FILENAME)
-    result = save_uploaded_config(settings, filename, config_text.encode("utf-8"))
-    username = str(payload.get("username") or "")
-    password = str(payload.get("password") or "")
-    if payload.get("has_credentials") and username and password:
-        save_credentials(settings, username, password)
-        result = {**result, "credentials_imported": True}
-    else:
-        result = {**result, "credentials_imported": False}
-    _save_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
-    return result
+    with _CREDENTIALS_LOCK:
+        source_peer_id = str(source_peer_id or "").strip()
+        if not source_peer_id:
+            raise ValueError("source_peer_id is required to import a peer's VPN configuration")
+        payload = payload if isinstance(payload, dict) else {}
+        config_text = str(payload.get("config_text") or "")
+        if not config_text.strip():
+            raise ValueError("peer did not return a VPN configuration")
+        filename = str(payload.get("config_filename") or OPENVPN_CONFIG_FILENAME)
+        result = save_uploaded_config(settings, filename, config_text.encode("utf-8"))
+        username = str(payload.get("username") or "")
+        password = str(payload.get("password") or "")
+        if payload.get("has_credentials") and username and password:
+            save_credentials(settings, username, password)
+            result = {**result, "credentials_imported": True}
+        else:
+            result = {**result, "credentials_imported": False}
+        _save_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
+        return result
 
 
 _SHARING_REVOKED_PEER_OFF = "The peer sharing this VPN configuration turned off sharing, so these credentials were removed."
@@ -953,30 +958,44 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     has no working credentials anymore. Only a genuine fresh
     ``save_uploaded_config`` call (a real new upload) can clear provenance.
     """
-    stop_error: Optional[BaseException] = None
-    try:
-        disconnect(settings)
-    except BaseException as error:
-        stop_error = error
-        raise
-    finally:
-        # Revoked credentials must not survive a failure to stop OpenVPN.
+    with _CREDENTIALS_LOCK:
+        stop_error: Optional[BaseException] = None
         try:
-            auth_path(settings).unlink(missing_ok=True)
-        except OSError:
-            # Keep has_credentials set when the secret is still on disk. The
-            # next revocation tick must retry the wipe instead of treating a
-            # failed unlink as completed cleanup.
-            if stop_error is not None:
-                _log_poller_failure("VPN sharing revocation check failed", stop_error)
+            disconnect(settings)
+        except BaseException as error:
+            stop_error = error
             raise
+        finally:
+            # Revoked credentials must not survive a failure to stop OpenVPN.
+            try:
+                auth_path(settings).unlink(missing_ok=True)
+            except OSError:
+                # Keep has_credentials set when the secret is still on disk. The
+                # next revocation tick must retry the wipe instead of treating a
+                # failed unlink as completed cleanup.
+                if stop_error is not None:
+                    _log_poller_failure("VPN sharing revocation check failed", stop_error)
+                raise
+            try:
+                _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+            except Exception:
+                if stop_error is not None:
+                    # The state failure is what propagates; don't lose the stop failure.
+                    _log_poller_failure("VPN sharing revocation check failed", stop_error)
+                raise
+
+
+def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
+    """Apply a peer's revocation only while it still owns our credentials."""
+    with _CREDENTIALS_LOCK:
+        state = _load_state(settings)
+        if state["source_peer_id"] != source_peer_id or not state["has_credentials"]:
+            return False
         try:
-            _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
-        except Exception:
-            if stop_error is not None:
-                # The state failure is what propagates; don't lose the stop failure.
-                _log_poller_failure("VPN sharing revocation check failed", stop_error)
-            raise
+            _revoke_local_credentials(settings, reason)
+        except Exception as error:
+            _log_poller_failure("VPN sharing revocation check failed", error)
+        return True
 
 
 def check_sharing_revocation(settings: Settings) -> bool:
@@ -993,10 +1012,11 @@ def check_sharing_revocation(settings: Settings) -> bool:
     raises (intended to run unattended on a background poller).
     """
     try:
-        state = _load_state(settings)
-        source_peer_id = state["source_peer_id"]
-        if not source_peer_id or not state["has_credentials"]:
-            return False
+        with _CREDENTIALS_LOCK:
+            state = _load_state(settings)
+            source_peer_id = state["source_peer_id"]
+            if not source_peer_id or not state["has_credentials"]:
+                return False
         try:
             from ..transfer import local_network as _local_network
             from ..transfer.peer_connectivity import _peer_get_json_for_peer
@@ -1005,21 +1025,13 @@ def check_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            try:
-                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
-            except Exception as error:
-                _log_poller_failure("VPN sharing revocation check failed", error)
-            return True
+            return _revoke_credentials_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_GONE)
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/vpn/config", settings, peer_id=source_peer_id)
             return False
         except HTTPError as error:
             if error.code == 404:
-                try:
-                    _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
-                except Exception as disconnect_error:
-                    _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
-                return True
+                return _revoke_credentials_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False
         except Exception:
             return False

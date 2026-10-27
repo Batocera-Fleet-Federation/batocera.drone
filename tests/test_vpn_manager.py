@@ -11,7 +11,9 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 from pathlib import Path
 from typing import List
 from unittest import mock
@@ -977,6 +979,86 @@ class CheckSharingRevocationTests(unittest.TestCase):
             # The config file + provenance survive so it can never become shareable.
             self.assertTrue(vpn_manager.config_path(settings).is_file())
             self.assertEqual(state["source_peer_id"], "peer-1")
+
+    def test_stale_revocation_preserves_replacement_credentials(self) -> None:
+        # Import on another thread while the peer request/lookup is in flight.
+        # Waiting for it here also proves network I/O does not hold the lock.
+        for peer_gone in (True, False):
+            for manual_upload in (True, False):
+                with self.subTest(peer_gone=peer_gone, manual_upload=manual_upload), tempfile.TemporaryDirectory() as tmp:
+                    settings = self._imported_settings(tmp)
+                    payload = {
+                        "config_filename": "replacement.ovpn", "config_text": SAMPLE_OVPN,
+                        "has_credentials": True, "username": "new-user", "password": "new-pass",
+                    }
+
+                    def replace_credentials():
+                        if manual_upload:
+                            vpn_manager.save_uploaded_config(settings, "replacement.ovpn", SAMPLE_OVPN.encode())
+                            vpn_manager.save_credentials(settings, "new-user", "new-pass")
+                        else:
+                            vpn_manager.import_from_peer(settings, payload, source_peer_id="peer-2")
+
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        def stale_answer(*args, **kwargs):
+                            executor.submit(replace_credentials).result(timeout=5)
+                            if peer_gone:
+                                return None
+                            raise HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+
+                        with mock.patch("app.transfer.local_network.get_paired_peer",
+                                        side_effect=stale_answer if peer_gone else None,
+                                        return_value={"drone_id": "peer-1"}), \
+                                mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=stale_answer), \
+                                mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                            self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                        disconnect.assert_not_called()
+
+                    state = vpn_manager._load_state(settings)
+                    self.assertEqual(state["source_peer_id"], "" if manual_upload else "peer-2")
+                    self.assertTrue(state["has_credentials"])
+                    self.assertEqual(state["username"], "new-user")
+                    self.assertEqual(state["revoked_reason"], "")
+                    self.assertIsNone(state["revoked_at"])
+                    self.assertEqual(vpn_manager.auth_path(settings).read_text(), "new-user\nnew-pass\n")
+
+    def test_import_waits_for_revocation_cleanup(self) -> None:
+        # The compare and wipe must be one critical section: an import that
+        # arrives during disconnect must finish after the old credentials go.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            started = Event()
+            finished = Event()
+            payload = {
+                "config_filename": "replacement.ovpn", "config_text": SAMPLE_OVPN,
+                "has_credentials": True, "username": "new-user", "password": "new-pass",
+            }
+
+            def replace_credentials():
+                started.set()
+                try:
+                    vpn_manager.import_from_peer(settings, payload, source_peer_id="peer-2")
+                finally:
+                    finished.set()
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                pending = []
+
+                def disconnect_during_import(_settings):
+                    pending.append(executor.submit(replace_credentials))
+                    self.assertTrue(started.wait(timeout=5))
+                    self.assertFalse(finished.wait(timeout=0.1))
+
+                with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                        mock.patch.object(vpn_manager, "disconnect", side_effect=disconnect_during_import):
+                    self.assertTrue(vpn_manager.check_sharing_revocation(settings))
+                pending[0].result(timeout=5)
+
+            state = vpn_manager._load_state(settings)
+            self.assertEqual(state["source_peer_id"], "peer-2")
+            self.assertTrue(state["has_credentials"])
+            self.assertEqual(state["revoked_reason"], "")
+            self.assertEqual(vpn_manager.auth_path(settings).read_text(), "new-user\nnew-pass\n")
 
     def test_disconnect_exception_does_not_block_revocation_cleanup(self) -> None:
         for peer_gone in (True, False):
