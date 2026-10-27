@@ -1177,7 +1177,7 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
         print(f"VPN self-heal: reconnected after detecting: {reason}", file=sys.stdout, flush=True)
         return {"action": "reconnected", "reason": reason, "result": result}
     except Exception as error:
-        print(f"VPN self-heal check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("VPN self-heal check failed", error)
         return None
 
 
@@ -1261,7 +1261,7 @@ def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
         _drone_log(f"RGS {action}ed after VPN reconnect: {reason}", also_stdout=True)
         return {"action": action, "reason": reason}
     except Exception as error:
-        print(f"RGS tunnel reconcile failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("RGS tunnel reconcile failed", error)
         return None
 
 
