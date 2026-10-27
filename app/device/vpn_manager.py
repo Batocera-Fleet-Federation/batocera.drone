@@ -964,7 +964,12 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
         try:
             auth_path(settings).unlink(missing_ok=True)
         except OSError:
-            pass
+            # Keep has_credentials set when the secret is still on disk. The
+            # next revocation tick must retry the wipe instead of treating a
+            # failed unlink as completed cleanup.
+            if stop_error is not None:
+                _log_poller_failure("VPN sharing revocation check failed", stop_error)
+            raise
         try:
             _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
         except Exception:
