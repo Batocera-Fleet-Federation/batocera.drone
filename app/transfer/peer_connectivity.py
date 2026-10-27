@@ -307,7 +307,12 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
                     target += "?" + parsed_url.query
                 connection.request("GET", target, headers=dict(request.header_items()))
                 response = connection.getresponse()
-                if response.status >= 300:
+                if 300 <= response.status < 400:
+                    # Redirects are never followed - a 302 Location: http://... must not
+                    # be treated as an authenticated 404. Treat as transient.
+                    error = HTTPError(url, response.status, response.reason, response.headers, None)
+                    raise error
+                if response.status >= 400:
                     error = HTTPError(url, response.status, response.reason, response.headers, None)
                     error._peer_tls_evidence = _PEER_TLS_EVIDENCE
                     raise error
@@ -351,13 +356,37 @@ def _peer_post_json(
         },
         method="POST",
     )
+    # Pin-verified TLS also avoids redirect follow for POST.
+    context_obj = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     try:
-        with urlopen(
-            request,
-            timeout=timeout,
-            context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
-        ) as response:
-            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
+        if urlparse(url).scheme == "https" and cafile:
+            parsed_url = urlparse(url)
+            connection = http.client.HTTPSConnection(
+                parsed_url.hostname, parsed_url.port or 443, timeout=timeout, context=context_obj,
+            )
+            try:
+                target = parsed_url.path or "/"
+                if parsed_url.query:
+                    target += "?" + parsed_url.query
+                connection.request("POST", target, data=request.data, headers=dict(request.header_items()))
+                response = connection.getresponse()
+                if 300 <= response.status < 400:
+                    error = HTTPError(url, response.status, response.reason, response.headers, None)
+                    raise error
+                if response.status >= 400:
+                    error = HTTPError(url, response.status, response.reason, response.headers, None)
+                    error._peer_tls_evidence = _PEER_TLS_EVIDENCE
+                    raise error
+                raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
+            finally:
+                connection.close()
+        else:
+            with urlopen(
+                request,
+                timeout=timeout,
+                context=context_obj,
+            ) as response:
+                raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
