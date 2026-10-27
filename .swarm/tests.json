@@ -4025,6 +4025,37 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_619_stop_error_status_retry_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-619-stop-error-status-retry",
+      "name": "Issue #619: a stop that returns an error status is retried on a later sharing-check tick",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_619_stop_error_status_retry_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_597_out_of_scope_unlink_failure_forgotten_uat.py"
       ],
       "disruptive": false,
