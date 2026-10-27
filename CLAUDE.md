@@ -33,9 +33,12 @@ Tests build `Settings` via `Settings.from_env()` with
 back-compat fallback names for `DRONE_DEVICE_ID`/`ACTIVITY_LOG_FILE`, but new tests
 should use the current names). Tests use `unittest.TestCase`.
 
-Security suites in `.swarm/tests.json` use `scripts/run_security_tests.py` with
-`-s`/`-p` discovery arguments. Keep their required files and patterns in sync;
-plain unittest discovery exits successfully even when a registered test is missing.
+`scripts/run_security_tests.py` validates all enabled adversarial-security entries
+in `.swarm/tests.json` by default, then runs their collected tests. It accepts both
+legacy unittest discovery commands and runner commands with explicit `-s`/`-p`
+arguments. Missing required files or an empty individual suite fail validation,
+even when other suites still contain tests. Use `-s`/`-p` for an individual suite.
+Plain unittest discovery exits successfully even when a registered test is missing.
 Run `python3 -m unittest discover -s tests -p test_security_suite_validation.py`
 after changing this registration. Preserve security boundary tests even when they
 add no unique line coverage: different hostile inputs can exercise the same lines.
