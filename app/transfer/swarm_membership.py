@@ -234,6 +234,12 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> bool:
                     _unlink_cert(settings, peer_id)
                 changed = True
                 continue
+            if current is not None and current.get("op") == "remove":
+                # A tombstone is an authorization boundary. A departed member's
+                # certificate is known to every former member, so a third party
+                # replaying it must not restore trust; only an explicit local
+                # approval (record_approved_member) supersedes the tombstone.
+                continue
             if not _apply_add(settings, state, record):
                 continue
             changed = True
