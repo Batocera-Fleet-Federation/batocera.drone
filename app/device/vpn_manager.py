@@ -1055,7 +1055,7 @@ def check_sharing_revocation(settings: Settings) -> bool:
         return False
 
 
-def run_sharing_revocation_poller(settings: Settings) -> None:
+def run_sharing_revocation_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop checking whether an imported config's sharing was revoked.
 
     Intended to run on its own daemon thread, started by the caller exactly
@@ -1076,7 +1076,8 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
     except Exception:
         interval = 300.0
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(interval)
         if poller_retired(generation):
@@ -1343,7 +1344,7 @@ def _log_poller_failure(message: str, error: Exception) -> None:
         pass
 
 
-def run_self_heal_poller(settings: Settings) -> None:
+def run_self_heal_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop calling check_and_self_heal on a fixed cadence.
 
     Started as its own daemon thread from create_server(), same pattern as
@@ -1352,7 +1353,8 @@ def run_self_heal_poller(settings: Settings) -> None:
     existing style. Each tick also reconciles RGS with the tunnel address
     (see reconcile_rgs_with_tunnel).
     """
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
