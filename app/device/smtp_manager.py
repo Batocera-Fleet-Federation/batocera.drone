@@ -173,9 +173,15 @@ def _load_state(settings: Settings) -> dict:
     }
 
 
-def _save_state(settings: Settings, **updates) -> dict:
+def _save_state(settings: Settings, *, expect_source_peer: Optional[str] = None, **updates) -> Optional[dict]:
+    """Persist SMTP state. With ``expect_source_peer`` the write is conditional:
+    it is skipped (returns None) unless that peer still owns a stored password.
+    The provenance check and the write share ``_STATE_LOCK``, so a fresh save
+    cannot land between them and be wiped."""
     with _STATE_LOCK:
         state = _load_state(settings)
+        if expect_source_peer is not None and (state["source_peer_id"] != expect_source_peer or not state["password"]):
+            return None
         state.update(updates)
         _save_state_payload(_state_database_path(settings.userdata_root), SMTP_STATE_NAMESPACE, state)
         return state
@@ -235,7 +241,8 @@ def update_settings(settings: Settings, payload: dict) -> dict:
     # since the admin UI never echoes the stored password back into the form.
     if str(payload.get("password") or "").strip():
         updates["password"] = str(payload["password"])
-    state = _save_state(settings, **updates)
+    with _CREDENTIALS_LOCK:
+        state = _save_state(settings, **updates)
     return _sanitized(state)
 
 
@@ -403,37 +410,36 @@ _SHARING_REVOKED_PEER_OFF = "The peer sharing this SMTP configuration turned off
 _SHARING_REVOKED_PEER_GONE = "The peer that shared this SMTP configuration is no longer paired, so these credentials were removed."
 
 
-def _revoke_local_credentials(settings: Settings, reason: str) -> None:
+def _revoke_local_credentials(settings: Settings, reason: str) -> bool:
     """Wipe the imported SMTP password (not the rest of the config, not
     ``source_peer_id``) -- mirrors ``vpn_manager._revoke_local_credentials()``:
     leaving provenance in place keeps ``set_sharing_enabled()``/
     ``export_payload()`` refusing to ever let this now-orphaned config be
     re-shared. Only a genuine fresh ``update_settings()`` call (a real new
-    save) clears provenance.
+    save) clears provenance. Inside ``_revoke_credentials_from_peer()`` the
+    write only lands while that peer still owns the credentials. Returns
+    True iff the wipe was written.
     """
     expected_peer = getattr(_REVOCATION_CONTEXT, "source_peer_id", None)
-    if expected_peer is not None:
-        state = _load_state(settings)
-        if state["source_peer_id"] != expected_peer or not state["password"]:
-            return
-    _save_state(settings, password="", revoked_reason=reason, revoked_at=_now_iso())
+    return _save_state(
+        settings, expect_source_peer=expected_peer,
+        password="", revoked_reason=reason, revoked_at=_now_iso(),
+    ) is not None
 
 
 def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
-    """Apply a peer's revocation only while it still owns our credentials."""
+    """Apply a peer's revocation only while it still owns our credentials. The
+    ownership check is re-read inside ``_save_state()``'s lock, so an import
+    or fresh save that lands after the caller's snapshot is never wiped."""
     with _CREDENTIALS_LOCK:
-        state = _load_state(settings)
-        if state["source_peer_id"] != source_peer_id or not state["password"]:
-            return False
         try:
             _REVOCATION_CONTEXT.source_peer_id = source_peer_id
-            _revoke_local_credentials(settings, reason)
+            return bool(_revoke_local_credentials(settings, reason))
         except Exception as error:
             _log_poller_failure("SMTP sharing revocation check failed", error)
+            return False
         finally:
-            if hasattr(_REVOCATION_CONTEXT, "source_peer_id"):
-                del _REVOCATION_CONTEXT.source_peer_id
-        return True
+            _REVOCATION_CONTEXT.source_peer_id = None
 
 
 def check_sharing_revocation(settings: Settings) -> bool:

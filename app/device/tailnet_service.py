@@ -802,10 +802,11 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
         # immediately after in its own follow-up call -- get that ordering
         # backwards and every import would look self-owned and pass the
         # single-hop sharing gate it's meant to fail.
-        _save_sharing_state(
-            settings, auth_key=key, source_peer_id="", source_peer_name="",
-            revoked_reason="", revoked_at=None,
-        )
+        with _CREDENTIALS_LOCK:
+            _save_sharing_state(
+                settings, auth_key=key, source_peer_id="", source_peer_name="",
+                revoked_reason="", revoked_at=None,
+            )
     return tailnet_status()
 
 
@@ -1028,9 +1029,15 @@ def _load_sharing_state(settings: Settings) -> dict:
     }
 
 
-def _save_sharing_state(settings: Settings, **updates) -> dict:
+def _save_sharing_state(settings: Settings, *, expect_source_peer: Optional[str] = None, **updates) -> Optional[dict]:
+    """Persist sharing state. With ``expect_source_peer`` the write is conditional:
+    it is skipped (returns None) unless that peer still owns a stored auth key.
+    The provenance check and the write share ``_STATE_LOCK``, so a fresh
+    enrollment cannot land between them and be wiped."""
     with _STATE_LOCK:
         state = _load_sharing_state(settings)
+        if expect_source_peer is not None and (state["source_peer_id"] != expect_source_peer or not state["auth_key"]):
+            return None
         state.update(updates)
         _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
         return state
@@ -1166,7 +1173,7 @@ _SHARING_REVOKED_PEER_OFF = "The peer sharing this Tailscale auth key turned off
 _SHARING_REVOKED_PEER_GONE = "The peer that shared this Tailscale auth key is no longer paired, so it was removed from this drone."
 
 
-def _revoke_local_sharing(settings: Settings, reason: str) -> None:
+def _revoke_local_sharing(settings: Settings, reason: str) -> bool:
     """Clear the imported auth key and stop sharing -- deliberately does
     **not** call ``tailscale logout`` or otherwise touch the live tailnet
     connection. Unlike VPN's revocation (which disconnects an active tunnel
@@ -1182,30 +1189,30 @@ def _revoke_local_sharing(settings: Settings, reason: str) -> None:
     ``vpn_manager._revoke_local_credentials()``: wiping it would let this
     now-orphaned entry pass the single-hop sharing gate as if it were
     self-owned. Only a genuine fresh ``tailnet_enroll()`` call clears it.
+    Inside ``_revoke_sharing_from_peer()`` the write only lands while that
+    peer still owns the key. Returns True iff the wipe was written.
     """
     expected_peer = getattr(_REVOCATION_CONTEXT, "source_peer_id", None)
-    if expected_peer is not None:
-        state = _load_sharing_state(settings)
-        if state["source_peer_id"] != expected_peer or not state["auth_key"]:
-            return
-    _save_sharing_state(settings, auth_key="", revoked_reason=reason, revoked_at=_now_iso())
+    return _save_sharing_state(
+        settings, expect_source_peer=expected_peer,
+        auth_key="", revoked_reason=reason, revoked_at=_now_iso(),
+    ) is not None
 
 
 def _revoke_sharing_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
-    """Apply a peer's revocation only while it still owns our sharing."""
+    """Apply a peer's revocation only while it still owns our sharing. The
+    ownership check is re-read inside ``_save_sharing_state()``'s lock, so an
+    import or fresh enrollment that lands after the caller's snapshot is never
+    wiped."""
     with _CREDENTIALS_LOCK:
-        state = _load_sharing_state(settings)
-        if state["source_peer_id"] != source_peer_id or not state["auth_key"]:
-            return False
         try:
             _REVOCATION_CONTEXT.source_peer_id = source_peer_id
-            _revoke_local_sharing(settings, reason)
+            return bool(_revoke_local_sharing(settings, reason))
         except Exception as error:
             _log_poller_failure("Tailnet sharing revocation check failed", error)
+            return False
         finally:
-            if hasattr(_REVOCATION_CONTEXT, "source_peer_id"):
-                del _REVOCATION_CONTEXT.source_peer_id
-        return True
+            _REVOCATION_CONTEXT.source_peer_id = None
 
 
 def check_tailnet_sharing_revocation(settings: Settings) -> bool:
