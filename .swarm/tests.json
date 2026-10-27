@@ -4464,6 +4464,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_599_revocation_requires_verified_channel.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-599-revocation-requires-verified-channel",
+      "name": "Issue #599 a 404 revokes shared credentials only over the pinned TLS connection, never from route metadata, redirects or plaintext",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_599_revocation_requires_verified_channel.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
