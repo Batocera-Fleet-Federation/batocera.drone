@@ -1666,6 +1666,7 @@ function startTransfersAutoRefresh() {
   // Live-update only the Transfers data while a copy is in progress -- never
   // re-render the whole page, so the asset-request form, paging, and
   // selections are left untouched.
+  // renderTransfersPanel(downloads, uploads) via updateTransfersLive
   stopTransfersAutoRefresh();
   transfersTimer = setInterval(async () => {
     if (document.hidden || transfersInFlight) return;
@@ -6264,7 +6265,7 @@ function renderArtworkTabBar(active) {
 function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
-    ["transfers", "Downloads", "bi-cloud-arrow-down", "#admin/transfers"],
+    ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
     ...(REFERENCE_ROMS_UI_ENABLED ? [["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"]] : []),
   ]);
 }
@@ -7054,7 +7055,7 @@ async function renderDownloadsPage() {
   try {
     const payload = await api("/admin/downloads");
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Downloads</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Transfers</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
         ${renderDownloadsPanel(payload)}
       </div></div>`;
@@ -10894,7 +10895,7 @@ function renderLocalAssetsPagination() {
 async function renderTransfersPage() {
   currentSystemContext = null;
   clearSystemTheme();
-  titleNode.textContent = "Downloads";
+  titleNode.textContent = "Transfers";
   subtitleNode.textContent = "Request and monitor drone-to-drone asset transfers";
   // No loading toast here: it stayed up until the peer probe behind the
   // request panel finished, and it lingered on the Swarm page we navigate to.
@@ -10996,7 +10997,7 @@ function renderSwarmDroneCard(drone) {
     ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Leave Swarm" aria-label="Leave Swarm" onclick="leaveSwarm()"><i class="bi bi-box-arrow-right" aria-hidden="true"></i></button>`
     : `${networkShareButton}
         <button type="button" class="btn btn-sm btn-outline-success" title="Download ROMs" aria-label="Download ROMs" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down" aria-hidden="true"></i></button>
-        <button type="button" class="btn btn-sm btn-outline-danger" title="Forget Drone" aria-label="Forget Drone" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle" aria-hidden="true"></i></button>`;
+        <button type="button" class="btn btn-sm btn-outline-danger" title="Forget Drone" aria-label="Forget Drone" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1" aria-hidden="true"></i>Forget</button>`;
   return `
     <tr id="${swarmDroneCardId(drone.drone_id)}">
       <th scope="row"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</th>
