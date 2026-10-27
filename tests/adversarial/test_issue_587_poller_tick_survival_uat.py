@@ -202,14 +202,14 @@ class Issue587PollerTickSurvivalUAT(unittest.TestCase):
         self.assertEqual(calls, 2)
         self._assert_revoked()
 
-    def test_disconnect_failure_on_revoking_tick_is_retried_by_next_tick(self) -> None:
-        # Real check and real revocation: the first revocation's disconnect fails before credentials
-        # are removed, so nothing is wiped on tick 1. Tick 2 must finish the job.
-        disconnect = mock.Mock(side_effect=[RuntimeError("tunnel busy"), {"status": "not_running"}])
+    def test_disconnect_failure_on_revoking_tick_wipes_without_retrying_disconnect(self) -> None:
+        # A confirmed peer departure revokes credentials on this tick despite a failed stop.
+        # The poller remains healthy, and its next check is a quiet no-op.
+        disconnect = mock.Mock(side_effect=RuntimeError("tunnel busy"))
         calls = self._run_poller([REAL, REAL], retire_after=2, disconnect={"new": disconnect})
 
         self.assertEqual(calls, 2)
-        self.assertEqual(disconnect.call_count, 2)
+        self.assertEqual(disconnect.call_count, 1)
         self._assert_revoked()
 
 
