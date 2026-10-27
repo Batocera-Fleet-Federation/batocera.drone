@@ -4959,6 +4959,101 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_626_revocation_check_to_write_race_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-626-revocation-check-to-write-race",
+      "name": "Issue #626: SMTP and Tailnet re-import between provenance check and revocation write",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_626_revocation_check_to_write_race_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_626_cross_thread_reimport_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-626-cross-thread-reimport",
+      "name": "Issue #626: SMTP and Tailnet cross-thread re-import during stale 404 revocation check",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_626_cross_thread_reimport_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-security-issue-626-fresh-smtp-save",
+      "name": "Issue #626 fresh SMTP save survives stale revocation",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_626_fresh_smtp_save_survives_revocation.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "tests/adversarial/security/test_issue_626_fresh_smtp_save_survives_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
