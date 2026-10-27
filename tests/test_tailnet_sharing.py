@@ -232,6 +232,32 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertIsNotNone(state["revoked_at"])
             self.assertEqual(state["source_peer_id"], "peer-1")
 
+    def test_does_not_revoke_on_plaintext_http_404(self) -> None:
+        # An http_only route is unauthenticated: an on-path 404 must not wipe anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("http://peer/v1/api/peer/tailnet/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(tailnet_service.check_tailnet_sharing_revocation(settings))
+            state = tailnet_service._load_sharing_state(settings)
+            self.assertNotEqual(state["auth_key"], "")
+            self.assertEqual(state["revoked_reason"], "")
+
+    def test_redirected_plaintext_404_does_not_revoke(self) -> None:
+        # The error URL may claim https after a redirect; the dialed route decides.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://elsewhere/v1/api/peer/tailnet/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(tailnet_service.check_tailnet_sharing_revocation(settings))
+            self.assertEqual(tailnet_service._load_sharing_state(settings)["revoked_reason"], "")
+
     def test_does_not_revoke_on_transient_network_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)

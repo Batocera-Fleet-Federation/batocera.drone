@@ -980,6 +980,32 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertTrue(vpn_manager.config_path(settings).is_file())
             self.assertEqual(state["source_peer_id"], "peer-1")
 
+    def test_does_not_revoke_on_plaintext_http_404(self) -> None:
+        # An http_only route is unauthenticated: an on-path 404 must not wipe anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("http://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["has_credentials"])
+            self.assertEqual(state["revoked_reason"], "")
+
+    def test_redirected_plaintext_404_does_not_revoke(self) -> None:
+        # The error URL may claim https after a redirect; the dialed route decides.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://elsewhere/v1/api/peer/vpn/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            self.assertEqual(vpn_manager._load_state(settings)["revoked_reason"], "")
+
     def test_stale_revocation_preserves_replacement_credentials(self) -> None:
         # Import on another thread while the peer request/lookup is in flight.
         # Waiting for it here also proves network I/O does not hold the lock.

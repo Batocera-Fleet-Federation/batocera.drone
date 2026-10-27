@@ -421,3 +421,45 @@ class LanDirectTransportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PeerHttpErrorAuthenticationTests(unittest.TestCase):
+    """A status code only counts as peer evidence when it came over HTTPS."""
+
+    def _error(self, url: str, route=None):
+        from urllib.error import HTTPError
+
+        error = HTTPError(url, 404, "not found", None, None)
+        if route is not None:
+            error.peer_route = route
+        return error
+
+    def test_recorded_https_route_is_authenticated(self) -> None:
+        from app.transfer.peer_connectivity import peer_http_error_is_authenticated
+
+        self.assertTrue(peer_http_error_is_authenticated(self._error("https://p/x", "https://p")))
+
+    def test_recorded_http_route_wins_over_error_url(self) -> None:
+        from app.transfer.peer_connectivity import peer_http_error_is_authenticated
+
+        self.assertFalse(peer_http_error_is_authenticated(self._error("https://other/x", "http://p")))
+
+    def test_falls_back_to_error_url_without_recorded_route(self) -> None:
+        from app.transfer.peer_connectivity import peer_http_error_is_authenticated
+
+        self.assertTrue(peer_http_error_is_authenticated(self._error("https://p/x")))
+        self.assertFalse(peer_http_error_is_authenticated(self._error("http://p/x")))
+
+    def test_peer_get_json_for_peer_records_dialed_route_on_http_error(self) -> None:
+        from urllib.error import HTTPError
+
+        from app.transfer import peer_connectivity
+
+        raised = HTTPError("https://redirected/x", 404, "nf", None, None)
+        with mock.patch.object(peer_connectivity, "_peer_address_candidates", return_value=["http://peer:80"]), \
+                mock.patch.object(peer_connectivity, "_candidate_dialable", return_value=True), \
+                mock.patch.object(peer_connectivity, "_peer_get_json", side_effect=raised):
+            with self.assertRaises(HTTPError) as caught:
+                peer_connectivity._peer_get_json_for_peer({"drone_id": "p"}, "/x", mock.Mock())
+        self.assertEqual(caught.exception.peer_route, "http://peer:80")
+        self.assertFalse(peer_connectivity.peer_http_error_is_authenticated(caught.exception))

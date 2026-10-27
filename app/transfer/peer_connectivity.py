@@ -1110,7 +1110,16 @@ def _peer_get_json_for_peer(
             )
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return payload, address
-        except (HTTPError, PeerIdentityHold):
+        except HTTPError as error:
+            # Record the route we actually dialed: error.url can differ after a
+            # redirect, and only the dialed scheme says whether the answer came
+            # over the pinned TLS channel (see peer_http_error_is_authenticated).
+            try:
+                error.peer_route = address
+            except Exception:
+                pass
+            raise
+        except PeerIdentityHold:
             # The peer answered and rejected the request; changing routes
             # cannot make an authorization or endpoint error succeed.
             raise
@@ -1123,6 +1132,25 @@ def _peer_get_json_for_peer(
     if last_error is not None:
         raise last_error
     raise ValueError("no peer address available")
+
+
+def peer_http_error_is_authenticated(error: HTTPError) -> bool:
+    """True only when ``error`` was received over a pinned HTTPS route.
+
+    Plain-http peer routes (``http_only`` fleets) are neither pinned nor
+    authenticated, so an on-path attacker can forge any status code on them.
+    Revocation decisions (a 404 meaning "sharing is off") must not act on such
+    an answer. Prefers the route ``_peer_get_json_for_peer`` recorded; falls back
+    to the error's own URL only when no route was recorded.
+    """
+    # __dict__ lookups: HTTPError's attribute proxy raises KeyError (not
+    # AttributeError) for names it does not have when built without a response.
+    route = vars(error).get("peer_route")
+    if not route:
+        # ``filename`` holds the request URL on every supported Python; geturl()
+        # needs a response body object that a bare HTTPError may not have.
+        route = vars(error).get("filename") or getattr(error, "filename", None) or ""
+    return urlparse(str(route or "")).scheme.lower() == "https"
 
 
 def _peer_post_json_for_peer(

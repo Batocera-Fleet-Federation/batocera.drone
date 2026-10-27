@@ -1198,10 +1198,10 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             return False
         try:
             from ..transfer import local_network as _local_network
-            from ..transfer.peer_connectivity import _peer_get_json_for_peer
+            from ..transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated
         except ImportError:  # pragma: no cover - direct script execution fallback
             from transfer import local_network as _local_network  # type: ignore
-            from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
+            from transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
             _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_GONE)
@@ -1210,7 +1210,8 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
             return False
         except urllib.error.HTTPError as error:
-            if error.code == 404:
+            # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
+            if error.code == 404 and peer_http_error_is_authenticated(error):
                 _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_OFF)
                 return True
             return False
