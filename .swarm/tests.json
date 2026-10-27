@@ -9,9 +9,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -30,7 +28,8 @@
         ],
         "files": [
           "app/transfer/drone_network.py",
-          "tests/adversarial/security/test_issue_279_rejects_trailing_der_after_certificate.py"
+          "tests/adversarial/security/test_issue_279_rejects_trailing_der_after_certificate.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -40,9 +39,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -62,7 +59,8 @@
         "files": [
           "app/transfer/drone_network.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_279_rejects_multi_certificate_pem.py"
+          "tests/adversarial/security/test_issue_279_rejects_multi_certificate_pem.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -72,9 +70,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -94,7 +90,8 @@
         "files": [
           "app/transfer/drone_network.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_279_rejects_non_x509_pem.py"
+          "tests/adversarial/security/test_issue_279_rejects_non_x509_pem.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -515,9 +512,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -536,7 +531,8 @@
         ],
         "files": [
           "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_191_discovery_infinite_port.py"
+          "tests/adversarial/security/test_issue_191_discovery_infinite_port.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -546,9 +542,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -567,7 +561,8 @@
         ],
         "files": [
           "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_191_discovery_packet_type.py"
+          "tests/adversarial/security/test_issue_191_discovery_packet_type.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -577,9 +572,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -598,7 +591,8 @@
         ],
         "files": [
           "app/integrations/media_keys/dispatch.py",
-          "tests/adversarial/security/test_issue_155_hardlinked_lock_chown.py"
+          "tests/adversarial/security/test_issue_155_hardlinked_lock_chown.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -738,9 +732,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -759,7 +751,8 @@
         ],
         "files": [
           "app/transfer/swarm_reset.py",
-          "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py"
+          "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -769,9 +762,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -790,7 +781,8 @@
         ],
         "files": [
           "app/transfer/swarm_reset.py",
-          "tests/adversarial/security/test_issue_163_clone_auth_revocation.py"
+          "tests/adversarial/security/test_issue_163_clone_auth_revocation.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -1337,9 +1329,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -1359,7 +1349,8 @@
         "files": [
           "app/transfer/peer_connectivity.py",
           "app/web/handlers_network.py",
-          "tests/adversarial/security/test_issue_213_pair_by_address_scheme_downgrade.py"
+          "tests/adversarial/security/test_issue_213_pair_by_address_scheme_downgrade.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -1867,9 +1858,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -1890,7 +1879,8 @@
           "app/multiplayer/protocol.py",
           "app/multiplayer/lifecycle.py",
           "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_departure_consent.py"
+          "tests/adversarial/security/test_issue_240_departure_consent.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -1900,9 +1890,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -1923,7 +1911,8 @@
           "app/multiplayer/protocol.py",
           "app/multiplayer/lifecycle.py",
           "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_launch_offer_binding.py"
+          "tests/adversarial/security/test_issue_240_launch_offer_binding.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -1933,9 +1922,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -1956,7 +1943,8 @@
           "app/multiplayer/protocol.py",
           "app/multiplayer/lifecycle.py",
           "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_auto_launch_revocation.py"
+          "tests/adversarial/security/test_issue_240_auto_launch_revocation.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -1966,9 +1954,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -1989,7 +1975,8 @@
           "app/multiplayer/protocol.py",
           "app/multiplayer/lifecycle.py",
           "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_execution_revocation.py"
+          "tests/adversarial/security/test_issue_240_execution_revocation.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -2034,9 +2021,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -2057,7 +2042,8 @@
         "files": [
           "app/transfer/swarm_membership.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_246_tls_pin_scheme_rewrite.py"
+          "tests/adversarial/security/test_issue_246_tls_pin_scheme_rewrite.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -2067,9 +2053,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -2091,7 +2075,8 @@
           "app/transfer/local_network.py",
           "app/transfer/swarm_membership.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_246_gossip_pin_boundaries.py"
+          "tests/adversarial/security/test_issue_246_gossip_pin_boundaries.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -2578,9 +2563,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -2601,7 +2584,8 @@
           "app/transport/lan.py",
           "app/transfer/peer_connectivity.py",
           "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py"
+          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -2708,9 +2692,7 @@
       "disruptive": false,
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -2725,7 +2707,8 @@
         ],
         "files": [
           "app/multiplayer/dependencies.py",
-          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py"
+          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -3111,9 +3094,7 @@
       "disruptive": false,
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -3128,7 +3109,8 @@
         ],
         "files": [
           "app/device/vpn_manager.py",
-          "tests/adversarial/security/test_issue_582_retired_poller_rgs_action.py"
+          "tests/adversarial/security/test_issue_582_retired_poller_rgs_action.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -3765,9 +3747,7 @@
       "disruptive": false,
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -3782,7 +3762,8 @@
         ],
         "files": [
           "app/device/vpn_manager.py",
-          "tests/adversarial/security/test_issue_588_retired_failed_check_no_rgs.py"
+          "tests/adversarial/security/test_issue_588_retired_failed_check_no_rgs.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -4270,9 +4251,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -4291,7 +4270,8 @@
         ],
         "files": [
           "app/device/vpn_manager.py",
-          "tests/adversarial/security/test_issue_598_status_provenance_race.py"
+          "tests/adversarial/security/test_issue_598_status_provenance_race.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -4469,9 +4449,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -4492,7 +4470,8 @@
         "files": [
           "app/transfer/peer_connectivity.py",
           "app/device/vpn_manager.py",
-          "tests/adversarial/security/test_issue_599_revocation_requires_verified_channel.py"
+          "tests/adversarial/security/test_issue_599_revocation_requires_verified_channel.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -4502,9 +4481,7 @@
     {
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -4525,7 +4502,8 @@
           "app/device/smtp_manager.py",
           "app/device/tailnet_service.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_599_sibling_revocation_verified_channel.py"
+          "tests/adversarial/security/test_issue_599_sibling_revocation_verified_channel.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -4640,9 +4618,7 @@
       "disruptive": false,
       "command": [
         "python3",
-        "-m",
-        "unittest",
-        "discover",
+        "scripts/run_security_tests.py",
         "-s",
         "tests/adversarial/security",
         "-p",
@@ -4658,7 +4634,8 @@
         ],
         "files": [
           "app/transfer/swarm_membership.py",
-          "tests/adversarial/security/test_issue_600_departure_rejoin_authorization.py"
+          "tests/adversarial/security/test_issue_600_departure_rejoin_authorization.py",
+          "scripts/run_security_tests.py"
         ],
         "mounts": [],
         "servers": []
@@ -4803,6 +4780,36 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/run_security_tests.py",
+        "-s",
+        "tests",
+        "-p",
+        "test_security_suite_validation.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-616-suite-collection",
+      "name": "Issue #616 security suites collect real tests and reject empty acceptance runs",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/test_security_suite_validation.py",
+          "scripts/run_security_tests.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
