@@ -83,6 +83,7 @@ VPN_CONNECT_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_CONNECT_TIMEOUT_SECOND
 VPN_AUTO_CONNECT_MAX_ATTEMPTS = int_from_env("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", 4)
 VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = seconds_from_env("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", 15.0)
 VPN_DISCONNECT_GRACE_SECONDS = seconds_from_env("DRONE_VPN_DISCONNECT_GRACE_SECONDS", 5.0)
+VPN_DISCONNECT_KILL_WAIT_SECONDS = 1.0
 VPN_PUBLIC_IP_CHECK_TIMEOUT_SECONDS = seconds_from_env("DRONE_VPN_PUBLIC_IP_TIMEOUT_SECONDS", 8.0)
 VPN_LOG_TAIL_LINES_FOR_DISPLAY = 200
 VPN_LOG_TAIL_LINES_FOR_DETECTION = 400
@@ -590,8 +591,18 @@ def disconnect(settings: Settings) -> dict:
         else:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except OSError:
+            except ProcessLookupError:
                 pass
+            except OSError as error:
+                return {"status": "error", "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
+            # Signal delivery is not proof of exit (for example, a process
+            # stuck in kernel teardown can survive SIGKILL). Keep revocation's
+            # stop retry pending until the managed process actually disappears.
+            deadline = time.monotonic() + VPN_DISCONNECT_KILL_WAIT_SECONDS
+            while _find_running_openvpn_pid(cfg) is not None:
+                if time.monotonic() >= deadline:
+                    return {"status": "error", "errors": ["OpenVPN is still running after SIGKILL."]}
+                time.sleep(0.25)
         _save_state(settings, connected_at=None)
         return {"status": "disconnected"}
 
