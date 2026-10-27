@@ -973,8 +973,9 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     """
     with _CREDENTIALS_LOCK:
         stop_error: Optional[BaseException] = None
+        stop_result: Optional[dict] = None
         try:
-            disconnect(settings)
+            stop_result = disconnect(settings)
         except BaseException as error:
             stop_error = error
             raise
@@ -992,13 +993,19 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
             try:
                 _save_state(
                     settings, has_credentials=False, username="", revoked_reason=reason,
-                    revoked_at=_now_iso(), disconnect_retry_pending=stop_error is not None,
+                    revoked_at=_now_iso(),
+                    disconnect_retry_pending=not _disconnect_result_confirms_stopped(stop_result),
                 )
             except Exception:
                 if stop_error is not None:
                     # The state failure is what propagates; don't lose the stop failure.
                     _log_poller_failure("VPN sharing revocation check failed", stop_error)
                 raise
+
+
+def _disconnect_result_confirms_stopped(result: object) -> bool:
+    """Only clear a revocation stop retry after disconnect confirms no tunnel remains."""
+    return isinstance(result, dict) and result.get("status") in {"disconnected", "not_running"}
 
 
 def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
@@ -1036,11 +1043,12 @@ def check_sharing_revocation(settings: Settings) -> bool:
                 # tick. Retry stopping the local tunnel without retaining any
                 # credentials or depending on another remote response.
                 try:
-                    disconnect(settings)
+                    stop_result = disconnect(settings)
                 except Exception as error:
                     _log_poller_failure("VPN sharing revocation check failed", error)
                     return False
-                _save_state(settings, disconnect_retry_pending=False)
+                if _disconnect_result_confirms_stopped(stop_result):
+                    _save_state(settings, disconnect_retry_pending=False)
                 return False
             if not source_peer_id or not state["has_credentials"]:
                 return False
