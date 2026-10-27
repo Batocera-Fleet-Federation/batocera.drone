@@ -3,10 +3,10 @@
 Production check_and_self_heal / reconcile_rgs_with_tunnel catch Exception and
 return None. #582 still requires:
 
-* a failed watchdog check attempts reconcile on that same tick
+* a failed watchdog check attempts reconcile on that same tick while live
 * a generation retired during a *successful* slow check does not start RGS
-* a failed check still gets that independent RGS attempt even if shutdown
-  retired the generation while the check was in flight
+* a generation retired during a failed/swallowed check also skips RGS
+  (security/test_issue_588_retired_failed_check_no_rgs.py)
 * after either operation, a retired generation does not start another tick
 * a surrogate in a reconnect/pause diagnostic must not kill the poller
 """
@@ -105,6 +105,8 @@ class Issue588SwallowedFailureIndependenceUAT(unittest.TestCase):
         self.assertIn(b"\\udcff", raw.getvalue())
 
     def test_swallowed_inner_failure_still_reconciles_when_retired_mid_check(self) -> None:
+        # Adjudicated against security/test_issue_588_retired_failed_check_no_rgs.py:
+        # a swallowed inner failure during retirement must not start RGS.
         retired_now = {"value": False}
 
         def load_state(_settings):
@@ -125,7 +127,7 @@ class Issue588SwallowedFailureIndependenceUAT(unittest.TestCase):
                 mock.patch.object(vpn_manager.sys, "stderr", stderr):
             vpn_manager.run_self_heal_poller(self.settings)
 
-        reconcile.assert_called_once_with(self.settings)
+        reconcile.assert_not_called()
 
     def test_successful_inner_check_still_skips_rgs_when_retired_mid_check(self) -> None:
         retired_now = {"value": False}

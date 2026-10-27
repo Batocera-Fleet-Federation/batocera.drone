@@ -2950,7 +2950,7 @@
     },
     {
       "id": "adversarial-issue-582-poller-retirement-after-failure-uat",
-      "name": "Issue #582 failed self-heal still reconciles RGS; successful slow check still honors shutdown",
+      "name": "Issue #582 live failed self-heal still reconciles RGS; retirement mid-check skips RGS",
       "origin": "adversarial",
       "enabled": true,
       "disruptive": false,
@@ -4425,6 +4425,40 @@
           "app/device/smtp_manager.py",
           "app/device/tailnet_service.py",
           "tests/adversarial/test_issue_599_local_peer_removal_revocation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_599_http_only_sibling_pollers_and_wire_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-599-http-only-sibling-pollers-and-wire-boundaries-uat",
+      "name": "Issue #599: SMTP/Tailnet pollers, omitted TLS flag, IPv6, and unstamped http 404 cannot forge revocation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_599_http_only_sibling_pollers_and_wire_boundaries_uat.py"
         ],
         "mounts": [],
         "servers": []

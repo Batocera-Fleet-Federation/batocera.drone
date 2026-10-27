@@ -3,8 +3,11 @@
 #581 required: if shutdown retires the poller during a successful slow
 check_and_self_heal, do not start the RGS service action.
 #582 requires: a failed check must still attempt reconcile on that tick so
-RGS cannot be starved by the watchdog exception; after either operation,
-a retired generation must not start another tick.
+RGS cannot be starved by the watchdog exception, but only while the
+generation is still live. Retirement during a failed check skips RGS
+(security/test_issue_582_retired_poller_rgs_action.py and the VPN skill's
+unconditional retirement gate). After either operation, a retired
+generation must not start another tick.
 """
 
 from __future__ import annotations
@@ -61,7 +64,26 @@ class Issue582PollerRetirementAfterFailureUAT(unittest.TestCase):
         check_mock.assert_called_once_with(self.settings)
         reconcile.assert_not_called()
 
+    def test_failed_check_still_reconciles_while_generation_is_live(self) -> None:
+        check_mock = mock.Mock(side_effect=RuntimeError("slow check exploded"))
+        reconcile = mock.Mock(return_value=None)
+
+        def retired(_generation: int) -> bool:
+            return reconcile.call_count > 0
+
+        stderr = self._run(retired=retired, check=check_mock, reconcile=reconcile)
+
+        check_mock.assert_called_once_with(self.settings)
+        reconcile.assert_called_once_with(self.settings)
+        self.assertIn(
+            "VPN self-heal tick failed: RuntimeError: slow check exploded",
+            stderr.getvalue(),
+        )
+
     def test_failed_check_still_reconciles_when_retired_mid_tick(self) -> None:
+        # Adjudicated against security/test_issue_582_retired_poller_rgs_action.py:
+        # retirement during a failed self-heal must not start RGS. The live-
+        # generation case is test_failed_check_still_reconciles_while_generation_is_live.
         retired_now = {"value": False}
 
         def check(_settings) -> None:
@@ -76,7 +98,7 @@ class Issue582PollerRetirementAfterFailureUAT(unittest.TestCase):
         stderr = self._run(retired=retired, check=check_mock, reconcile=reconcile)
 
         check_mock.assert_called_once_with(self.settings)
-        reconcile.assert_called_once_with(self.settings)
+        reconcile.assert_not_called()
         self.assertIn(
             "VPN self-heal tick failed: RuntimeError: slow check exploded",
             stderr.getvalue(),
