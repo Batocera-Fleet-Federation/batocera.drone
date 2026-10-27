@@ -270,7 +270,7 @@ router config) or the peer port-forwarded for the direct-WAN fallback.
 **Swarm membership** is still that paired-peer list, not a directory. An approved
 pairing (`transfer/swarm_membership.py`) is gossiped only to Drones already
 paired with the sender, so a join through any member converges on every roster.
-A newer removal beats an older add. Discovery and an unpaired caller cannot
+A newer removal beats an older add, but unsigned removals are honored only when both `origin` and `peer_id` are the authenticated introducer and the epoch is near the local clock; a paired member cannot remove a third party or force a receiver's departure (#600). Discovery and an unpaired caller cannot
 insert members, and gossip cannot replace a fingerprint already pinned locally.
 Multicast announcements are unauthenticated too: they never rewrite a paired
 peer's address/fingerprint (only `last_seen`), and the pairing code is only
