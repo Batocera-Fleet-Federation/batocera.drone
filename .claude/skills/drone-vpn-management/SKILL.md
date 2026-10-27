@@ -49,7 +49,13 @@ shared poller-generation retirement gate, like other background pollers. The
 SMTP (`smtp_manager.run_sharing_revocation_poller`) and tailnet
 (`tailnet_service.run_tailnet_sharing_revocation_poller`) sharing-revocation
 pollers use the same guarded shape and the same `_log_poller_failure`
-isolation (surrogate-safe, closed-stderr-safe).
+isolation (surrogate-safe, closed-stderr-safe). `vpn_manager.run_self_heal_poller`
+wraps both its `check_and_self_heal` and `reconcile_rgs_with_tunnel` ticks
+independently with that same isolation, and both inner helpers also report
+through `_log_poller_failure` so a surrogate-escaped path or a closed/broken
+`stderr` never escapes as `UnicodeEncodeError`/`OSError` and kills the loop;
+the retirement gate is checked unconditionally after each tick so a retired
+generation never performs a further RGS action.
 
 ## Design: stateless status, separate background pollers
 
