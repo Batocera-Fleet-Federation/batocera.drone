@@ -11070,6 +11070,73 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-592-interval-env-resilience-uat",
+      "name": "Issue #592 malformed, nonfinite and oversized intervals preserve imports and VPN polling",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_592_interval_env_resilience_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/poller_interval.py",
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_592_interval_env_resilience_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-592-sibling-poller-fresh-process-uat",
+      "name": "Issue #592 SMTP/tailnet import-time intervals and all three pollers survive unusable env values in a fresh process",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_592_sibling_poller_fresh_process_uat.py"
+      ],
+      "timeoutSeconds": 600,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/common/poller_interval.py",
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_592_sibling_poller_fresh_process_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1

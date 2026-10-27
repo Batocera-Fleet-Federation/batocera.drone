@@ -132,7 +132,8 @@ exists on top of pairing, etc.). The concrete differences:
   never overrides an existing local configuration.
 - **Revocation poller**: `run_sharing_revocation_poller()` — identical
   shape to VPN's, its own `DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS` env
-  var (default 300s, floored at 30s), own `_SMTP_SHARING_POLLER_STARTED`
+  var (default 300s, floored at 30s; a malformed, non-finite, or over-a-year value
+  falls back to 300s via `common/poller_interval.py` so import never fails), own `_SMTP_SHARING_POLLER_STARTED`
   guard flag in `create_server()`.
 
 ## The audit_log / notifications tables
