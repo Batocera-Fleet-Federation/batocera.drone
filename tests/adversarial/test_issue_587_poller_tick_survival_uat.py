@@ -24,6 +24,13 @@ import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 SAMPLE_OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nauth-user-pass\n"
 PEER = {"drone_id": "peer-1", "name": "Peer"}
 REAL = object()  # marker: run the real check_sharing_revocation for this tick
@@ -80,7 +87,7 @@ class Issue587PollerTickSurvivalUAT(unittest.TestCase):
 
     @contextlib.contextmanager
     def _peer_says_sharing_off(self, paired=PEER):
-        missing = vpn_manager.HTTPError("https://peer/v1/api/peer/vpn/config", 404, "missing", None, None)
+        missing = _verified_tls(vpn_manager.HTTPError("https://peer/v1/api/peer/vpn/config", 404, "missing", None, None))
         if isinstance(paired, list):
             paired_patch = mock.patch("app.transfer.local_network.get_paired_peer", side_effect=paired)
         else:
