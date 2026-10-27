@@ -906,7 +906,6 @@ try:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
-        poller_generation as _poller_generation,
         retire_pollers as _retire_pollers,
     )
 except ImportError:
@@ -917,7 +916,6 @@ except ImportError:
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
-        poller_generation as _poller_generation,
         retire_pollers as _retire_pollers,
     )
 _DOWNLOAD_MANAGER = None
@@ -2633,14 +2631,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # Backgrounded forever-loop: the only way to learn a peer revoked
         # sharing is to periodically ask it (Drones are outbound-only, no push
         # channel) -- see run_sharing_revocation_poller's own docstring.
-        # The generation is captured here, before the thread starts, so a retirement that
-        # lands before the thread runs still retires it.
-        Thread(
-            target=_vpn_manager.run_sharing_revocation_poller,
-            args=(settings, _poller_generation()),
-            name="drone-vpn-sharing-revocation",
-            daemon=True,
-        ).start()
+        Thread(target=_vpn_manager.run_sharing_revocation_poller, args=(settings,), name="drone-vpn-sharing-revocation", daemon=True).start()
     if not _VPN_SELF_HEAL_POLLER_STARTED and swarm_enabled:
         _VPN_SELF_HEAL_POLLER_STARTED = True
         # Backgrounded forever-loop: detects and recovers from a broken tunnel
