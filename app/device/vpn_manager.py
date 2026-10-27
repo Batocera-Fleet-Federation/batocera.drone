@@ -116,6 +116,11 @@ _UNHEALTHY_LOG_MIN_MATCHES = 10
 _CONNECT_LOCK = Lock()
 # Imports call the public save helpers, so this lock must be reentrant.
 _CREDENTIALS_LOCK = RLock()
+# Innermost leaf lock guarding only _save_state's read-modify-write. Nothing else
+# is acquired while it is held, so it is safe under _CONNECT_LOCK and
+# _CREDENTIALS_LOCK alike (taking _CREDENTIALS_LOCK in _save_state would invert
+# against revocation's _CREDENTIALS_LOCK -> disconnect -> _CONNECT_LOCK order).
+_STATE_LOCK = Lock()
 
 # Substrings openvpn's own log uses; matched independent of version/provider
 # wording differences beyond these fairly stable phrases.
@@ -212,10 +217,15 @@ def _load_state(settings: Settings) -> dict:
 
 
 def _save_state(settings: Settings, **updates) -> dict:
-    state = _load_state(settings)
-    state.update(updates)
-    _save_state_payload(_state_database_path(settings.userdata_root), VPN_STATE_NAMESPACE, state)
-    return state
+    # The load/merge/save must be one atomic step: a concurrent writer that only
+    # means to touch its own fields (e.g. the status poll's connected_at) would
+    # otherwise write back a stale copy of source_peer_id/has_credentials and
+    # restore a previous peer's revocation authority over a newer import.
+    with _STATE_LOCK:
+        state = _load_state(settings)
+        state.update(updates)
+        _save_state_payload(_state_database_path(settings.userdata_root), VPN_STATE_NAMESPACE, state)
+        return state
 
 
 # ------------------------------------------------------------------ config

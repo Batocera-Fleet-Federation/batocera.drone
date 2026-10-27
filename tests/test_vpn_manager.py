@@ -1022,6 +1022,32 @@ class CheckSharingRevocationTests(unittest.TestCase):
                     self.assertIsNone(state["revoked_at"])
                     self.assertEqual(vpn_manager.auth_path(settings).read_text(), "new-user\nnew-pass\n")
 
+    def test_concurrent_state_updates_do_not_restore_stale_fields(self) -> None:
+        # A slow field-only write (the status poll) must not clobber provenance
+        # that another writer saved while it was in flight.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            in_save = Event()
+            release = Event()
+            real_save = vpn_manager._save_state_payload
+
+            def slow_save(*args, **kwargs):
+                if not in_save.is_set():
+                    in_save.set()
+                    self.assertTrue(release.wait(timeout=5))
+                return real_save(*args, **kwargs)
+
+            with ThreadPoolExecutor(max_workers=2) as executor, \
+                    mock.patch.object(vpn_manager, "_save_state_payload", side_effect=slow_save):
+                status_write = executor.submit(vpn_manager._save_state, settings, connected_at=None)
+                self.assertTrue(in_save.wait(timeout=5))
+                provenance_write = executor.submit(vpn_manager._save_state, settings, source_peer_id="peer-2")
+                release.set()
+                status_write.result(timeout=5)
+                provenance_write.result(timeout=5)
+
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "peer-2")
+
     def test_import_waits_for_revocation_cleanup(self) -> None:
         # The compare and wipe must be one critical section: an import that
         # arrives during disconnect must finish after the old credentials go.

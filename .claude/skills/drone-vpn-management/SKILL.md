@@ -80,6 +80,10 @@ credential saves, complete peer imports, and revocation cleanup share a separate
 reentrant `_CREDENTIALS_LOCK`. Nested save helpers require reentrancy; keep peer
 network I/O outside this lock. Revocation takes this lock before disconnecting
 (which takes `_CONNECT_LOCK`); never acquire these locks in the reverse order.
+Every `_save_state` read-modify-write runs under a leaf `_STATE_LOCK` (nothing else is
+acquired while held), so a status poll's field update can't write back stale provenance.
+Don't take `_CREDENTIALS_LOCK` inside `_save_state`: connect/disconnect call it under
+`_CONNECT_LOCK`, which would invert against revocation.
 
 ## Root privilege model: direct subprocess, no IPC
 
