@@ -6,6 +6,7 @@ assumes a specific provider's .ovpn wording beyond standard OpenVPN
 directives.
 """
 
+import io
 import stat
 import subprocess
 import tempfile
@@ -1013,6 +1014,18 @@ class CheckSharingRevocationTests(unittest.TestCase):
             settings = self._imported_settings(tmp)
             with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("boom")):
                 self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+
+    def test_never_raises_when_stderr_rejects_surrogate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            raw = io.BytesIO()
+            strict_stderr = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+            with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("roster \udcff")), \
+                    mock.patch.object(vpn_manager.sys, "stderr", strict_stderr):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            self.assertTrue(vpn_manager._load_state(settings)["has_credentials"])
+            strict_stderr.flush()
+            self.assertIn(b"\\udcff", raw.getvalue())
 
     def test_poller_continues_after_unexpected_check_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

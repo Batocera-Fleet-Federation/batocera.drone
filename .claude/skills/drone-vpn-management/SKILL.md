@@ -45,7 +45,11 @@ revocation disconnects and removes credentials even when nobody opens the VPN
 page. `check_sharing_revocation()` handles expected lookup and peer failures;
 the poller must also catch and log unexpected exceptions around each tick so a
 single failure cannot permanently stop future revocation checks. It uses the
-shared poller-generation retirement gate, like other background pollers.
+shared poller-generation retirement gate, like other background pollers. The
+SMTP (`smtp_manager.run_sharing_revocation_poller`) and tailnet
+(`tailnet_service.run_tailnet_sharing_revocation_poller`) sharing-revocation
+pollers use the same guarded shape and the same `_log_poller_failure`
+isolation (surrogate-safe, closed-stderr-safe).
 
 ## Design: stateless status, separate background pollers
 
@@ -320,12 +324,14 @@ bias (see "Design" above), because unlike status, an on-demand recompute
 cannot detect a revocation nobody is actively looking for.
 
 - `run_sharing_revocation_poller(settings)` is a forever-loop (sleep, then
-  `check_sharing_revocation`), started as its own daemon thread from
+  `check_sharing_revocation` inside an `Exception` guard that logs via
+  `_log_poller_failure`), started as its own daemon thread from
   `create_server()` **exactly like `maybe_auto_connect`** — a
   `_VPN_SHARING_POLLER_STARTED` guard flag, threading owned by the caller, the
   function itself threading-agnostic. Interval: `DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS`
   (default 300s, floored at 30s) — an ops/test-only env var, not a UI setting,
-  matching `DRONE_VPN_DIR`'s precedent.
+  matching `DRONE_VPN_DIR`'s precedent. The SMTP and tailnet sharing-revocation
+  pollers use this same guarded shape.
 - `check_sharing_revocation(settings)` is a no-op unless `source_peer_id` is
   set *and* `has_credentials` is true (nothing to revoke otherwise). It
   resolves the source peer via `local_network.get_paired_peer` and re-calls
@@ -710,6 +716,12 @@ oversell this feature as "fixes" that class of problem when explaining it.
 - Rendering the revoked-reason notice only in `renderVpnPage`'s static
   one-time template instead of the live-polled `vpnRevokedNotice` node —
   revocation can happen while the page is already open.
+- Letting an unexpected `Exception` from `check_sharing_revocation` (including
+  a naive stderr print of unprintable/surrogate text, or a closed stderr pipe)
+  kill `run_sharing_revocation_poller` — that thread is the only background
+  path that wipes imported credentials. Catch `Exception` around each tick and
+  log through `_log_poller_failure`; apply the same guard to the SMTP and
+  tailnet sharing-revocation pollers.
 
 ## Expected output format
 

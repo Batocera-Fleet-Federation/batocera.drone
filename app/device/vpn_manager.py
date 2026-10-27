@@ -998,7 +998,11 @@ def check_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"VPN sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        # The naive f-string print used to raise on unprintable/surrogate
+        # exception text or a closed stderr, which is the one way this
+        # "never raises" helper actually escaped. Isolate the report the
+        # same way the poller does.
+        _log_poller_failure("VPN sharing revocation check failed", error)
         return False
 
 
@@ -1012,6 +1016,12 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     outbound-only with no push channel, and unlike ``status()`` this cannot be
     a passive on-demand recompute, because the whole point is to disconnect
     and wipe credentials even if nobody is looking at the VPN page.
+
+    Each tick is wrapped so an unexpected Exception from
+    ``check_sharing_revocation`` (including a report that itself fails) is
+    logged via ``_log_poller_failure`` and the loop continues. Only
+    ``Exception`` is absorbed; a ``BaseException`` such as KeyboardInterrupt
+    is a shutdown signal and propagates.
     """
     interval = max(30.0, float(os.environ.get("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", "300")))
     generation = poller_generation()
@@ -1290,17 +1300,14 @@ def run_self_heal_poller(settings: Settings) -> None:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
-        self_heal_failed = False
         try:
             check_and_self_heal(settings)
         except Exception as error:
-            self_heal_failed = True
-            # One unexpected failure must not kill the poller (and RGS reconcile with it).
+            # One unexpected failure must not kill the poller.
             _log_poller_failure("VPN self-heal tick failed", error)
-        # Self-heal can perform slow I/O. Preserve the shutdown gate before
-        # reconciliation after a successful check; on failure, still make the
-        # independent RGS attempt so it cannot be starved by this tick.
-        if not self_heal_failed and poller_retired(generation):
+        # Self-heal can perform slow I/O. A generation retired while either
+        # outcome was in flight must not perform further RGS actions.
+        if poller_retired(generation):
             return
         # Reconcile independently of self-heal success: the two concerns share
         # a cadence, but a failed watchdog check must not skip RGS recovery.

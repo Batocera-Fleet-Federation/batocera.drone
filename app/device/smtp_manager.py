@@ -437,15 +437,36 @@ def check_sharing_revocation(settings: Settings) -> bool:
         except Exception:
             return False
     except Exception as error:
-        print(f"SMTP sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        _log_poller_failure("SMTP sharing revocation check failed", error)
         return False
+
+
+def _poller_error_detail(error: Exception) -> str:
+    """Format an unexpected poller exception without trusting its __str__."""
+    try:
+        detail = str(error)
+    except Exception:
+        detail = "<unprintable exception>"
+    return f"{error.__class__.__name__}: {detail}"
+
+
+def _log_poller_failure(message: str, error: Exception) -> None:
+    """Report a poller tick failure without letting the report stop the poller."""
+    try:
+        text = f"{message}: {_poller_error_detail(error)}"
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+        print(text, file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def run_sharing_revocation_poller(settings: Settings) -> None:
     """Forever-loop, mirrors ``vpn_manager.run_sharing_revocation_poller()``:
     started as its own daemon thread from ``create_server()``. A periodic
     background check is the only way to learn about revocation at all --
-    Drones are outbound-only with no push channel.
+    Drones are outbound-only with no push channel. Each tick is wrapped so
+    an unexpected Exception is logged via ``_log_poller_failure`` and the
+    loop continues; a BaseException still propagates.
     """
     interval = max(30.0, SMTP_SHARING_CHECK_INTERVAL_SECONDS)
     generation = poller_generation()
@@ -453,7 +474,10 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
         time.sleep(interval)
         if poller_retired(generation):
             return
-        check_sharing_revocation(settings)
+        try:
+            check_sharing_revocation(settings)
+        except Exception as error:
+            _log_poller_failure("SMTP sharing revocation check failed", error)
 
 
 # --------------------------------------------------------------- sending

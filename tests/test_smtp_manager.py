@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 import ast
@@ -325,6 +326,31 @@ class CheckSharingRevocationTests(unittest.TestCase):
             settings = self._imported_settings(tmp)
             with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("boom")):
                 self.assertFalse(smtp_manager.check_sharing_revocation(settings))
+
+    def test_never_raises_when_stderr_rejects_surrogate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            raw = io.BytesIO()
+            strict_stderr = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+            with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("roster \udcff")), \
+                    mock.patch.object(smtp_manager.sys, "stderr", strict_stderr):
+                self.assertFalse(smtp_manager.check_sharing_revocation(settings))
+            self.assertEqual(smtp_manager._load_state(settings)["password"], "hunter2")
+            strict_stderr.flush()
+            self.assertIn(b"\\udcff", raw.getvalue())
+
+    def test_poller_continues_after_unexpected_check_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(smtp_manager, "poller_generation", return_value=7), \
+                    mock.patch.object(smtp_manager, "poller_retired", side_effect=[False, False, True]), \
+                    mock.patch.object(smtp_manager.time, "sleep"), \
+                    mock.patch.object(smtp_manager, "check_sharing_revocation", side_effect=[RuntimeError("boom"), False]) as check, \
+                    mock.patch.object(smtp_manager, "_log_poller_failure") as log_failure:
+                smtp_manager.run_sharing_revocation_poller(settings)
+
+            self.assertEqual(check.call_count, 2)
+            log_failure.assert_called_once()
 
 
 class BootstrapSmtpFromSwarmTests(unittest.TestCase):
