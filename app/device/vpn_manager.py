@@ -953,12 +953,30 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     has no working credentials anymore. Only a genuine fresh
     ``save_uploaded_config`` call (a real new upload) can clear provenance.
     """
-    disconnect(settings)
+    stop_error: Optional[BaseException] = None
     try:
-        auth_path(settings).unlink(missing_ok=True)
-    except OSError:
-        pass
-    _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+        disconnect(settings)
+    except BaseException as error:
+        stop_error = error
+        raise
+    finally:
+        # Revoked credentials must not survive a failure to stop OpenVPN.
+        try:
+            auth_path(settings).unlink(missing_ok=True)
+        except OSError:
+            # Keep has_credentials set when the secret is still on disk. The
+            # next revocation tick must retry the wipe instead of treating a
+            # failed unlink as completed cleanup.
+            if stop_error is not None:
+                _log_poller_failure("VPN sharing revocation check failed", stop_error)
+            raise
+        try:
+            _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+        except Exception:
+            if stop_error is not None:
+                # The state failure is what propagates; don't lose the stop failure.
+                _log_poller_failure("VPN sharing revocation check failed", stop_error)
+            raise
 
 
 def check_sharing_revocation(settings: Settings) -> bool:
@@ -987,14 +1005,20 @@ def check_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
+            try:
+                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
+            except Exception as error:
+                _log_poller_failure("VPN sharing revocation check failed", error)
             return True
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/vpn/config", settings, peer_id=source_peer_id)
             return False
         except HTTPError as error:
             if error.code == 404:
-                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
+                try:
+                    _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
+                except Exception as disconnect_error:
+                    _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
                 return True
             return False
         except Exception:

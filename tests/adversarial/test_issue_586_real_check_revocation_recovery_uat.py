@@ -125,15 +125,15 @@ class Issue586RealCheckRevocationRecoveryUAT(unittest.TestCase):
         self.assertEqual(stderr.getvalue().count("VPN sharing revocation check failed"), 1)
         self.assertIn("VPN sharing revocation check failed: RuntimeError: state database locked", stderr.getvalue())
 
-    def test_revocation_interrupted_by_disconnect_error_completes_on_later_tick(self) -> None:
+    def test_disconnect_error_does_not_defer_confirmed_revocation_to_later_tick(self) -> None:
         self._import_shared_config()
-        disconnect = mock.Mock(side_effect=[RuntimeError("pid lookup failed"), {"status": "not_running"}])
+        disconnect = mock.Mock(side_effect=RuntimeError("pid lookup failed"))
 
         with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
                 mock.patch.object(vpn_manager, "disconnect", disconnect):
             self._run_live_ticks(live_ticks=2)
 
-        self.assertEqual(disconnect.call_count, 2)
+        self.assertEqual(disconnect.call_count, 1, "confirmed revocation wipes on its first tick; later ticks are no-ops")
         state = vpn_manager._load_state(self.settings)
         self.assertFalse(state["has_credentials"])
         self.assertIn("no longer paired", state["revoked_reason"])
