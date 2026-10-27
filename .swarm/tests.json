@@ -5023,6 +5023,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-security-issue-626-fresh-smtp-save",
+      "name": "Issue #626 fresh SMTP save survives stale revocation",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_626_fresh_smtp_save_survives_revocation.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "tests/adversarial/security/test_issue_626_fresh_smtp_save_survives_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
