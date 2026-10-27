@@ -990,14 +990,20 @@ def check_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
+            try:
+                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_GONE)
+            except Exception as error:
+                _log_poller_failure("VPN sharing revocation check failed", error)
             return True
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/vpn/config", settings, peer_id=source_peer_id)
             return False
         except HTTPError as error:
             if error.code == 404:
-                _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
+                try:
+                    _revoke_local_credentials(settings, _SHARING_REVOKED_PEER_OFF)
+                except Exception as disconnect_error:
+                    _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
                 return True
             return False
         except Exception:
