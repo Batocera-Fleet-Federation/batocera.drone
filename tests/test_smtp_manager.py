@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 
+from app.transfer.peer_connectivity import _PEER_TLS_EVIDENCE
+
 import app.device.smtp_manager as smtp_manager
 from app.common.settings import Settings
 
@@ -305,12 +307,39 @@ class CheckSharingRevocationTests(unittest.TestCase):
             settings = self._imported_settings(tmp)
             peer = {"drone_id": "peer-1", "name": "Peer One"}
             error = HTTPError("https://peer/v1/api/peer/smtp/config", 404, "not found", None, None)
+            error._peer_tls_evidence = _PEER_TLS_EVIDENCE
             with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
                     mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
                 self.assertTrue(smtp_manager.check_sharing_revocation(settings))
             state = smtp_manager._load_state(settings)
             self.assertEqual(state["password"], "")
             self.assertIn("turned off sharing", state["revoked_reason"])
+
+    def test_does_not_revoke_on_plaintext_http_404(self) -> None:
+        # An http_only route is unauthenticated: an on-path 404 must not wipe anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("http://peer/v1/api/peer/smtp/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(smtp_manager.check_sharing_revocation(settings))
+            state = smtp_manager._load_state(settings)
+            self.assertNotEqual(state["password"], "")
+            self.assertEqual(state["revoked_reason"], "")
+
+    def test_redirected_plaintext_404_does_not_revoke(self) -> None:
+        # The error URL may claim https after a redirect; the dialed route decides.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://elsewhere/v1/api/peer/smtp/config", 404, "not found", None, None)
+            error.peer_route = "http://peer"
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(smtp_manager.check_sharing_revocation(settings))
+            self.assertEqual(smtp_manager._load_state(settings)["revoked_reason"], "")
 
     def test_does_not_revoke_on_transient_network_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
