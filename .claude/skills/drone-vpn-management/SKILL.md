@@ -355,7 +355,10 @@ cannot detect a revocation nobody is actively looking for.
   (default 300s, floored at 30s; a malformed, non-finite, or over-a-year value falls
   back to the default via `common/poller_interval.py`, never kills the poller) — an ops/test-only env var, not a UI setting,
   matching `DRONE_VPN_DIR`'s precedent. The SMTP and tailnet sharing-revocation
-  pollers use this same guarded shape.
+  pollers use this same guarded shape. The VPN poller claims
+  `runtime_state.claim_poller()` at function entry so a retirement that lands
+  after `Thread.start()` but before the thread reads `poller_generation()`
+  still exits before any check.
 - `check_sharing_revocation(settings)` is a no-op unless `source_peer_id` is
   set *and* `has_credentials` is true (nothing to revoke otherwise). It
   resolves the source peer via `local_network.get_paired_peer` and re-calls

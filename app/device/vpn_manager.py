@@ -52,7 +52,13 @@ try:
     from ..common.logging_setup import _drone_log
     from ..common.logtail import _tail_lines
     from ..common.poller_interval import poller_interval_from_env
-    from ..common.runtime_state import poller_generation, poller_retired
+    from ..common.runtime_state import (
+        claim_poller,
+        poller_claim_retired,
+        poller_generation,
+        poller_retired,
+        release_poller_claim,
+    )
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -65,7 +71,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _drone_log  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from common.poller_interval import poller_interval_from_env  # type: ignore
-    from common.runtime_state import poller_generation, poller_retired  # type: ignore
+    from common.runtime_state import (  # type: ignore
+        claim_poller,
+        poller_claim_retired,
+        poller_generation,
+        poller_retired,
+        release_poller_claim,
+    )
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -1055,7 +1067,7 @@ def check_sharing_revocation(settings: Settings) -> bool:
         return False
 
 
-def run_sharing_revocation_poller(settings: Settings) -> None:
+def run_sharing_revocation_poller(settings: Settings, *, generation: Optional[int] = None) -> None:
     """Forever-loop checking whether an imported config's sharing was revoked.
 
     Intended to run on its own daemon thread, started by the caller exactly
@@ -1071,22 +1083,35 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     logged via ``_log_poller_failure`` and the loop continues. Only
     ``Exception`` is absorbed; a ``BaseException`` such as KeyboardInterrupt
     is a shutdown signal and propagates.
+
+    ``claim_poller`` is taken at function entry so a retirement that lands
+    after the thread starts but before ``poller_generation()`` is read still
+    stops the loop before any check. Callers that already know the generation
+    may pass it so a thread that has not been scheduled yet is bound to the
+    pre-start generation.
     """
+    claim = claim_poller()
     try:
-        interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
-    except Exception:
-        interval = 300.0
-    generation = poller_generation()
-    while True:
-        time.sleep(interval)
-        if poller_retired(generation):
-            return
         try:
-            check_sharing_revocation(settings)
-        except Exception as error:
-            # Keep this background poller alive even if a check unexpectedly
-            # raises outside its own error handling.
-            _log_poller_failure("VPN sharing revocation check failed", error)
+            interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+        except Exception:
+            interval = 300.0
+        if generation is None:
+            generation = poller_generation()
+        if poller_claim_retired(claim):
+            return
+        while True:
+            time.sleep(interval)
+            if poller_claim_retired(claim) or poller_retired(generation):
+                return
+            try:
+                check_sharing_revocation(settings)
+            except Exception as error:
+                # Keep this background poller alive even if a check unexpectedly
+                # raises outside its own error handling.
+                _log_poller_failure("VPN sharing revocation check failed", error)
+    finally:
+        release_poller_claim(claim)
 
 
 # ------------------------------------------------------------ self-heal
