@@ -11579,6 +11579,142 @@
         "servers": []
       },
       "timeoutSeconds": 60
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_599_http_only_plaintext_404_live_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-599-http-only-plaintext-404-live-uat",
+      "name": "Issue #599: forged plaintext 404 from an http_only peer must not wipe VPN, SMTP, or Tailnet secrets",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_599_http_only_plaintext_404_live_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_599_pinned_https_404_still_revokes_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-599-pinned-https-404-still-revokes-uat",
+      "name": "Issue #599: a 404 over pinned HTTPS still revokes VPN, SMTP, and Tailnet sharing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_599_pinned_https_404_still_revokes_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_599_status_redirect_and_stamp_boundaries_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-599-status-redirect-and-stamp-boundaries-uat",
+      "name": "Issue #599: non-404 statuses, redirected http 404s, and dialed-route stamps cannot forge revocation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_599_status_redirect_and_stamp_boundaries_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_599_out_of_scope_tls_redirect_plaintext_404_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-599-out-of-scope-tls-redirect-plaintext-404",
+      "name": "Out of scope for #599: pinned HTTPS 302 onto a plaintext 404 is still treated as authenticated revocation",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "openssl"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_599_out_of_scope_tls_redirect_plaintext_404_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
