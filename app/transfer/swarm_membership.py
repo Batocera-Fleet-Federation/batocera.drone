@@ -6,9 +6,11 @@ stored. Once two Drones approve a pairing, each one already trusts the
 other, so that approval is shared with the peers they already trust. Every
 Drone keeps its own paired-peer list; there is no central roster.
 
-Removals use the same path. A newer removal beats an older add, and the
-removed Drone is told with the certificate that was pinned while it was
-still a member so it drops out instead of staying on its own roster.
+A newer removal beats an older add. Records are unsigned, so the only
+authenticated identity is the paired introducer (the mTLS caller). A removal
+is honored only when it names that introducer as both origin and peer. A local
+operator removal cannot authorize other peers to evict that Drone, and received
+departures are not relayed. A paired Drone cannot force a receiver's departure.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 MEMBERSHIP_NAMESPACE = "swarm_membership"
 MAX_FORWARD_HOP = 3
 _MAX_RECORDS = 64
+# A removal outranks every add with a lower epoch, so a forged huge epoch would
+# make a member unrejoinable. Clocks tick once per event; this is far above any
+# real divergence between two Drones' clocks.
+_MAX_REMOVAL_EPOCH_AHEAD = 1_000_000
 _MAX_PEM_CHARS = 20000
 _CARD_FIELDS = (
     "name",
@@ -91,18 +97,12 @@ def record_approved_member(settings: Any, peer: dict) -> None:
 
 
 def publish_forget(settings: Any, peer_id: str) -> bool:
-    """Drop a member locally and push that removal until the swarm agrees."""
+    """Drop a member locally; this operator has no authority over other rosters."""
     normalized = str(peer_id or "").strip()
-    snapshot = _local_network.get_paired_peer(settings, normalized)
     removed = _local_network.forget_peer(settings, normalized)
     if not removed:
         return False
-    if snapshot:
-        try:
-            _post_to_peer(settings, snapshot, hop=0)
-        except Exception:
-            pass
-        _unlink_cert(settings, normalized)
+    _unlink_cert(settings, normalized)
     propagate_membership(settings, hop=0, skip_ids={normalized})
     return True
 
@@ -140,8 +140,9 @@ def propagate_membership(settings: Any, *, hop: int = 0, skip_ids: Optional[set[
                 failed = True
                 continue
             if str(response.get("status") or "") == "removed":
-                _apply_departure_records(settings, response.get("records"))
-                return
+                # A peer's response cannot authorize this Drone's departure.
+                failed = True
+                continue
             try:
                 _accept_records(settings, response.get("records"), peer_id)
             except MembershipRejected:
@@ -168,23 +169,16 @@ def handle_membership_request(settings: Any, payload: dict, caller_id: str) -> d
             return _removed_response(settings, tombstone)
         raise MembershipRejected(403, "paired client certificate required")
     hop = _hop(payload)
-    changed, removals = _accept_records(settings, payload.get("records"), caller)
-    for snapshot in removals:
-        removed_id = _peer_id(snapshot)
-        try:
-            _post_to_peer(settings, snapshot, hop=min(hop + 1, MAX_FORWARD_HOP))
-        except Exception:
-            pass
-        _unlink_cert(settings, removed_id)
+    changed = _accept_records(settings, payload.get("records"), caller)
     if hop < MAX_FORWARD_HOP and (changed or _is_dirty(settings)):
         propagate_membership(settings, hop=hop + 1, skip_ids={caller})
-    view = membership_view(settings)
+    view = _gossip_view(settings)
     view["status"] = "synced"
     return view
 
 
 def membership_view(settings: Any) -> dict:
-    """Serializable roster this Drone is willing to attest."""
+    """Local roster and tombstones; outgoing syncs use the filtered gossip view."""
 
     def read(state: dict) -> dict:
         records = []
@@ -196,34 +190,35 @@ def membership_view(settings: Any) -> dict:
     return _with_state(settings, read)
 
 
-def _accept_records(settings: Any, records: Any, introducer_id: str) -> tuple[bool, list[dict]]:
+def _gossip_view(settings: Any) -> dict:
+    """Only our own departure can be authenticated by our outgoing channel.
+
+    Keep local and received tombstones for stale-add suppression, but never
+    send them as authority to remove a third party in a request or sync reply.
+    """
+    view = membership_view(settings)
+    own_id = str(settings.device_id)
+    view["records"] = [
+        record for record in view["records"]
+        if record["op"] != "remove"
+        or (record["peer_id"] == own_id and record["origin"] == own_id)
+    ]
+    return view
+
+
+def _accept_records(settings: Any, records: Any, introducer_id: str) -> bool:
     introducer = str(introducer_id or "").strip()
     if _local_network.get_paired_peer(settings, introducer) is None:
         raise MembershipRejected(403, "membership introduction is not from a paired Drone")
     parsed = _parse_records(records)
 
-    def mutate(state: dict) -> tuple[bool, list[dict]]:
+    def mutate(state: dict) -> bool:
         if state.get("departed"):
-            return False, []
+            return False
         own_id = str(settings.device_id)
-        # A removal of this Drone ends its membership. Later adds in the same
-        # payload must not be stored, or the next reconcile would rejoin it.
-        for record in parsed:
-            if record["peer_id"] != own_id or record["op"] != "remove":
-                continue
-            current = state["records"].get(own_id)
-            if not _beats(record, current):
-                continue
-            state["departed"] = True
-            state["clock"] = max(int(state.get("clock") or 0), int(record["epoch"]))
-            state["records"][own_id] = record
-            for peer in list(_local_network.paired_peers(settings)):
-                _local_network.forget_peer(settings, _peer_id(peer), publish_membership=False)
-                _unlink_cert(settings, _peer_id(peer))
-            return True, []
+        parsed_records = [record for record in parsed if _removal_allowed(record, introducer, state)]
         changed = False
-        removals: list[dict] = []
-        for record in parsed:
+        for record in parsed_records:
             peer_id = record["peer_id"]
             if peer_id == own_id:
                 continue
@@ -236,15 +231,38 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> tuple[bo
                 state["records"][peer_id] = record
                 if snapshot:
                     _local_network.forget_peer(settings, peer_id, publish_membership=False)
-                    removals.append(snapshot)
+                    _unlink_cert(settings, peer_id)
                 changed = True
+                continue
+            if current is not None and current.get("op") == "remove":
+                # A tombstone is an authorization boundary. A departed member's
+                # certificate is known to every former member, so a third party
+                # replaying it must not restore trust; only an explicit local
+                # approval (record_approved_member) supersedes the tombstone.
                 continue
             if not _apply_add(settings, state, record):
                 continue
             changed = True
-        return changed, removals
+        return changed
 
     return _with_state(settings, mutate)
+
+
+def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
+    """Whether a remove record may be honored from this authenticated introducer.
+
+    Adds are always judged by their certificate pin elsewhere. A removal carries
+    no proof, so it must at least be the introducer's own act and sit within a
+    sane distance of the local clock.
+    """
+    if record["op"] != "remove":
+        return True
+    # mTLS authenticates only the introducer. Since records have no signature,
+    # it cannot authorize that peer to remove another member, even if the
+    # unsigned origin field claims the introducer as author.
+    if record["origin"] != introducer or record["peer_id"] != introducer:
+        return False
+    return int(record["epoch"]) <= int(state.get("clock") or 0) + _MAX_REMOVAL_EPOCH_AHEAD
 
 
 def _apply_add(settings: Any, state: dict, record: dict) -> bool:
@@ -317,30 +335,6 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
     return True
 
 
-def _apply_departure_records(settings: Any, records: Any) -> None:
-    own_id = str(settings.device_id)
-    chosen = None
-    for record in _parse_records(records):
-        if record["peer_id"] == own_id and record["op"] == "remove":
-            chosen = record
-            break
-    if chosen is None:
-        return
-
-    def mutate(state: dict) -> None:
-        current = state["records"].get(own_id)
-        if not _beats(chosen, current):
-            return
-        state["departed"] = True
-        state["clock"] = max(int(state.get("clock") or 0), int(chosen["epoch"]))
-        state["records"][own_id] = chosen
-        for peer in list(_local_network.paired_peers(settings)):
-            _local_network.forget_peer(settings, _peer_id(peer), publish_membership=False)
-            _unlink_cert(settings, _peer_id(peer))
-
-    _with_state(settings, mutate)
-
-
 def peer_id_for_removed_fingerprint(settings: Any, fingerprint: str) -> str:
     """Return a removed member whose pinned certificate matches ``fingerprint``."""
     expected = str(fingerprint or "").strip().lower()
@@ -383,7 +377,7 @@ def record_local_removal(settings: Any, peer_id: str, previous: Optional[dict] =
 
 
 def _post_to_peer(settings: Any, peer: dict, *, hop: int) -> dict:
-    payload = membership_view(settings)
+    payload = _gossip_view(settings)
     payload["status"] = "sync"
     payload["introducer_id"] = str(settings.device_id)
     payload["hop"] = int(hop)
