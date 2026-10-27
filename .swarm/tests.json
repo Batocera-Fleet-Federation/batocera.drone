@@ -4497,6 +4497,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_599_sibling_revocation_verified_channel.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-599-sibling-revocation-verified-channel",
+      "name": "Issue #599 forged plaintext 404 cannot wipe imported SMTP or Tailnet secrets",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/security/test_issue_599_sibling_revocation_verified_channel.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
