@@ -42,6 +42,8 @@ _PYTIME_T_NANOSECONDS_LIMIT = 2 ** 63
 UNUSABLE_INTERVALS = (
     "abc",
     "5m",
+    "0x1.0p+4",
+    "--1",
     "inf",
     "+inf",
     "-inf",

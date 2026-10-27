@@ -39,7 +39,7 @@ class Issue592IntervalEnvResilienceUAT(unittest.TestCase):
             self.settings = Settings.from_env()
 
     def test_parser_rejects_malformed_nonfinite_and_unrepresentable_values(self) -> None:
-        for raw in ("abc", "5m", "inf", "-inf", "nan", "1e400", "1e10",
+        for raw in ("abc", "5m", "0x1.0p+4", "--1", "inf", "-inf", "nan", "1e400", "1e10",
                     str(POLLER_INTERVAL_MAX_SECONDS + 1)):
             with self.subTest(raw=raw):
                 self.assertEqual(parse_poller_interval(raw, 300.0), 300.0)
