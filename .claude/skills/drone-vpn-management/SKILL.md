@@ -381,8 +381,15 @@ cannot detect a revocation nobody is actively looking for.
   existing `disconnect()`, deletes `auth.txt`, clears `has_credentials`/
   `username`, and sets `revoked_reason` + `revoked_at`. Credential removal and
   the state update run in `finally`, so an exception from `disconnect()`
-  cannot skip cleanup after confirmed revocation. The disconnect exception
-  still reaches the check's existing error reporter. It deliberately
+  cannot skip cleanup after confirmed revocation. A refused OS signal
+  (`PermissionError` on `SIGTERM`/`SIGKILL`) is reported by `disconnect()` as
+  an error-status dict, not an exception — `_revoke_local_credentials` and the
+  `disconnect_retry_pending` retry path in `check_sharing_revocation`
+  explicitly convert that dict to a `RuntimeError` and report it via
+  `_log_poller_failure` (so it appears as `VPN sharing revocation check
+  failed`), while still setting `disconnect_retry_pending` so the failed stop
+  is retried on a later tick. The disconnect exception still reaches the
+  check's existing error reporter. It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look
