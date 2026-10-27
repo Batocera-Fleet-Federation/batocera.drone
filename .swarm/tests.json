@@ -4866,6 +4866,37 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-619-os-signal-stop-retry",
+      "name": "Security: an OS signal failure while revoking a VPN tunnel is retried",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_619_os_signal_failure_retry.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_619_os_signal_failure_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
