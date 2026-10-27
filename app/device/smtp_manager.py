@@ -45,7 +45,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 from typing import Optional
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -107,6 +107,7 @@ OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 _DIGEST_SEND_LOCK = Lock()
 _OUTBOUND_MAIL_LOCK = Lock()
 _CREDENTIALS_LOCK = RLock()
+_REVOCATION_CONTEXT = local()
 _STATE_LOCK = Lock()
 
 # Fields carried in the shared/exported payload (peer-to-peer, mirrors VPN's
@@ -323,15 +324,16 @@ def import_from_peer(settings: Settings, payload: dict, *, source_peer_id: str, 
         raise ValueError("source_peer_id is required to import a peer's SMTP configuration")
     payload = payload if isinstance(payload, dict) else {}
     update_payload = {field: payload.get(field) for field in _SHARED_FIELDS if payload.get(field) not in (None, "")}
-    update_settings(settings, update_payload)
-    state = _save_state(
-        settings,
-        source_peer_id=source_peer_id,
-        source_peer_name=str(source_peer_name or "").strip(),
-        # Imported clients never send notification digests themselves. The
-        # relay path intentionally does not consult this owner-only switch.
-        smtp_enabled=False,
-    )
+    with _CREDENTIALS_LOCK:
+        update_settings(settings, update_payload)
+        state = _save_state(
+            settings,
+            source_peer_id=source_peer_id,
+            source_peer_name=str(source_peer_name or "").strip(),
+            # Imported clients never send notification digests themselves. The
+            # relay path intentionally does not consult this owner-only switch.
+            smtp_enabled=False,
+        )
     return _sanitized(state)
 
 
@@ -409,6 +411,11 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     re-shared. Only a genuine fresh ``update_settings()`` call (a real new
     save) clears provenance.
     """
+    expected_peer = getattr(_REVOCATION_CONTEXT, "source_peer_id", None)
+    if expected_peer is not None:
+        state = _load_state(settings)
+        if state["source_peer_id"] != expected_peer or not state["password"]:
+            return
     _save_state(settings, password="", revoked_reason=reason, revoked_at=_now_iso())
 
 
@@ -419,9 +426,13 @@ def _revoke_credentials_from_peer(settings: Settings, source_peer_id: str, reaso
         if state["source_peer_id"] != source_peer_id or not state["password"]:
             return False
         try:
+            _REVOCATION_CONTEXT.source_peer_id = source_peer_id
             _revoke_local_credentials(settings, reason)
         except Exception as error:
             _log_poller_failure("SMTP sharing revocation check failed", error)
+        finally:
+            if hasattr(_REVOCATION_CONTEXT, "source_peer_id"):
+                del _REVOCATION_CONTEXT.source_peer_id
         return True
 
 

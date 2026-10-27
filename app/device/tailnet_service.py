@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 from typing import Any, Iterable, Optional
 
 try:
@@ -89,6 +89,7 @@ TAILSCALE_API_TIMEOUT_SECONDS = 15.0
 _NETWORK_REPAIR_LOCK = Lock()
 _NETWORK_REPAIR_LAST = float("-inf")
 _CREDENTIALS_LOCK = RLock()
+_REVOCATION_CONTEXT = local()
 _STATE_LOCK = Lock()
 
 
@@ -1097,8 +1098,9 @@ def import_tailnet_from_peer(settings: Settings, payload: dict, *, source_peer_i
     auth_key = str(payload.get("auth_key") or "")
     if not auth_key:
         raise ValueError("peer did not return a Tailscale auth key")
-    result = tailnet_enroll(auth_key, settings)
-    _save_sharing_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
+    with _CREDENTIALS_LOCK:
+        result = tailnet_enroll(auth_key, settings)
+        _save_sharing_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
     return result
 
 
@@ -1181,6 +1183,11 @@ def _revoke_local_sharing(settings: Settings, reason: str) -> None:
     now-orphaned entry pass the single-hop sharing gate as if it were
     self-owned. Only a genuine fresh ``tailnet_enroll()`` call clears it.
     """
+    expected_peer = getattr(_REVOCATION_CONTEXT, "source_peer_id", None)
+    if expected_peer is not None:
+        state = _load_sharing_state(settings)
+        if state["source_peer_id"] != expected_peer or not state["auth_key"]:
+            return
     _save_sharing_state(settings, auth_key="", revoked_reason=reason, revoked_at=_now_iso())
 
 
@@ -1191,9 +1198,13 @@ def _revoke_sharing_from_peer(settings: Settings, source_peer_id: str, reason: s
         if state["source_peer_id"] != source_peer_id or not state["auth_key"]:
             return False
         try:
+            _REVOCATION_CONTEXT.source_peer_id = source_peer_id
             _revoke_local_sharing(settings, reason)
         except Exception as error:
             _log_poller_failure("Tailnet sharing revocation check failed", error)
+        finally:
+            if hasattr(_REVOCATION_CONTEXT, "source_peer_id"):
+                del _REVOCATION_CONTEXT.source_peer_id
         return True
 
 
