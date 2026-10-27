@@ -51,6 +51,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 
 try:
+    from ..common.poller_interval import poller_interval_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
@@ -62,6 +63,7 @@ try:
     from . import crash_history as _crash_history
     from . import usb_enumeration as _usb_enumeration
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.poller_interval import poller_interval_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -79,7 +81,7 @@ SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECOND
 # plain-text digest/test email over a modest home upload link -- give it real
 # room rather than reusing the short default meant for a few KB of text.
 SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", "120"))
-SMTP_SHARING_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", "300"))
+SMTP_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
 # Default/fallback seed for the user-configurable digest_interval_seconds
 # setting below (1 minute - 24 hours, default 5 minutes) -- once a drone has
 # saved its own value via the admin UI, that stored value always wins over
