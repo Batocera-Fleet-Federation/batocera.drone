@@ -51,6 +51,7 @@ try:
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.logging_setup import _drone_log
     from ..common.logtail import _tail_lines
+    from ..common.poller_interval import poller_interval_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
@@ -63,6 +64,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logging_setup import _drone_log  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
+    from common.poller_interval import poller_interval_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -1023,7 +1025,10 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     ``Exception`` is absorbed; a ``BaseException`` such as KeyboardInterrupt
     is a shutdown signal and propagates.
     """
-    interval = max(30.0, float(os.environ.get("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", "300")))
+    try:
+        interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    except Exception:
+        interval = 300.0
     generation = poller_generation()
     while True:
         time.sleep(interval)

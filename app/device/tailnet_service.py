@@ -39,6 +39,7 @@ from typing import Any, Iterable, Optional
 
 try:
     from ..common.http_errors import _format_http_error
+    from ..common.poller_interval import poller_interval_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
@@ -47,6 +48,7 @@ try:
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_errors import _format_http_error  # type: ignore
+    from common.poller_interval import poller_interval_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -1001,7 +1003,10 @@ def create_invite_auth_key(settings: Settings) -> dict:
 # an active tunnel up in the first place.
 
 TAILNET_SHARING_STATE_NAMESPACE = "tailnet_sharing.json"
-TAILNET_SHARING_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", "300"))
+try:
+    TAILNET_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+except Exception:
+    TAILNET_SHARING_CHECK_INTERVAL_SECONDS = 300.0
 
 
 def _now_iso() -> str:
@@ -1241,7 +1246,10 @@ def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
     exactly, including the per-tick Exception guard and
     ``_log_poller_failure`` isolation. Started as its own daemon thread
     from ``create_server()``."""
-    interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
+    try:
+        interval = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    except Exception:
+        interval = 300.0
     generation = poller_generation()
     while True:
         time.sleep(interval)
