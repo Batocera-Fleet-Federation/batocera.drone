@@ -4735,6 +4735,42 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-615-main-finally-start-window-uat",
+      "name": "Issue #615 main() finally, Thread.start window, interval-parse, and inspect-fallback must not recapture generation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_main_finally_start_window_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/device/network_share_manager.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_main_finally_start_window_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
