@@ -3919,7 +3919,7 @@
     },
     {
       "id": "adversarial-issue-586-out-of-scope-poller-capture-race-uat",
-      "name": "Out-of-scope evidence for #586 (found while testing #594): retirement before the VPN sharing poller thread captures its generation lets it keep checking",
+      "name": "Issue #615 production starter: retire after Thread.start() and before on-thread generation fallback must yield zero checks",
       "origin": "adversarial",
       "enabled": true,
       "disruptive": false,
@@ -3942,6 +3942,7 @@
         ],
         "files": [
           "app/device/vpn_manager.py",
+          "app/drone_api.py",
           "app/common/runtime_state.py",
           "tests/adversarial/test_issue_586_out_of_scope_poller_capture_race_uat.py"
         ],
@@ -4694,6 +4695,42 @@
           "app/drone_api.py",
           "app/common/runtime_state.py",
           "tests/adversarial/test_issue_615_poller_capture_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-615-create-server-shutdown-race-uat",
+      "name": "Issue #615 create_server failure after poller start then main finally must not check; production starter dual-gate race",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_create_server_shutdown_race_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/device/network_share_manager.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_create_server_shutdown_race_uat.py"
         ],
         "mounts": [],
         "servers": []
