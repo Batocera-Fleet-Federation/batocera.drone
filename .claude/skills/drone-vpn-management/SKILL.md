@@ -350,14 +350,18 @@ cannot detect a revocation nobody is actively looking for.
   drone's paired-peer list at all, or it answers with `404` (sharing off, or
   it no longer has a config — `_handle_peer_vpn_config` returns 404 for both,
   and both mean "stop relying on this"). **Every other outcome — unreachable,
-  timeout, any other HTTP status, an unexpected exception — changes nothing.**
+  timeout, any other HTTP status, an unexpected exception while checking the
+  peer — changes nothing.**
   `check_sharing_revocation` never raises and never revokes on a guess; a
   flaky or briefly-offline peer must not strip a working VPN setup. Do not
   loosen this to "any error revokes" — that turns ordinary network flakiness
   into data loss.
 - **What revocation actually does** (`_revoke_local_credentials`): calls the
   existing `disconnect()`, deletes `auth.txt`, clears `has_credentials`/
-  `username`, and sets `revoked_reason` + `revoked_at`. It deliberately
+  `username`, and sets `revoked_reason` + `revoked_at`. Credential removal and
+  the state update run in `finally`, so an exception from `disconnect()`
+  cannot skip cleanup after confirmed revocation. The disconnect exception
+  still reaches the check's existing error reporter. It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look

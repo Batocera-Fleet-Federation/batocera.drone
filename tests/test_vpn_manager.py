@@ -978,6 +978,32 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertTrue(vpn_manager.config_path(settings).is_file())
             self.assertEqual(state["source_peer_id"], "peer-1")
 
+    def test_disconnect_exception_does_not_block_revocation_cleanup(self) -> None:
+        for peer_gone in (True, False):
+            with self.subTest(peer_gone=peer_gone), tempfile.TemporaryDirectory() as tmp:
+                settings = self._imported_settings(tmp)
+                peer = None if peer_gone else {"drone_id": "peer-1"}
+                rejection = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                failure = RuntimeError("process table unreadable")
+                with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                        mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=rejection), \
+                        mock.patch.object(vpn_manager, "_find_running_openvpn_pid", side_effect=failure), \
+                        mock.patch.object(vpn_manager, "_log_poller_failure") as log_failure:
+                    vpn_manager.check_sharing_revocation(settings)
+
+                self.assertFalse(vpn_manager.auth_path(settings).exists())
+                state = vpn_manager._load_state(settings)
+                self.assertFalse(state["has_credentials"])
+                self.assertEqual(state["username"], "")
+                expected_reason = (vpn_manager._SHARING_REVOKED_PEER_GONE if peer_gone
+                                   else vpn_manager._SHARING_REVOKED_PEER_OFF)
+                self.assertEqual(state["revoked_reason"], expected_reason)
+                self.assertIsNotNone(state["revoked_at"])
+                self.assertTrue(vpn_manager.config_path(settings).is_file())
+                self.assertEqual(state["source_peer_id"], "peer-1")
+                self.assertEqual(state["source_peer_name"], "Peer One")
+                log_failure.assert_called_once_with("VPN sharing revocation check failed", failure)
+
     def test_does_not_revoke_on_transient_network_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)
