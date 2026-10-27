@@ -43,7 +43,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.error import HTTPError
 
 try:
@@ -1133,18 +1133,23 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
 
     Never raises -- intended for an unattended background poller.
     """
+    return _check_and_self_heal(settings)[0]
+
+
+def _check_and_self_heal(settings: Settings) -> Tuple[Optional[dict], bool]:
+    """Return the public result plus whether the check failed internally."""
     try:
         if not _swarm_networking_allowed():
-            return None
+            return None, False
         state = _load_state(settings)
         if not state["self_heal_enabled"]:
-            return None
+            return None, False
         if not state["has_config"] or not state["has_credentials"]:
-            return None
+            return None, False
 
         reason = _self_heal_reason(status(settings), settings)
         if reason is None:
-            return None
+            return None, False
 
         now = datetime.now(timezone.utc)
         last_at = state["self_heal_last_at"]
@@ -1152,7 +1157,7 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
             try:
                 elapsed = (now - datetime.fromisoformat(last_at)).total_seconds()
                 if elapsed < VPN_SELF_HEAL_MIN_INTERVAL_SECONDS:
-                    return None
+                    return None, False
             except ValueError:
                 pass
 
@@ -1164,7 +1169,7 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
                 f"{int(VPN_SELF_HEAL_WINDOW_SECONDS / 60)} min -- most recent cause: {reason}",
                 file=sys.stderr, flush=True,
             )
-            return {"action": "paused", "reason": reason}
+            return {"action": "paused", "reason": reason}, False
 
         attempts.append(now.replace(microsecond=0).isoformat())
         result = reconnect(settings)
@@ -1175,10 +1180,10 @@ def check_and_self_heal(settings: Settings) -> Optional[dict]:
             self_heal_attempts=attempts,
         )
         print(f"VPN self-heal: reconnected after detecting: {reason}", file=sys.stdout, flush=True)
-        return {"action": "reconnected", "reason": reason, "result": result}
+        return {"action": "reconnected", "reason": reason, "result": result}, False
     except Exception as error:
         _log_poller_failure("VPN self-heal check failed", error)
-        return None
+        return None, True
 
 
 def reconcile_rgs_with_tunnel(settings: Settings) -> Optional[dict]:
@@ -1300,16 +1305,7 @@ def run_self_heal_poller(settings: Settings) -> None:
         time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
         if poller_retired(generation):
             return
-        check_failed = False
-        try:
-            check_and_self_heal(settings)
-        except Exception as error:
-            check_failed = True
-            # One unexpected failure must not kill the poller.
-            _log_poller_failure("VPN self-heal tick failed", error)
-        # A direct exception identifies an unexpectedly failed helper tick.
-        # The helper owns its operational error boundary and logs expected
-        # failures itself; its ordinary None also represents a healthy no-op.
+        _check_result, check_failed = _check_and_self_heal(settings)
         # Self-heal can perform slow I/O. A generation retired while either
         # successful check was in flight must not perform further RGS actions.
         # A failed check still gets its independent RGS attempt for this tick.
