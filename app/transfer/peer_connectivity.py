@@ -291,9 +291,32 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     if urlparse(url).scheme == "https" and peer_id and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     try:
-        with urlopen(request, timeout=timeout, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
-            raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
+        if urlparse(url).scheme == "https" and cafile:
+            # Keep the status on the connection authenticated by the cached pin.
+            # urllib follows redirects (including HTTPS -> HTTP) and can use
+            # environment proxies, so the initial URL alone proves nothing.
+            parsed_url = urlparse(url)
+            connection = http.client.HTTPSConnection(
+                parsed_url.hostname, parsed_url.port or 443, timeout=timeout, context=context,
+            )
+            try:
+                target = parsed_url.path or "/"
+                if parsed_url.query:
+                    target += "?" + parsed_url.query
+                connection.request("GET", target, headers=dict(request.header_items()))
+                response = connection.getresponse()
+                if response.status >= 300:
+                    error = HTTPError(url, response.status, response.reason, response.headers, None)
+                    error._peer_tls_evidence = _PEER_TLS_EVIDENCE
+                    raise error
+                raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
+            finally:
+                connection.close()
+        else:
+            with urlopen(request, timeout=timeout, context=context) as response:
+                raw = _read_capped(response, MAX_PEER_JSON_RESPONSE_BYTES)
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
     except URLError as error:
@@ -1111,9 +1134,8 @@ def _peer_get_json_for_peer(
             _remember_successful_peer_route(settings, normalized_peer_id, address)
             return payload, address
         except HTTPError as error:
-            # Record the route we actually dialed: error.url can differ after a
-            # redirect, and only the dialed scheme says whether the answer came
-            # over the pinned TLS channel (see peer_http_error_is_authenticated).
+            # Retain the attempted route for diagnostics. Authentication evidence
+            # is attached by _peer_get_json on the verified connection itself.
             try:
                 error.peer_route = address
             except Exception:
@@ -1134,22 +1156,14 @@ def _peer_get_json_for_peer(
     raise ValueError("no peer address available")
 
 
-def peer_http_error_is_authenticated(error: HTTPError) -> bool:
-    """True only when ``error`` was received over a pinned HTTPS route.
+# Process-local evidence attached only after a pinned TLS request receives a
+# status. Route metadata and HTTPError.url are diagnostic, never trust evidence.
+_PEER_TLS_EVIDENCE = object()
 
-    Plain-http peer routes (``http_only`` fleets) are neither pinned nor
-    authenticated, so an on-path attacker can forge any status code on them.
-    Revocation decisions (a 404 meaning "sharing is off") must not act on such
-    an answer. The route stamp is mandatory; an unstamped error cannot prove
-    which candidate was actually dialed.
-    """
-    # __dict__ lookups: HTTPError's attribute proxy raises KeyError (not
-    # AttributeError) for names it does not have when built without a response.
-    attributes = vars(error)
-    route = attributes.get("peer_route")
-    if not isinstance(route, str) or urlparse(route).scheme.lower() != "https":
-        return False
-    return urlparse(route).scheme.lower() == "https"
+
+def peer_http_error_is_authenticated(error: HTTPError) -> bool:
+    """Whether the status was received on our pinned TLS connection."""
+    return vars(error).get("_peer_tls_evidence") is _PEER_TLS_EVIDENCE
 
 
 def _peer_post_json_for_peer(

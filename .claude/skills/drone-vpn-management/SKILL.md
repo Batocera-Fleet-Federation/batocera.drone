@@ -51,8 +51,9 @@ SMTP (`smtp_manager.run_sharing_revocation_poller`) and tailnet
 pollers use the same guarded shape and the same `_log_poller_failure`
 isolation (surrogate-safe, closed-stderr-safe). A peer 404 only counts as
 revocation when it arrived over a pinned HTTPS route
-(`peer_connectivity.peer_http_error_is_authenticated`, using the dialed route that
-`_peer_get_json_for_peer` stamps on the `HTTPError` as `peer_route`); a 404 from an
+(`peer_connectivity.peer_http_error_is_authenticated`, using process-local evidence
+attached by `_peer_get_json` after receiving a status on its verified TLS
+connection; redirects are refused and `peer_route` is diagnostic only); a 404 from an
 `http_only` peer is forgeable by an on-path attacker and is treated as transient in
 all three checks (#599). "No longer paired" is local and unaffected.
 `vpn_manager.run_self_heal_poller`
