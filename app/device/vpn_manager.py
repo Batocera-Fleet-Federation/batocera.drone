@@ -953,15 +953,25 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     has no working credentials anymore. Only a genuine fresh
     ``save_uploaded_config`` call (a real new upload) can clear provenance.
     """
+    stop_error: Optional[BaseException] = None
     try:
         disconnect(settings)
+    except BaseException as error:
+        stop_error = error
+        raise
     finally:
         # Revoked credentials must not survive a failure to stop OpenVPN.
         try:
             auth_path(settings).unlink(missing_ok=True)
         except OSError:
             pass
-        _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+        try:
+            _save_state(settings, has_credentials=False, username="", revoked_reason=reason, revoked_at=_now_iso())
+        except Exception:
+            if stop_error is not None:
+                # The state failure is what propagates; don't lose the stop failure.
+                _log_poller_failure("VPN sharing revocation check failed", stop_error)
+            raise
 
 
 def check_sharing_revocation(settings: Settings) -> bool:
