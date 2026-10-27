@@ -54,9 +54,11 @@ wraps both its `check_and_self_heal` and `reconcile_rgs_with_tunnel` ticks
 independently with that same isolation, and both inner helpers also report
 through `_log_poller_failure` so a surrogate-escaped path or a closed/broken
 `stderr` never escapes as `UnicodeEncodeError`/`OSError` and kills the loop;
-after a successful self-heal check, retirement prevents a further RGS action;
-a failed check still gets its independent RGS attempt for that tick. Retirement
-after either operation prevents the next tick.
+retirement after any self-heal check prevents a further RGS action, including
+when that check failed internally or raised. A failed check still gets its
+independent RGS attempt while the generation is live. Retirement after either
+operation prevents the next tick. Do not condition the retirement gate on the
+check's outcome: an old generation must not start or restart RGS during shutdown.
 
 ## Design: stateless status, separate background pollers
 
