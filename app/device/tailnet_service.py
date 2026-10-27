@@ -1003,7 +1003,10 @@ def create_invite_auth_key(settings: Settings) -> dict:
 # an active tunnel up in the first place.
 
 TAILNET_SHARING_STATE_NAMESPACE = "tailnet_sharing.json"
-TAILNET_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+try:
+    TAILNET_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+except Exception:
+    TAILNET_SHARING_CHECK_INTERVAL_SECONDS = 300.0
 
 
 def _now_iso() -> str:
@@ -1243,7 +1246,10 @@ def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
     exactly, including the per-tick Exception guard and
     ``_log_poller_failure`` isolation. Started as its own daemon thread
     from ``create_server()``."""
-    interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
+    try:
+        interval = poller_interval_from_env("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    except Exception:
+        interval = 300.0
     generation = poller_generation()
     while True:
         time.sleep(interval)

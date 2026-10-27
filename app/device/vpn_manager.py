@@ -1025,7 +1025,10 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     ``Exception`` is absorbed; a ``BaseException`` such as KeyboardInterrupt
     is a shutdown signal and propagates.
     """
-    interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    try:
+        interval = poller_interval_from_env("DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    except Exception:
+        interval = 300.0
     generation = poller_generation()
     while True:
         time.sleep(interval)

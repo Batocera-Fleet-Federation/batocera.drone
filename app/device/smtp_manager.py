@@ -81,7 +81,10 @@ SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECOND
 # plain-text digest/test email over a modest home upload link -- give it real
 # room rather than reusing the short default meant for a few KB of text.
 SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", "120"))
-SMTP_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+try:
+    SMTP_SHARING_CHECK_INTERVAL_SECONDS = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+except Exception:
+    SMTP_SHARING_CHECK_INTERVAL_SECONDS = 300.0
 # Default/fallback seed for the user-configurable digest_interval_seconds
 # setting below (1 minute - 24 hours, default 5 minutes) -- once a drone has
 # saved its own value via the admin UI, that stored value always wins over
@@ -470,7 +473,10 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     an unexpected Exception is logged via ``_log_poller_failure`` and the
     loop continues; a BaseException still propagates.
     """
-    interval = max(30.0, SMTP_SHARING_CHECK_INTERVAL_SECONDS)
+    try:
+        interval = poller_interval_from_env("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", 300.0)
+    except Exception:
+        interval = 300.0
     generation = poller_generation()
     while True:
         time.sleep(interval)

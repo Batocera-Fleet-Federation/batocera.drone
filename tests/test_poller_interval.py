@@ -56,6 +56,15 @@ class PollerIntervalFromEnvTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"DRONE_TEST_INTERVAL_SECONDS": "abc"}, clear=True):
             self.assertEqual(poller_interval_from_env("DRONE_TEST_INTERVAL_SECONDS", 300.0), 300.0)
 
+    def test_non_string_raw_uses_default_without_raising(self):
+        self.assertEqual(parse_poller_interval(object(), 300.0), 300.0)
+        self.assertEqual(parse_poller_interval(b"abc", 300.0), 300.0)
+
+    def test_unusable_default_still_returns_a_sleepable_value(self):
+        value = parse_poller_interval("abc", float("inf"))
+        self.assertTrue(math.isfinite(value))
+        self.assertLessEqual(value * 1e9, 2 ** 63)
+
 
 if __name__ == "__main__":
     unittest.main()
