@@ -400,7 +400,22 @@ cannot detect a revocation nobody is actively looking for.
   after the tunnel stops, without a new peer response. Only successful removal
   or a genuine `save_credentials` replacement clears that wipe flag; a config
   upload cannot cancel pending cleanup. Retry ticks preserve the original
-  revocation timestamp and reason. It deliberately
+  revocation timestamp and reason. The retry is bound to the revoked
+  tunnel: `disconnect()` records the pid it targets (thread-local
+  `_DISCONNECT_TARGET`) before signalling, so even a stop that raises keeps
+  `disconnect_retry_pid`; a retry whose pid is gone never stops a newer
+  tunnel. That check is atomic: the retry hands `expected_pid` (or
+  `not_started_after`) to `disconnect()`, which compares it under
+  `_CONNECT_LOCK` against the same lookup it signals from, so a tunnel that
+  starts after the retry's own pre-check is still left alone. If no pid was
+  ever captured, `disconnect_retry_since` records the
+  revocation's `CLOCK_BOOTTIME` rounded down to a `/proc` clock tick. Compare
+  directly to boot-relative `/proc` starttime: wall-clock corrections cannot
+  alter the decision. Same-tick starts are ambiguous and explicitly preserved
+  as replacements; older starts are stopped. Unknown timing still stops the
+  process. A clock-format marker prevents legacy epoch timestamps from being
+  used as boot times, and a persisted Linux boot ID retires retries across a
+  reboot. It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look
