@@ -1244,7 +1244,7 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
             return False
         except urllib.error.HTTPError as error:
-            # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
+            # Only a status received on our pinned TLS connection can revoke secrets.
             if error.code == 404 and peer_http_error_is_authenticated(error):
                 return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False

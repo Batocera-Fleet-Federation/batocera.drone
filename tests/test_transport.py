@@ -424,7 +424,7 @@ if __name__ == "__main__":
 
 
 class PeerHttpErrorAuthenticationTests(unittest.TestCase):
-    """A status code only counts as peer evidence when it came over HTTPS."""
+    """A status code only counts as peer evidence after pinned TLS verification."""
 
     def _error(self, url: str, route=None):
         from urllib.error import HTTPError
@@ -456,6 +456,18 @@ class PeerHttpErrorAuthenticationTests(unittest.TestCase):
         self.assertFalse(peer_http_error_is_authenticated(
             self._error("https://peer/x", "https://peer")
         ))
+
+    def test_only_exact_process_local_tls_evidence_authenticates(self) -> None:
+        from app.transfer import peer_connectivity
+
+        for evidence in (None, True, "https", object(), peer_connectivity._PEER_TLS_EVIDENCE):
+            with self.subTest(evidence=evidence):
+                error = self._error("https://peer/x", "HTTPS://peer")
+                error._peer_tls_evidence = evidence
+                self.assertEqual(
+                    peer_connectivity.peer_http_error_is_authenticated(error),
+                    evidence is peer_connectivity._PEER_TLS_EVIDENCE,
+                )
 
     def test_peer_get_json_for_peer_records_dialed_route_on_http_error(self) -> None:
         from urllib.error import HTTPError

@@ -44,6 +44,40 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_632_unstamped_https_404_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-632-unstamped-https-404-uat",
+      "name": "Issue #632: an unstamped HTTPS-looking 404 cannot revoke imported VPN, SMTP, or Tailnet secrets",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/transfer/peer_connectivity.py",
+          "tests/adversarial/test_issue_632_unstamped_https_404_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_279_rejects_multi_certificate_pem.py"
