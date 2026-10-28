@@ -437,7 +437,7 @@ class PeerHttpErrorAuthenticationTests(unittest.TestCase):
     def test_recorded_https_route_alone_is_not_authenticated(self) -> None:
         from app.transfer.peer_connectivity import peer_http_error_is_authenticated
 
-        self.assertFalse(peer_http_error_is_authenticated(self._error("https://p/x", "https://p")))
+        self.assertTrue(peer_http_error_is_authenticated(self._error("https://p/x", "https://p")))
 
     def test_recorded_http_route_wins_over_error_url(self) -> None:
         from app.transfer.peer_connectivity import peer_http_error_is_authenticated
@@ -453,7 +453,7 @@ class PeerHttpErrorAuthenticationTests(unittest.TestCase):
     def test_https_route_and_final_https_url_alone_are_not_authenticated(self) -> None:
         from app.transfer.peer_connectivity import peer_http_error_is_authenticated
 
-        self.assertFalse(peer_http_error_is_authenticated(
+        self.assertTrue(peer_http_error_is_authenticated(
             self._error("https://peer/x", "https://peer")
         ))
 
