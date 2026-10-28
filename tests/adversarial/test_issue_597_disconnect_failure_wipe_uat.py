@@ -25,6 +25,13 @@ from app.drone_api import Settings
 from app.transfer import swarm_reset
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 SAMPLE_OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nauth-user-pass\n"
 SOURCE_PEER_ID = "source-peer"
 
@@ -40,7 +47,7 @@ def _payload() -> dict:
 
 
 def _not_sharing() -> HTTPError:
-    return HTTPError("https://peer/v1/api/peer/vpn/config", 404, "Not Found", None, None)
+    return _verified_tls(HTTPError("https://peer/v1/api/peer/vpn/config", 404, "Not Found", None, None))
 
 
 def _revocation_cases():

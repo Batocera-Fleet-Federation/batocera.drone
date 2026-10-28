@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock, local
 from typing import Any, Iterable, Optional
 
 try:
@@ -88,6 +88,9 @@ TAILSCALE_API_TIMEOUT_SECONDS = 15.0
 
 _NETWORK_REPAIR_LOCK = Lock()
 _NETWORK_REPAIR_LAST = float("-inf")
+_CREDENTIALS_LOCK = RLock()
+_REVOCATION_CONTEXT = local()
+_STATE_LOCK = Lock()
 
 
 def _kernel_tailnet_failure(payload: dict) -> Optional[str]:
@@ -799,10 +802,11 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
         # immediately after in its own follow-up call -- get that ordering
         # backwards and every import would look self-owned and pass the
         # single-hop sharing gate it's meant to fail.
-        _save_sharing_state(
-            settings, auth_key=key, source_peer_id="", source_peer_name="",
-            revoked_reason="", revoked_at=None,
-        )
+        with _CREDENTIALS_LOCK:
+            _save_sharing_state(
+                settings, auth_key=key, source_peer_id="", source_peer_name="",
+                revoked_reason="", revoked_at=None,
+            )
     return tailnet_status()
 
 
@@ -1025,11 +1029,18 @@ def _load_sharing_state(settings: Settings) -> dict:
     }
 
 
-def _save_sharing_state(settings: Settings, **updates) -> dict:
-    state = _load_sharing_state(settings)
-    state.update(updates)
-    _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
-    return state
+def _save_sharing_state(settings: Settings, *, expect_source_peer: Optional[str] = None, **updates) -> Optional[dict]:
+    """Persist sharing state. With ``expect_source_peer`` the write is conditional:
+    it is skipped (returns None) unless that peer still owns a stored auth key.
+    The provenance check and the write share ``_STATE_LOCK``, so a fresh
+    enrollment cannot land between them and be wiped."""
+    with _STATE_LOCK:
+        state = _load_sharing_state(settings)
+        if expect_source_peer is not None and (state["source_peer_id"] != expect_source_peer or not state["auth_key"]):
+            return None
+        state.update(updates)
+        _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
+        return state
 
 
 def tailnet_sharing_status(settings: Settings) -> dict:
@@ -1094,8 +1105,9 @@ def import_tailnet_from_peer(settings: Settings, payload: dict, *, source_peer_i
     auth_key = str(payload.get("auth_key") or "")
     if not auth_key:
         raise ValueError("peer did not return a Tailscale auth key")
-    result = tailnet_enroll(auth_key, settings)
-    _save_sharing_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
+    with _CREDENTIALS_LOCK:
+        result = tailnet_enroll(auth_key, settings)
+        _save_sharing_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
     return result
 
 
@@ -1161,7 +1173,7 @@ _SHARING_REVOKED_PEER_OFF = "The peer sharing this Tailscale auth key turned off
 _SHARING_REVOKED_PEER_GONE = "The peer that shared this Tailscale auth key is no longer paired, so it was removed from this drone."
 
 
-def _revoke_local_sharing(settings: Settings, reason: str) -> None:
+def _revoke_local_sharing(settings: Settings, reason: str) -> bool:
     """Clear the imported auth key and stop sharing -- deliberately does
     **not** call ``tailscale logout`` or otherwise touch the live tailnet
     connection. Unlike VPN's revocation (which disconnects an active tunnel
@@ -1177,8 +1189,30 @@ def _revoke_local_sharing(settings: Settings, reason: str) -> None:
     ``vpn_manager._revoke_local_credentials()``: wiping it would let this
     now-orphaned entry pass the single-hop sharing gate as if it were
     self-owned. Only a genuine fresh ``tailnet_enroll()`` call clears it.
+    Inside ``_revoke_sharing_from_peer()`` the write only lands while that
+    peer still owns the key. Returns True iff the wipe was written.
     """
-    _save_sharing_state(settings, auth_key="", revoked_reason=reason, revoked_at=_now_iso())
+    expected_peer = getattr(_REVOCATION_CONTEXT, "source_peer_id", None)
+    return _save_sharing_state(
+        settings, expect_source_peer=expected_peer,
+        auth_key="", revoked_reason=reason, revoked_at=_now_iso(),
+    ) is not None
+
+
+def _revoke_sharing_from_peer(settings: Settings, source_peer_id: str, reason: str) -> bool:
+    """Apply a peer's revocation only while it still owns our sharing. The
+    ownership check is re-read inside ``_save_sharing_state()``'s lock, so an
+    import or fresh enrollment that lands after the caller's snapshot is never
+    wiped."""
+    with _CREDENTIALS_LOCK:
+        try:
+            _REVOCATION_CONTEXT.source_peer_id = source_peer_id
+            return bool(_revoke_local_sharing(settings, reason))
+        except Exception as error:
+            _log_poller_failure("Tailnet sharing revocation check failed", error)
+            return False
+        finally:
+            _REVOCATION_CONTEXT.source_peer_id = None
 
 
 def check_tailnet_sharing_revocation(settings: Settings) -> bool:
@@ -1192,10 +1226,11 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
     never strip a working setup. Never raises (intended to run unattended
     on a background poller)."""
     try:
-        state = _load_sharing_state(settings)
-        source_peer_id = state["source_peer_id"]
-        if not source_peer_id or not state["auth_key"]:
-            return False
+        with _CREDENTIALS_LOCK:
+            state = _load_sharing_state(settings)
+            source_peer_id = state["source_peer_id"]
+            if not source_peer_id or not state["auth_key"]:
+                return False
         try:
             from ..transfer import local_network as _local_network
             from ..transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated
@@ -1204,16 +1239,14 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             from transfer.peer_connectivity import _peer_get_json_for_peer, peer_http_error_is_authenticated  # type: ignore
         peer = _local_network.get_paired_peer(settings, source_peer_id)
         if not peer:
-            _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_GONE)
-            return True
+            return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_GONE)
         try:
             _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
             return False
         except urllib.error.HTTPError as error:
-            # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
+            # Only a status received on our pinned TLS connection can revoke secrets.
             if error.code == 404 and peer_http_error_is_authenticated(error):
-                _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_OFF)
-                return True
+                return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False
         except Exception:
             return False

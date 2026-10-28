@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from threading import Event
 from pathlib import Path
+from threading import Event, Thread
 from typing import List
 from unittest import mock
 from urllib.error import HTTPError
@@ -1024,7 +1024,7 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertEqual(state["revoked_reason"], "")
 
     def test_redirected_plaintext_404_does_not_revoke(self) -> None:
-        # The error URL may claim https after a redirect; the dialed route decides.
+        # The error URL may claim https after a redirect; pinned TLS evidence is required.
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)
             peer = {"drone_id": "peer-1", "name": "Peer One"}
@@ -1059,7 +1059,9 @@ class CheckSharingRevocationTests(unittest.TestCase):
                             executor.submit(replace_credentials).result(timeout=5)
                             if peer_gone:
                                 return None
-                            raise HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                            error = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                            error._peer_tls_evidence = _PEER_TLS_EVIDENCE
+                            raise error
 
                         with mock.patch("app.transfer.local_network.get_paired_peer",
                                         side_effect=stale_answer if peer_gone else None,
@@ -1229,6 +1231,53 @@ class CheckSharingRevocationTests(unittest.TestCase):
 
             self.assertEqual(check.call_count, 2)
             log_failure.assert_called_once()
+
+    def test_retirement_before_generation_read_skips_checks(self) -> None:
+        from app.common import runtime_state
+
+        real_generation = vpn_manager.poller_generation
+        entered = Event()
+        gate = Event()
+
+        def gated_generation() -> int:
+            entered.set()
+            gate.wait(10)
+            return real_generation()
+
+        check = mock.Mock(return_value=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "poller_generation", gated_generation), \
+                    mock.patch.object(vpn_manager.time, "sleep", return_value=None), \
+                    mock.patch.object(vpn_manager, "check_sharing_revocation", check):
+                thread = Thread(
+                    target=vpn_manager.run_sharing_revocation_poller,
+                    args=(settings,),
+                    daemon=True,
+                )
+                thread.start()
+                self.assertTrue(entered.wait(10), "poller never reached generation capture")
+                runtime_state.retire_pollers()
+                gate.set()
+                thread.join(10)
+
+        self.assertFalse(thread.is_alive())
+        check.assert_not_called()
+
+    def test_bound_generation_skips_checks_without_rereading_poller_generation(self) -> None:
+        from app.common import runtime_state
+
+        bound = runtime_state.poller_generation()
+        runtime_state.retire_pollers()
+        check = mock.Mock(return_value=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "poller_generation", side_effect=AssertionError("must use bound generation")), \
+                    mock.patch.object(vpn_manager.time, "sleep", return_value=None), \
+                    mock.patch.object(vpn_manager, "check_sharing_revocation", check):
+                vpn_manager.run_sharing_revocation_poller(settings, generation=bound)
+
+        check.assert_not_called()
 
 
 class BootstrapVpnFromSwarmTests(unittest.TestCase):

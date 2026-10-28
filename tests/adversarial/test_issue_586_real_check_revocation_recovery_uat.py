@@ -26,6 +26,13 @@ import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 SAMPLE_OVPN = """client
 dev tun
 proto udp
@@ -167,7 +174,7 @@ class Issue586RealCheckRevocationRecoveryUAT(unittest.TestCase):
         outcomes = [
             URLError("peer unreachable"),
             HTTPError("https://peer/", 503, "Service Unavailable", None, None),
-            HTTPError("https://peer/", 404, "Not Found", None, None),
+            _verified_tls(HTTPError("https://peer/", 404, "Not Found", None, None)),
         ]
         get_json = mock.Mock(side_effect=outcomes)
         peer = {"peer_id": _PEER_ID, "address": "203.0.113.5"}
