@@ -5060,6 +5060,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-636-sybil-identity-clock-ratchet",
+      "name": "Security: identities introduced by one paired member cannot stop a Drone publishing via clock ratchet",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_sybil_identity_clock_ratchet.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_sybil_identity_clock_ratchet.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
