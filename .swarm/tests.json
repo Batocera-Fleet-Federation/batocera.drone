@@ -5152,6 +5152,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-635-repair-first-gossip-uat",
+      "name": "Issue #635 re-paired peer survives and is accepted on its first membership POST",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_635_repair_first_gossip_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_635_repair_first_gossip_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
