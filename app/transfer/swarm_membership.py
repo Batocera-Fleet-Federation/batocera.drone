@@ -86,12 +86,18 @@ def record_approved_member(settings: Any, peer: dict) -> None:
 
     def mutate(state: dict) -> None:
         state["departed"] = False
+        # Remote tombstones do not advance the clock, so a re-approval must
+        # explicitly outrank any tombstone for this peer (without moving the clock).
+        tombstone = state["records"].get(peer_id)
+        epoch = _mint(state)
+        if tombstone is not None and tombstone.get("op") == "remove":
+            epoch = max(epoch, min(_MAX_EPOCH, int(tombstone.get("epoch") or 0) + 1))
         _store(
             state,
             {
                 "peer_id": peer_id,
                 "op": "add",
-                "epoch": _mint(state),
+                "epoch": epoch,
                 "origin": str(settings.device_id),
                 "card": card,
             },
@@ -234,9 +240,11 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> bool:
                 continue
             if record["op"] == "remove":
                 snapshot = _local_network.get_paired_peer(settings, peer_id)
-                state["clock"] = min(
-                    _MAX_EPOCH, max(int(state.get("clock") or 0), int(record["epoch"]))
-                )
+                # Like remote adds, a remote removal never moves the local mint
+                # clock: each self-removing identity a paired member introduced
+                # would otherwise add one margin, ratcheting the clock past what
+                # peers accept (#669). A local re-approval outranks the tombstone
+                # through record_approved_member instead.
                 state["records"][peer_id] = record
                 if snapshot:
                     _local_network.forget_peer(settings, peer_id, publish_membership=False)
