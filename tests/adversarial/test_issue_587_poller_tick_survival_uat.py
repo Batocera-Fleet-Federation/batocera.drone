@@ -211,12 +211,13 @@ class Issue587PollerTickSurvivalUAT(unittest.TestCase):
 
     def test_disconnect_failure_on_revoking_tick_wipes_without_retrying_disconnect(self) -> None:
         # A confirmed peer departure revokes credentials on this tick despite a failed stop.
-        # The poller remains healthy, and its next check is a quiet no-op.
+        # The poller remains healthy. A later tick may retry the failed stop (#622)
+        # without restoring credentials or treating the retry as a new revocation.
         disconnect = mock.Mock(side_effect=RuntimeError("tunnel busy"))
         calls = self._run_poller([REAL, REAL], retire_after=2, disconnect={"new": disconnect})
 
         self.assertEqual(calls, 2)
-        self.assertEqual(disconnect.call_count, 1)
+        self.assertGreaterEqual(disconnect.call_count, 1)
         self._assert_revoked()
 
 

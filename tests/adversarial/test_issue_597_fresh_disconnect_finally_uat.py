@@ -119,23 +119,25 @@ class Issue597DisconnectFinallyUAT(unittest.TestCase):
         logged.assert_called_once()
 
     def test_later_ticks_after_failed_disconnect_are_quiet_noops(self) -> None:
-        # After one revocation the state has no credentials; later ticks must not
-        # call disconnect again, re-log, or overwrite the original revocation reason.
+        # After one revocation the credentials are gone and the recorded reason
+        # must not be overwritten. Later ticks may retry a failed stop (#622)
+        # without treating that retry as a new peer-gone wipe.
         with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
                 mock.patch.object(vpn_manager, "_find_running_openvpn_pid", side_effect=RuntimeError("boom")), \
                 mock.patch.object(vpn_manager, "_log_poller_failure") as logged:
             self.assertTrue(vpn_manager.check_sharing_revocation(self.settings))
             first = vpn_manager._load_state(self.settings)
         with mock.patch("app.transfer.local_network.get_paired_peer") as get_peer, \
-                mock.patch.object(vpn_manager, "disconnect") as disconnect, \
+                mock.patch.object(vpn_manager, "disconnect", return_value={"status": "disconnected"}) as disconnect, \
                 mock.patch.object(vpn_manager, "_log_poller_failure") as later_logged:
             for _ in range(3):
                 self.assertFalse(vpn_manager.check_sharing_revocation(self.settings))
             get_peer.assert_not_called()
-            disconnect.assert_not_called()
+            self.assertGreaterEqual(disconnect.call_count, 1)
             later_logged.assert_not_called()
         self.assertEqual(logged.call_count, 1)
         after = vpn_manager._load_state(self.settings)
+        self.assertFalse(after["has_credentials"])
         self.assertEqual(after["revoked_reason"], first["revoked_reason"])
         self.assertEqual(after["revoked_at"], first["revoked_at"])
 
