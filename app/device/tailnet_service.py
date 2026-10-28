@@ -1244,25 +1244,8 @@ def check_tailnet_sharing_revocation(settings: Settings) -> bool:
             _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
             return False
         except urllib.error.HTTPError as error:
-            # A 404 over plain http is unauthenticated and forgeable: treat it as transient.
-            # For mocked errors without a stamped peer_route, fall back to filename
-            # so the adversarial suites that mock _peer_get_json_for_peer still
-            # exercise revocation (the real code always stamps peer_route).
-            is_auth = peer_http_error_is_authenticated(error)
-            if not is_auth and "peer_route" not in vars(error):
-                try:
-                    url = ""
-                    try:
-                        url = error.filename  # type: ignore[attr-defined]
-                    except Exception:
-                        url = ""
-                    if isinstance(url, str) and url.strip():
-                        from urllib.parse import urlparse as _urlparse
-
-                        is_auth = _urlparse(url).scheme.lower() == "https"
-                except Exception:
-                    is_auth = False
-            if error.code == 404 and is_auth:
+            # Only a status received on our pinned TLS connection can revoke secrets.
+            if error.code == 404 and peer_http_error_is_authenticated(error):
                 return _revoke_sharing_from_peer(settings, source_peer_id, _SHARING_REVOKED_PEER_OFF)
             return False
         except Exception:

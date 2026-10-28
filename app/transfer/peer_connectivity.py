@@ -1186,29 +1186,13 @@ def _peer_get_json_for_peer(
 
 
 # Process-local evidence attached only after a pinned TLS request receives a
-# status. Only the stamped dialed route is trust evidence.
+# status. Route metadata and HTTPError.url are diagnostic, never trust evidence.
 _PEER_TLS_EVIDENCE = object()
 
 
 def peer_http_error_is_authenticated(error: HTTPError) -> bool:
-    """Whether the status was received over an authenticated (https) peer route.
-
-    Only the ``peer_route`` stamped by ``_peer_get_json_for_peer`` is
-    authoritative. ``HTTPError.url``/``filename`` are diagnostic and
-    may reflect a redirect target, so they are not used. Unstamped errors
-    (directly constructed or mocked without a route) are unauthenticated.
-
-    ``HTTPError`` implements ``__getattr__`` that raises ``KeyError`` for
-    missing attributes, so use ``vars`` directly.
-    """
-    route = vars(error).get("peer_route")
-    if isinstance(route, str) and route.strip():
-        return urlparse(route).scheme.lower() == "https"
-    # Fallback to evidence object for backward compatibility with
-    # earlier stamping (pinned TLS connection).
-    if vars(error).get("_peer_tls_evidence") is _PEER_TLS_EVIDENCE:
-        return True
-    return False
+    """Whether the status was received on our pinned TLS connection."""
+    return vars(error).get("_peer_tls_evidence") is _PEER_TLS_EVIDENCE
 
 
 def _peer_post_json_for_peer(

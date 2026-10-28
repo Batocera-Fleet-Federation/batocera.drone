@@ -1024,7 +1024,7 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertEqual(state["revoked_reason"], "")
 
     def test_redirected_plaintext_404_does_not_revoke(self) -> None:
-        # The error URL may claim https after a redirect; the dialed route decides.
+        # The error URL may claim https after a redirect; pinned TLS evidence is required.
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)
             peer = {"drone_id": "peer-1", "name": "Peer One"}
@@ -1059,7 +1059,9 @@ class CheckSharingRevocationTests(unittest.TestCase):
                             executor.submit(replace_credentials).result(timeout=5)
                             if peer_gone:
                                 return None
-                            raise HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                            error = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+                            error._peer_tls_evidence = _PEER_TLS_EVIDENCE
+                            raise error
 
                         with mock.patch("app.transfer.local_network.get_paired_peer",
                                         side_effect=stale_answer if peer_gone else None,
