@@ -36,6 +36,13 @@ import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 SOURCE_A = "source-a"
 SOURCE_B = "source-b"
 OVPN_A = "client\ndev tun\nproto udp\nremote vpn-a.example.net 1194\nauth-user-pass\n"
@@ -54,7 +61,7 @@ def _payload(username: str, password: str, config_text: str = OVPN_A, filename: 
 
 
 def _http_404(peer_id: str = SOURCE_A) -> HTTPError:
-    return HTTPError(f"https://{peer_id}/v1/api/peer/vpn/config", 404, "Not Found", None, None)
+    return _verified_tls(HTTPError(f"https://{peer_id}/v1/api/peer/vpn/config", 404, "Not Found", None, None))
 
 
 class Issue598ProvenanceIdentityBoundariesUAT(unittest.TestCase):

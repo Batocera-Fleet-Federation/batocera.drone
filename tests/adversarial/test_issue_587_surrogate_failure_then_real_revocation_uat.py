@@ -12,6 +12,13 @@ import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 SAMPLE_OVPN = """client\ndev tun\nproto udp\nremote vpn.example.net 1194\nauth-user-pass\n"""
 
 
@@ -59,7 +66,7 @@ class Issue587RecoveryUAT(unittest.TestCase):
             return sleeps > 2
 
         peer = {"drone_id": "peer-1", "name": "Peer"}
-        missing = vpn_manager.HTTPError("https://peer/v1/api/peer/vpn/config", 404, "missing", None, None)
+        missing = _verified_tls(vpn_manager.HTTPError("https://peer/v1/api/peer/vpn/config", 404, "missing", None, None))
         with mock.patch.object(vpn_manager, "poller_generation", return_value=587), \
                 mock.patch.object(vpn_manager, "poller_retired", side_effect=retired), \
                 mock.patch.object(vpn_manager.time, "sleep", side_effect=sleep), \

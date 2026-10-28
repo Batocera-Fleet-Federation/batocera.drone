@@ -219,9 +219,12 @@ class Issue599StatusRedirectAndStampBoundariesUAT(unittest.TestCase):
         self._assert_vpn_intact()
         self.assertTrue(server.hits)
 
-    def test_mixed_case_https_recorded_route_is_authenticated(self) -> None:
+    def test_mixed_case_https_recorded_route_alone_is_not_authenticated(self) -> None:
+        # peer_route is diagnostic only (#599); verified-TLS evidence is what authenticates.
         error = HTTPError("HTTP://peer/x", 404, "not found", None, None)
         error.peer_route = "HTTPS://127.0.0.1:443"
+        self.assertFalse(pc.peer_http_error_is_authenticated(error))
+        error._peer_tls_evidence = pc._PEER_TLS_EVIDENCE
         self.assertTrue(pc.peer_http_error_is_authenticated(error))
         http_error = HTTPError("https://elsewhere/x", 404, "not found", None, None)
         http_error.peer_route = "HTTP://127.0.0.1:80"
@@ -252,6 +255,12 @@ class Issue599StatusRedirectAndStampBoundariesUAT(unittest.TestCase):
         self._assert_vpn_intact()
         tls_404 = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
         tls_404.peer_route = "https://127.0.0.1:443"
+        # A route stamp alone is diagnostic; only process-local TLS evidence authorises revocation.
+        with mock.patch("app.transfer.local_network.get_paired_peer", return_value=_http_only_peer(443, {"scheme": "https", "paired_over_tls": True})), \
+                mock.patch.object(pc, "_peer_get_json_for_peer", side_effect=tls_404):
+            self.assertFalse(vpn_manager.check_sharing_revocation(self.settings))
+        self._assert_vpn_intact()
+        tls_404._peer_tls_evidence = pc._PEER_TLS_EVIDENCE
         with mock.patch("app.transfer.local_network.get_paired_peer", return_value=_http_only_peer(443, {"scheme": "https", "paired_over_tls": True})), \
                 mock.patch.object(pc, "_peer_get_json_for_peer", side_effect=tls_404):
             self.assertTrue(vpn_manager.check_sharing_revocation(self.settings))

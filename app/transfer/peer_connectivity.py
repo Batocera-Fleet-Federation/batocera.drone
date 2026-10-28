@@ -368,7 +368,7 @@ def _peer_post_json(
                 target = parsed_url.path or "/"
                 if parsed_url.query:
                     target += "?" + parsed_url.query
-                connection.request("POST", target, data=request.data, headers=dict(request.header_items()))
+                connection.request("POST", target, body=request.data, headers=dict(request.header_items()))
                 response = connection.getresponse()
                 if 300 <= response.status < 400:
                     error = HTTPError(url, response.status, response.reason, response.headers, None)

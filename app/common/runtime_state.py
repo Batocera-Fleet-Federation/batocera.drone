@@ -40,8 +40,14 @@ _ES_LIFECYCLE_LOCK = Lock()
 # a different one. Without this a poller left behind by a closed server keeps resolving the
 # environment-selected state database on every tick and writes into whatever database a later
 # server (or test) has since selected.
+#
+# ``claim_poller`` is taken at function entry, before the (possibly delayed) generation
+# read. ``retire_pollers`` invalidates every outstanding claim, so a thread that started
+# before retirement but captured ``poller_generation()`` after it still exits before any I/O.
 _POLLER_GENERATION_LOCK = Lock()
 _POLLER_GENERATION = 0
+_POLLER_CLAIMS = set()
+_POLLER_NEXT_CLAIM = 0
 
 
 def poller_generation() -> int:
@@ -53,9 +59,34 @@ def poller_retired(generation: int) -> bool:
     return poller_generation() != generation
 
 
+def claim_poller() -> int:
+    """Register a forever-loop poller that has entered its run function.
+
+    Call this before reading ``poller_generation()``. A retirement that lands
+    after the thread starts but before that read still stops the loop.
+    """
+    global _POLLER_NEXT_CLAIM
+    with _POLLER_GENERATION_LOCK:
+        _POLLER_NEXT_CLAIM += 1
+        claim = _POLLER_NEXT_CLAIM
+        _POLLER_CLAIMS.add(claim)
+        return claim
+
+
+def poller_claim_retired(claim: int) -> bool:
+    with _POLLER_GENERATION_LOCK:
+        return claim not in _POLLER_CLAIMS
+
+
+def release_poller_claim(claim: int) -> None:
+    with _POLLER_GENERATION_LOCK:
+        _POLLER_CLAIMS.discard(claim)
+
+
 def retire_pollers() -> int:
     """Retire every poller started under an earlier generation; returns the new generation."""
     global _POLLER_GENERATION
     with _POLLER_GENERATION_LOCK:
         _POLLER_GENERATION += 1
+        _POLLER_CLAIMS.clear()
         return _POLLER_GENERATION

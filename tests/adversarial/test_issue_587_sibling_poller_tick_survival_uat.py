@@ -23,6 +23,13 @@ import app.device.tailnet_service as tailnet_service
 from app.drone_api import Settings
 
 
+def _verified_tls(error):
+    """Mark a peer status as received on the pinned, verified TLS channel (#599)."""
+    from app.transfer import peer_connectivity as _pc
+    error._peer_tls_evidence = _pc._PEER_TLS_EVIDENCE
+    return error
+
+
 REAL = object()  # marker: run the real check for this tick
 PEER = {"drone_id": "peer-1", "name": "Peer"}
 
@@ -177,7 +184,7 @@ class SmtpSharingPollerTickSurvivalUAT(_SiblingPollerTickSurvival, unittest.Test
     peer_patch_target = "app.transfer.peer_connectivity._peer_get_json_for_peer"
 
     def peer_missing_error(self):
-        return smtp_manager.HTTPError("https://peer/v1/api/peer/smtp/config", 404, "missing", None, None)
+        return _verified_tls(smtp_manager.HTTPError("https://peer/v1/api/peer/smtp/config", 404, "missing", None, None))
 
     def seed_imported_share(self, settings: Settings) -> None:
         smtp_manager._save_state(
@@ -197,7 +204,7 @@ class TailnetSharingPollerTickSurvivalUAT(_SiblingPollerTickSurvival, unittest.T
     peer_patch_target = "app.transfer.peer_connectivity._peer_get_json_for_peer"
 
     def peer_missing_error(self):
-        return tailnet_service.urllib.error.HTTPError("https://peer/v1/api/peer/tailnet/config", 404, "missing", None, None)
+        return _verified_tls(tailnet_service.urllib.error.HTTPError("https://peer/v1/api/peer/tailnet/config", 404, "missing", None, None))
 
     def seed_imported_share(self, settings: Settings) -> None:
         tailnet_service._save_sharing_state(settings, auth_key="tskey-adversarial-587", source_peer_id="peer-1", source_peer_name="Peer")

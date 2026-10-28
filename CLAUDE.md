@@ -174,8 +174,11 @@ network-share watchdog) are latched on once per process by `create_server()` and
 they are retired by generation, not by stop event: `create_server()` captures `runtime_state.poller_generation()`
 before starting each thread and passes that snapshot into the poller. The worker returns — before any I/O — the
 first time it wakes to a different generation. This prevents retirement between thread startup and generation
-capture from accidentally making an old worker current again. `drone_api.retire_background_pollers()`
-bumps the generation and clears their `*_STARTED` latches; `main()` calls it beside
+capture from accidentally making an old worker current again. VPN sharing-revocation also
+calls `runtime_state.claim_poller()` at function entry so a retirement that lands after
+`Thread.start()` but before the generation read still exits before any check.
+`drone_api.retire_background_pollers()` bumps the generation, clears outstanding claims, and
+clears their `*_STARTED` latches; `main()` calls it beside
 `stop_local_network_workers()`. A plain HTTP shutdown does not (owner-driven, like the LAN workers). Any
 test harness that calls `create_server` should call both on teardown: a leftover poller re-resolves
 `DRONE_STATE_DATABASE_FILE` every tick, so it writes into (and re-creates the temp tree of) whatever later test
