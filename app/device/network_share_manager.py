@@ -1640,11 +1640,12 @@ def maybe_reconnect_all_on_boot(settings: Settings) -> None:
         print("Network share boot replay completed, but EmulationStation could not be refreshed", file=sys.stderr, flush=True)
 
 
-def run_watchdog_poller(settings: Settings) -> None:
+def run_watchdog_poller(settings: Settings, generation: int | None = None) -> None:
     """Forever-loop: verify every enabled share's mount is still alive and
     remount if not. Started as its own daemon thread from create_server(),
     same pattern as VPN's run_self_heal_poller."""
-    generation = poller_generation()
+    if generation is None:
+        generation = poller_generation()
     while True:
         time.sleep(NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS)
         if poller_retired(generation):

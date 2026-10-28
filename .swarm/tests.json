@@ -44,15 +44,15 @@
         "unittest",
         "discover",
         "-s",
-        "tests/adversarial/security",
+        "tests/adversarial",
         "-p",
-        "test_issue_279_rejects_multi_certificate_pem.py"
+        "test_issue_632_unstamped_https_404_uat.py"
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-security-issue-279-rejects-multi-certificate-pem",
-      "name": "Security: Issue #279 rejects a multi-certificate PEM bundle as a pairing pin",
-      "origin": "adversarial-security",
+      "id": "adversarial-issue-632-unstamped-https-404-uat",
+      "name": "Issue #632: an unstamped HTTPS-looking 404 cannot revoke imported VPN, SMTP, or Tailnet secrets",
+      "origin": "adversarial",
       "requirements": {
         "credentials": [],
         "devices": [],
@@ -60,41 +60,11 @@
           "python3"
         ],
         "files": [
-          "app/transfer/drone_network.py",
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
           "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_279_rejects_multi_certificate_pem.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_279_rejects_non_x509_pem.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-279-rejects-non-x509-pem",
-      "name": "Security: Issue #279 rejects a decodable non-X.509 pairing certificate without persistence",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/drone_network.py",
-          "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_279_rejects_non_x509_pem.py"
+          "tests/adversarial/test_issue_632_unstamped_https_404_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -519,99 +489,6 @@
         "unittest",
         "discover",
         "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_191_discovery_infinite_port.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-191-discovery-infinite-port",
-      "name": "Issue #191 overflowing or deeply nested LAN packets must not terminate discovery",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_191_discovery_infinite_port.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_191_discovery_packet_type.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-191-discovery-packet-type",
-      "name": "Issue #191 malformed LAN announcement must not terminate discovery",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_191_discovery_packet_type.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_155_hardlinked_lock_chown.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-155-hardlinked-lock-chown",
-      "name": "Issue #155 security: root dispatcher must not chown a hard-linked state/hold.lock",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/integrations/media_keys/dispatch.py",
-          "tests/adversarial/security/test_issue_155_hardlinked_lock_chown.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 120
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
         "tests/adversarial",
         "-p",
         "test_issue_160_documentation_acceptance.py"
@@ -734,68 +611,6 @@
         "servers": []
       },
       "timeoutSeconds": 300
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_160_reprovisioning_boundaries.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-160-reprovisioning-boundaries",
-      "name": "Issue #160 clone reset revokes live NFS access and source sessions",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/swarm_reset.py",
-          "tests/adversarial/security/test_issue_160_reprovisioning_boundaries.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 120
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_163_clone_auth_revocation.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-163-clone-auth-revocation",
-      "name": "Issue #163 clone reset revokes copied sessions and MCP tokens",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/swarm_reset.py",
-          "tests/adversarial/security/test_issue_163_clone_auth_revocation.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 120
     },
     {
       "command": [
@@ -1341,38 +1156,6 @@
         "unittest",
         "discover",
         "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_213_pair_by_address_scheme_downgrade.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-213-pair-by-address-scheme-downgrade",
-      "name": "Issue #213 peer-info scheme must not downgrade pair-by-address to cleartext",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transfer/peer_connectivity.py",
-          "app/web/handlers_network.py",
-          "tests/adversarial/security/test_issue_213_pair_by_address_scheme_downgrade.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
         "tests/adversarial",
         "-p",
         "test_issue_223_out_of_scope_discovered_pair_docs.py"
@@ -1906,39 +1689,6 @@
         "-s",
         "tests/adversarial/security",
         "-p",
-        "test_issue_240_launch_offer_binding.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-240-launch-offer-binding",
-      "name": "Issue #240 queued guest workers require consent for the exact launch offer",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/multiplayer/protocol.py",
-          "app/multiplayer/lifecycle.py",
-          "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_launch_offer_binding.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
         "test_issue_240_auto_launch_revocation.py"
       ],
       "disruptive": false,
@@ -1957,39 +1707,6 @@
           "app/multiplayer/lifecycle.py",
           "tests/multiplayer_support.py",
           "tests/adversarial/security/test_issue_240_auto_launch_revocation.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_240_execution_revocation.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-240-execution-revocation",
-      "name": "Issue #240 launch execution respects revoked automatic consent and multiplayer disable",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/multiplayer/protocol.py",
-          "app/multiplayer/lifecycle.py",
-          "tests/multiplayer_support.py",
-          "tests/adversarial/security/test_issue_240_execution_revocation.py"
         ],
         "mounts": [],
         "servers": []
@@ -2025,39 +1742,6 @@
           "app/transport/lan.py",
           "app/web/handlers_network.py",
           "tests/adversarial/test_issue_246_route_inventory_uat.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_246_tls_pin_scheme_rewrite.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-246-tls-pin-scheme-rewrite",
-      "name": "Issue #246 gossip cannot rewrite a TLS-paired peer's route to cleartext http",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3",
-          "openssl"
-        ],
-        "files": [
-          "app/transfer/swarm_membership.py",
-          "app/transfer/peer_connectivity.py",
-          "tests/adversarial/security/test_issue_246_tls_pin_scheme_rewrite.py"
         ],
         "mounts": [],
         "servers": []
@@ -2576,39 +2260,6 @@
       }
     },
     {
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_332_lan_tier_scheme_casing.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "adversarial-security-issue-332-lan-tier-scheme-casing",
-      "name": "Issue #332 LAN tier must not build cleartext routes for a TLS-pinned peer with mixed-case scheme",
-      "origin": "adversarial-security",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/transport/lan.py",
-          "app/transfer/peer_connectivity.py",
-          "app/transfer/local_network.py",
-          "tests/adversarial/security/test_issue_332_lan_tier_scheme_casing.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
-    },
-    {
       "id": "adversarial-issue-332-mixed-case-binary-download-uat",
       "name": "Issue #332 mixed-case HTTPS binary downloads retain the pinned TLS context",
       "origin": "adversarial",
@@ -2695,37 +2346,6 @@
         ],
         "files": [
           "tests/adversarial/test_issue_240_streaming_seat_limit_invitation_uat.py"
-        ],
-        "mounts": [],
-        "servers": []
-      }
-    },
-    {
-      "id": "adversarial-security-issue-240-sunshine-pidfile",
-      "name": "Issue #240 Sunshine service keeps root PID state out of /tmp",
-      "origin": "adversarial-security",
-      "enabled": true,
-      "disruptive": false,
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests/adversarial/security",
-        "-p",
-        "test_issue_240_sunshine_pidfile_security.py"
-      ],
-      "timeoutSeconds": 180,
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "app/multiplayer/dependencies.py",
-          "tests/adversarial/security/test_issue_240_sunshine_pidfile_security.py"
         ],
         "mounts": [],
         "servers": []
@@ -3919,7 +3539,7 @@
     },
     {
       "id": "adversarial-issue-586-out-of-scope-poller-capture-race-uat",
-      "name": "Out-of-scope evidence for #586 (found while testing #594): retirement before the VPN sharing poller thread captures its generation lets it keep checking",
+      "name": "Issue #615 production starter: retire after Thread.start() and before on-thread generation fallback must yield zero checks",
       "origin": "adversarial",
       "enabled": true,
       "disruptive": false,
@@ -3942,6 +3562,7 @@
         ],
         "files": [
           "app/device/vpn_manager.py",
+          "app/drone_api.py",
           "app/common/runtime_state.py",
           "tests/adversarial/test_issue_586_out_of_scope_poller_capture_race_uat.py"
         ],
@@ -3995,8 +3616,8 @@
       ],
       "disruptive": false,
       "enabled": true,
-      "id": "adversarial-issue-597-out-of-scope-failed-disconnect-not-retried",
-      "name": "Out of scope for #597: a failed disconnect of a revoked tunnel is never retried on later ticks",
+      "id": "adversarial-issue-619-failed-disconnect-retry",
+      "name": "Issue #619: failed disconnect is retried on a later sharing-check tick",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
@@ -4009,6 +3630,37 @@
           "app/device/vpn_manager.py",
           "app/transfer/swarm_reset.py",
           "tests/adversarial/test_issue_597_out_of_scope_failed_disconnect_not_retried_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_619_stop_error_status_retry_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-619-stop-error-status-retry",
+      "name": "Issue #619: a stop that returns an error status is retried on a later sharing-check tick",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_619_stop_error_status_retry_uat.py"
         ],
         "mounts": [],
         "servers": []
@@ -4758,6 +4410,462 @@
           "app/drone_api.py",
           "app/common/runtime_state.py",
           "tests/adversarial/test_issue_587_out_of_scope_pre_claim_capture_race.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-615-poller-capture-uat",
+      "name": "Issue #615 a poller started before retirement never checks after retirement (create_server wiring and thread ordering)",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_poller_capture_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/device/network_share_manager.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_poller_capture_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-615-create-server-shutdown-race-uat",
+      "name": "Issue #615 create_server failure after poller start then main finally must not check; production starter dual-gate race",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_create_server_shutdown_race_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/device/network_share_manager.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_create_server_shutdown_race_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-615-main-finally-start-window-uat",
+      "name": "Issue #615 main() finally, Thread.start window, interval-parse, and inspect-fallback must not recapture generation",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_main_finally_start_window_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "app/device/network_share_manager.py",
+          "app/drone_api.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_main_finally_start_window_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-615-explicit-zero-generation-uat",
+      "name": "Issue #615 explicit zero generation is a valid stale snapshot, not a missing value",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_615_explicit_zero_generation_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "app/common/runtime_state.py",
+          "tests/adversarial/test_issue_615_explicit_zero_generation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-616-security-suite-empty-discovery",
+      "name": "Issue #616 reported security suites reject empty test discovery",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_616_security_suite_empty_discovery.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "scripts/run_security_tests.py",
+          "tests/adversarial/test_issue_616_security_suite_empty_discovery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-619-os-signal-stop-retry",
+      "name": "Security: an OS signal failure while revoking a VPN tunnel is retried",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_619_os_signal_failure_retry.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_619_os_signal_failure_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-619-unverified-sigkill-retry",
+      "name": "Security: a revoked VPN tunnel that survives SIGKILL is retried",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_619_unverified_sigkill_retry.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/security/test_issue_619_unverified_sigkill_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-621-refused-signal-logging-uat",
+      "name": "Issue #621 refused VPN stop signals are logged during revocation and retry",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_621_refused_signal_is_logged_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_621_refused_signal_is_logged_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_626_revocation_check_to_write_race_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-626-revocation-check-to-write-race",
+      "name": "Issue #626: SMTP and Tailnet re-import between provenance check and revocation write",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_626_revocation_check_to_write_race_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_626_cross_thread_reimport_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-626-cross-thread-reimport",
+      "name": "Issue #626: SMTP and Tailnet cross-thread re-import during stale 404 revocation check",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/device/tailnet_service.py",
+          "tests/adversarial/test_issue_626_cross_thread_reimport_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-security-issue-626-fresh-smtp-save",
+      "name": "Issue #626 fresh SMTP save survives stale revocation",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_626_fresh_smtp_save_survives_revocation.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "tests/adversarial/security/test_issue_626_fresh_smtp_save_survives_revocation.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_630_pinned_https_redirect_plaintext_404.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-630-pinned-https-redirect-plaintext-404",
+      "name": "Issue #630 pinned HTTPS redirect to plaintext 404 does not revoke sharing",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/peer_connectivity.py",
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_630_pinned_https_redirect_plaintext_404.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-631-security-suite-files-exist",
+      "name": "Issue #631 enabled security suite commands reference existing test files",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_631_security_suite_files_exist.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/adversarial/test_issue_631_security_suite_files_exist.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-635-repair-first-gossip-uat",
+      "name": "Issue #635 re-paired peer survives and is accepted on its first membership POST",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_635_repair_first_gossip_uat.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/test_issue_635_repair_first_gossip_uat.py"
         ],
         "mounts": [],
         "servers": []

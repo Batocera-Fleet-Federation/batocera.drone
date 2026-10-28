@@ -93,7 +93,9 @@ def record_approved_member(settings: Any, peer: dict) -> None:
         )
         _mark_dirty(state)
 
-    _with_state(settings, mutate)
+    # Reconcile only after the add is stored: the peer was just saved as paired,
+    # so reconciling first would read the old tombstone and forget it again.
+    _with_state(settings, mutate, reconcile_after=True)
 
 
 def publish_forget(settings: Any, peer_id: str) -> bool:
@@ -403,11 +405,14 @@ def _default_poster(settings: Any, peer: dict, payload: dict) -> dict:
     return body
 
 
-def _with_state(settings: Any, fn: Callable[[dict], Any]) -> Any:
+def _with_state(settings: Any, fn: Callable[[dict], Any], *, reconcile_after: bool = False) -> Any:
     with _lock_for(settings):
         state = _load(settings)
-        _reconcile(settings, state)
+        if not reconcile_after:
+            _reconcile(settings, state)
         result = fn(state)
+        if reconcile_after:
+            _reconcile(settings, state)
         _save(settings, state)
         return result
 
