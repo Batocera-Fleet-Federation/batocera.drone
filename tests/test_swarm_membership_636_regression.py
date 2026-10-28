@@ -86,3 +86,41 @@ class AddEpochBoundRegressionTests(unittest.TestCase):
             epoch = swarm_membership._with_state(s, lambda state: swarm_membership._mint(state))
             self.assertLessEqual(epoch, swarm_membership._MAX_EPOCH)
             self.assertEqual(epoch, swarm_membership._MAX_EPOCH)
+
+
+class RemovalClockAndReapprovalTests(unittest.TestCase):
+    _ENV = {
+        "HTTP_ONLY": "1", "DRONE_LOCAL_ALLOW_INSECURE_HTTP": "1",
+        "DRONE_COMPAT_HTTPS_PORTS": "", "DRONE_CAST_ENABLED": "0",
+        "DRONE_HTTP_REDIRECT_PORT": "0", "USE_FAKE_DATA": "0",
+    }
+
+    def test_remote_removal_keeps_clock_and_local_reapproval_outranks_it(self):
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl required")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, self._ENV, clear=True):
+            victim = _settings(tmp, "victim")
+            member = _settings(tmp, "member")
+            cert = DroneCertificateManager(member).ensure_certificate()["public_certificate"]
+            cert_path, fingerprint = _save_local_peer_certificate(victim, "member", cert)
+            peer = {
+                "drone_id": "member", "name": "member", "hostname": "member",
+                "reachable_url": "https://127.0.0.1/member", "scheme": "https",
+                "api_port": 443, "peer_mtls_port": 443,
+                "certificate_fingerprint": fingerprint, "certificate_path": str(cert_path),
+                "certificate_pem": cert,
+            }
+            local_network.save_paired_peer(victim, peer)
+            margin = swarm_membership._MAX_REMOVAL_EPOCH_AHEAD
+            swarm_membership.handle_membership_request(victim, {"records": [{
+                "peer_id": "member", "op": "remove", "epoch": margin, "origin": "member",
+            }]}, "member")
+            self.assertEqual(swarm_membership.membership_view(victim)["clock"], 0,
+                             "a remote removal must not advance the mint clock")
+            local_network.save_paired_peer(victim, peer)
+            swarm_membership.record_approved_member(victim, peer)
+            view = swarm_membership.membership_view(victim)
+            record = next(row for row in view["records"] if row["peer_id"] == "member")
+            self.assertEqual(record["op"], "add")
+            self.assertGreater(record["epoch"], margin)
+            self.assertLess(view["clock"], 10)
