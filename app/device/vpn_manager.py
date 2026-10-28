@@ -33,6 +33,7 @@ boot-ordering-dependent service unit.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -218,12 +219,16 @@ def _load_state(settings: Settings) -> dict:
         "credential_wipe_pending": bool(stored.get("credential_wipe_pending", False)),
         # Pid of the revoked tunnel whose stop failed; a retry never targets a newer process.
         "disconnect_retry_pid": stored.get("disconnect_retry_pid") if isinstance(stored.get("disconnect_retry_pid"), int) else None,
-        # Epoch seconds when the revocation began; a pid-less retry never stops a process that started later.
+        # Boot-relative revocation tick. Legacy epoch timestamps are not comparable.
         "disconnect_retry_since": (
             float(stored["disconnect_retry_since"])
-            if isinstance(stored.get("disconnect_retry_since"), (int, float))
-            and not isinstance(stored.get("disconnect_retry_since"), bool) else None
+            if stored.get("disconnect_retry_clock") == "boottime-v1"
+            and isinstance(stored.get("disconnect_retry_since"), (int, float))
+            and not isinstance(stored.get("disconnect_retry_since"), bool)
+            and math.isfinite(stored["disconnect_retry_since"]) else None
         ),
+        "disconnect_retry_clock": stored.get("disconnect_retry_clock"),
+        "disconnect_retry_boot_id": stored.get("disconnect_retry_boot_id"),
         # Default True: self-healing is opt-out, not opt-in.
         "self_heal_enabled": bool(stored.get("self_heal_enabled", True)),
         "self_heal_last_at": stored.get("self_heal_last_at"),
@@ -511,39 +516,54 @@ def _find_running_openvpn_pid(target_config_path: Path, proc_root: Path = Path("
     return None
 
 
+def _boot_id() -> Optional[str]:
+    """Identify the boot whose process clock a persisted retry belongs to."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
+    except OSError:
+        return None
+
+
+def _revocation_start_tick() -> Optional[float]:
+    """Capture the current Linux boot clock, rounded down to a /proc tick."""
+    try:
+        # MONOTONIC is only a portability fallback on hosts without Linux /proc.
+        # On Linux use uptime if Python does not expose CLOCK_BOOTTIME.
+        if hasattr(time, "CLOCK_BOOTTIME"):
+            now = time.clock_gettime(time.CLOCK_BOOTTIME)
+        elif sys.platform.startswith("linux"):
+            now = float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+        else:
+            now = time.monotonic()
+        hz = os.sysconf("SC_CLK_TCK")
+        return math.floor(now * hz) / hz
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _process_started_at(pid: int, proc_root: Path = Path("/proc")) -> Optional[float]:
-    """Epoch start time of ``pid`` from /proc, or None when it cannot be determined."""
+    """Boot-relative start time of ``pid`` from /proc; independent of wall time."""
     try:
         stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="ignore")
         # comm (field 2) may contain spaces/parentheses; fields resume after the last ')'.
         fields = stat[stat.rindex(")") + 2:].split()
         start_ticks = int(fields[19])  # field 22 overall: starttime, in clock ticks since boot
-        if proc_root == Path("/proc"):
-            # /proc/stat's btime loses fractional seconds. Use the same boot
-            # clock as process starttime (including suspend) so a replacement
-            # started milliseconds after revocation is not mistaken for the old one.
-            boot_time = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
-        else:
-            boot_time = next(
-                int(line.split()[1]) for line in (proc_root / "stat").read_text(encoding="utf-8").splitlines()
-                if line.startswith("btime ")
-            )
-        return boot_time + start_ticks / os.sysconf("SC_CLK_TCK")
-    except (OSError, ValueError, IndexError, StopIteration, AttributeError):
+        return start_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, AttributeError):
         return None
 
 
 def _started_after_revocation(pid: int, since: Optional[float]) -> bool:
-    """True only when ``pid`` provably started after the revocation began.
+    """Preserve starts in or after the revocation tick on a PID-less retry.
 
-    Compare without a grace window: even a subsecond replacement is newer.
-    Unknown timing returns False so
-    a revoked tunnel is never left running just because /proc was unreadable.
+    /proc cannot order starts within one tick. Resolve that ambiguity in favor
+    of preserving a replacement; known older processes and unknown timing still
+    get a stop attempt. PID-bound retries do not use this tie rule.
     """
     if since is None:
         return False
     started = _process_started_at(pid)
-    return started is not None and started > since
+    return started is not None and started >= since
 
 
 def validate_ready(settings: Settings) -> List[str]:
@@ -641,7 +661,7 @@ def disconnect(settings: Settings, expected_pid: Optional[int] = None,
     A revocation retry passes the tunnel it is bound to so the check happens
     here, under ``_CONNECT_LOCK`` and against the very pid that gets signalled:
     ``expected_pid`` leaves any other process alone, and ``not_started_after``
-    (when no pid was recorded) leaves one that provably started later alone.
+    (when no pid was recorded) preserves starts in or after the revocation tick.
     """
     with _CONNECT_LOCK:
         cfg = config_path(settings)
@@ -1080,7 +1100,8 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
     with _CREDENTIALS_LOCK:
         stop_error: Optional[BaseException] = None
         stop_result: Optional[dict] = None
-        revocation_started = time.time()
+        revocation_started = _revocation_start_tick()
+        revocation_boot_id = _boot_id()
         # disconnect() records the pid it targets before signalling, so a stop that
         # raises before returning still binds the retry to this process.
         _DISCONNECT_TARGET.pid = None
@@ -1110,6 +1131,8 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                     disconnect_retry_pending=pending,
                     disconnect_retry_pid=revoked_pid if pending else None,
                     disconnect_retry_since=revocation_started if pending else None,
+                    disconnect_retry_clock="boottime-v1" if pending else None,
+                    disconnect_retry_boot_id=revocation_boot_id if pending else None,
                 )
             except Exception:
                 if stop_error is not None:
@@ -1177,6 +1200,11 @@ def check_sharing_revocation(settings: Settings) -> bool:
                 revoked_pid = state["disconnect_retry_pid"]
                 retry_since = state["disconnect_retry_since"]
                 try:
+                    recorded_boot = state["disconnect_retry_boot_id"]
+                    current_boot = _boot_id()
+                    if recorded_boot and current_boot and recorded_boot != current_boot:
+                        # No process from the revoked boot can have survived reboot.
+                        pending = False
                     if pending:
                         running_pid = _find_running_openvpn_pid(config_path(settings))
                         if revoked_pid is not None and running_pid != revoked_pid:
@@ -1185,8 +1213,8 @@ def check_sharing_revocation(settings: Settings) -> bool:
                             pending = False
                         elif revoked_pid is None and running_pid is not None and \
                                 _started_after_revocation(running_pid, retry_since):
-                            # No pid was recorded, but this process started after the
-                            # revocation began, so it is a newer tunnel.
+                            # No pid was recorded. Preserve processes starting in or
+                            # after the revocation tick as possible replacements.
                             pending = False
                     if pending:
                         stop_result = disconnect(
