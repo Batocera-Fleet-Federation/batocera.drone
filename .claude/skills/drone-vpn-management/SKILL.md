@@ -406,7 +406,10 @@ cannot detect a revocation nobody is actively looking for.
   `disconnect_retry_pid`; a retry whose pid is gone never stops a newer
   tunnel. If no pid was ever captured, `disconnect_retry_since` (epoch of
   revocation start) lets the retry skip a process that `/proc` shows started
-  later; unknown timing fails closed (the retry still stops it). It deliberately
+  later, with no one-second grace window. On Linux the epoch conversion uses
+  `CLOCK_BOOTTIME`, including suspend, rather than whole-second `/proc/stat`
+  boot time so subsecond replacements are distinguished. Unknown timing fails
+  closed (the retry still stops it). It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look

@@ -518,10 +518,16 @@ def _process_started_at(pid: int, proc_root: Path = Path("/proc")) -> Optional[f
         # comm (field 2) may contain spaces/parentheses; fields resume after the last ')'.
         fields = stat[stat.rindex(")") + 2:].split()
         start_ticks = int(fields[19])  # field 22 overall: starttime, in clock ticks since boot
-        boot_time = next(
-            int(line.split()[1]) for line in (proc_root / "stat").read_text(encoding="utf-8").splitlines()
-            if line.startswith("btime ")
-        )
+        if proc_root == Path("/proc"):
+            # /proc/stat's btime loses fractional seconds. Use the same boot
+            # clock as process starttime (including suspend) so a replacement
+            # started milliseconds after revocation is not mistaken for the old one.
+            boot_time = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
+        else:
+            boot_time = next(
+                int(line.split()[1]) for line in (proc_root / "stat").read_text(encoding="utf-8").splitlines()
+                if line.startswith("btime ")
+            )
         return boot_time + start_ticks / os.sysconf("SC_CLK_TCK")
     except (OSError, ValueError, IndexError, StopIteration, AttributeError):
         return None
@@ -530,13 +536,14 @@ def _process_started_at(pid: int, proc_root: Path = Path("/proc")) -> Optional[f
 def _started_after_revocation(pid: int, since: Optional[float]) -> bool:
     """True only when ``pid`` provably started after the revocation began.
 
-    A 1s margin absorbs /proc boot-time rounding. Unknown timing returns False so
+    Compare without a grace window: even a subsecond replacement is newer.
+    Unknown timing returns False so
     a revoked tunnel is never left running just because /proc was unreadable.
     """
     if since is None:
         return False
     started = _process_started_at(pid)
-    return started is not None and started > since + 1.0
+    return started is not None and started > since
 
 
 def validate_ready(settings: Settings) -> List[str]:

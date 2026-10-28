@@ -331,6 +331,34 @@ class FindRunningOpenvpnTests(unittest.TestCase):
             )
 
 
+class ProcessStartTimeTests(unittest.TestCase):
+    def test_live_proc_uses_fractional_boot_time_including_suspend(self) -> None:
+        # Field 22 is 100.1 seconds since boot. The comm field can contain ')'.
+        stat = "99 (openvpn (client)) " + " ".join(["0"] * 19 + ["10010"])
+        with mock.patch.object(Path, "read_text", return_value=stat), \
+                mock.patch.object(vpn_manager.time, "time", return_value=1000.75), \
+                mock.patch.object(vpn_manager.time, "CLOCK_BOOTTIME", 7, create=True), \
+                mock.patch.object(vpn_manager.time, "clock_gettime", return_value=100.25) as clock, \
+                mock.patch.object(vpn_manager.os, "sysconf", return_value=100):
+            self.assertAlmostEqual(vpn_manager._process_started_at(99), 1000.6)
+            clock.assert_called_once_with(7)
+            self.assertTrue(vpn_manager._started_after_revocation(99, 1000.5))
+
+    def test_unavailable_boot_clock_leaves_timing_unknown(self) -> None:
+        stat = "99 (openvpn) " + " ".join(["0"] * 19 + ["10010"])
+        with mock.patch.object(Path, "read_text", return_value=stat), \
+                mock.patch.object(vpn_manager.time, "CLOCK_BOOTTIME", 7, create=True), \
+                mock.patch.object(vpn_manager.time, "clock_gettime", side_effect=OSError("unavailable")):
+            self.assertIsNone(vpn_manager._process_started_at(99))
+
+    def test_revocation_boundary_has_no_grace_window(self) -> None:
+        for started, expected in ((999.9, False), (1000.0, False),
+                                  (1000.001, True), (1000.1, True), (None, False)):
+            with self.subTest(started=started), \
+                    mock.patch.object(vpn_manager, "_process_started_at", return_value=started):
+                self.assertEqual(vpn_manager._started_after_revocation(99, 1000.0), expected)
+
+
 class ConnectDisconnectTests(unittest.TestCase):
     def _ready_settings(self, tmp: str) -> Settings:
         settings = _build_settings(self, Path(tmp))
