@@ -341,7 +341,9 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
         from transfer.peer_connectivity import _save_local_peer_certificate  # type: ignore
     cert_path, stored_fingerprint = _save_local_peer_certificate(settings, peer_id, pem)
     peer["certificate_path"] = str(cert_path)
-    state["clock"] = min(_MAX_EPOCH, max(int(state.get("clock") or 0), int(record["epoch"])))
+    # Remote add epochs are untrusted. Do not fold them into the local mint
+    # clock: doing so would reset the ahead allowance on every request and let
+    # a paired introducer ratchet the clock to _MAX_EPOCH incrementally.
     state["records"][peer_id] = {
         "op": "add",
         "epoch": int(record["epoch"]),
