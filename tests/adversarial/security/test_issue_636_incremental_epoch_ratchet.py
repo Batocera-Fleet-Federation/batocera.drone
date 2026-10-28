@@ -62,15 +62,16 @@ class IncrementalEpochRatchetTests(unittest.TestCase):
                     },
                 }]}, "attacker")
 
-            # The receiver now mints at the parse ceiling; a less advanced peer
-            # rejects this record under the same ahead-distance gate.
-            self.assertLess(
-                swarm_membership.membership_view(receiver)["clock"], ceiling,
-                "a paired member can ratchet the clock to the parse ceiling across requests",
+            # Rejected remote adds must not advance the receiver's local mint
+            # clock, even when an attacker repeats records up to the parse
+            # ceiling across requests.
+            self.assertEqual(
+                swarm_membership.membership_view(receiver)["clock"], 0,
+                "gossiped adds ratcheted the receiver's local clock",
             )
             minted = swarm_membership._with_state(receiver, lambda state: swarm_membership._mint(state))
-            self.assertEqual(minted, ceiling)
-            self.assertGreater(minted, margin)
+            self.assertEqual(minted, 1)
+            self.assertLessEqual(minted, margin)
 
 
 if __name__ == "__main__":
