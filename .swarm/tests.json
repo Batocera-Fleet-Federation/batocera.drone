@@ -4996,6 +4996,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-636-forged-add-blocks-self-departure",
+      "name": "Security: a bounded forged add cannot outrank a member's own lower-epoch departure",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_forged_add_blocks_self_departure.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_forged_add_blocks_self_departure.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
