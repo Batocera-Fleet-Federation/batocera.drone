@@ -400,7 +400,13 @@ cannot detect a revocation nobody is actively looking for.
   after the tunnel stops, without a new peer response. Only successful removal
   or a genuine `save_credentials` replacement clears that wipe flag; a config
   upload cannot cancel pending cleanup. Retry ticks preserve the original
-  revocation timestamp and reason. It deliberately
+  revocation timestamp and reason. The retry is bound to the revoked
+  tunnel: `disconnect()` records the pid it targets (thread-local
+  `_DISCONNECT_TARGET`) before signalling, so even a stop that raises keeps
+  `disconnect_retry_pid`; a retry whose pid is gone never stops a newer
+  tunnel. If no pid was ever captured, `disconnect_retry_since` (epoch of
+  revocation start) lets the retry skip a process that `/proc` shows started
+  later; unknown timing fails closed (the retry still stops it). It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look

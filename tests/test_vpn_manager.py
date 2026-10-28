@@ -1008,6 +1008,64 @@ class CheckSharingRevocationTests(unittest.TestCase):
             self.assertFalse(state["disconnect_retry_pending"])
             self.assertIsNone(state["disconnect_retry_pid"])
 
+    def test_stop_raising_before_pid_report_still_binds_retry_to_revoked_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            # disconnect() finds pid 42, then the signal call raises a non-OSError.
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=42), \
+                    mock.patch.object(vpn_manager.os, "kill", side_effect=RuntimeError("signal failed")), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                vpn_manager.check_sharing_revocation(settings)
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["disconnect_retry_pending"])
+            self.assertEqual(state["disconnect_retry_pid"], 42)
+            # A newly imported tunnel (pid 99) must not be stopped by the retry.
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                vpn_manager.check_sharing_revocation(settings)
+                disconnect.assert_not_called()
+            self.assertFalse(vpn_manager._load_state(settings)["disconnect_retry_pending"])
+
+    def test_pidless_retry_skips_process_started_after_revocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                    mock.patch.object(vpn_manager, "disconnect", side_effect=RuntimeError("boom")), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                vpn_manager.check_sharing_revocation(settings)
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["disconnect_retry_pending"])
+            self.assertIsNone(state["disconnect_retry_pid"])
+            since = state["disconnect_retry_since"]
+            self.assertIsNotNone(since)
+            # A tunnel that began after the revocation is newer and is left alone.
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager, "_process_started_at", return_value=since + 60), \
+                    mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                vpn_manager.check_sharing_revocation(settings)
+                disconnect.assert_not_called()
+            self.assertFalse(vpn_manager._load_state(settings)["disconnect_retry_pending"])
+
+    def test_pidless_retry_still_stops_process_that_predates_revocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                    mock.patch.object(vpn_manager, "disconnect", side_effect=RuntimeError("boom")), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                vpn_manager.check_sharing_revocation(settings)
+            since = vpn_manager._load_state(settings)["disconnect_retry_since"]
+            for started in (since - 3600, None):  # older, or timing unknown: fail closed
+                with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                        mock.patch.object(vpn_manager, "_process_started_at", return_value=started), \
+                        mock.patch.object(vpn_manager, "disconnect", return_value={"status": "error", "pid": 99, "errors": ["x"]}) as disconnect, \
+                        mock.patch.object(vpn_manager, "_log_poller_failure"):
+                    vpn_manager.check_sharing_revocation(settings)
+                    disconnect.assert_called_once()
+                state = vpn_manager._load_state(settings)
+                self.assertTrue(state["disconnect_retry_pending"])
+                self.assertEqual(state["disconnect_retry_pid"], 99)
+
     def test_pending_wipe_does_not_remove_fresh_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)
