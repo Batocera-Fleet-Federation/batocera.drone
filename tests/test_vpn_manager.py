@@ -952,6 +952,78 @@ class SharingProvenanceGateTests(unittest.TestCase):
 
 
 class CheckSharingRevocationTests(unittest.TestCase):
+    def test_unlink_failure_disables_credentials_and_retries_cleanup_without_peer(self) -> None:
+        for stop_result in ({"status": "error"}, RuntimeError("stop failed"), {"status": "disconnected"}):
+            with self.subTest(stop_result=stop_result), tempfile.TemporaryDirectory() as tmp:
+                settings = self._imported_settings(tmp)
+                auth = vpn_manager.auth_path(settings)
+                with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                        mock.patch.object(vpn_manager, "disconnect", side_effect=[stop_result]), \
+                        mock.patch.object(Path, "unlink", side_effect=OSError("busy")), \
+                        mock.patch.object(vpn_manager, "_log_poller_failure"):
+                    self.assertTrue(vpn_manager.check_sharing_revocation(settings))
+                state = vpn_manager._load_state(settings)
+                self.assertTrue(auth.exists())
+                self.assertFalse(state["has_credentials"])
+                self.assertTrue(state["credential_wipe_pending"])
+                self.assertEqual(state["disconnect_retry_pending"], stop_result != {"status": "disconnected"})
+                with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="openvpn"):
+                    self.assertTrue(vpn_manager.validate_ready(settings))
+
+                # A successful stop does not discard a still-failing file wipe.
+                with mock.patch("app.transfer.local_network.get_paired_peer") as peer, \
+                        mock.patch.object(vpn_manager, "disconnect", return_value={"status": "disconnected"}), \
+                        mock.patch.object(Path, "unlink", side_effect=OSError("still busy")), \
+                        mock.patch.object(vpn_manager, "_log_poller_failure"):
+                    self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                    peer.assert_not_called()
+                self.assertFalse(vpn_manager._load_state(settings)["disconnect_retry_pending"])
+                self.assertTrue(vpn_manager._load_state(settings)["credential_wipe_pending"])
+
+                with mock.patch("app.transfer.local_network.get_paired_peer") as peer, \
+                        mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                    self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                    peer.assert_not_called()
+                    disconnect.assert_not_called()
+                self.assertFalse(auth.exists())
+                after = vpn_manager._load_state(settings)
+                self.assertFalse(after["credential_wipe_pending"])
+                self.assertEqual(after["revoked_at"], state["revoked_at"])
+
+    def test_retry_does_not_stop_newer_tunnel_after_revoked_process_exited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            failed = {"status": "error", "pid": 42, "errors": ["Failed to stop openvpn (pid 42): denied"]}
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                    mock.patch.object(vpn_manager, "disconnect", return_value=failed), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                vpn_manager.check_sharing_revocation(settings)
+            self.assertEqual(vpn_manager._load_state(settings)["disconnect_retry_pid"], 42)
+            # The revoked pid is gone; a different (newly imported) tunnel runs as pid 99.
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                vpn_manager.check_sharing_revocation(settings)
+                disconnect.assert_not_called()
+            state = vpn_manager._load_state(settings)
+            self.assertFalse(state["disconnect_retry_pending"])
+            self.assertIsNone(state["disconnect_retry_pid"])
+
+    def test_pending_wipe_does_not_remove_fresh_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch.object(vpn_manager, "disconnect", return_value={"status": "error"}), \
+                    mock.patch.object(Path, "unlink", side_effect=OSError("busy")), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                with self.assertRaises(OSError):
+                    vpn_manager._revoke_local_credentials(settings, "revoked")
+            vpn_manager.save_uploaded_config(settings, "fresh.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "fresh-user", "fresh-password")
+            with mock.patch.object(vpn_manager, "disconnect", return_value={"status": "disconnected"}) as disconnect:
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                disconnect.assert_called_once()
+            self.assertTrue(vpn_manager._load_state(settings)["has_credentials"])
+            self.assertIn("fresh-user", vpn_manager.auth_path(settings).read_text())
+
     def _imported_settings(self, tmp: str, *, with_credentials: bool = True):
         settings = _build_settings(self, Path(tmp))
         peer_payload = {
