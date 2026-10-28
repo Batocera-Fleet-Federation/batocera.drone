@@ -353,6 +353,24 @@ class SwarmMembershipTests(unittest.TestCase):
         self.assertEqual(_roster(drones["drone-b"]), {"drone-a", "drone-c"})
         self.assertEqual(_roster(drones["drone-c"]), {"drone-a", "drone-b"})
 
+    def test_immediate_repair_after_forget_keeps_peer_and_accepts_its_first_post(self) -> None:
+        drones = {name: self._settings(name) for name in ("victim", "member", "source")}
+        self._approve(drones["victim"], drones["source"])
+        self._approve(drones["victim"], drones["member"])
+        self._approve(drones["member"], drones["victim"])
+        self._install_poster(drones)
+        self.assertTrue(swarm_membership.publish_forget(drones["victim"], "member"))
+        self.assertNotIn("member", _roster(drones["victim"]))
+
+        # Same call order as the pairing handlers: save the pin, then record the approval.
+        self._approve(drones["victim"], drones["member"])
+        self.assertIn("member", _roster(drones["victim"]))
+
+        # The approved peer's first membership POST is not refused with 403.
+        view = swarm_membership.handle_membership_request(drones["victim"], {"records": []}, "member")
+        self.assertEqual(view.get("status"), "synced")
+        self.assertIn("member", _roster(drones["victim"]))
+
     def test_operator_removal_only_changes_its_own_roster(self) -> None:
         drones = {name: self._settings(name) for name in ("drone-a", "drone-b", "drone-c")}
         for left, right in (("drone-a", "drone-b"), ("drone-b", "drone-c")):
