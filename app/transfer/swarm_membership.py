@@ -518,8 +518,55 @@ def _load(settings: Any) -> dict:
         forwarded_gen = int(payload.get("forwarded_gen") or 0)
     except (TypeError, ValueError):
         forwarded_gen = 0
+    # Heal legacy poisoned clocks (#636): a pre-fix add with epoch 1e9
+    # ratcheted the clock to the parse ceiling. That clock would make
+    # every future locally minted record exceed the receiver's
+    # _MAX_ADD_EPOCH_AHEAD bound and be silently dropped. Recover by
+    # lowering the clock to the highest legitimate own-origin epoch.
+    clock = min(_MAX_EPOCH, max(0, clock))
+    # Only heal if the clock looks poisoned. A legitimate swarm never
+    # needs a clock near the ceiling; 1M is already far above real
+    # divergence, so a clock >= 999M is definitely poisoned. For
+    # intermediate values, treat as poisoned when far ahead of the
+    # highest own-origin epoch that is itself not near the ceiling.
+    try:
+        own_id = str(getattr(settings, "device_id", "") or "")
+    except Exception:
+        own_id = ""
+    max_legit = 0
+    for rec in clean.values():
+        try:
+            e = int(rec.get("epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if e >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD:
+            continue
+        if own_id and str(rec.get("origin") or "") != own_id:
+            continue
+        if e > max_legit:
+            max_legit = e
+    # If there is no own-origin record, fall back to any non-poisoned
+    # record so a Drone that was poisoned before any local mint still
+    # heals to 0 rather than staying at the ceiling.
+    if max_legit == 0:
+        for rec in clean.values():
+            try:
+                e = int(rec.get("epoch") or 0)
+            except (TypeError, ValueError):
+                continue
+            if e >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD:
+                continue
+            if e > max_legit and e < 5_000_000:
+                max_legit = e
+    poisoned_ceiling = clock >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD
+    poisoned_far = clock > 5_000_000 and clock > max_legit + _MAX_ADD_EPOCH_AHEAD
+    if poisoned_ceiling or poisoned_far:
+        clock = max_legit
+        # Ensure monotonic with the healed max (already equal) and keep
+        # within bounds.
+        clock = min(_MAX_EPOCH, max(0, clock))
     return {
-        "clock": min(_MAX_EPOCH, max(0, clock)),
+        "clock": clock,
         "dirty_gen": max(0, dirty_gen),
         "forwarded_gen": max(0, forwarded_gen),
         "departed": bool(payload.get("departed")),
@@ -541,7 +588,32 @@ def _store(state: dict, record: dict) -> None:
 
 
 def _mint(state: dict) -> int:
-    clock = int(state.get("clock") or 0) + 1
+    # Defense in depth for legacy poisoned clocks that were mutated
+    # without going through _load (#636). If the clock is poisoned,
+    # heal it to the highest non-poisoned epoch before incrementing.
+    raw_clock = int(state.get("clock") or 0)
+    max_legit = 0
+    for rec in (state.get("records") or {}).values():
+        try:
+            e = int(rec.get("epoch") or 0)
+        except (TypeError, ValueError):
+            continue
+        if e >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD:
+            continue
+        if e > max_legit and e < 5_000_000:
+            max_legit = e
+        elif e > max_legit and e < raw_clock:
+            # For larger legitimate values, still consider if not poisoned
+            # but cap the heuristic to avoid using a poisoned max as legit.
+            if e < 10_000_000:
+                max_legit = e
+    # Also consider own-origin max if available (state may carry it indirectly)
+    # Fall back to overall max_legit computed above.
+    poisoned_ceiling = raw_clock >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD
+    poisoned_far = raw_clock > 5_000_000 and raw_clock > max_legit + _MAX_ADD_EPOCH_AHEAD
+    if poisoned_ceiling or poisoned_far:
+        raw_clock = max_legit
+    clock = raw_clock + 1
     if clock > _MAX_EPOCH:
         clock = _MAX_EPOCH
     state["clock"] = clock
