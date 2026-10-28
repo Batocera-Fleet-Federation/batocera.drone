@@ -5087,6 +5087,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-631-security-suite-files-exist",
+      "name": "Issue #631 enabled security suite commands reference existing test files",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_631_security_suite_files_exist.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          ".swarm/tests.json",
+          "tests/adversarial/test_issue_631_security_suite_files_exist.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
