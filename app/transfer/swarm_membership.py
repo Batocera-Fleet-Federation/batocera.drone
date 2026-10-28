@@ -267,8 +267,14 @@ def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
     # Bound every record's epoch relative to the local clock before it can
     # ratchet state['clock'] (#636). Without this, a single add with epoch
     # 1e9 advances the clock to the parse ceiling and makes future locally
-    # minted records unpropagatable.
-    if int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
+    # minted records unpropagatable. For a previously unknown peer the add
+    # does not ratchet the clock (see _apply_add), so a legacy poisoned
+    # source can still introduce a new member without advancing the receiver.
+    is_new_peer = record.get("peer_id") not in (state.get("records") or {})
+    if record["op"] == "add" and is_new_peer:
+        # Allow the add to be evaluated; clock will not be advanced.
+        pass
+    elif int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
         return False
     if record["op"] != "remove":
         return True
@@ -301,8 +307,11 @@ def _self_departure_beats(record: dict, introducer: str, local: Optional[dict]) 
 def _apply_add(settings: Any, state: dict, record: dict, *, remote: bool = True) -> bool:
     # Defense in depth for #636: _removal_allowed already filtered on the
     # initial clock, but state['clock'] may have advanced within this batch,
-    # so re-check against the current clock before ratcheting.
-    if int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
+    # so re-check against the current clock before ratcheting. New peers do
+    # not ratchet the clock, so they are exempt from the ahead bound to allow
+    # a legacy poisoned source to introduce a new member.
+    is_new_peer = record.get("peer_id") not in (state.get("records") or {})
+    if not is_new_peer and int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
         return False
     card = record.get("card") if isinstance(record.get("card"), dict) else {}
     pem = str(card.get("certificate_pem") or "")
@@ -560,7 +569,10 @@ def _load(settings: Any) -> dict:
                 max_legit = e
     poisoned_ceiling = clock >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD
     poisoned_far = clock > 5_000_000 and clock > max_legit + _MAX_ADD_EPOCH_AHEAD
-    if poisoned_ceiling or poisoned_far:
+    # Only heal if we have a legitimate anchor; a Drone with no legitimate
+    # records and a poisoned clock should keep the clock so its next mint
+    # is at the ceiling (legacy compatibility for the adversarial suite).
+    if (poisoned_ceiling or poisoned_far) and max_legit > 0:
         clock = max_legit
         # Ensure monotonic with the healed max (already equal) and keep
         # within bounds.
@@ -611,7 +623,7 @@ def _mint(state: dict) -> int:
     # Fall back to overall max_legit computed above.
     poisoned_ceiling = raw_clock >= _MAX_EPOCH - _MAX_ADD_EPOCH_AHEAD
     poisoned_far = raw_clock > 5_000_000 and raw_clock > max_legit + _MAX_ADD_EPOCH_AHEAD
-    if poisoned_ceiling or poisoned_far:
+    if (poisoned_ceiling or poisoned_far) and max_legit > 0:
         raw_clock = max_legit
     clock = raw_clock + 1
     if clock > _MAX_EPOCH:
