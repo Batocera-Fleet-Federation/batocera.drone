@@ -191,22 +191,22 @@ class DisconnectFailureWipeUAT(_ImportedCredentialsCase):
                 self.assertTrue(vpn_manager.auth_path(settings).exists())
                 self.assertTrue(vpn_manager._load_state(settings)["has_credentials"])
 
-    def test_next_tick_after_failed_revocation_is_quiet(self) -> None:
+    def test_next_tick_retries_failed_disconnect_after_revocation(self) -> None:
         settings = self._imported_settings()
         with _peer_answers(None), \
-                mock.patch.object(vpn_manager, "_find_running_openvpn_pid",
-                                  side_effect=RuntimeError("process table unreadable")), \
+                mock.patch.object(vpn_manager, "disconnect", side_effect=[
+                    RuntimeError("process table unreadable"), {"status": "disconnected"},
+                ]) as disconnect, \
                 contextlib.redirect_stderr(io.StringIO()):
             vpn_manager.check_sharing_revocation(settings)
-        before = vpn_manager._load_state(settings)
+            # Issue #622: "Failed disconnect of a revoked VPN tunnel is never retried, leaving a revoked session running"
+            # requires another stop attempt after a failed disconnect, even though the credentials were wiped.
+            vpn_manager.check_sharing_revocation(settings)
 
-        with _peer_answers(None), contextlib.redirect_stderr(io.StringIO()) as stderr:
-            self.assertFalse(vpn_manager.check_sharing_revocation(settings))
-
-        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(disconnect.call_count, 2)
         after = vpn_manager._load_state(settings)
-        self.assertEqual(after["revoked_reason"], before["revoked_reason"])
-        self.assertEqual(after["revoked_at"], before["revoked_at"])
+        self.assertFalse(after["has_credentials"])
+        self.assertFalse(after["disconnect_retry_pending"])
 
     def test_clone_reset_wipes_imported_credentials_when_disconnect_raises(self) -> None:
         # Clone provisioning reaches the same wipe via swarm_reset; the failing vpn step must be reported

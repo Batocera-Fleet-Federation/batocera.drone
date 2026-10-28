@@ -359,8 +359,10 @@ cannot detect a revocation nobody is actively looking for.
   `runtime_state.claim_poller()` at function entry so a retirement that lands
   after `Thread.start()` but before the thread reads `poller_generation()`
   still exits before any check.
-- `check_sharing_revocation(settings)` is a no-op unless `source_peer_id` is
-  set *and* `has_credentials` is true (nothing to revoke otherwise). It
+- `check_sharing_revocation(settings)` retries pending disconnects and credential
+  wipes before any peer lookup, independent of provenance or `has_credentials`.
+  Otherwise it is a no-op unless `source_peer_id` is set *and*
+  `has_credentials` is true (nothing to revoke otherwise). It
   resolves the source peer via `local_network.get_paired_peer` and re-calls
   the *same* `GET /peer/vpn/config` endpoint the original pull used.
 - **Only two outcomes count as revocation**: the peer is no longer in this
@@ -392,7 +394,13 @@ cannot detect a revocation nobody is actively looking for.
   `_log_poller_failure` (so it appears as `VPN sharing revocation check
   failed`), while still setting `disconnect_retry_pending` so the failed stop
   is retried on a later tick. The disconnect exception still reaches the
-  check's existing error reporter. It deliberately
+  check's existing error reporter. An unlink failure still persists the stop
+  outcome and disables `has_credentials` to prevent reuse on startup. The
+  separate `credential_wipe_pending` flag keeps file removal retrying even
+  after the tunnel stops, without a new peer response. Only successful removal
+  or a genuine `save_credentials` replacement clears that wipe flag; a config
+  upload cannot cancel pending cleanup. Retry ticks preserve the original
+  revocation timestamp and reason. It deliberately
   **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
   provenance here would reopen the single-hop-only hole (see above): a
   credential-less imported config with no recorded origin would look
