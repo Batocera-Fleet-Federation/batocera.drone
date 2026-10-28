@@ -215,6 +215,8 @@ def _load_state(settings: Settings) -> dict:
         # A failed stop remains actionable after credential material is wiped.
         "disconnect_retry_pending": bool(stored.get("disconnect_retry_pending", False)),
         "credential_wipe_pending": bool(stored.get("credential_wipe_pending", False)),
+        # Pid of the revoked tunnel whose stop failed; a retry never targets a newer process.
+        "disconnect_retry_pid": stored.get("disconnect_retry_pid") if isinstance(stored.get("disconnect_retry_pid"), int) else None,
         # Default True: self-healing is opt-out, not opt-in.
         "self_heal_enabled": bool(stored.get("self_heal_enabled", True)),
         "self_heal_last_at": stored.get("self_heal_last_at"),
@@ -599,7 +601,7 @@ def disconnect(settings: Settings) -> dict:
             _save_state(settings, connected_at=None)
             return {"status": "not_running"}
         except OSError as error:
-            return {"status": "error", "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
+            return {"status": "error", "pid": pid, "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
         deadline = time.monotonic() + VPN_DISCONNECT_GRACE_SECONDS
         while time.monotonic() < deadline:
             if _find_running_openvpn_pid(cfg) is None:
@@ -611,14 +613,14 @@ def disconnect(settings: Settings) -> dict:
             except ProcessLookupError:
                 pass
             except OSError as error:
-                return {"status": "error", "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
+                return {"status": "error", "pid": pid, "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
             # Signal delivery is not proof of exit (for example, a process
             # stuck in kernel teardown can survive SIGKILL). Keep revocation's
             # stop retry pending until the managed process actually disappears.
             deadline = time.monotonic() + VPN_DISCONNECT_KILL_WAIT_SECONDS
             while _find_running_openvpn_pid(cfg) is not None:
                 if time.monotonic() >= deadline:
-                    return {"status": "error", "errors": ["OpenVPN is still running after SIGKILL."]}
+                    return {"status": "error", "pid": pid, "errors": ["OpenVPN is still running after SIGKILL."]}
                 time.sleep(0.25)
         _save_state(settings, connected_at=None)
         return {"status": "disconnected"}
@@ -1030,11 +1032,16 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
             # Any exception means the stop could not be confirmed. Error
             # wording is diagnostic only and never changes retry behavior.
             pending = stop_error is not None or not _disconnect_result_confirms_stopped(stop_result)
+            # disconnect() reports the pid it targeted so retries stay bound to this process.
+            revoked_pid = stop_result.get("pid") if isinstance(stop_result, dict) else None
+            if not isinstance(revoked_pid, int):
+                revoked_pid = None
             try:
                 _wipe_revoked_credentials(
                     settings, revoked_reason=reason,
                     revoked_at=_now_iso(),
                     disconnect_retry_pending=pending,
+                    disconnect_retry_pid=revoked_pid if pending else None,
                 )
             except Exception:
                 if stop_error is not None:
@@ -1099,7 +1106,14 @@ def check_sharing_revocation(settings: Settings) -> bool:
                 # tick. Retry stopping the local tunnel without retaining any
                 # credentials or depending on another remote response.
                 pending = state["disconnect_retry_pending"]
+                revoked_pid = state["disconnect_retry_pid"]
                 try:
+                    revoked_pid = state["disconnect_retry_pid"]
+                    if pending and revoked_pid is not None and \
+                            _find_running_openvpn_pid(config_path(settings)) != revoked_pid:
+                        # The revoked process is gone; whatever runs now is a
+                        # newer tunnel this retry must not stop.
+                        pending = False
                     if pending:
                         stop_result = disconnect(settings)
                         pending = not _disconnect_result_confirms_stopped(stop_result)
@@ -1107,10 +1121,12 @@ def check_sharing_revocation(settings: Settings) -> bool:
                         if retry_error is not None:
                             _log_poller_failure("VPN sharing revocation check failed", retry_error)
                 finally:
+                    keep_pid = revoked_pid if pending else None
                     if state["credential_wipe_pending"]:
-                        _wipe_revoked_credentials(settings, disconnect_retry_pending=pending)
+                        _wipe_revoked_credentials(
+                            settings, disconnect_retry_pending=pending, disconnect_retry_pid=keep_pid)
                     else:
-                        _save_state(settings, disconnect_retry_pending=pending)
+                        _save_state(settings, disconnect_retry_pending=pending, disconnect_retry_pid=keep_pid)
                 return False
             if not source_peer_id or not state["has_credentials"]:
                 return False

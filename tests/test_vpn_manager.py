@@ -990,6 +990,24 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 self.assertFalse(after["credential_wipe_pending"])
                 self.assertEqual(after["revoked_at"], state["revoked_at"])
 
+    def test_retry_does_not_stop_newer_tunnel_after_revoked_process_exited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            failed = {"status": "error", "pid": 42, "errors": ["Failed to stop openvpn (pid 42): denied"]}
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None), \
+                    mock.patch.object(vpn_manager, "disconnect", return_value=failed), \
+                    mock.patch.object(vpn_manager, "_log_poller_failure"):
+                vpn_manager.check_sharing_revocation(settings)
+            self.assertEqual(vpn_manager._load_state(settings)["disconnect_retry_pid"], 42)
+            # The revoked pid is gone; a different (newly imported) tunnel runs as pid 99.
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager, "disconnect") as disconnect:
+                vpn_manager.check_sharing_revocation(settings)
+                disconnect.assert_not_called()
+            state = vpn_manager._load_state(settings)
+            self.assertFalse(state["disconnect_retry_pending"])
+            self.assertIsNone(state["disconnect_retry_pid"])
+
     def test_pending_wipe_does_not_remove_fresh_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)
