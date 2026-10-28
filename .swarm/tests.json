@@ -44,6 +44,37 @@
         "unittest",
         "discover",
         "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_666_pidbound_retry_toctou_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-666-pidbound-retry-toctou-uat",
+      "name": "Issue #666: pid-bound VPN revocation retry cannot stop a tunnel started after its pid check",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/vpn_manager.py",
+          "tests/adversarial/test_issue_666_pidbound_retry_toctou_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
         "tests/adversarial/security",
         "-p",
         "test_issue_279_rejects_trailing_der_after_certificate.py"
