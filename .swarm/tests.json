@@ -4964,6 +4964,134 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-636-incremental-epoch-ratchet",
+      "name": "Security: repeated bounded adds cannot ratchet membership clock to the parse ceiling",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_incremental_epoch_ratchet.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_incremental_epoch_ratchet.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-636-forged-add-blocks-self-departure",
+      "name": "Security: a bounded forged add cannot outrank a member's own lower-epoch departure",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_forged_add_blocks_self_departure.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_forged_add_blocks_self_departure.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-636-legacy-poisoned-clock",
+      "name": "Security: a legacy poisoned membership clock does not silence new approved members",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_legacy_poisoned_clock.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_legacy_poisoned_clock.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-636-sybil-identity-clock-ratchet",
+      "name": "Security: identities introduced by one paired member cannot stop a Drone publishing via clock ratchet",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_636_sybil_identity_clock_ratchet.py"
+      ],
+      "timeoutSeconds": 1800,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/swarm_membership.py",
+          "tests/adversarial/security/test_issue_636_sybil_identity_clock_ratchet.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
