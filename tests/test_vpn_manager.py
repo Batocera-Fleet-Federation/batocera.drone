@@ -1055,6 +1055,25 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 disconnect.assert_not_called()
             self.assertFalse(vpn_manager._load_state(settings)["disconnect_retry_pending"])
 
+    def test_disconnect_bound_to_expected_pid_never_signals_another_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager.os, "kill") as kill:
+                result = vpn_manager.disconnect(settings, expected_pid=42)
+            kill.assert_not_called()
+            self.assertEqual(result, {"status": "not_running"})
+
+    def test_disconnect_bound_by_start_time_never_signals_newer_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=99), \
+                    mock.patch.object(vpn_manager, "_process_started_at", return_value=1000.001), \
+                    mock.patch.object(vpn_manager.os, "kill") as kill:
+                result = vpn_manager.disconnect(settings, not_started_after=1000.0)
+            kill.assert_not_called()
+            self.assertEqual(result, {"status": "not_running"})
+
     def test_pidless_retry_skips_process_started_after_revocation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._imported_settings(tmp)

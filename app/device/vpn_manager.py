@@ -634,11 +634,26 @@ def connect(settings: Settings) -> dict:
 _DISCONNECT_TARGET = threading.local()
 
 
-def disconnect(settings: Settings) -> dict:
+def disconnect(settings: Settings, expected_pid: Optional[int] = None,
+               not_started_after: Optional[float] = None) -> dict:
+    """Stop the managed tunnel.
+
+    A revocation retry passes the tunnel it is bound to so the check happens
+    here, under ``_CONNECT_LOCK`` and against the very pid that gets signalled:
+    ``expected_pid`` leaves any other process alone, and ``not_started_after``
+    (when no pid was recorded) leaves one that provably started later alone.
+    """
     with _CONNECT_LOCK:
         cfg = config_path(settings)
         _DISCONNECT_TARGET.pid = None
         pid = _find_running_openvpn_pid(cfg)
+        if pid is not None and (
+            (expected_pid is not None and pid != expected_pid)
+            or (expected_pid is None and _started_after_revocation(pid, not_started_after))
+        ):
+            # A newer tunnel replaced the revoked one; it is not ours to stop.
+            _save_state(settings, connected_at=None)
+            return {"status": "not_running"}
         _DISCONNECT_TARGET.pid = pid
         if pid is None:
             _save_state(settings, connected_at=None)
@@ -652,7 +667,7 @@ def disconnect(settings: Settings) -> dict:
             return {"status": "error", "pid": pid, "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
         deadline = time.monotonic() + VPN_DISCONNECT_GRACE_SECONDS
         while time.monotonic() < deadline:
-            if _find_running_openvpn_pid(cfg) is None:
+            if _find_running_openvpn_pid(cfg) != pid:
                 break
             time.sleep(0.25)
         else:
@@ -666,7 +681,7 @@ def disconnect(settings: Settings) -> dict:
             # stuck in kernel teardown can survive SIGKILL). Keep revocation's
             # stop retry pending until the managed process actually disappears.
             deadline = time.monotonic() + VPN_DISCONNECT_KILL_WAIT_SECONDS
-            while _find_running_openvpn_pid(cfg) is not None:
+            while _find_running_openvpn_pid(cfg) == pid:
                 if time.monotonic() >= deadline:
                     return {"status": "error", "pid": pid, "errors": ["OpenVPN is still running after SIGKILL."]}
                 time.sleep(0.25)
@@ -1174,7 +1189,8 @@ def check_sharing_revocation(settings: Settings) -> bool:
                             # revocation began, so it is a newer tunnel.
                             pending = False
                     if pending:
-                        stop_result = disconnect(settings)
+                        stop_result = disconnect(
+                            settings, expected_pid=revoked_pid, not_started_after=retry_since)
                         pending = not _disconnect_result_confirms_stopped(stop_result)
                         retry_error = _disconnect_error_from_result(stop_result)
                         if retry_error is not None:

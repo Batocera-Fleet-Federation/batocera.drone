@@ -404,7 +404,10 @@ cannot detect a revocation nobody is actively looking for.
   tunnel: `disconnect()` records the pid it targets (thread-local
   `_DISCONNECT_TARGET`) before signalling, so even a stop that raises keeps
   `disconnect_retry_pid`; a retry whose pid is gone never stops a newer
-  tunnel. If no pid was ever captured, `disconnect_retry_since` (epoch of
+  tunnel. That check is atomic: the retry hands `expected_pid` (or
+  `not_started_after`) to `disconnect()`, which compares it under
+  `_CONNECT_LOCK` against the same lookup it signals from, so a tunnel that
+  starts after the retry's own pre-check is still left alone. If no pid was ever captured, `disconnect_retry_since` (epoch of
   revocation start) lets the retry skip a process that `/proc` shows started
   later, with no one-second grace window. On Linux the epoch conversion uses
   `CLOCK_BOOTTIME`, including suspend, rather than whole-second `/proc/stat`
