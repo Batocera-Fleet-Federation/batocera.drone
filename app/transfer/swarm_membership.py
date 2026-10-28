@@ -230,7 +230,7 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> bool:
             if peer_id == own_id:
                 continue
             current = state["records"].get(peer_id)
-            if not _beats(record, current):
+            if not (_beats(record, current) or _self_departure_beats(record, introducer, current)):
                 continue
             if record["op"] == "remove":
                 snapshot = _local_network.get_paired_peer(settings, peer_id)
@@ -280,7 +280,25 @@ def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
     return int(record["epoch"]) <= int(state.get("clock") or 0) + _MAX_REMOVAL_EPOCH_AHEAD
 
 
-def _apply_add(settings: Any, state: dict, record: dict) -> bool:
+def _self_departure_beats(record: dict, introducer: str, local: Optional[dict]) -> bool:
+    """An introducer's own departure outranks an add that only gossip supplied.
+
+    A gossiped add carries an unverified epoch, so a paired insider can pick one
+    that no honest remove from the member itself can reach (#636). The mTLS
+    identity proves the member announced its own departure; locally approved
+    adds (no ``remote`` mark) still win on epoch, as an explicit re-pair should.
+    """
+    return (
+        record["op"] == "remove"
+        and record["peer_id"] == introducer
+        and record["origin"] == introducer
+        and local is not None
+        and local.get("op") == "add"
+        and bool(local.get("remote"))
+    )
+
+
+def _apply_add(settings: Any, state: dict, record: dict, *, remote: bool = True) -> bool:
     # Defense in depth for #636: _removal_allowed already filtered on the
     # initial clock, but state['clock'] may have advanced within this batch,
     # so re-check against the current clock before ratcheting.
@@ -348,6 +366,7 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
         "op": "add",
         "epoch": int(record["epoch"]),
         "origin": record["origin"],
+        "remote": bool(remote),
         "card": {**card, "scheme": peer["scheme"], "reachable_url": peer["reachable_url"],
                  "advertised_reachable_url": peer["advertised_reachable_url"],
                  "certificate_fingerprint": stored_fingerprint, "certificate_pem": pem},
@@ -449,7 +468,7 @@ def _reconcile(settings: Any, state: dict) -> None:
         if record.get("op") == "remove" and _local_network.get_paired_peer(settings, peer_id):
             _local_network.forget_peer(settings, peer_id, publish_membership=False)
         elif record.get("op") == "add" and _local_network.get_paired_peer(settings, peer_id) is None:
-            _apply_add(settings, state, {"peer_id": peer_id, **record})
+            _apply_add(settings, state, {"peer_id": peer_id, **record}, remote=bool(record.get("remote")))
 
 
 def _public_records(settings: Any, state: dict) -> dict[str, dict]:
@@ -485,6 +504,8 @@ def _load(settings: Any) -> dict:
                 "origin": str(record.get("origin") or ""),
                 "card": record.get("card") if isinstance(record.get("card"), dict) else {},
             }
+            if record.get("op") == "add" and record.get("remote"):
+                clean[str(peer_id)]["remote"] = True
     try:
         clock = int(payload.get("clock") or 0)
     except (TypeError, ValueError):

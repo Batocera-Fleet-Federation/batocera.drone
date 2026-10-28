@@ -153,7 +153,10 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   local clock is ignored before it can ratchet `state['clock']` to the parse
   ceiling (1_000_000_000) and render future locally minted records
   unpropagatable. Minted clocks are clamped to `_MAX_EPOCH` so a previously
-  poisoned clock cannot mint epochs beyond the parse ceiling. This permits a
+  poisoned clock cannot mint epochs beyond the parse ceiling. Remote adds are
+  stored with `remote: true` and do not advance the local clock; a member's own
+  authenticated departure (origin and peer_id both the introducer) outranks such
+  an add regardless of epoch, so a forged high-epoch add cannot keep it paired. This permits a
   Drone to announce its own departure; it cannot remove another Drone or force a
   receiver's departure. Removal records are not relayed transitively. Gossip
   must not replace a fingerprint already pinned for that drone id. An explicit
