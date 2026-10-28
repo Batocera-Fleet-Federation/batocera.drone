@@ -38,6 +38,11 @@ _MAX_RECORDS = 64
 # make a member unrejoinable. Clocks tick once per event; this is far above any
 # real divergence between two Drones' clocks.
 _MAX_REMOVAL_EPOCH_AHEAD = 1_000_000
+_MAX_EPOCH = 1_000_000_000
+# Apply the same ahead bound to adds: an unchecked add can ratchet the
+# receiver's clock to the parse ceiling and render its future records
+# unpropagatable (#636).
+_MAX_ADD_EPOCH_AHEAD = _MAX_REMOVAL_EPOCH_AHEAD
 _MAX_PEM_CHARS = 20000
 _CARD_FIELDS = (
     "name",
@@ -229,7 +234,9 @@ def _accept_records(settings: Any, records: Any, introducer_id: str) -> bool:
                 continue
             if record["op"] == "remove":
                 snapshot = _local_network.get_paired_peer(settings, peer_id)
-                state["clock"] = max(int(state.get("clock") or 0), int(record["epoch"]))
+                state["clock"] = min(
+                    _MAX_EPOCH, max(int(state.get("clock") or 0), int(record["epoch"]))
+                )
                 state["records"][peer_id] = record
                 if snapshot:
                     _local_network.forget_peer(settings, peer_id, publish_membership=False)
@@ -257,6 +264,12 @@ def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
     no proof, so it must at least be the introducer's own act and sit within a
     sane distance of the local clock.
     """
+    # Bound every record's epoch relative to the local clock before it can
+    # ratchet state['clock'] (#636). Without this, a single add with epoch
+    # 1e9 advances the clock to the parse ceiling and makes future locally
+    # minted records unpropagatable.
+    if int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
+        return False
     if record["op"] != "remove":
         return True
     # mTLS authenticates only the introducer. Since records have no signature,
@@ -268,6 +281,11 @@ def _removal_allowed(record: dict, introducer: str, state: dict) -> bool:
 
 
 def _apply_add(settings: Any, state: dict, record: dict) -> bool:
+    # Defense in depth for #636: _removal_allowed already filtered on the
+    # initial clock, but state['clock'] may have advanced within this batch,
+    # so re-check against the current clock before ratcheting.
+    if int(record["epoch"]) > int(state.get("clock") or 0) + _MAX_ADD_EPOCH_AHEAD:
+        return False
     card = record.get("card") if isinstance(record.get("card"), dict) else {}
     pem = str(card.get("certificate_pem") or "")
     if "BEGIN CERTIFICATE" not in pem or len(pem) > _MAX_PEM_CHARS:
@@ -323,7 +341,7 @@ def _apply_add(settings: Any, state: dict, record: dict) -> bool:
         from transfer.peer_connectivity import _save_local_peer_certificate  # type: ignore
     cert_path, stored_fingerprint = _save_local_peer_certificate(settings, peer_id, pem)
     peer["certificate_path"] = str(cert_path)
-    state["clock"] = max(int(state.get("clock") or 0), int(record["epoch"]))
+    state["clock"] = min(_MAX_EPOCH, max(int(state.get("clock") or 0), int(record["epoch"])))
     state["records"][peer_id] = {
         "op": "add",
         "epoch": int(record["epoch"]),
@@ -478,7 +496,7 @@ def _load(settings: Any) -> dict:
     except (TypeError, ValueError):
         forwarded_gen = 0
     return {
-        "clock": max(0, clock),
+        "clock": min(_MAX_EPOCH, max(0, clock)),
         "dirty_gen": max(0, dirty_gen),
         "forwarded_gen": max(0, forwarded_gen),
         "departed": bool(payload.get("departed")),
@@ -501,6 +519,8 @@ def _store(state: dict, record: dict) -> None:
 
 def _mint(state: dict) -> int:
     clock = int(state.get("clock") or 0) + 1
+    if clock > _MAX_EPOCH:
+        clock = _MAX_EPOCH
     state["clock"] = clock
     return clock
 
@@ -531,7 +551,7 @@ def _parse_records(records: Any) -> list[dict]:
         if not peer_id or op not in {"add", "remove"} or len(peer_id) > 128:
             continue
         epoch = raw.get("epoch")
-        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0 or epoch > 1_000_000_000:
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0 or epoch > _MAX_EPOCH:
             continue
         card = raw.get("card") if isinstance(raw.get("card"), dict) else {}
         parsed.append(

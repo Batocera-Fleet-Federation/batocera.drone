@@ -148,11 +148,16 @@ Peer candidates come from **direct pairing**, not a third-party directory:
   A newer removal beats an older add, but records are unsigned, so a remove is
   honored only when both its `origin` and `peer_id` are the authenticated
   introducer, and its epoch is within `_MAX_REMOVAL_EPOCH_AHEAD` of the local
-  clock (#600). This permits a Drone to announce its own departure; it cannot
-  remove another Drone or force a receiver's departure. Removal records are
-  not relayed transitively. Gossip must
-  not replace a fingerprint already pinned for that drone id. An explicit re-pair
-  is a new approval and can rejoin; a stale add cannot.
+  clock (#600). Adds are bounded the same way (`_MAX_ADD_EPOCH_AHEAD`, same
+  1_000_000; #636): an add whose epoch is more than the margin ahead of the
+  local clock is ignored before it can ratchet `state['clock']` to the parse
+  ceiling (1_000_000_000) and render future locally minted records
+  unpropagatable. Minted clocks are clamped to `_MAX_EPOCH` so a previously
+  poisoned clock cannot mint epochs beyond the parse ceiling. This permits a
+  Drone to announce its own departure; it cannot remove another Drone or force a
+  receiver's departure. Removal records are not relayed transitively. Gossip
+  must not replace a fingerprint already pinned for that drone id. An explicit
+  re-pair is a new approval and can rejoin; a stale add cannot.
 - A trust pin is only ever a parseable X.509 certificate. `_certificate_pem_fingerprint`
   (`transfer/drone_network.py`) hands the PEM to OpenSSL via `load_verify_locations`
   before hashing; base64 decoding alone is not validation. Malformed input raises
