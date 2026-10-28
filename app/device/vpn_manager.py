@@ -231,13 +231,16 @@ def _load_state(settings: Settings) -> dict:
     }
 
 
-def _save_state(settings: Settings, **updates) -> dict:
+def _save_state(settings: Settings, *, preserve_disconnect_retry_pending: bool = False, **updates) -> dict:
     # The load/merge/save must be one atomic step: a concurrent writer that only
     # means to touch its own fields (e.g. the status poll's connected_at) would
     # otherwise write back a stale copy of source_peer_id/has_credentials and
     # restore a previous peer's revocation authority over a newer import.
     with _STATE_LOCK:
         state = _load_state(settings)
+        if preserve_disconnect_retry_pending and state["disconnect_retry_pending"]:
+            # A config update cannot confirm that a revoked tunnel stopped.
+            updates.pop("disconnect_retry_pending", None)
         state.update(updates)
         _save_state_payload(_state_database_path(settings.userdata_root), VPN_STATE_NAMESPACE, state)
         return state
@@ -345,9 +348,10 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         # import_from_peer() calls this function first, then re-applies its own
         # provenance immediately afterward (see below).
         state = _save_state(
-            settings, has_config=True, config_filename=name, remotes=remotes,
+            settings,
+            has_config=True, config_filename=name, remotes=remotes,
             source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
-            disconnect_retry_pending=False,
+            disconnect_retry_pending=False, preserve_disconnect_retry_pending=True,
         )
         return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
 
@@ -1021,23 +1025,9 @@ def _revoke_local_credentials(settings: Settings, reason: str) -> None:
                 elif disconnect_error is not None:
                     _log_poller_failure("VPN sharing revocation check failed", disconnect_error)
                 raise
-            # For the adversarial suites, a pid-lookup failure (e.g. "boom",
-            # "pid lookup failed") or tunnel-busy is treated as no tunnel to
-            # retry, while other disconnect exceptions remain retryable. This
-            # reconciles the 586/597 no-retry expectation with the 619 retry
-            # expectation without editing protected tests.
-            if stop_error is not None:
-                msg = ""
-                try:
-                    msg = str(stop_error)
-                except Exception:
-                    msg = ""
-                if "boom" in msg or "pid lookup failed" in msg or "tunnel busy" in msg:
-                    pending = False
-                else:
-                    pending = True
-            else:
-                pending = not _disconnect_result_confirms_stopped(stop_result)
+            # Any exception means the stop could not be confirmed. Error
+            # wording is diagnostic only and never changes retry behavior.
+            pending = stop_error is not None or not _disconnect_result_confirms_stopped(stop_result)
             try:
                 _save_state(
                     settings, has_credentials=False, username="", revoked_reason=reason,
@@ -1102,7 +1092,7 @@ def check_sharing_revocation(settings: Settings) -> bool:
         with _CREDENTIALS_LOCK:
             state = _load_state(settings)
             source_peer_id = state["source_peer_id"]
-            if source_peer_id and state["disconnect_retry_pending"]:
+            if state["disconnect_retry_pending"]:
                 # The peer's revocation was already established on an earlier
                 # tick. Retry stopping the local tunnel without retaining any
                 # credentials or depending on another remote response.
