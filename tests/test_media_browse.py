@@ -718,6 +718,12 @@ class UiContractTests(unittest.TestCase):
         router = (self.ROOT / "static" / "js" / "drone.js").read_text(encoding="utf-8")
         self.assertIn("DroneRemoteMedia.onRouteRendered(hash)", router)
 
+    def test_remote_items_have_no_play_from_button(self):
+        # Issue #677: a peer's file is never played through this Drone; only local files get Play.
+        script = self._script()
+        self.assertNotIn('" from " + esc(droneLabel(it))', script)
+        self.assertIn("&& it.is_local", script)
+
     def test_media_browse_path_ids_are_url_decoded(self):
         # Drone ids are MAC addresses; browsers send the colons as %3A.
         routes = (self.ROOT / "api_routes.py").read_text(encoding="utf-8")

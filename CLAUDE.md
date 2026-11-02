@@ -396,7 +396,7 @@ parallel through `transfer/media_browse.py` (`collect_page`: deterministic round
 per-source cursor; sources may be `ok`/`cached`/`offline`/`timeout`/`unsupported` and never fail the page).
 Peers serve it from the existing `/peer/inventory/{movies,music,roms}` plus `/peer/music/...`,
 `/peer/media-artwork/...`, `/peer/media-detail/...`; `/peer/movies|music` honor `Range`. **Playback and artwork
-of a peer's item are proxied through the browsing Drone** (`_peer_open_stream_for_peer`, pinned mTLS, Range
+of a peer's item are proxied through the browsing Drone** — the UI no longer offers Play for a peer's item (#677: copy it, then play locally); the endpoint remains (`_peer_open_stream_for_peer`, pinned mTLS, Range
 forwarded, nothing written to disk) — the browser never talks to a peer. **Copy** reuses
 `POST /admin/local-network/sync` (same as Swarm > Transfers), so a game arrives with its artwork in the right
 system folder; music has its own `_download_music_from_peer` / `enqueue_music`. **Likes stay local**: peers'
