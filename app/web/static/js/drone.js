@@ -2026,7 +2026,6 @@ function renderAssetTypeSwitcher(active) {
     ["systems", "Games", "bi-grid", "#systems"],
     ["movies", "Movies", "bi-film", "#movies"],
     ["music", "Music", "bi-music-note-beamed", "#music"],
-    ["network", "All Drones", "bi-diagram-3", "#network"],
   ];
   return `
     <div class="asset-type-switcher">
@@ -14795,14 +14794,6 @@ async function router(retryDepth = 0) {
         // same page.
         await renderMovieExplorerPage();
       }
-    } else if (hash.startsWith("#network")) {
-      // Browse every paired Drone's Movies/Shows, Music and Games (media_browse.js).
-      if (typeof renderNetworkMediaPage === "function") {
-        await renderNetworkMediaPage(hash);
-      } else {
-        await redirectRouterHash("#movies");
-        return;
-      }
     } else if (hash.startsWith("#music")) {
       const parsed = parseMusicHash(hash);
       if (parsed && parsed.view === "detail") {
@@ -15007,6 +14998,11 @@ async function router(retryDepth = 0) {
       return;
     } else {
       await renderHelpPage();
+    }
+    // Local game/movie/track detail pages list every Drone that has the item
+    // (media_browse.js); fire-and-forget so it can never delay or break the page.
+    if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
+      DroneRemoteMedia.onRouteRendered(hash).catch(() => {});
     }
     // The awaited render call above may have taken long enough that a newer
     // nav click already fired its own router() call and rendered a

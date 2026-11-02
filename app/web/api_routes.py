@@ -360,6 +360,9 @@ class ApiRoutesMixin:
                 if kind == "roms" and len(parts) >= 7 and parts[3] == "artwork":
                     self._handle_media_browse_rom_artwork(parts[2], parts[4], parts[5], "/".join(parts[6:]))
                     return
+                if len(parts) == 2 and kind == "sources":
+                    self._handle_media_browse_sources()
+                    return
                 if len(parts) == 2:
                     self._handle_media_browse_list(kind, query_params)
                     return

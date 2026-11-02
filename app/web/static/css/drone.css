@@ -1430,19 +1430,15 @@
     .transfer-toast .tt-bar .progress-bar.bg-success, .transfer-toast .tt-bar .progress-bar.bg-danger { background: #fff !important; }
     .transfer-toast .tt-meta { display: flex; justify-content: space-between; font-size: 0.8rem; }
     .transfer-toast .tt-names { font-size: 0.75rem; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    /* Browse every Drone (#network) */
-    .network-media .nm-search { max-width: 22rem; }
-    .network-media .nm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 0.9rem; }
-    .network-media .nm-card { display: flex; flex-direction: column; gap: 0.25rem; text-align: left; background: var(--admin-card-bg, #1e293b); color: inherit; border: 1px solid rgba(255,255,255,0.12); border-radius: 0.6rem; padding: 0.5rem; }
-    .network-media .nm-card:hover, .network-media .nm-card:focus-visible { border-color: #38bdf8; outline: none; }
-    .network-media .nm-art { position: relative; aspect-ratio: 2 / 3; border-radius: 0.4rem; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 2rem; opacity: 0.95; }
-    .network-media .nm-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-    .network-media .nm-title { font-weight: 600; font-size: 0.85rem; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-    .network-media .nm-sub { font-size: 0.75rem; opacity: 0.7; min-height: 1em; }
-    .network-media .nm-badges { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    /* Other Drones' items, appended in place to the Games/Movies/Music grids (media_browse.js) */
+    .remote-media-layer { display: contents; }
+    .remote-media-divider { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.75rem; padding: 0.6rem 0.25rem 0.35rem; border-top: 1px solid rgba(255,255,255,0.14); }
+    .remote-media-status { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .remote-media-more { grid-column: 1 / -1; text-align: center; padding: 0.5rem 0 1rem; }
+    .remote-card { position: relative; content-visibility: auto; contain-intrinsic-size: 15rem 11rem; }
+    .remote-drone-badge { position: absolute; left: 0.35rem; bottom: 0.35rem; max-width: calc(100% - 0.7rem); padding: 0.1rem 0.45rem; border-radius: 999px; background: rgba(15,23,42,0.85); color: #e0f2fe; font-size: 0.7rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nm-drone-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .nm-chip .nm-dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.4rem; }
-    @media (max-width: 576px) { .network-media .nm-grid { grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr)); } }
+    .drone-availability .nm-copy:first-child { border-top: 0 !important; }
 
     .mcp-token-reveal {
       color: var(--admin-text);

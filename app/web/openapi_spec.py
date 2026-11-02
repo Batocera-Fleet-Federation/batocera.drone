@@ -1845,6 +1845,7 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("drone_id", "name", "status"),
         ),
+        "MediaBrowseSourcesResponse": _object({"sources": _array(_object({"drone_id": _string(), "name": _string(), "is_local": _boolean()}, ("drone_id", "name")))}, ("sources",)),
         "MediaBrowseListResponse": _object(
             {
                 "media_type": _enum(["movies", "music", "roms"]),
@@ -2366,11 +2367,19 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["downloads"],
                 )
             },
+            "/media-browse/sources": {
+                "get": _operation(
+                    "Paired Drones available for merged browsing (local state only, no network)",
+                    {"200": _json_response("MediaBrowseSourcesResponse")},
+                    tags=["library", "local-network"],
+                    error_codes=("401", "403", "429", "500"),
+                )
+            },
             "/media-browse/{media_type}": {
                 "get": _operation(
                     "Browse movies/shows, music or games across this Drone and every paired peer (merged, cursor-paged)",
                     {"200": _json_response("MediaBrowseListResponse")},
-                    parameters=[_path_param("media_type", "movies, music or roms"), _query_param("q", _string()), _query_param("system", _string(), "roms only"), _query_param("limit", _integer(default=200, minimum=1, maximum=500)), _query_param("cursor", _string()), _query_param("drones", _string(), "Comma-separated Drone ids to include")],
+                    parameters=[_path_param("media_type", "movies, music or roms"), _query_param("q", _string()), _query_param("system", _string(), "roms only"), _query_param("limit", _integer(default=200, minimum=1, maximum=500)), _query_param("cursor", _string()), _query_param("drones", _string(), "Comma-separated Drone ids to include"), _query_param("exclude_local", _boolean(), "Peers only"), _query_param("genre", _string(), "roms only"), _query_param("refresh", _boolean())],
                     tags=["library", "local-network"],
                     error_codes=("401", "403", "404", "429", "500"),
                 )

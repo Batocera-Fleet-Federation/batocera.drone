@@ -1,47 +1,55 @@
-// Browse every Drone's Movies/Shows, Music and Games from this Drone (#network),
-// plus the persistent transfer-progress toast used when copying an item here.
+// Other Drones' Games, Movies/Shows and Music, shown in place on the normal pages (#systems,
+// #movies, #music) -- there is no separate page.  This file is a *layer* on top of the existing
+// explorers: it never replaces their rendering, it appends remote cards to the end of their grid
+// and adds an "Available on" card to local detail pages.
 //
-// Server contract (see handlers_media_browse.py): /v1/api/media-browse/... returns one merged,
-// cursor-paged list across this Drone and every paired peer; playback and artwork of a peer's item
-// are proxied through this Drone; copying reuses POST /admin/local-network/sync (the same path as
-// Swarm > Transfers, so a game arrives with its artwork in the right system folder).
-// Relies on drone.js globals: api, apiPost, escapeHtml, jsAttr, formatBytes, showToast,
-// ensureToastContainer, dismissToast, setHash, content, adminEnabled.
+// * Loading is asynchronous, one request per paired Drone, so a slow or offline Drone never
+//   blocks the page or the others, and nothing the user is doing (typing, scrolling, a modal)
+//   is interrupted: cards are appended in a display:contents wrapper in animation-frame batches.
+// * Every load is reported in a persistent toast (Drones done, items found, problems).
+// * Results are cached client-side (and server-side, see handlers_media_browse.py), so revisiting a
+//   page or re-filtering does not ask every Batocera machine again.
+// * Playback/artwork of a peer's item is proxied through this Drone; Copy uses the same sync path
+//   as Swarm > Transfers (a game arrives with its artwork).  Also owns the persistent
+//   transfer-progress toast: DroneTransferToast.track(jobIds).
+// Relies on drone.js globals: api, apiPost, escapeHtml, formatBytes, showToast, ensureToastContainer,
+// dismissToast, content, adminEnabled.
 (function () {
   "use strict";
 
+  // api()/apiPost() prepend /v1/api themselves; BASE is for <img>/<video> URLs, which are not routed through them.
+  const API = "/media-browse";
   const BASE = "/v1/api/media-browse";
-  const KINDS = [
-    ["movies", "Movies & Shows", "bi-film"],
-    ["music", "Music", "bi-music-note-beamed"],
-    ["roms", "Games", "bi-grid"],
-  ];
   const PAGE = 200;
-  const AUTO_LOAD_LIMIT = 1000; // movies/music load this many up front; the rest on demand
-  const CLIENT_CACHE_MS = 60 * 1000;
-
-  const state = {
-    kind: "movies", q: "", hidden: new Set(), items: [], sources: [], cursor: "", hasMore: false,
-    loading: false, token: 0, byKey: new Map(),
-  };
-  // Re-opening the page (or switching tabs back and forth) must not re-ask every Drone.
-  const clientCache = new Map();
+  const CAPS = { roms: 400, movies: 1000, music: 600 }; // auto-loaded per Drone; more on demand
+  const RENDER_STEP = 300;
+  const FRESH_MS = 60 * 1000;
+  const SOURCES_MS = 5 * 60 * 1000;
+  const GRIDS = { roms: "systems-explore-grid", movies: "movie-explorer-grid", music: "music-explorer-grid" };
+  const NOUN = { roms: "games", movies: "movies & shows", music: "music" };
+  const ICON = { roms: "bi-controller", movies: "bi-film", music: "bi-music-note-beamed" };
 
   const esc = (v) => escapeHtml(String(v == null ? "" : v));
   const enc = encodeURIComponent;
+  const norm = (v) => String(v || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").trim();
+  const titleOf = (it) => it.display_title || it.title || it.track_name || it.movie_name || it.rom_name || it.name || it.entry_key || "";
+  const keyOf = (it) => `${it.drone_id}|${it.entry_key || it.relative_path || it.file_path || it.rom_path || ""}|${it.system || ""}`;
+  const droneLabel = (it) => (it.is_local ? "This Drone" : (it.drone_name || it.drone_id));
+  const canCopy = () => typeof adminEnabled !== "undefined" && !!adminEnabled;
 
-  // ------------------------------------------------------------------ transfer toast
+  // ================================================================== transfer toast
+  // Persistent while a copy runs: progress bar, files done, bytes, speed, current names.
   const POLL_MS = 1000;
   const STORE_KEY = "droneTransferToastJobs";
   const TERMINAL = new Set(["completed", "failed", "cancelled", "skipped"]);
   const Toast = {
-    ids: new Set(), label: "", el: null, timer: null, failedSeen: false, errors: 0,
+    ids: new Set(), label: "", el: null, timer: null, errors: 0,
 
     track(jobIds, label) {
       (jobIds || []).forEach((id) => id && this.ids.add(String(id)));
       if (label) this.label = label;
       this.persist();
-      this.render({ files: 0, done: 0, failed: 0, bytes: 0, total: 0, speed: 0, names: [], state: "running" });
+      this.render({ files: this.ids.size, done: 0, failed: 0, bytes: 0, total: 0, speed: 0, names: [], state: "running" });
       this.start();
     },
     persist() {
@@ -141,8 +149,6 @@
       el.querySelector(".tt-sub").textContent = s.total > 0 ? `${formatBytes(s.bytes)} of ${formatBytes(s.total)}` : (finished ? "" : "Starting…");
       const bar = el.querySelector(".progress-bar");
       bar.style.width = `${shown.toFixed(1)}%`;
-      bar.classList.toggle("bg-success", s.state === "done");
-      bar.classList.toggle("bg-danger", s.state === "failed");
       el.querySelector(".tt-bar").setAttribute("aria-valuenow", String(Math.round(shown)));
       const completed = s.done + s.failed;
       el.querySelector(".tt-files").textContent = `${completed} of ${s.files} file${s.files === 1 ? "" : "s"}${s.failed ? ` (${s.failed} failed)` : ""}`;
@@ -155,16 +161,242 @@
   };
   window.DroneTransferToast = Toast;
 
-  // ------------------------------------------------------------------ helpers
-  const norm = (v) => String(v || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").trim();
-  const titleOf = (it) => it.display_title || it.title || it.track_name || it.movie_name || it.rom_name || it.name || it.entry_key || "";
-  const keyOf = (it) => `${it.drone_id}|${it.entry_key || it.relative_path || it.file_path || it.rom_path || ""}|${it.system || ""}`;
-  const droneLabel = (it) => (it.is_local ? "This Drone" : (it.drone_name || it.drone_id));
+  // ================================================================== loading toast
+  // One toast per page load of other Drones' assets.  Created only if the load takes longer than
+  // a blink (cache hits never flash a toast) and stays until every Drone has answered or failed.
+  const LoadToast = {
+    el: null, delay: null, active: false, state: null,
 
-  function artUrl(it) {
-    if (state.kind === "movies" && it.entry_key) return `${BASE}/movies/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/poster`;
-    if (state.kind === "music" && it.entry_key) return `${BASE}/music/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/art`;
-    if (state.kind === "roms") {
+    begin(kind, total) {
+      this.cancel();
+      this.active = true;
+      this.state = { kind, total, done: 0, found: 0, issues: [] };
+      this.delay = setTimeout(() => { this.delay = null; if (this.active) this.render(); }, 350);
+    },
+    update(patch) {
+      if (!this.active) return;
+      Object.assign(this.state, patch);
+      if (this.el) this.render();
+    },
+    issue(text) {
+      if (!this.active) return;
+      this.state.issues.push(text);
+      if (this.el) this.render();
+    },
+    end() {
+      if (!this.active) return;
+      const s = this.state;
+      this.active = false;
+      if (this.delay) { clearTimeout(this.delay); this.delay = null; if (!s.issues.length) return; this.render(); }
+      if (!this.el) return;
+      this.render(true);
+      const el = this.el;
+      setTimeout(() => { if (this.el === el) this.cancel(); }, s.issues.length ? 7000 : 1800);
+    },
+    cancel() {
+      this.active = false;
+      if (this.delay) { clearTimeout(this.delay); this.delay = null; }
+      if (this.el) { dismissToast(this.el); this.el = null; }
+    },
+    render(finished = false) {
+      const s = this.state;
+      if (!this.el || !this.el.isConnected) {
+        const el = document.createElement("div");
+        el.className = "toast-alert transfer-toast alert-info load-toast";
+        el.setAttribute("role", "status");
+        el.setAttribute("aria-live", "polite");
+        el.innerHTML = `<div class="tt-head"><span class="spinner-border spinner-border-sm tt-spin" aria-hidden="true"></span>
+          <span class="tt-title"></span></div>
+          <div class="progress tt-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar"></div></div>
+          <div class="tt-meta"><span class="tt-files"></span><span class="tt-speed"></span></div>
+          <div class="tt-names"></div>`;
+        ensureToastContainer().appendChild(el);
+        this.el = el;
+      }
+      const el = this.el;
+      const pct = s.total ? Math.min(100, (s.done / s.total) * 100) : 0;
+      el.classList.toggle("alert-warning", finished && s.issues.length > 0);
+      el.classList.toggle("alert-success", finished && s.issues.length === 0);
+      el.classList.toggle("alert-info", !finished);
+      el.querySelector(".tt-spin").classList.toggle("d-none", finished);
+      el.querySelector(".tt-title").textContent = finished
+        ? (s.issues.length ? `Loaded ${NOUN[s.kind]} from ${s.total - s.issues.length} of ${s.total} Drones` : `Loaded ${NOUN[s.kind]} from other Drones`)
+        : `Loading ${NOUN[s.kind]} from other Drones…`;
+      el.querySelector(".progress-bar").style.width = `${finished ? 100 : pct}%`;
+      el.querySelector(".tt-bar").setAttribute("aria-valuenow", String(Math.round(finished ? 100 : pct)));
+      el.querySelector(".tt-files").textContent = `${s.done} of ${s.total} Drone${s.total === 1 ? "" : "s"}`;
+      el.querySelector(".tt-speed").textContent = `${s.found.toLocaleString()} found`;
+      el.querySelector(".tt-names").textContent = s.issues.join(" · ");
+    },
+  };
+
+  // ================================================================== sources + data
+  let sourcesCache = { at: 0, promise: null };
+  function peers() {
+    const now = Date.now();
+    if (!sourcesCache.promise || now - sourcesCache.at > SOURCES_MS) {
+      sourcesCache = {
+        at: now,
+        promise: api(`${API}/sources`, { timeoutMs: 15000 })
+          .then((r) => r.sources || [])
+          .catch((err) => { sourcesCache = { at: 0, promise: null }; throw err; }),
+      };
+    }
+    return sourcesCache.promise;
+  }
+
+  const L = {
+    roms: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.roms },
+    movies: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.movies },
+    music: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.music },
+  };
+  const cache = new Map(); // kind|sig -> { at, peers: Map }
+
+  // What the page's own filters currently are.  null = the page is in a mode the remote layer
+  // does not apply to (BIOS list, duplicate finder, Chrome-playable-only), so no remote cards.
+  function filtersFor(kind) {
+    try {
+      if (kind === "roms") {
+        if (systemsExploreDuplicatesMode || systemsExploreBrowserPlayOnly) return null;
+        const system = systemsExploreSelectedSystem || "";
+        if (system === SYSTEMS_EXPLORE_BIOS_KEY) return null;
+        return { q: (systemsExploreSearchQuery || "").trim(), system, genre: systemsExploreSelectedGenre || "" };
+      }
+      if (kind === "movies") {
+        if (movieExplorerDuplicatesMode) return null;
+        const box = document.getElementById("movieExplorerSearch");
+        return { q: box ? box.value.trim() : "", system: "", genre: "", type: movieExplorerTypeFilter, tag: movieExplorerGenreFilter || "" };
+      }
+      const box = document.getElementById("musicExplorerSearch");
+      return { q: box ? box.value.trim() : "", system: "", genre: "", tag: musicExplorerGenreFilter || "", artist: musicExplorerArtistFilter || "", liked: !!musicExplorerLikedFilter };
+    } catch (e) {
+      return null; // explorer globals not ready yet
+    }
+  }
+  const sigOf = (f) => JSON.stringify([f.q, f.system, f.genre]);
+
+  function newEntry(p) {
+    return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, error: "", age: null };
+  }
+
+  async function loadPeer(kind, entry, f, token, cap) {
+    const ls = L[kind];
+    entry.status = "loading";
+    let errored = false;
+    let first = !entry.cursor && entry.items.length === 0;
+    try {
+      while (token === ls.token && entry.items.length < cap && (first || entry.hasMore)) {
+        first = false;
+        const params = new URLSearchParams({ limit: String(PAGE), drones: entry.id, exclude_local: "1" });
+        if (f.q) params.set("q", f.q);
+        if (f.system) params.set("system", f.system);
+        if (f.genre) params.set("genre", f.genre);
+        if (entry.cursor) params.set("cursor", entry.cursor);
+        const page = await api(`${API}/${kind}?${params}`, { timeoutMs: 45000 });
+        if (token !== ls.token) return;
+        const src = (page.sources || [])[0] || { status: "ok" };
+        entry.status = src.status;
+        entry.total = Number(src.total || 0);
+        entry.age = src.cached_age_seconds == null ? null : src.cached_age_seconds;
+        entry.error = src.error || "";
+        entry.items.push(...(page.items || []));
+        entry.cursor = page.next_cursor || "";
+        entry.hasMore = !!page.has_more;
+        LoadToast.update({ found: totalFound(kind) });
+        schedulePaint(kind);
+        if ((src.status !== "ok" && src.status !== "cached") || !(page.items || []).length) break;
+      }
+    } catch (err) {
+      errored = true;
+      if (token !== ls.token) return;
+      entry.status = "error";
+      entry.error = String(err && err.message || "failed");
+    }
+    if (token !== ls.token) return;
+    if (entry.status === "offline" || entry.status === "timeout" || entry.status === "error") {
+      LoadToast.issue(`${entry.name}: ${entry.status === "timeout" ? "slow" : entry.status === "offline" ? "offline" : (entry.error === "not found" ? "this Drone needs an update" : "error")}`);
+    } else if (entry.status === "unsupported") {
+      LoadToast.issue(`${entry.name}: needs an update`);
+    } else if (entry.status === "cached") {
+      LoadToast.issue(`${entry.name}: showing saved copy`);
+    }
+    if (errored) entry.hasMore = false;
+    LoadToast.update({ done: (LoadToast.state ? LoadToast.state.done : 0) + 1 });
+    schedulePaint(kind);
+  }
+
+  const totalFound = (kind) => [...L[kind].peers.values()].reduce((n, e) => n + e.items.length, 0);
+
+  async function start(kind, sig, f) {
+    const ls = L[kind];
+    const token = ++ls.token;
+    ls.sig = sig;
+    ls.limit = RENDER_STEP;
+    ls.cap = CAPS[kind];
+    for (const other of Object.keys(L)) if (other !== kind) { L[other].token += 1; }
+    const hit = cache.get(`${kind}|${sig}`);
+    const fresh = hit && Date.now() - hit.at < FRESH_MS;
+    if (hit) {
+      ls.peers = new Map([...hit.peers].map(([id, e]) => [id, { ...e, items: e.items.slice() }]));
+      paint(kind);
+      if (fresh) { LoadToast.cancel(); return; }
+    }
+    let list;
+    try {
+      list = (await peers()).filter((p) => !p.is_local);
+    } catch (err) {
+      if (token === ls.token) {
+        LoadToast.begin(kind, 1);
+        LoadToast.issue(err && err.message === "not found" ? "This Drone needs an update to browse other Drones" : `Could not list Drones: ${err.message || "error"}`);
+        LoadToast.end();
+      }
+      return;
+    }
+    if (token !== ls.token) return;
+    if (!list.length) { ls.peers = new Map(); paint(kind); LoadToast.cancel(); return; }
+    // Keep whatever was already shown while a refresh runs (no flicker); swap in each Drone's
+    // fresh result as soon as it answers.
+    const staging = new Map(list.map((p) => [p.drone_id, newEntry(p)]));
+    LoadToast.begin(kind, list.length);
+    if (!hit) ls.peers = staging;
+    await Promise.all([...staging.values()].map(async (entry) => {
+      await loadPeer(kind, entry, f, token, ls.cap);
+      if (hit && token === ls.token) { ls.peers.set(entry.id, entry); schedulePaint(kind); }
+    }));
+    if (token !== ls.token) return;
+    cache.set(`${kind}|${sig}`, { at: Date.now(), peers: new Map([...ls.peers].map(([id, e]) => [id, { ...e, items: e.items.slice() }])) });
+    LoadToast.end();
+  }
+
+  async function loadMore(kind) {
+    const ls = L[kind];
+    const f = filtersFor(kind);
+    if (!f) return;
+    ls.limit += RENDER_STEP;
+    const loaded = totalFound(kind);
+    const pending = [...ls.peers.values()].filter((e) => e.hasMore);
+    if (loaded < ls.limit && pending.length) {
+      const token = ++ls.token; // supersede nothing else; same filters
+      ls.cap += CAPS[kind];
+      LoadToast.begin(kind, pending.length);
+      await Promise.all(pending.map((e) => loadPeer(kind, e, f, token, ls.cap)));
+      if (token === ls.token) LoadToast.end();
+    }
+    paint(kind);
+  }
+
+  // ================================================================== layer rendering
+  const paintQueued = new Set();
+  function schedulePaint(kind) {
+    if (paintQueued.has(kind)) return;
+    paintQueued.add(kind);
+    requestAnimationFrame(() => { paintQueued.delete(kind); paint(kind); });
+  }
+
+  function artUrl(kind, it) {
+    if (kind === "movies" && it.entry_key) return `${BASE}/movies/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/poster`;
+    if (kind === "music" && it.entry_key) return `${BASE}/music/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/art`;
+    if (kind === "roms") {
       const image = it.gamelist && it.gamelist.image;
       if (!image) return "";
       if (it.is_local) return `/v1/api/public/systems/${enc(it.system || "")}/images/${enc(String(image).split("/").pop())}`;
@@ -173,123 +405,186 @@
     }
     return "";
   }
-  const streamUrl = (it) => `${BASE}/${state.kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`;
 
-  function badge(it) {
-    return `<span class="badge ${it.is_local ? "text-bg-secondary" : "text-bg-info"} nm-drone-badge" title="${esc(droneLabel(it))}"><i class="bi bi-hdd-network me-1"></i>${esc(droneLabel(it))}</span>`;
-  }
-
-  // ------------------------------------------------------------------ data
-  function cacheKey() { return `${state.kind}|${state.q}`; }
-
-  async function load({ refresh = false, more = false } = {}) {
-    const token = ++state.token;
-    if (!more) {
-      const hit = !refresh && clientCache.get(cacheKey());
-      if (hit && Date.now() - hit.at < CLIENT_CACHE_MS) {
-        Object.assign(state, { items: hit.items, sources: hit.sources, cursor: hit.cursor, hasMore: hit.hasMore, loading: false });
-        paint();
-        return;
+  // Apply the page's own client-side filters (type / category / artist / liked) to remote rows.
+  function passes(kind, it, f) {
+    if (it.exists_locally) return false; // already shown as a normal local card
+    if (kind === "movies") {
+      if (f.type && f.type !== "all") {
+        const k = it.kind || "movie";
+        if (f.type === "episode" ? !(it.show_title && (k === "episode" || k === "extra")) : k !== f.type) return false;
       }
-      state.items = []; state.cursor = ""; state.hasMore = false;
-      if (refresh) clientCache.delete(cacheKey());
+      if (f.tag && !(it.genres || []).includes(f.tag)) return false;
+    } else if (kind === "music") {
+      if (f.tag && !(it.genres || []).includes(f.tag)) return false;
+      if (f.artist && (it.artist || "") !== f.artist) return false;
+      if (f.liked && !it.liked) return false;
     }
-    state.loading = true;
-    paint();
-    try {
-      let firstPage = !more;
-      const target = state.items.length + (state.kind === "roms" ? PAGE : AUTO_LOAD_LIMIT);
-      do {
-        const params = new URLSearchParams({ limit: String(PAGE) });
-        if (state.q) params.set("q", state.q);
-        if (state.cursor) params.set("cursor", state.cursor);
-        if (refresh && firstPage) params.set("refresh", "1");
-        const page = await api(`${BASE}/${state.kind}?${params}`);
-        if (token !== state.token) return; // a newer request superseded this one
-        firstPage = false;
-        state.items = state.items.concat(page.items || []);
-        state.sources = page.sources || [];
-        state.cursor = page.next_cursor || "";
-        state.hasMore = !!page.has_more;
-        paint();
-      } while (state.hasMore && state.items.length < target);
-      clientCache.set(cacheKey(), { at: Date.now(), items: state.items, sources: state.sources, cursor: state.cursor, hasMore: state.hasMore });
-    } catch (err) {
-      if (token === state.token) showToast(`Could not load the network library: ${esc(err.message || "unknown error")}`, "danger", 8000);
-    } finally {
-      if (token === state.token) { state.loading = false; paint(); }
-    }
+    return true;
   }
 
-  // ------------------------------------------------------------------ view model
-  function visibleItems() {
-    return state.items.filter((it) => !state.hidden.has(it.drone_id));
-  }
-
-  // Movies tab: episodes/extras of the same show collapse into one card across Drones.
-  function buildCards(items) {
-    if (state.kind !== "movies") return items.map((it) => ({ type: "item", item: it, items: [it] }));
+  // Episodes of one show / tracks of one album collapse into one card, across Drones.
+  function buildCards(kind, items) {
+    if (kind === "roms") return items.map((it) => ({ group: false, title: titleOf(it), sub: it.system || "", items: [it] }));
     const cards = [];
-    const shows = new Map();
+    const groups = new Map();
     for (const it of items) {
-      const show = it.show_title && (it.kind === "episode" || it.kind === "extra");
-      if (!show) { cards.push({ type: "item", item: it, items: [it] }); continue; }
-      const key = norm(it.scraped_show_title || it.show_title);
-      let card = shows.get(key);
-      if (!card) { card = { type: "show", title: it.scraped_show_title || it.show_title, item: it, items: [] }; shows.set(key, card); cards.push(card); }
+      let key = "";
+      let title = "";
+      let sub = "";
+      if (kind === "movies" && it.show_title && (it.kind === "episode" || it.kind === "extra")) {
+        key = `s|${norm(it.scraped_show_title || it.show_title)}`; title = it.scraped_show_title || it.show_title; sub = "Show";
+      } else if (kind === "music" && it.album) {
+        key = `a|${norm(it.artist)}|${norm(it.album)}`; title = it.album; sub = it.artist || "";
+      }
+      if (!key) { cards.push({ group: false, title: titleOf(it), sub: kind === "music" ? (it.artist || "") : (it.kind === "episode" ? "Episode" : ""), items: [it] }); continue; }
+      let card = groups.get(key);
+      if (!card) { card = { group: true, title, sub, items: [] }; groups.set(key, card); cards.push(card); }
       card.items.push(it);
     }
+    cards.forEach((c) => { if (c.group) c.sub = `${c.sub ? c.sub + " · " : ""}${c.items.length} ${c.items.length === 1 ? "item" : "items"}`; });
     return cards;
   }
 
-  function cardDrones(card) {
-    const seen = new Map();
-    card.items.forEach((it) => seen.set(it.drone_id, it));
-    return [...seen.values()];
+  function cardEl(kind, card, index) {
+    const it = card.items[0];
+    const drones = [...new Map(card.items.map((x) => [x.drone_id, x])).values()];
+    const art = artUrl(kind, it);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "movie-explorer-card remote-card";
+    btn.dataset.rmIndex = String(index);
+    btn.title = `${card.title} — ${drones.map(droneLabel).join(", ")}`;
+    btn.innerHTML = `
+      <div class="movie-explorer-card-poster">
+        ${art ? `<img loading="lazy" decoding="async" src="${esc(art)}" alt="">` : ""}
+        <div class="movie-explorer-card-poster-fallback ${art ? "d-none" : ""}"><i class="bi ${card.group && kind === "movies" ? "bi-collection-play" : card.group ? "bi-disc" : ICON[kind]}"></i></div>
+        <span class="remote-drone-badge"><i class="bi bi-hdd-network me-1"></i>${esc(droneLabel(drones[0]))}${drones.length > 1 ? ` +${drones.length - 1}` : ""}</span>
+      </div>
+      <div class="movie-explorer-card-title">${esc(card.title)}</div>
+      <div class="movie-explorer-card-subtitle">${esc(card.sub)}</div>`;
+    return btn;
   }
 
-  // ------------------------------------------------------------------ rendering
-  function paint() {
-    const root = document.getElementById("networkMediaRoot");
-    if (!root) return;
-    const cards = buildCards(visibleItems()).sort((a, b) => norm(a.type === "show" ? a.title : titleOf(a.item)).localeCompare(norm(b.type === "show" ? b.title : titleOf(b.item))));
-    state.byKey = new Map();
-    cards.forEach((card, i) => state.byKey.set(String(i), card));
-    const chips = state.sources.map((s) => {
-      const off = state.hidden.has(s.drone_id);
-      const tone = s.status === "ok" ? "success" : s.status === "cached" ? "warning" : s.status === "unsupported" ? "secondary" : "danger";
-      const note = s.status === "cached" ? ` · saved copy${s.cached_age_seconds != null ? ` (${Math.max(1, Math.round(s.cached_age_seconds / 60))} min old)` : ""}`
-        : s.status === "unsupported" ? " · needs update" : s.status === "offline" ? " · offline" : s.status === "timeout" ? " · slow" : s.status === "error" ? " · error" : "";
-      return `<button type="button" class="btn btn-sm nm-chip ${off ? "btn-outline-secondary" : "btn-outline-light active"}" data-drone="${esc(s.drone_id)}" title="${esc(s.error || s.status)}">
-        <span class="nm-dot bg-${tone}"></span>${esc(s.is_local ? "This Drone" : s.name)} <span class="text-muted small">${Number(s.total || 0)}${esc(note)}</span></button>`;
-    }).join("");
-    const grid = cards.length ? cards.map((card, i) => cardHtml(card, i)).join("")
-      : `<div class="themed-empty">${state.loading ? "Loading…" : "Nothing found on the Drones that answered."}</div>`;
-    root.querySelector("#nmChips").innerHTML = chips;
-    const gridEl = root.querySelector("#nmGrid");
-    gridEl.innerHTML = grid;
-    gridEl.querySelectorAll("img").forEach((img) => img.addEventListener("error", () => img.remove(), { once: true }));
-    root.querySelector("#nmStatus").textContent = state.loading ? "Loading…" : `${cards.length} shown · ${state.items.length} loaded${state.hasMore ? " · more available" : ""}`;
-    root.querySelector("#nmMore").classList.toggle("d-none", !state.hasMore || state.loading);
-    root.querySelectorAll(".nm-tab").forEach((b) => b.classList.toggle("active", b.dataset.kind === state.kind));
+  function statusBadges(kind) {
+    const out = [];
+    for (const e of L[kind].peers.values()) {
+      if (e.status === "loading") out.push(`<span class="badge text-bg-secondary"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem"></span>${esc(e.name)}</span>`);
+      else if (e.status === "cached") out.push(`<span class="badge text-bg-warning" title="Unreachable — showing the last copy${e.age != null ? ` (${Math.max(1, Math.round(e.age / 60))} min old)` : ""}">${esc(e.name)}: saved copy</span>`);
+      else if (e.status === "offline" || e.status === "timeout" || e.status === "error") out.push(`<span class="badge text-bg-danger" title="${esc(e.error || e.status)}">${esc(e.name)}: ${e.status === "timeout" ? "slow" : e.status === "offline" ? "offline" : "unavailable"}</span>`);
+      else if (e.status === "unsupported") out.push(`<span class="badge text-bg-secondary">${esc(e.name)}: needs update</span>`);
+      else out.push(`<span class="badge text-bg-info">${esc(e.name)} · ${e.total.toLocaleString()}</span>`);
+    }
+    return out.join(" ");
   }
 
-  function cardHtml(card, i) {
-    const it = card.item;
-    const art = card.type === "show" ? (it.entry_key ? `${BASE}/movies/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/poster` : "") : artUrl(it);
-    const drones = cardDrones(card);
-    const sub = card.type === "show" ? `${card.items.length} episode${card.items.length === 1 ? "" : "s"}`
-      : state.kind === "music" ? esc(it.artist || "") : state.kind === "roms" ? esc(it.system || "") : esc(it.kind === "episode" ? "Episode" : "");
-    const title = card.type === "show" ? card.title : titleOf(it);
-    return `<button type="button" class="nm-card" data-card="${i}" title="${esc(title)}">
-      <span class="nm-art">${art ? `<img loading="lazy" src="${esc(art)}" alt="">` : ""}<i class="bi ${card.type === "show" ? "bi-collection-play" : state.kind === "music" ? "bi-music-note-beamed" : state.kind === "roms" ? "bi-controller" : "bi-film"}"></i></span>
-      <span class="nm-title">${esc(title)}</span>
-      <span class="nm-sub">${sub}</span>
-      <span class="nm-badges">${drones.slice(0, 3).map(badge).join("")}${drones.length > 3 ? `<span class="badge text-bg-dark">+${drones.length - 3}</span>` : ""}</span>
-    </button>`;
+  function paint(kind) {
+    const grid = document.getElementById(GRIDS[kind]);
+    if (!grid) return;
+    const f = filtersFor(kind);
+    let layer = grid.querySelector(":scope > .remote-media-layer");
+    if (!f || (!L[kind].peers.size && !LoadToast.active)) { if (layer) layer.remove(); return; }
+    const ls = L[kind];
+    const items = [];
+    for (const e of ls.peers.values()) for (const it of e.items) if (passes(kind, it, f)) items.push(it);
+    // Client-side text match for movies/music: remote pages were fetched with the same q, but a
+    // stale cached page may predate a keystroke.
+    const needle = f.q.toLowerCase();
+    const cards = buildCards(kind, needle && kind !== "roms"
+      ? items.filter((it) => `${titleOf(it)} ${it.artist || ""} ${it.album || ""} ${it.file_path || ""}`.toLowerCase().includes(needle))
+      : items);
+    cards.sort((a, b) => norm(a.title).localeCompare(norm(b.title)));
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.className = "remote-media-layer";
+      layer.addEventListener("click", onLayerClick);
+      layer.addEventListener("error", (event) => {
+        const img = event.target;
+        if (img && img.tagName === "IMG") {
+          const fb = img.parentElement && img.parentElement.querySelector(".movie-explorer-card-poster-fallback");
+          img.remove();
+          if (fb) fb.classList.remove("d-none");
+        }
+      }, true);
+      grid.appendChild(layer);
+    }
+    layer._kind = kind;
+    layer._cards = cards;
+    const shown = cards.slice(0, ls.limit);
+    const frag = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "remote-media-divider";
+    head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones${cards.length ? ` · ${cards.length.toLocaleString()}` : ""}</span><span class="remote-media-status">${statusBadges(kind)}</span>`;
+    frag.appendChild(head);
+    shown.forEach((card, i) => frag.appendChild(cardEl(kind, card, i)));
+    const more = cards.length > shown.length || [...ls.peers.values()].some((e) => e.hasMore);
+    if (more) {
+      const wrap = document.createElement("div");
+      wrap.className = "remote-media-more";
+      wrap.innerHTML = `<button type="button" class="btn btn-outline-primary btn-sm" data-rm-more="1"><i class="bi bi-plus-circle me-1"></i>Show more from other Drones</button>`;
+      frag.appendChild(wrap);
+    }
+    layer.replaceChildren(frag);
   }
 
-  // ------------------------------------------------------------------ details
+  function onLayerClick(event) {
+    const layer = event.currentTarget;
+    if (event.target.closest("[data-rm-more]")) { loadMore(layer._kind); return; }
+    const card = event.target.closest(".remote-card");
+    if (!card) return;
+    const entry = layer._cards && layer._cards[Number(card.dataset.rmIndex)];
+    if (entry) openDetails(layer._kind, entry);
+  }
+
+  // ================================================================== activation (no edits to the big renderers)
+  let activeKind = "";
+  let scanQueued = false;
+  function scan() {
+    scanQueued = false;
+    let found = "";
+    for (const kind of Object.keys(GRIDS)) {
+      const grid = document.getElementById(GRIDS[kind]);
+      if (!grid) continue;
+      found = kind;
+      const f = filtersFor(kind);
+      const layer = grid.querySelector(":scope > .remote-media-layer");
+      if (!f) { if (layer) layer.remove(); continue; }
+      const sig = sigOf(f);
+      const ls = L[kind];
+      if (sig !== ls.sig) {
+        clearTimeout(ls.pending);
+        // First load starts immediately; filter changes wait for the user to stop typing.
+        ls.pending = setTimeout(() => start(kind, sig, f), ls.sig === "" ? 0 : 400);
+        if (layer) paint(kind);
+      } else if (!layer) {
+        paint(kind); // local grid re-rendered: put the remote cards back (from memory, no network)
+      }
+    }
+    if (found !== activeKind) {
+      if (!found) {
+        for (const kind of Object.keys(L)) { L[kind].token += 1; L[kind].sig = ""; clearTimeout(L[kind].pending); }
+        LoadToast.cancel();
+      }
+      activeKind = found;
+    }
+  }
+  function queueScan() {
+    if (scanQueued) return;
+    scanQueued = true;
+    requestAnimationFrame(scan);
+  }
+  function observe() {
+    const host = document.getElementById("content");
+    if (!host) return;
+    new MutationObserver((records) => {
+      // Our own layer updates (and image loads inside it) must not retrigger a scan.
+      if (records.every((r) => r.target.closest && r.target.closest(".remote-media-layer"))) return;
+      queueScan();
+    }).observe(host, { childList: true, subtree: true });
+    queueScan();
+  }
+
+  // ================================================================== details
   let modalEl = null;
   function ensureModal() {
     if (modalEl) return modalEl;
@@ -300,92 +595,93 @@
       <div class="modal-header"><h5 class="modal-title"></h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
       <div class="modal-body"></div></div></div>`;
     document.body.appendChild(modalEl);
-    modalEl.addEventListener("hidden.bs.modal", () => { modalEl.querySelectorAll("video,audio").forEach((m) => { m.pause(); m.removeAttribute("src"); m.load(); }); });
+    modalEl.addEventListener("hidden.bs.modal", () => {
+      modalEl.querySelectorAll("video,audio").forEach((m) => { m.pause(); m.removeAttribute("src"); m.load(); });
+    });
+    modalEl.addEventListener("click", (event) => onAction(event, modalEl));
     return modalEl;
   }
 
-  function copyButton(it) {
-    if (it.is_local || it.exists_locally || typeof adminEnabled === "undefined" || !adminEnabled) return "";
-    return `<button type="button" class="btn btn-sm btn-primary" data-act="copy" data-key="${esc(keyOf(it))}"><i class="bi bi-download me-1"></i>Copy to this Drone</button>`;
-  }
-  function playButton(it) {
-    if (state.kind === "roms" || !it.entry_key) return "";
-    return `<button type="button" class="btn btn-sm btn-success" data-act="play" data-key="${esc(keyOf(it))}"><i class="bi bi-play-fill me-1"></i>Play${it.is_local ? "" : " (streams from " + esc(droneLabel(it)) + ")"}</button>`;
-  }
-  function likeButton(it) {
-    if (state.kind !== "music" || !it.entry_key) return "";
-    return `<button type="button" class="btn btn-sm btn-outline-light" data-act="like" data-key="${esc(keyOf(it))}"><i class="bi ${it.liked ? "bi-heart-fill text-danger" : "bi-heart"}"></i></button>`;
-  }
+  const badge = (it) => `<span class="badge ${it.is_local ? "text-bg-secondary" : "text-bg-info"} nm-drone-badge" title="${esc(droneLabel(it))}"><i class="bi bi-hdd-network me-1"></i>${esc(droneLabel(it))}</span>`;
 
-  function copyRow(it) {
+  function copyRow(kind, it) {
+    const play = kind !== "roms" && it.entry_key
+      ? `<button type="button" class="btn btn-sm btn-success" data-act="play" data-key="${esc(keyOf(it))}"><i class="bi bi-play-fill me-1"></i>Play${it.is_local ? "" : " from " + esc(droneLabel(it))}</button>` : "";
+    const copy = !it.is_local && !it.exists_locally && canCopy()
+      ? `<button type="button" class="btn btn-sm btn-primary" data-act="copy" data-key="${esc(keyOf(it))}"><i class="bi bi-download me-1"></i>Copy to this Drone</button>` : "";
+    const like = kind === "music" && it.entry_key
+      ? `<button type="button" class="btn btn-sm btn-outline-light" data-act="like" data-key="${esc(keyOf(it))}" title="Like (saved on this Drone only)"><i class="bi ${it.liked ? "bi-heart-fill text-danger" : "bi-heart"}"></i></button>` : "";
     return `<div class="nm-copy d-flex flex-wrap align-items-center gap-2 py-2 border-top border-secondary-subtle">
-      ${badge(it)}<span class="small text-muted flex-grow-1">${it.file_size ? esc(formatBytes(it.file_size)) : ""}${it.exists_locally ? " · already on this Drone" : ""}</span>
-      ${playButton(it)}${copyButton(it)}${likeButton(it)}</div>`;
+      ${badge(it)}<span class="small text-muted flex-grow-1">${it.file_size ? esc(formatBytes(it.file_size)) : ""}${it.exists_locally ? " · already on this Drone" : ""}</span>${play}${copy}${like}</div>`;
   }
 
-  async function openCard(card) {
+  // Which Drones hold this title?  Fills `host` asynchronously; never blocks the page.
+  async function fillAvailability(kind, it, host, registry, includeSelf) {
+    host.innerHTML = `<div class="small text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Checking which Drones have this…</div>`;
+    const params = new URLSearchParams({ title: titleOf(it) });
+    ["fingerprint", "artist", "system"].forEach((k) => it[k] && params.set(k, it[k]));
+    if (it.drone_id) params.set("exclude_drone", it.drone_id);
+    try {
+      const res = await api(`${API}/${kind}/also-on?${params}`, { timeoutMs: 45000 });
+      const copies = res.copies || [];
+      copies.forEach((c) => registry.set(keyOf(c), c));
+      const rows = (includeSelf ? [it] : []).concat(copies);
+      rows.forEach((r) => registry.set(keyOf(r), r));
+      const down = (res.sources || []).filter((s) => !["ok", "cached"].includes(s.status));
+      host.innerHTML = `${rows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">Only on this Drone.</div>'}
+        ${down.length ? `<div class="small text-muted mt-2">Could not check: ${esc(down.map((s) => s.name).join(", "))}</div>` : ""}`;
+    } catch (err) {
+      host.innerHTML = `<div class="small text-muted">Could not check other Drones${err && err.message ? ` (${esc(err.message)})` : ""}.</div>`;
+    }
+  }
+
+  function openDetails(kind, card) {
     const modal = ensureModal();
-    const it = card.item;
-    const title = card.type === "show" ? card.title : titleOf(it);
-    modal.querySelector(".modal-title").textContent = title;
+    const it = card.items[0];
+    modal.querySelector(".modal-title").textContent = card.title;
     const body = modal.querySelector(".modal-body");
-    const known = new Map();
-    card.items.forEach((x) => known.set(keyOf(x), x));
-    modal._items = known;
-    if (card.type === "show") {
-      const eps = [...card.items].sort((a, b) => (a.season_number || 0) - (b.season_number || 0) || (a.episode_number || 0) - (b.episode_number || 0));
-      body.innerHTML = `<div class="d-flex flex-wrap gap-2 mb-2">${cardDrones(card).map(badge).join("")}
-        ${typeof adminEnabled !== "undefined" && adminEnabled ? `<button class="btn btn-sm btn-primary ms-auto" data-act="copy-show"><i class="bi bi-download me-1"></i>Copy all remote episodes</button>` : ""}</div>
+    const registry = new Map();
+    modal._kind = kind;
+    modal._registry = registry;
+    modal._group = card.group ? card : null;
+    if (card.group) {
+      const eps = card.items.slice().sort((a, b) => (a.season_number || 0) - (b.season_number || 0) || (a.episode_number || a.track_number || 0) - (b.episode_number || b.track_number || 0));
+      eps.forEach((e) => registry.set(keyOf(e), e));
+      const drones = [...new Map(card.items.map((x) => [x.drone_id, x])).values()];
+      body.innerHTML = `<div class="d-flex flex-wrap gap-2 mb-2">${drones.map(badge).join("")}
+        ${canCopy() ? `<button class="btn btn-sm btn-primary ms-auto" data-act="copy-all"><i class="bi bi-download me-1"></i>Copy all to this Drone</button>` : ""}</div>
         <div class="nm-player"></div>
-        ${eps.map((ep) => `<div><div class="small fw-semibold mt-2">${ep.season_number != null ? `S${String(ep.season_number).padStart(2, "0")}` : ""}${ep.episode_number != null ? `E${String(ep.episode_number).padStart(2, "0")}` : ""} ${esc(ep.episode_title || titleOf(ep))}</div>${copyRow(ep)}</div>`).join("")}`;
-      modal._show = card;
+        ${eps.map((e) => `<div class="small fw-semibold mt-2">${e.season_number != null ? `S${String(e.season_number).padStart(2, "0")}` : ""}${e.episode_number != null ? `E${String(e.episode_number).padStart(2, "0")} ` : ""}${esc(e.episode_title || titleOf(e))}</div>${copyRow(kind, e)}`).join("")}`;
     } else {
       const meta = it.metadata || {};
+      registry.set(keyOf(it), it);
       body.innerHTML = `<div class="nm-player"></div>
         <div class="mb-2 small text-muted">${esc([it.artist, it.album, it.system, meta.release_date || meta.year].filter(Boolean).join(" · "))}</div>
         ${meta.overview ? `<p class="small">${esc(meta.overview)}</p>` : ""}
-        <h6 class="mt-3">On this Drone and others</h6>
-        <div class="nm-copies">${copyRow(it)}</div>
-        <div class="small text-muted mt-2 nm-also">Looking for other copies on the network…</div>`;
-      modal._show = null;
-      alsoOn(it, body, known);
+        <h6 class="mt-3">Available on</h6><div class="nm-avail"></div>`;
+      fillAvailability(kind, it, body.querySelector(".nm-avail"), registry, true);
     }
     bootstrap.Modal.getOrCreateInstance(modal).show();
   }
 
-  async function alsoOn(it, body, known) {
-    const params = new URLSearchParams({ title: titleOf(it), exclude_drone: it.drone_id });
-    ["fingerprint", "artist", "system"].forEach((k) => it[k] && params.set(k, it[k]));
-    const note = body.querySelector(".nm-also");
-    try {
-      const res = await api(`${BASE}/${state.kind}/also-on?${params}`);
-      const copies = res.copies || [];
-      copies.forEach((c) => known.set(keyOf(c), c));
-      body.querySelector(".nm-copies").insertAdjacentHTML("beforeend", copies.map(copyRow).join(""));
-      if (note) note.textContent = copies.length ? `Also on ${copies.length} other Drone${copies.length === 1 ? "" : "s"}.` : "Only on this Drone.";
-    } catch (err) {
-      if (note) note.textContent = "Could not check other Drones.";
-    }
-  }
-
-  function play(it) {
-    const modal = ensureModal();
-    const host = modal.querySelector(".nm-player");
+  function play(kind, it, scope) {
+    const host = scope.querySelector(".nm-player");
     if (!host) return;
-    const tag = state.kind === "music" ? "audio" : "video";
-    host.innerHTML = `<${tag} controls autoplay class="w-100 mb-2" src="${esc(streamUrl(it))}"></${tag}><div class="small text-muted mb-2">Playing from ${esc(droneLabel(it))}</div>`;
-    const media = host.firstElementChild;
-    media.addEventListener("error", () => showToast("That Drone could not stream this file right now.", "warning", 6000));
+    const tag = kind === "music" ? "audio" : "video";
+    const url = `${BASE}/${kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`;
+    host.innerHTML = `<${tag} controls autoplay class="w-100 mb-2" src="${esc(url)}"></${tag}><div class="small text-muted mb-2">Playing from ${esc(droneLabel(it))}</div>`;
+    host.firstElementChild.addEventListener("error", () => showToast("That Drone could not stream this file right now.", "warning", 6000));
+    host.scrollIntoView({ block: "nearest" });
   }
 
-  async function copyItems(items) {
+  async function copyItems(kind, items) {
     const remote = items.filter((x) => !x.is_local && !x.exists_locally);
     if (!remote.length) { showToast("Everything selected is already on this Drone.", "info"); return; }
     const jobIds = [];
     try {
       for (const it of remote) {
         const res = await apiPost("/admin/local-network/sync", {
-          peer_id: it.drone_id, asset_type: state.kind, system: it.system || "", item: it, include_artwork: true,
+          peer_id: it.drone_id, asset_type: kind, system: it.system || "", item: it, include_artwork: true,
         });
         (res.jobs || []).forEach((j) => jobIds.push(j.id || j.job_id));
       }
@@ -396,73 +692,74 @@
     else if (remote.length) showToast("Nothing new to copy — it may already be here or queued.", "info");
   }
 
-  async function toggleLike(it) {
+  async function toggleLike(scope, it) {
     const liked = !it.liked;
     try {
-      await apiPost(`${BASE}/music/like`, { drone_id: it.drone_id, entry_key: it.entry_key, liked });
+      await apiPost(`${API}/music/like`, { drone_id: it.drone_id, entry_key: it.entry_key, liked });
       it.liked = liked;
-      clientCache.clear();
-      const btn = modalEl.querySelector(`[data-act="like"][data-key="${CSS.escape(keyOf(it))}"] i`);
-      if (btn) btn.className = `bi ${liked ? "bi-heart-fill text-danger" : "bi-heart"}`;
+      const icon = scope.querySelector(`[data-act="like"][data-key="${CSS.escape(keyOf(it))}"] i`);
+      if (icon) icon.className = `bi ${liked ? "bi-heart-fill text-danger" : "bi-heart"}`;
     } catch (err) {
       showToast(`Could not save the like: ${esc(err.message || "unknown error")}`, "danger");
     }
   }
 
-  // ------------------------------------------------------------------ page
-  function pageHtml() {
-    return `<div class="network-media">
-      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
-        <h2 class="h4 mb-0 me-2"><i class="bi bi-diagram-3 me-2"></i>All Drones</h2>
-        <div class="btn-group" role="group">${KINDS.map(([k, label, icon]) => `<button type="button" class="btn btn-outline-light btn-sm nm-tab" data-kind="${k}"><i class="bi ${icon} me-1"></i>${label}</button>`).join("")}</div>
-        <input id="nmSearch" class="form-control form-control-sm nm-search" type="search" placeholder="Search every Drone" value="${esc(state.q)}">
-        <button type="button" id="nmRefresh" class="btn btn-outline-light btn-sm" title="Ask every Drone again"><i class="bi bi-arrow-clockwise"></i></button>
-        <span id="nmStatus" class="small text-muted ms-auto"></span>
-      </div>
-      <div id="nmChips" class="d-flex flex-wrap gap-2 mb-3"></div>
-      <div id="nmGrid" class="nm-grid"></div>
-      <div class="text-center my-3"><button type="button" id="nmMore" class="btn btn-outline-light btn-sm d-none">Load more</button></div>
-    </div>`;
-  }
-
-  function wire(root) {
-    root.addEventListener("click", (event) => {
-      const tab = event.target.closest(".nm-tab");
-      if (tab) { state.kind = tab.dataset.kind; setHash(`#network/${state.kind}`); return; }
-      const chip = event.target.closest(".nm-chip");
-      if (chip) { const id = chip.dataset.drone; state.hidden.has(id) ? state.hidden.delete(id) : state.hidden.add(id); paint(); return; }
-      if (event.target.closest("#nmRefresh")) { load({ refresh: true }); return; }
-      if (event.target.closest("#nmMore")) { load({ more: true }); return; }
-      const card = event.target.closest(".nm-card");
-      if (card) { const c = state.byKey.get(card.dataset.card); if (c) openCard(c); }
-    });
-    let timer = null;
-    root.querySelector("#nmSearch").addEventListener("input", (event) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { state.q = event.target.value.trim(); load(); }, 350);
-    });
-  }
-
-  document.addEventListener("click", (event) => {
-    const btn = event.target.closest && event.target.closest("#networkMediaModalHost [data-act], .modal [data-act]");
-    if (!btn || !modalEl || !modalEl.contains(btn)) return;
+  // Shared click handling for the modal and the on-page "Available on" card.
+  function onAction(event, scope) {
+    const btn = event.target.closest("[data-act]");
+    if (!btn || !scope.contains(btn)) return;
+    const kind = scope._kind;
     const act = btn.dataset.act;
-    if (act === "copy-show" && modalEl._show) { copyItems(modalEl._show.items); return; }
-    const it = modalEl._items && modalEl._items.get(btn.dataset.key);
+    if (act === "copy-all" && scope._group) { copyItems(kind, scope._group.items); return; }
+    const it = scope._registry && scope._registry.get(btn.dataset.key);
     if (!it) return;
-    if (act === "play") play(it);
-    else if (act === "copy") copyItems([it]);
-    else if (act === "like") toggleLike(it);
-  });
+    if (act === "play") play(kind, it, scope);
+    else if (act === "copy") copyItems(kind, [it]);
+    else if (act === "like") toggleLike(scope, it);
+  }
 
-  window.renderNetworkMediaPage = async function renderNetworkMediaPage(hash) {
-    const m = /^#network\/(movies|music|roms)/.exec(hash || "");
-    if (m && m[1] !== state.kind) { state.kind = m[1]; state.items = []; state.sources = []; }
-    content.innerHTML = pageHtml();
-    wire(content);
-    paint();
-    await load();
-  };
+  // ================================================================== local detail pages
+  // A local game/movie/track page gets an "Available on" card showing every Drone that has it.
+  async function onRouteRendered(hash) {
+    document.querySelectorAll(".drone-availability").forEach((n) => n.remove());
+    let kind = "";
+    let item = null;
+    try {
+      if (hash.startsWith("#system/")) {
+        const rom = (window.missingArtworkRoms || [])[0];
+        if (!rom) return;
+        kind = "roms";
+        item = { title: rom.title || rom.name || rom.rom_name, system: rom.system, fingerprint: rom.fingerprint || rom.rom_fingerprint || "" };
+      } else if (hash.startsWith("#movies/") || hash.startsWith("#music/")) {
+        const parsed = hash.startsWith("#movies/") ? parseMoviesHash(hash) : parseMusicHash(hash);
+        if (!parsed || parsed.view !== "detail" || !parsed.entryKey) return;
+        kind = hash.startsWith("#movies/") ? "movies" : "music";
+        const detail = await api(`/${kind}/${enc(parsed.entryKey)}`, { timeoutMs: 15000 });
+        item = { title: detail.display_title || detail.movie_name || detail.track_name, fingerprint: detail.fingerprint || "", artist: detail.artist || "" };
+      } else {
+        return;
+      }
+    } catch (e) { return; }
+    if (!item || !item.title || window.location.hash !== hash) return;
+    const first = content.firstElementChild;
+    if (!first) return;
+    const card = document.createElement("div");
+    card.className = "card log-card mb-3 drone-availability";
+    card.innerHTML = `<div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Available on</div><div class="card-body"><div class="nm-avail"></div></div>`;
+    first.insertAdjacentElement("afterend", card);
+    card._kind = kind;
+    card._registry = new Map();
+    card.addEventListener("click", (event) => onAction(event, card));
+    let self = null;
+    try { self = (await peers()).find((p) => p.is_local); } catch (e) { /* offline listing is fine */ }
+    const here = { ...item, drone_id: self ? self.drone_id : "", drone_name: "This Drone", is_local: true };
+    await fillAvailability(kind, here, card.querySelector(".nm-avail"), card._registry, false);
+    const host = card.querySelector(".nm-avail");
+    if (host && card.isConnected) host.insertAdjacentHTML("afterbegin", `<div class="nm-copy d-flex align-items-center gap-2 py-2">${badge(here)}<span class="small text-muted">This page</span></div>`);
+  }
+  window.DroneRemoteMedia = { onRouteRendered, refresh() { cache.clear(); for (const k of Object.keys(L)) L[k].sig = ""; queueScan(); } };
 
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", observe);
+  else observe();
   Toast.restore();
 })();

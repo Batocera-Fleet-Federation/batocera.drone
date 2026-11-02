@@ -68,6 +68,7 @@ _PATH_CACHE_TTL_SECONDS = 300.0
 _path_cache: Dict[tuple, tuple] = {}
 # One process-wide cache of peers' inventory pages (see media_browse.SourceCache).
 _source_cache = _media_browse.SourceCache()
+_fingerprint_cache: Dict[str, tuple] = {}
 
 
 class HandlersMediaBrowseMixin:
@@ -108,10 +109,35 @@ class HandlersMediaBrowseMixin:
     def _media_with_local_flags(self, kind: str, result):
         """``exists_locally`` depends on *this* Drone, so it is recomputed per
         request and never cached with the peer's page."""
-        if kind == "roms" and isinstance(result, dict):
-            result = {**result, "items": [dict(item) for item in (result.get("items") or []) if isinstance(item, dict)]}
+        if not isinstance(result, dict):
+            return result
+        result = {**result, "items": [dict(item) for item in (result.get("items") or []) if isinstance(item, dict)]}
+        if kind == "roms":
             self._annotate_roms_exist_locally(result["items"])
+        else:
+            local = self._local_fingerprints(kind)
+            for item in result["items"]:
+                fingerprint = _media_browse.item_fingerprint(item)
+                item["exists_locally"] = bool(fingerprint) and fingerprint in local
         return result
+
+    def _local_fingerprints(self, kind: str) -> set:
+        """Fingerprints of this Drone's movies/tracks, briefly memoized so a
+        burst of per-Drone page loads does not rescan the library each time."""
+        now = time.monotonic()
+        cached = _fingerprint_cache.get(kind)
+        if cached and cached[1] > now:
+            return cached[0]
+        try:
+            rows = (
+                _movies_store.list_movies(self.settings.movies_root) if kind == "movies"
+                else _music_store.list_music(self.settings.music_root)
+            )
+            fingerprints = {str(r.get("fingerprint") or "").strip().lower() for r in rows} - {""}
+        except Exception:  # noqa: BLE001 - flag is advisory
+            fingerprints = set()
+        _fingerprint_cache[kind] = (fingerprints, now + 30.0)
+        return fingerprints
 
     def _media_fetch(self, kind: str, params: dict, refresh: bool = False):
         """Build the per-source ``fetch(source, offset, limit)`` callable."""
@@ -125,7 +151,11 @@ class HandlersMediaBrowseMixin:
             peer = self._media_peer(source.drone_id)
             if peer is None:
                 raise OSError("peer is no longer paired")
-            cache_key = (source.drone_id, kind, params.get("q") or "", params.get("system") or "", offset, limit)
+            if self.settings.use_fake_data and peer.get("fake_data"):
+                # Dev/demo peers have no address; answer from the local collector, same as
+                # _fetch_peer_inventory does for the Swarm page.
+                return self._media_with_local_flags(kind, self._collect_peer_inventory(kind, query_params))
+            cache_key = (source.drone_id, kind, params.get("q") or "", params.get("system") or "", params.get("genre") or "", offset, limit)
             if not refresh:
                 hit = _source_cache.get(cache_key)
                 if hit is not None:
@@ -161,6 +191,17 @@ class HandlersMediaBrowseMixin:
 
         return fetch
 
+    def _handle_media_browse_sources(self) -> None:
+        """Paired Drones, from local state only (no network).  Lets the page
+        start one background request per Drone so each can finish -- or fail --
+        independently without holding up the others."""
+        self._send_json(200, {
+            "sources": [
+                {"drone_id": s.drone_id, "name": s.name, "is_local": s.is_local}
+                for s in self._media_sources()
+            ],
+        })
+
     # --------------------------------------------------------------- list
 
     def _handle_media_browse_list(self, kind: str, query_params: dict) -> None:
@@ -175,18 +216,27 @@ class HandlersMediaBrowseMixin:
             part.strip() for part in str((query_params.get("drones") or [""])[0]).split(",") if part.strip()
         } or None
         sources = self._media_sources(only)
-        params = {"q": q, "system": system if kind == "roms" else ""}
+        if str((query_params.get("exclude_local") or [""])[0]).strip().lower() in {"1", "true", "yes"}:
+            sources = [source for source in sources if not source.is_local]
+        genre = str((query_params.get("genre") or [""])[0]).strip()[:128]
+        params = {"q": q, "system": system if kind == "roms" else "", "genre": genre if kind == "roms" else ""}
         refresh = str((query_params.get("refresh") or [""])[0]).strip().lower() in {"1", "true", "yes"}
         if refresh:
             for source in sources:
                 if not source.is_local:
                     _source_cache.invalidate(source.drone_id)
-        page = _media_browse.collect_page(
-            sources,
-            self._media_fetch(kind, params, refresh=refresh),
-            limit=limit,
-            cursor=cursor,
-        )
+        try:
+            page = _media_browse.collect_page(
+                sources,
+                self._media_fetch(kind, params, refresh=refresh),
+                limit=limit,
+                cursor=cursor,
+            )
+        except FileNotFoundError as error:
+            # Never let a missing file surface as a bare 404 "not found": the page
+            # would read that as "this Drone has no network browsing".
+            self._send_json(500, {"error": f"media browse failed: {error}"})
+            return
         if kind == "music":
             self._media_overlay_likes(page["items"])
         self._send_json(200, {"media_type": kind, **page})

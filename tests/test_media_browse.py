@@ -516,6 +516,72 @@ class CachingTests(unittest.TestCase):
         self.assertEqual(cache.invalidate("c"), 2)
 
 
+class InPlaceLoadingBackendTests(unittest.TestCase):
+    """The pages ask for one Drone at a time, peers only, and local fingerprints flag duplicates."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.settings = _settings(self.root)
+        track = self.root / "music" / "A" / "Song.mp3"
+        track.parent.mkdir(parents=True)
+        track.write_bytes(b"x" * 64)
+        music_store.sync_music_cache(self.settings.music_root)
+        self.local_fp = music_store.list_music(self.settings.music_root)[0]["fingerprint"]
+        handlers_media_browse._source_cache.invalidate()
+        handlers_media_browse._fingerprint_cache.clear()
+        self.asked = []
+        peers = [{"drone_id": "drone-a", "name": "A"}, {"drone_id": "drone-b", "name": "B"}]
+
+        def peer_request(inner_self, peer, peer_id, kind, query_params, overrides=None):
+            self.asked.append(peer_id)
+            return {"total": 2, "items": [{"entry_key": "01", "display_title": "Same", "fingerprint": self.local_fp},
+                                          {"entry_key": "02", "display_title": "New", "fingerprint": "zz"}]}
+
+        for patcher in (
+            mock.patch("app.transfer.local_network.is_local_mode", return_value=True),
+            mock.patch("app.transfer.local_network.paired_peers", return_value=peers),
+            mock.patch("app.transfer.local_network.get_paired_peer", side_effect=lambda s, pid: next((p for p in peers if p["drone_id"] == pid), None)),
+            mock.patch.object(HandlersMediaBrowseMixin, "_peer_inventory_request", peer_request, create=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        handlers_media_browse._source_cache.invalidate()
+        self._tmp.cleanup()
+
+    def test_sources_lists_local_first_without_any_network(self):
+        handler = _Handler(self.settings)
+        handler._handle_media_browse_sources()
+        status, body = handler.json
+        self.assertEqual(status, 200)
+        self.assertEqual([s["drone_id"] for s in body["sources"]], ["drone-local", "drone-a", "drone-b"])
+        self.assertTrue(body["sources"][0]["is_local"])
+        self.assertEqual(self.asked, [])
+
+    def test_one_drone_peers_only_request_asks_only_that_drone(self):
+        handler = _Handler(self.settings)
+        handler._handle_media_browse_list("music", {"drones": ["drone-b"], "exclude_local": ["1"]})
+        body = handler.json[1]
+        self.assertEqual(self.asked, ["drone-b"])
+        self.assertEqual([s["drone_id"] for s in body["sources"]], ["drone-b"])
+        self.assertFalse(any(item["is_local"] for item in body["items"]))
+
+    def test_items_already_on_this_drone_are_flagged(self):
+        handler = _Handler(self.settings)
+        handler._handle_media_browse_list("music", {"drones": ["drone-a"], "exclude_local": ["1"]})
+        flags = {item["entry_key"]: item["exists_locally"] for item in handler.json[1]["items"]}
+        self.assertEqual(flags, {"01": True, "02": False})
+
+    def test_missing_file_is_a_clear_500_not_a_bare_404(self):
+        with mock.patch.object(media_browse, "collect_page", side_effect=FileNotFoundError("gone")):
+            handler = _Handler(self.settings)
+            handler._handle_media_browse_list("music", {})
+        self.assertEqual(handler.json[0], 500)
+        self.assertIn("media browse failed", handler.json[1]["error"])
+
+
 class CopyHereTests(unittest.TestCase):
     def test_music_copy_uses_the_normal_download_manager(self):
         from app.web.handlers_network import HandlersNetworkMixin
@@ -609,24 +675,45 @@ class MusicDownloadTests(unittest.TestCase):
 class UiContractTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1] / "app" / "web"
 
+    def _script(self):
+        return (self.ROOT / "static" / "js" / "media_browse.js").read_text(encoding="utf-8")
+
     def test_media_browse_script_contract(self):
-        script = (self.ROOT / "static" / "js" / "media_browse.js").read_text(encoding="utf-8")
-        for needle in ("renderNetworkMediaPage", "DroneTransferToast", "escapeHtml", "themed-modal",
-                       "/admin/local-network/sync", "include_artwork: true", "transfer_speed_bps",
-                       "progressbar", "downloaded_bytes", "cursor", "refresh"):
+        script = self._script()
+        for needle in ("remote-media-layer", "MutationObserver", "DroneTransferToast", "LoadToast", "escapeHtml",
+                       "themed-modal", "/admin/local-network/sync", "include_artwork: true", "transfer_speed_bps",
+                       "downloaded_bytes", "exclude_local", "also-on", "onRouteRendered", "requestAnimationFrame"):
             self.assertIn(needle, script)
-        for forbidden in ("onclick=", "onerror=", "eval(", "innerHTML = it."):
+        for forbidden in ("onclick=", "onerror=", "eval(", "location.reload"):
             self.assertNotIn(forbidden, script)
 
-    def test_script_is_loaded_and_routed(self):
+    def test_there_is_no_separate_all_drones_page_or_button(self):
+        router = (self.ROOT / "static" / "js" / "drone.js").read_text(encoding="utf-8")
+        self.assertNotIn('startsWith("#network")', router)
+        self.assertNotIn("renderNetworkMediaPage", router)
+        self.assertNotIn("All Drones", router)
+        self.assertNotIn("renderNetworkMediaPage", self._script())
+
+    def test_script_is_loaded_and_detail_pages_are_hooked(self):
         self.assertIn("/static/js/media_browse.js", (self.ROOT / "templates" / "index.html").read_text(encoding="utf-8"))
         router = (self.ROOT / "static" / "js" / "drone.js").read_text(encoding="utf-8")
-        self.assertIn('hash.startsWith("#network")', router)
-        self.assertIn("renderNetworkMediaPage", router)
+        self.assertIn("DroneRemoteMedia.onRouteRendered(hash)", router)
 
-    def test_toast_has_no_dismiss_while_running(self):
-        script = (self.ROOT / "static" / "js" / "media_browse.js").read_text(encoding="utf-8")
-        self.assertIn('classList.toggle("d-none", !finished)', script)
+    def test_api_calls_do_not_double_the_api_prefix(self):
+        # drone.js api()/apiPost() already prepend /v1/api; passing the full path 404s ("not found").
+        script = self._script()
+        self.assertNotIn("api(`${BASE}", script)
+        self.assertNotIn("apiPost(`${BASE}", script)
+        self.assertNotIn('api("/v1/api', script)
+        self.assertIn('const API = "/media-browse"', script)
+
+    def test_loading_is_reported_in_a_toast_and_one_request_per_drone(self):
+        script = self._script()
+        self.assertIn("LoadToast.begin(kind, list.length)", script)
+        self.assertIn("drones: entry.id", script)  # one request per Drone, so a slow one never blocks the rest
+
+    def test_transfer_toast_has_no_dismiss_while_running(self):
+        self.assertIn('classList.toggle("d-none", !finished)', self._script())
 
 
 if __name__ == "__main__":
