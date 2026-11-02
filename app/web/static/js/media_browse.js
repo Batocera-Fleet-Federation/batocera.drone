@@ -20,8 +20,8 @@
   // api()/apiPost() prepend /v1/api themselves; BASE is for <img>/<video> URLs, which are not routed through them.
   const API = "/media-browse";
   const BASE = "/v1/api/media-browse";
-  const PAGE = 200;
-  const CAPS = { roms: 400, movies: 1000, music: 600 }; // auto-loaded per Drone; more on demand
+  const PAGE = 500; // the server's page maximum: fewest round trips per Drone
+  const SAFETY_CAP = 50000; // per Drone and view; everything loads in the background, nothing is paged away
   const RENDER_STEP = 300;
   const FRESH_MS = 60 * 1000;
   const SOURCES_MS = 5 * 60 * 1000;
@@ -161,75 +161,6 @@
   };
   window.DroneTransferToast = Toast;
 
-  // ================================================================== loading toast
-  // One toast per page load of other Drones' assets.  Created only if the load takes longer than
-  // a blink (cache hits never flash a toast) and stays until every Drone has answered or failed.
-  const LoadToast = {
-    el: null, delay: null, active: false, state: null,
-
-    begin(kind, total) {
-      this.cancel();
-      this.active = true;
-      this.state = { kind, total, done: 0, found: 0, issues: [] };
-      this.delay = setTimeout(() => { this.delay = null; if (this.active) this.render(); }, 350);
-    },
-    update(patch) {
-      if (!this.active) return;
-      Object.assign(this.state, patch);
-      if (this.el) this.render();
-    },
-    issue(text) {
-      if (!this.active) return;
-      this.state.issues.push(text);
-      if (this.el) this.render();
-    },
-    end() {
-      if (!this.active) return;
-      const s = this.state;
-      this.active = false;
-      if (this.delay) { clearTimeout(this.delay); this.delay = null; if (!s.issues.length) return; this.render(); }
-      if (!this.el) return;
-      this.render(true);
-      const el = this.el;
-      setTimeout(() => { if (this.el === el) this.cancel(); }, s.issues.length ? 7000 : 1800);
-    },
-    cancel() {
-      this.active = false;
-      if (this.delay) { clearTimeout(this.delay); this.delay = null; }
-      if (this.el) { dismissToast(this.el); this.el = null; }
-    },
-    render(finished = false) {
-      const s = this.state;
-      if (!this.el || !this.el.isConnected) {
-        const el = document.createElement("div");
-        el.className = "toast-alert transfer-toast alert-info load-toast";
-        el.setAttribute("role", "status");
-        el.setAttribute("aria-live", "polite");
-        el.innerHTML = `<div class="tt-head"><span class="spinner-border spinner-border-sm tt-spin" aria-hidden="true"></span>
-          <span class="tt-title"></span></div>
-          <div class="progress tt-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar"></div></div>
-          <div class="tt-meta"><span class="tt-files"></span><span class="tt-speed"></span></div>
-          <div class="tt-names"></div>`;
-        ensureToastContainer().appendChild(el);
-        this.el = el;
-      }
-      const el = this.el;
-      const pct = s.total ? Math.min(100, (s.done / s.total) * 100) : 0;
-      el.classList.toggle("alert-warning", finished && s.issues.length > 0);
-      el.classList.toggle("alert-success", finished && s.issues.length === 0);
-      el.classList.toggle("alert-info", !finished);
-      el.querySelector(".tt-spin").classList.toggle("d-none", finished);
-      el.querySelector(".tt-title").textContent = finished
-        ? (s.issues.length ? `Loaded ${NOUN[s.kind]} from ${s.total - s.issues.length} of ${s.total} Drones` : `Loaded ${NOUN[s.kind]} from other Drones`)
-        : `Loading ${NOUN[s.kind]} from other Drones…`;
-      el.querySelector(".progress-bar").style.width = `${finished ? 100 : pct}%`;
-      el.querySelector(".tt-bar").setAttribute("aria-valuenow", String(Math.round(finished ? 100 : pct)));
-      el.querySelector(".tt-files").textContent = `${s.done} of ${s.total} Drone${s.total === 1 ? "" : "s"}`;
-      el.querySelector(".tt-speed").textContent = `${s.found.toLocaleString()} found`;
-      el.querySelector(".tt-names").textContent = s.issues.join(" · ");
-    },
-  };
-
   // ================================================================== sources + data
   let sourcesCache = { at: 0, promise: null };
   function peers() {
@@ -246,9 +177,9 @@
   }
 
   const L = {
-    roms: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.roms },
-    movies: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.movies },
-    music: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null, cap: CAPS.music },
+    roms: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null },
+    movies: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null },
+    music: { sig: "", token: 0, peers: new Map(), limit: RENDER_STEP, pending: null },
   };
   const cache = new Map(); // kind|sig -> { at, peers: Map }
 
@@ -279,118 +210,112 @@
     return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, error: "", age: null };
   }
 
-  async function loadPeer(kind, entry, f, token, cap) {
+  // Loads every page of one Drone, painting as pages arrive.  Progress and problems are shown by
+  // that Drone's chip next to the "On other Drones" divider -- no toast, nothing modal.
+  async function loadPeer(kind, entry, f, token) {
     const ls = L[kind];
     entry.status = "loading";
-    let errored = false;
-    let first = !entry.cursor && entry.items.length === 0;
+    entry.hasMore = false;
+    let first = true;
     try {
-      while (token === ls.token && entry.items.length < cap && (first || entry.hasMore)) {
+      while (token === ls.token && entry.items.length < SAFETY_CAP && (first || entry.hasMore)) {
         first = false;
         const params = new URLSearchParams({ limit: String(PAGE), drones: entry.id, exclude_local: "1" });
         if (f.q) params.set("q", f.q);
         if (f.system) params.set("system", f.system);
         if (f.genre) params.set("genre", f.genre);
         if (entry.cursor) params.set("cursor", entry.cursor);
-        const page = await api(`${API}/${kind}?${params}`, { timeoutMs: 45000 });
+        const page = await api(`${API}/${kind}?${params}`, { timeoutMs: 60000 });
         if (token !== ls.token) return;
         const src = (page.sources || [])[0] || { status: "ok" };
-        entry.status = src.status;
         entry.total = Number(src.total || 0);
         entry.age = src.cached_age_seconds == null ? null : src.cached_age_seconds;
         entry.error = src.error || "";
         entry.items.push(...(page.items || []));
         entry.cursor = page.next_cursor || "";
         entry.hasMore = !!page.has_more;
-        LoadToast.update({ found: totalFound(kind) });
+        const ok = src.status === "ok" || src.status === "cached";
+        // A Drone is "loading" until its last page is in; a failure/stale status shows at once.
+        entry.status = ok && entry.hasMore && (page.items || []).length ? "loading" : src.status;
         schedulePaint(kind);
-        if ((src.status !== "ok" && src.status !== "cached") || !(page.items || []).length) break;
+        if (!ok || !(page.items || []).length) break;
       }
     } catch (err) {
-      errored = true;
       if (token !== ls.token) return;
       entry.status = "error";
       entry.error = String(err && err.message || "failed");
+      entry.hasMore = false;
     }
     if (token !== ls.token) return;
-    if (entry.status === "offline" || entry.status === "timeout" || entry.status === "error") {
-      LoadToast.issue(`${entry.name}: ${entry.status === "timeout" ? "slow" : entry.status === "offline" ? "offline" : (entry.error === "not found" ? "this Drone needs an update" : "error")}`);
-    } else if (entry.status === "unsupported") {
-      LoadToast.issue(`${entry.name}: needs an update`);
-    } else if (entry.status === "cached") {
-      LoadToast.issue(`${entry.name}: showing saved copy`);
-    }
-    if (errored) entry.hasMore = false;
-    LoadToast.update({ done: (LoadToast.state ? LoadToast.state.done : 0) + 1 });
-    schedulePaint(kind);
+    if (entry.status === "loading") entry.status = "ok";
+    schedulePaint(kind, true);
   }
-
-  const totalFound = (kind) => [...L[kind].peers.values()].reduce((n, e) => n + e.items.length, 0);
 
   async function start(kind, sig, f) {
     const ls = L[kind];
     const token = ++ls.token;
     ls.sig = sig;
     ls.limit = RENDER_STEP;
-    ls.cap = CAPS[kind];
     for (const other of Object.keys(L)) if (other !== kind) { L[other].token += 1; }
     const hit = cache.get(`${kind}|${sig}`);
     const fresh = hit && Date.now() - hit.at < FRESH_MS;
     if (hit) {
       ls.peers = new Map([...hit.peers].map(([id, e]) => [id, { ...e, items: e.items.slice() }]));
       paint(kind);
-      if (fresh) { LoadToast.cancel(); return; }
+      if (fresh) return;
     }
     let list;
     try {
       list = (await peers()).filter((p) => !p.is_local);
     } catch (err) {
       if (token === ls.token) {
-        LoadToast.begin(kind, 1);
-        LoadToast.issue(err && err.message === "not found" ? "This Drone needs an update to browse other Drones" : `Could not list Drones: ${err.message || "error"}`);
-        LoadToast.end();
+        const msg = err && err.message === "not found" ? "needs an update" : (err && err.message) || "error";
+        ls.peers = new Map([["_list", { id: "_list", name: "Other Drones", items: [], total: 0, status: "error", error: msg }]]);
+        paint(kind);
       }
       return;
     }
     if (token !== ls.token) return;
-    if (!list.length) { ls.peers = new Map(); paint(kind); LoadToast.cancel(); return; }
+    if (!list.length) { ls.peers = new Map(); paint(kind); return; }
     // Keep whatever was already shown while a refresh runs (no flicker); swap in each Drone's
     // fresh result as soon as it answers.
     const staging = new Map(list.map((p) => [p.drone_id, newEntry(p)]));
-    LoadToast.begin(kind, list.length);
-    if (!hit) ls.peers = staging;
+    if (!hit) { ls.peers = staging; paint(kind); }
     await Promise.all([...staging.values()].map(async (entry) => {
-      await loadPeer(kind, entry, f, token, ls.cap);
+      await loadPeer(kind, entry, f, token);
       if (hit && token === ls.token) { ls.peers.set(entry.id, entry); schedulePaint(kind); }
     }));
     if (token !== ls.token) return;
     cache.set(`${kind}|${sig}`, { at: Date.now(), peers: new Map([...ls.peers].map(([id, e]) => [id, { ...e, items: e.items.slice() }])) });
-    LoadToast.end();
   }
 
-  async function loadMore(kind) {
+  // Everything is already loaded in the background; "show more" only reveals more of it.
+  function loadMore(kind) {
+    L[kind].limit += RENDER_STEP;
+    paint(kind);
+  }
+
+  function retry(kind, id) {
     const ls = L[kind];
     const f = filtersFor(kind);
     if (!f) return;
-    ls.limit += RENDER_STEP;
-    const loaded = totalFound(kind);
-    const pending = [...ls.peers.values()].filter((e) => e.hasMore);
-    if (loaded < ls.limit && pending.length) {
-      const token = ++ls.token; // supersede nothing else; same filters
-      ls.cap += CAPS[kind];
-      LoadToast.begin(kind, pending.length);
-      await Promise.all(pending.map((e) => loadPeer(kind, e, f, token, ls.cap)));
-      if (token === ls.token) LoadToast.end();
-    }
+    if (id === "_list") { sourcesCache = { at: 0, promise: null }; cache.clear(); ls.sig = ""; queueScan(); return; }
+    const entry = ls.peers.get(id);
+    if (!entry) return;
+    entry.items = []; entry.cursor = ""; entry.error = "";
+    cache.delete(`${kind}|${ls.sig}`);
+    loadPeer(kind, entry, f, ls.token);
     paint(kind);
   }
 
   // ================================================================== layer rendering
+  // Coalesced: with thousands of items arriving, repainting every page would stutter the page.
   const paintQueued = new Set();
-  function schedulePaint(kind) {
+  function schedulePaint(kind, now) {
     if (paintQueued.has(kind)) return;
     paintQueued.add(kind);
-    requestAnimationFrame(() => { paintQueued.delete(kind); paint(kind); });
+    const run = () => { paintQueued.delete(kind); paint(kind); };
+    if (now) requestAnimationFrame(run); else setTimeout(() => requestAnimationFrame(run), 250);
   }
 
   function artUrl(kind, it) {
@@ -466,14 +391,29 @@
     return btn;
   }
 
+  // One chip per Drone: this is where loading, progress and problems are shown.
   function statusBadges(kind) {
     const out = [];
+    const n = (v) => Number(v || 0).toLocaleString();
     for (const e of L[kind].peers.values()) {
-      if (e.status === "loading") out.push(`<span class="badge text-bg-secondary"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem"></span>${esc(e.name)}</span>`);
-      else if (e.status === "cached") out.push(`<span class="badge text-bg-warning" title="Unreachable — showing the last copy${e.age != null ? ` (${Math.max(1, Math.round(e.age / 60))} min old)` : ""}">${esc(e.name)}: saved copy</span>`);
-      else if (e.status === "offline" || e.status === "timeout" || e.status === "error") out.push(`<span class="badge text-bg-danger" title="${esc(e.error || e.status)}">${esc(e.name)}: ${e.status === "timeout" ? "slow" : e.status === "offline" ? "offline" : "unavailable"}</span>`);
-      else if (e.status === "unsupported") out.push(`<span class="badge text-bg-secondary">${esc(e.name)}: needs update</span>`);
-      else out.push(`<span class="badge text-bg-info">${esc(e.name)} · ${e.total.toLocaleString()}</span>`);
+      const name = esc(e.name);
+      const retryBtn = (cls, text, title) => `<button type="button" class="badge border-0 ${cls}" data-rm-retry="${esc(e.id)}" title="${esc(title)}">${text} <i class="bi bi-arrow-clockwise"></i></button>`;
+      if (e.status === "loading") {
+        const pct = e.total ? Math.min(100, Math.round((e.items.length / e.total) * 100)) : 0;
+        out.push(`<span class="badge text-bg-secondary rm-chip-loading" title="Loading from ${name}"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem"></span>${name}${e.total ? ` · ${n(e.items.length)} / ${n(e.total)}` : ""}<span class="rm-chip-bar"><span style="width:${pct}%"></span></span></span>`);
+      } else if (e.status === "cached") {
+        out.push(`<span class="badge text-bg-warning" title="Unreachable — showing the last copy${e.age != null ? ` (${Math.max(1, Math.round(e.age / 60))} min old)` : ""}">${name}: saved copy · ${n(e.items.length)}</span>`);
+      } else if (e.status === "timeout") {
+        out.push(retryBtn("text-bg-danger", `${name}: slow`, "Did not answer in time — click to try again"));
+      } else if (e.status === "offline") {
+        out.push(retryBtn("text-bg-danger", `${name}: offline`, e.error || "Unreachable — click to try again"));
+      } else if (e.status === "error") {
+        out.push(retryBtn("text-bg-danger", `${name}: ${e.error === "needs an update" || e.error === "not found" ? "needs an update" : "unavailable"}`, e.error || "Click to try again"));
+      } else if (e.status === "unsupported") {
+        out.push(`<span class="badge text-bg-secondary" title="This Drone's software is too old to share this">${name}: needs update</span>`);
+      } else {
+        out.push(`<span class="badge text-bg-info">${name} · ${n(e.items.length)}</span>`);
+      }
     }
     return out.join(" ");
   }
@@ -483,7 +423,7 @@
     if (!grid) return;
     const f = filtersFor(kind);
     let layer = grid.querySelector(":scope > .remote-media-layer");
-    if (!f || (!L[kind].peers.size && !LoadToast.active)) { if (layer) layer.remove(); return; }
+    if (!f || !L[kind].peers.size) { if (layer) layer.remove(); return; }
     const ls = L[kind];
     const items = [];
     for (const e of ls.peers.values()) for (const it of e.items) if (passes(kind, it, f)) items.push(it);
@@ -501,6 +441,14 @@
       layer.addEventListener("error", (event) => {
         const img = event.target;
         if (img && img.tagName === "IMG") {
+          // Covers come through a busy peer; one dropped request must not leave a card blank.
+          const tries = Number(img.dataset.tries || 0);
+          if (tries < 3) {
+            img.dataset.tries = String(tries + 1);
+            const base = (img.dataset.base = img.dataset.base || img.getAttribute("src"));
+            setTimeout(() => { if (img.isConnected) img.src = `${base}${base.includes("?") ? "&" : "?"}r=${tries + 1}`; }, 1500 * (tries + 1));
+            return;
+          }
           const fb = img.parentElement && img.parentElement.querySelector(".movie-explorer-card-poster-fallback");
           img.remove();
           if (fb) fb.classList.remove("d-none");
@@ -517,7 +465,7 @@
     head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones${cards.length ? ` · ${cards.length.toLocaleString()}` : ""}</span><span class="remote-media-status">${statusBadges(kind)}</span>`;
     frag.appendChild(head);
     shown.forEach((card, i) => frag.appendChild(cardEl(kind, card, i)));
-    const more = cards.length > shown.length || [...ls.peers.values()].some((e) => e.hasMore);
+    const more = cards.length > shown.length;
     if (more) {
       const wrap = document.createElement("div");
       wrap.className = "remote-media-more";
@@ -530,6 +478,8 @@
   function onLayerClick(event) {
     const layer = event.currentTarget;
     if (event.target.closest("[data-rm-more]")) { loadMore(layer._kind); return; }
+    const again = event.target.closest("[data-rm-retry]");
+    if (again) { retry(layer._kind, again.dataset.rmRetry); return; }
     const card = event.target.closest(".remote-card");
     if (!card) return;
     const entry = layer._cards && layer._cards[Number(card.dataset.rmIndex)];
@@ -563,7 +513,6 @@
     if (found !== activeKind) {
       if (!found) {
         for (const kind of Object.keys(L)) { L[kind].token += 1; L[kind].sig = ""; clearTimeout(L[kind].pending); }
-        LoadToast.cancel();
       }
       activeKind = found;
     }

@@ -389,7 +389,7 @@ There is no separate page: the normal Games/Movies/Music explorers always append
 (`static/js/media_browse.js` is a *layer* — a MutationObserver re-attaches a `display:contents` wrapper after the
 explorers re-render; it never replaces their rendering) and local game/movie/track detail pages get an "Available on"
 card. Loading is async, **one request per Drone** (`GET /media-browse/sources`, then `/media-browse/{kind}?drones=<id>&exclude_local=1`),
-reported by a persistent loading toast. `api()`/`apiPost()` already prepend `/v1/api` — pass `/media-browse/...`,
+every page of every Drone loads in the background (no caps) and progress/problems show in the per-Drone chips beside the "On other Drones" divider (no toast; a failed chip click retries). Peer images are proxied through a bounded in-memory cache with a per-Drone concurrency cap (`_ArtworkCache`). `api()`/`apiPost()` already prepend `/v1/api` — pass `/media-browse/...`,
 never the full path (that exact mistake produced a "not found" in the UI).
 `web/handlers_media_browse.py` (`/v1/api/media-browse/...`, session-gated like `/movies`) fans out in
 parallel through `transfer/media_browse.py` (`collect_page`: deterministic round-robin merge with an opaque

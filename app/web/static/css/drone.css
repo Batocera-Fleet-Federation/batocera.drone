@@ -1434,6 +1434,10 @@
     .remote-media-layer { display: contents; }
     .remote-media-divider { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.75rem; padding: 0.6rem 0.25rem 0.35rem; border-top: 1px solid rgba(255,255,255,0.14); }
     .remote-media-status { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .rm-chip-loading { position: relative; overflow: hidden; }
+    .rm-chip-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,0.15); }
+    .rm-chip-bar > span { display: block; height: 100%; background: #38bdf8; transition: width 0.3s; }
+    button.badge[data-rm-retry] { cursor: pointer; }
     .remote-media-more { grid-column: 1 / -1; text-align: center; padding: 0.5rem 0 1rem; }
     .remote-card { position: relative; content-visibility: auto; contain-intrinsic-size: 15rem 11rem; }
     .remote-drone-badge { position: absolute; left: 0.35rem; bottom: 0.35rem; max-width: calc(100% - 0.7rem); padding: 0.1rem 0.45rem; border-radius: 999px; background: rgba(15,23,42,0.85); color: #e0f2fe; font-size: 0.7rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

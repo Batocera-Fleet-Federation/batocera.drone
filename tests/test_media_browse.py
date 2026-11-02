@@ -343,12 +343,31 @@ class PlaybackProxyAndLikesTests(unittest.TestCase):
             handler = _Handler(self.settings)
             handler._handle_media_browse_artwork("movies", "drone-peer", "ab", "poster")
         self.assertEqual(handler.json[0], 502)
+        handlers_media_browse._artwork_cache.__init__()  # the bad answer was remembered as a miss
         good = _FakeResponse(b"\xff\xd8img", headers={"Content-Type": "image/jpeg"})
         with mock.patch.object(handlers_media_browse, "_peer_open_stream_for_peer", return_value=(good, "x")) as opener:
             handler = _Handler(self.settings)
             handler._handle_media_browse_artwork("movies", "drone-peer", "ab", "poster")
         self.assertEqual(handler.status, 200)
         self.assertEqual(opener.call_args.args[1], "/v1/api/peer/media-artwork/movies/ab/poster")
+
+    def test_artwork_is_cached_and_missing_art_is_not_re_requested(self):
+        handlers_media_browse._artwork_cache.__init__()
+        good = _FakeResponse(b"\xff\xd8img", headers={"Content-Type": "image/jpeg"})
+        with mock.patch.object(handlers_media_browse, "_peer_open_stream_for_peer", return_value=(good, "x")) as opener:
+            for _ in range(3):
+                handler = _Handler(self.settings)
+                handler._handle_media_browse_artwork("movies", "drone-peer", "cd", "poster")
+                self.assertEqual(handler.status, 200)
+        self.assertEqual(opener.call_count, 1)  # one round trip to the peer, not three
+        err = HTTPError("u", 404, "nf", {}, None)
+        with mock.patch.object(handlers_media_browse, "_peer_open_stream_for_peer", side_effect=err) as opener:
+            for _ in range(3):
+                handler = _Handler(self.settings)
+                handler._handle_media_browse_artwork("movies", "drone-peer", "ef", "poster")
+                self.assertEqual(handler.json[0], 404)
+        self.assertEqual(opener.call_count, 1)
+        handlers_media_browse._artwork_cache.__init__()
 
     def test_rom_artwork_proxy_rejects_traversal(self):
         handler = _Handler(self.settings)
@@ -680,7 +699,7 @@ class UiContractTests(unittest.TestCase):
 
     def test_media_browse_script_contract(self):
         script = self._script()
-        for needle in ("remote-media-layer", "MutationObserver", "DroneTransferToast", "LoadToast", "escapeHtml",
+        for needle in ("remote-media-layer", "MutationObserver", "DroneTransferToast", "data-rm-retry", "escapeHtml",
                        "themed-modal", "/admin/local-network/sync", "include_artwork: true", "transfer_speed_bps",
                        "downloaded_bytes", "exclude_local", "also-on", "onRouteRendered", "requestAnimationFrame"):
             self.assertIn(needle, script)
@@ -717,10 +736,13 @@ class UiContractTests(unittest.TestCase):
             self.assertIn(needle, router)
         self.assertIn("adminEnabled && !remoteKeyParts(entryKey)", router)  # no delete/scrape of another Drone's file
 
-    def test_loading_is_reported_in_a_toast_and_one_request_per_drone(self):
+    def test_loading_is_shown_in_the_drone_chips_not_a_toast(self):
         script = self._script()
-        self.assertIn("LoadToast.begin(kind, list.length)", script)
+        self.assertNotIn("LoadToast", script)
+        self.assertIn("rm-chip-loading", script)
         self.assertIn("drones: entry.id", script)  # one request per Drone, so a slow one never blocks the rest
+        self.assertNotIn("CAPS", script)  # every page of every Drone loads; nothing is capped away
+        self.assertIn("data.tries" if False else "dataset.tries", script)  # cover art retries before giving up
 
     def test_transfer_toast_has_no_dismiss_while_running(self):
         self.assertIn('classList.toggle("d-none", !finished)', self._script())

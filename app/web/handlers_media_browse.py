@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import re
 import socket
+import threading
 import time
+from collections import OrderedDict
 from typing import Dict, List, Optional
 from urllib.error import HTTPError
 from urllib.parse import quote, unquote
@@ -64,6 +66,63 @@ _STREAMABLE = {"movies", "music"}
 BROWSE_PEER_TIMEOUT_SECONDS = 15.0
 BROWSE_PEER_BUDGET_SECONDS = 20.0
 MAX_ARTWORK_BYTES = 20 * 1024 * 1024
+
+
+class _ArtworkCache:
+    """Bounded in-memory LRU of proxied peer images plus a short negative cache.
+
+    A grid of other Drones' posters fires dozens of image requests at once; without this each
+    one is a fresh mTLS round trip to the peer on every page view, so slow Drones drop most of
+    them and the cards stay blank.  Per-Drone concurrency is capped for the same reason."""
+
+    def __init__(self, max_bytes: int = 64 * 1024 * 1024, miss_seconds: float = 45.0, per_drone: int = 4) -> None:
+        self.max_bytes, self.miss_seconds, self.per_drone = max_bytes, miss_seconds, per_drone
+        self._lock = threading.Lock()
+        self._hits: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._misses: Dict[tuple, float] = {}
+        self._size = 0
+        self._gates: Dict[str, threading.BoundedSemaphore] = {}
+
+    def gate(self, drone_id: str) -> threading.BoundedSemaphore:
+        with self._lock:
+            return self._gates.setdefault(drone_id, threading.BoundedSemaphore(self.per_drone))
+
+    def get(self, key: tuple):
+        with self._lock:
+            hit = self._hits.get(key)
+            if hit is not None:
+                self._hits.move_to_end(key)
+            return hit
+
+    def missed_recently(self, key: tuple) -> bool:
+        with self._lock:
+            until = self._misses.get(key)
+            if until is None:
+                return False
+            if until < time.monotonic():
+                self._misses.pop(key, None)
+                return False
+            return True
+
+    def miss(self, key: tuple) -> None:
+        with self._lock:
+            if len(self._misses) > 4096:
+                self._misses.clear()
+            self._misses[key] = time.monotonic() + self.miss_seconds
+
+    def put(self, key: tuple, content_type: str, body: bytes) -> None:
+        with self._lock:
+            old = self._hits.pop(key, None)
+            if old:
+                self._size -= len(old[1])
+            self._hits[key] = (content_type, body)
+            self._size += len(body)
+            while self._size > self.max_bytes and self._hits:
+                _, (_, evicted) = self._hits.popitem(last=False)
+                self._size -= len(evicted)
+
+
+_artwork_cache = _ArtworkCache()
 _PATH_CACHE_TTL_SECONDS = 300.0
 _path_cache: Dict[tuple, tuple] = {}
 # One process-wide cache of peers' inventory pages (see media_browse.SourceCache).
@@ -493,36 +552,64 @@ class HandlersMediaBrowseMixin:
         if peer is None:
             self._send_json(404, {"error": "unknown Drone"})
             return
+        key = (drone_id, endpoint)
+        cached = _artwork_cache.get(key)
+        if cached is None and _artwork_cache.missed_recently(key):
+            self._send_json(404, {"error": "artwork unavailable"})
+            return
+        if cached is None:
+            gate = _artwork_cache.gate(drone_id)
+            if not gate.acquire(timeout=BROWSE_PEER_TIMEOUT_SECONDS):
+                self._send_json(503, {"error": "Drone is busy"})
+                return
+            try:
+                cached = _artwork_cache.get(key)  # another request may have filled it while we waited
+                if cached is None:
+                    cached = self._fetch_peer_image(peer, drone_id, endpoint, key)
+            finally:
+                gate.release()
+            if cached is None:
+                return  # error already sent
+        content_type, body = cached
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers(cache_control="private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _fetch_peer_image(self, peer: dict, drone_id: str, endpoint: str, key: tuple):
+        """Fetch one image from a peer; returns ``(content_type, body)`` or sends the error and returns None."""
         try:
             response, _ = _peer_open_stream_for_peer(
                 peer, endpoint, self.settings, peer_id=drone_id, timeout=BROWSE_PEER_TIMEOUT_SECONDS,
             )
         except PeerIdentityHold:
             self._send_json(503, {"error": "swarm networking is held pending Drone identity verification"})
-            return
+            return None
         except HTTPError as error:
+            if error.code == 404:
+                _artwork_cache.miss(key)  # no cover art there: do not ask again for a while
             self._send_json(404 if error.code == 404 else 502, {"error": "artwork unavailable"})
-            return
+            return None
         except Exception:  # noqa: BLE001 - peer unreachable
             self._send_json(502, {"error": "Drone unreachable"})
-            return
+            return None
         try:
             content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if not content_type.startswith("image/"):
+                _artwork_cache.miss(key)
                 self._send_json(502, {"error": "unexpected artwork response"})
-                return
+                return None
             body = response.read(MAX_ARTWORK_BYTES + 1)
         finally:
             response.close()
         if len(body) > MAX_ARTWORK_BYTES:
+            _artwork_cache.miss(key)
             self._send_json(502, {"error": "artwork too large"})
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self._send_security_headers(cache_control="private, max-age=300")
-        self.end_headers()
-        self.wfile.write(body)
+            return None
+        _artwork_cache.put(key, content_type, body)
+        return content_type, body
 
     # -------------------------------------------------------------- likes
 
