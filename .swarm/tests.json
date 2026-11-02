@@ -7,6 +7,38 @@
   },
   "suites": [
     {
+      "id": "adversarial-issue-677-direct-source-playback",
+      "name": "Issue #677: remote movie plays directly from source",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_677_direct_source_playback.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/media_browse.js",
+          "tests/adversarial/test_issue_677_direct_source_playback.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
       "command": [
         "python3",
         "-m",
