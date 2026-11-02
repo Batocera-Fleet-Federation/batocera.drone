@@ -15,6 +15,37 @@
         "-s",
         "tests/adversarial",
         "-p",
+        "test_issue_677_remote_media_playback_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-677-remote-media-playback-uat",
+      "name": "Issue #677: remote media retains direct playback without the Play from Drone label",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/static/js/media_browse.js",
+          "tests/adversarial/test_issue_677_remote_media_playback_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
         "test_issue_666_pidless_same_tick_reimport_uat.py"
       ],
       "disruptive": false,
