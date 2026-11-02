@@ -1438,8 +1438,18 @@
     .rm-chip-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,0.15); }
     .rm-chip-bar > span { display: block; height: 100%; background: #38bdf8; transition: width 0.3s; }
     button.badge[data-rm-retry] { cursor: pointer; }
+    .remote-media-tail { grid-column: 1 / -1; height: 1px; }
+    /* Loading placeholder: a static, same-size tile with a soft shimmer; the cover fades in over it. */
+    .rm-poster { position: relative; overflow: hidden; }
+    .rm-skel { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: rgba(148,163,184,0.45); font-size: 2.4rem; background: linear-gradient(110deg, #111a2e 30%, #1b2742 50%, #111a2e 70%); background-size: 200% 100%; animation: rm-shimmer 1.6s linear infinite; transition: opacity 0.2s; }
+    .rm-skel.rm-final { animation: none; background: #111a2e; }
+    .rm-skel.rm-done { opacity: 0; pointer-events: none; }
+    .rm-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.2s ease-out; }
+    .rm-art.loaded { opacity: 1; }
+    @keyframes rm-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    @media (prefers-reduced-motion: reduce) { .rm-skel { animation: none; } .rm-art { transition: none; } }
     .remote-media-more { grid-column: 1 / -1; text-align: center; padding: 0.5rem 0 1rem; }
-    .remote-card { position: relative; content-visibility: auto; contain-intrinsic-size: 15rem 11rem; }
+    .remote-card { position: relative; }
     .remote-drone-badge { position: absolute; left: 0.35rem; bottom: 0.35rem; max-width: calc(100% - 0.7rem); padding: 0.1rem 0.45rem; border-radius: 999px; background: rgba(15,23,42,0.85); color: #e0f2fe; font-size: 0.7rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nm-drone-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .drone-availability .nm-copy:first-child { border-top: 0 !important; }

@@ -718,6 +718,12 @@ class UiContractTests(unittest.TestCase):
         router = (self.ROOT / "static" / "js" / "drone.js").read_text(encoding="utf-8")
         self.assertIn("DroneRemoteMedia.onRouteRendered(hash)", router)
 
+    def test_media_browse_path_ids_are_url_decoded(self):
+        # Drone ids are MAC addresses; browsers send the colons as %3A.
+        routes = (self.ROOT / "api_routes.py").read_text(encoding="utf-8")
+        self.assertIn("unquote(parts[2])", routes)
+        self.assertIn("from urllib.parse import parse_qs, unquote", routes)
+
     def test_api_calls_do_not_double_the_api_prefix(self):
         # drone.js api()/apiPost() already prepend /v1/api; passing the full path 404s ("not found").
         script = self._script()
@@ -742,7 +748,10 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("rm-chip-loading", script)
         self.assertIn("drones: entry.id", script)  # one request per Drone, so a slow one never blocks the rest
         self.assertNotIn("CAPS", script)  # every page of every Drone loads; nothing is capped away
-        self.assertIn("data.tries" if False else "dataset.tries", script)  # cover art retries before giving up
+        # covers stream in as cards scroll into view, from a placeholder, never all at once
+        for needle in ("IntersectionObserver", "rm-skel", "ART_MAX", "insertBefore"):
+            self.assertIn(needle, script)
+        self.assertNotIn("replaceChildren", script)  # repainting must not rebuild existing cards (flicker)
 
     def test_transfer_toast_has_no_dismiss_while_running(self):
         self.assertIn('classList.toggle("d-none", !finished)', self._script())

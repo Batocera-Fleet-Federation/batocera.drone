@@ -1,5 +1,5 @@
 import ssl
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 try:
     from .route_config import API_PREFIX
@@ -358,7 +358,7 @@ class ApiRoutesMixin:
             if len(parts) >= 2 and parts[0] == "media-browse":
                 kind = parts[1]
                 if kind == "roms" and len(parts) >= 7 and parts[3] == "artwork":
-                    self._handle_media_browse_rom_artwork(parts[2], parts[4], parts[5], "/".join(parts[6:]))
+                    self._handle_media_browse_rom_artwork(unquote(parts[2]), parts[4], parts[5], "/".join(parts[6:]))
                     return
                 if len(parts) == 2 and kind == "sources":
                     self._handle_media_browse_sources()
@@ -369,14 +369,16 @@ class ApiRoutesMixin:
                 if len(parts) == 3 and parts[2] == "also-on":
                     self._handle_media_browse_also_on(kind, query_params)
                     return
+                # Drone ids are MAC addresses; the browser sends their colons as %3A, so the
+                # path segments must be decoded or no real Drone ever matches.
                 if len(parts) == 4:
-                    self._handle_media_browse_detail(kind, parts[2], parts[3])
+                    self._handle_media_browse_detail(kind, unquote(parts[2]), unquote(parts[3]))
                     return
                 if len(parts) == 5 and parts[4] == "stream":
-                    self._handle_media_browse_stream(kind, parts[2], parts[3])
+                    self._handle_media_browse_stream(kind, unquote(parts[2]), unquote(parts[3]))
                     return
                 if len(parts) == 6 and parts[4] == "artwork":
-                    self._handle_media_browse_artwork(kind, parts[2], parts[3], parts[5])
+                    self._handle_media_browse_artwork(kind, unquote(parts[2]), unquote(parts[3]), unquote(parts[5]))
                     return
 
             if api_path == "/music":

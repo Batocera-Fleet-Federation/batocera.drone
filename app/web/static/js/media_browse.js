@@ -289,12 +289,6 @@
     cache.set(`${kind}|${sig}`, { at: Date.now(), peers: new Map([...ls.peers].map(([id, e]) => [id, { ...e, items: e.items.slice() }])) });
   }
 
-  // Everything is already loaded in the background; "show more" only reveals more of it.
-  function loadMore(kind) {
-    L[kind].limit += RENDER_STEP;
-    paint(kind);
-  }
-
   function retry(kind, id) {
     const ls = L[kind];
     const f = filtersFor(kind);
@@ -350,7 +344,7 @@
 
   // Episodes of one show / tracks of one album collapse into one card, across Drones.
   function buildCards(kind, items) {
-    if (kind === "roms") return items.map((it) => ({ group: false, title: titleOf(it), sub: it.system || "", items: [it] }));
+    if (kind === "roms") return items.map((it) => ({ key: keyOf(it), sortKey: norm(titleOf(it)), group: false, title: titleOf(it), sub: it.system || "", items: [it] }));
     const cards = [];
     const groups = new Map();
     for (const it of items) {
@@ -362,33 +356,109 @@
       } else if (kind === "music" && it.album) {
         key = `a|${norm(it.artist)}|${norm(it.album)}`; title = it.album; sub = it.artist || "";
       }
-      if (!key) { cards.push({ group: false, title: titleOf(it), sub: kind === "music" ? (it.artist || "") : (it.kind === "episode" ? "Episode" : ""), items: [it] }); continue; }
+      if (!key) { cards.push({ key: keyOf(it), sortKey: norm(titleOf(it)), group: false, title: titleOf(it), sub: kind === "music" ? (it.artist || "") : (it.kind === "episode" ? "Episode" : ""), items: [it] }); continue; }
       let card = groups.get(key);
-      if (!card) { card = { group: true, title, sub, items: [] }; groups.set(key, card); cards.push(card); }
+      if (!card) { card = { key, sortKey: norm(title), group: true, title, sub, items: [] }; groups.set(key, card); cards.push(card); }
       card.items.push(it);
     }
     cards.forEach((c) => { if (c.group) c.sub = `${c.sub ? c.sub + " · " : ""}${c.items.length} ${c.items.length === 1 ? "item" : "items"}`; });
     return cards;
   }
 
-  function cardEl(kind, card, index) {
+  // ---- cards: each is created once and reconciled in place, so a repaint never rebuilds (or
+  // re-requests the image of) a card that is already on the page -- that rebuild was the flicker.
+  const cardEls = { roms: new Map(), movies: new Map(), music: new Map() };
+
+  // Covers stream in as cards scroll into view, a few at a time, instead of all at once.
+  const ART_MAX = 6;
+  const artQueue = [];
+  let artActive = 0;
+  const visibility = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const el = e.target;
+      el._visible = e.isIntersecting;
+      if (e.isIntersecting) requestArt(el);
+      else cancelArt(el);
+    }
+  }, { rootMargin: "500px 0px" });
+
+  function requestArt(el) {
+    if (el._artState || !el._art) return;
+    el._artState = "queued";
+    artQueue.push(el);
+    pumpArt();
+  }
+  function cancelArt(el) {
+    if (el._artState !== "queued") return;
+    const at = artQueue.indexOf(el);
+    if (at >= 0) artQueue.splice(at, 1);
+    el._artState = "";
+  }
+  function pumpArt() {
+    while (artActive < ART_MAX && artQueue.length) {
+      const el = artQueue.pop(); // newest-visible first: what the user is looking at now
+      if (!el._visible) { el._artState = ""; continue; }
+      startArt(el);
+    }
+  }
+  function startArt(el) {
+    artActive += 1;
+    el._artState = "loading";
+    const poster = el.querySelector(".rm-poster");
+    const skel = el.querySelector(".rm-skel");
+    const img = new Image();
+    img.decoding = "async";
+    img.alt = "";
+    img.className = "rm-art";
+    const settle = () => { artActive -= 1; pumpArt(); };
+    img.onload = () => {
+      el._artState = "done";
+      poster.insertBefore(img, skel);
+      requestAnimationFrame(() => { img.classList.add("loaded"); skel.classList.add("rm-done"); });
+      settle();
+    };
+    img.onerror = () => {
+      settle();
+      if ((el._tries = (el._tries || 0) + 1) <= 1) {
+        // One quiet retry while the card is still on screen; then a calm, final placeholder.
+        el._artState = "";
+        setTimeout(() => { if (el._visible) requestArt(el); }, 2500);
+      } else {
+        el._artState = "failed";
+        skel.classList.add("rm-final");
+      }
+    };
+    img.src = el._art;
+  }
+
+  function cardEl(kind, card) {
     const it = card.items[0];
-    const drones = [...new Map(card.items.map((x) => [x.drone_id, x])).values()];
-    const art = artUrl(kind, it);
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "movie-explorer-card remote-card";
-    btn.dataset.rmIndex = String(index);
-    btn.title = `${card.title} — ${drones.map(droneLabel).join(", ")}`;
+    btn.dataset.rmKey = card.key;
+    btn._art = artUrl(kind, it);
     btn.innerHTML = `
-      <div class="movie-explorer-card-poster">
-        ${art ? `<img loading="lazy" decoding="async" src="${esc(art)}" alt="">` : ""}
-        <div class="movie-explorer-card-poster-fallback ${art ? "d-none" : ""}"><i class="bi ${card.group && kind === "movies" ? "bi-collection-play" : card.group ? "bi-disc" : ICON[kind]}"></i></div>
-        <span class="remote-drone-badge"><i class="bi bi-hdd-network me-1"></i>${esc(droneLabel(drones[0]))}${drones.length > 1 ? ` +${drones.length - 1}` : ""}</span>
+      <div class="movie-explorer-card-poster rm-poster">
+        <div class="rm-skel${btn._art ? "" : " rm-final"}"><i class="bi ${card.group && kind === "movies" ? "bi-collection-play" : card.group ? "bi-disc" : ICON[kind]}"></i></div>
+        <span class="remote-drone-badge"></span>
       </div>
-      <div class="movie-explorer-card-title">${esc(card.title)}</div>
-      <div class="movie-explorer-card-subtitle">${esc(card.sub)}</div>`;
+      <div class="movie-explorer-card-title"></div>
+      <div class="movie-explorer-card-subtitle"></div>`;
+    visibility.observe(btn);
     return btn;
+  }
+
+  function updateCard(el, card) {
+    el._card = card;
+    const drones = [...new Map(card.items.map((x) => [x.drone_id, x])).values()];
+    const badge = `${droneLabel(drones[0])}${drones.length > 1 ? ` +${drones.length - 1}` : ""}`;
+    const set = (sel, text) => { const n = el.querySelector(sel); if (n.textContent !== text) n.textContent = text; };
+    set(".remote-drone-badge", badge);
+    set(".movie-explorer-card-title", card.title);
+    set(".movie-explorer-card-subtitle", card.sub);
+    const title = `${card.title} — ${drones.map(droneLabel).join(", ")}`;
+    if (el.title !== title) el.title = title;
   }
 
   // One chip per Drone: this is where loading, progress and problems are shown.
@@ -418,6 +488,36 @@
     return out.join(" ");
   }
 
+  // The divider and the end-of-list marker persist for the life of the layer; only their text changes.
+  function makeLayer(grid) {
+    const layer = document.createElement("div");
+    layer.className = "remote-media-layer";
+    layer.addEventListener("click", onLayerClick);
+    layer._head = document.createElement("div");
+    layer._head.className = "remote-media-divider";
+    layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones<span class="rm-count"></span></span><span class="remote-media-status"></span>`;
+    layer._tail = document.createElement("div");
+    layer._tail.className = "remote-media-tail";
+    layer.append(layer._head, layer._tail);
+    tailWatch.observe(layer._tail);
+    grid.appendChild(layer);
+    return layer;
+  }
+
+  // Reaching the end of what is drawn draws more (data is already loaded): infinite scroll.
+  const tailWatch = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const layer = e.target.parentElement;
+      if (!layer) continue;
+      layer._tailVisible = e.isIntersecting;
+      if (e.isIntersecting && layer._more) revealMore(layer._kind);
+    }
+  }, { rootMargin: "800px 0px" });
+  function revealMore(kind) {
+    L[kind].limit += RENDER_STEP;
+    schedulePaint(kind, true);
+  }
+
   function paint(kind) {
     const grid = document.getElementById(GRIDS[kind]);
     if (!grid) return;
@@ -433,57 +533,47 @@
     const cards = buildCards(kind, needle && kind !== "roms"
       ? items.filter((it) => `${titleOf(it)} ${it.artist || ""} ${it.album || ""} ${it.file_path || ""}`.toLowerCase().includes(needle))
       : items);
-    cards.sort((a, b) => norm(a.title).localeCompare(norm(b.title)));
-    if (!layer) {
-      layer = document.createElement("div");
-      layer.className = "remote-media-layer";
-      layer.addEventListener("click", onLayerClick);
-      layer.addEventListener("error", (event) => {
-        const img = event.target;
-        if (img && img.tagName === "IMG") {
-          // Covers come through a busy peer; one dropped request must not leave a card blank.
-          const tries = Number(img.dataset.tries || 0);
-          if (tries < 3) {
-            img.dataset.tries = String(tries + 1);
-            const base = (img.dataset.base = img.dataset.base || img.getAttribute("src"));
-            setTimeout(() => { if (img.isConnected) img.src = `${base}${base.includes("?") ? "&" : "?"}r=${tries + 1}`; }, 1500 * (tries + 1));
-            return;
-          }
-          const fb = img.parentElement && img.parentElement.querySelector(".movie-explorer-card-poster-fallback");
-          img.remove();
-          if (fb) fb.classList.remove("d-none");
-        }
-      }, true);
-      grid.appendChild(layer);
-    }
+    cards.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
+    if (!layer) layer = makeLayer(grid);
     layer._kind = kind;
-    layer._cards = cards;
+
+    const count = cards.length ? ` · ${cards.length.toLocaleString()}` : "";
+    const countEl = layer._head.querySelector(".rm-count");
+    if (countEl.textContent !== count) countEl.textContent = count;
+    const html = statusBadges(kind);
+    const statusEl = layer._head.querySelector(".remote-media-status");
+    if (layer._statusHtml !== html) { statusEl.innerHTML = html; layer._statusHtml = html; }
+
     const shown = cards.slice(0, ls.limit);
-    const frag = document.createDocumentFragment();
-    const head = document.createElement("div");
-    head.className = "remote-media-divider";
-    head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones${cards.length ? ` · ${cards.length.toLocaleString()}` : ""}</span><span class="remote-media-status">${statusBadges(kind)}</span>`;
-    frag.appendChild(head);
-    shown.forEach((card, i) => frag.appendChild(cardEl(kind, card, i)));
-    const more = cards.length > shown.length;
-    if (more) {
-      const wrap = document.createElement("div");
-      wrap.className = "remote-media-more";
-      wrap.innerHTML = `<button type="button" class="btn btn-outline-primary btn-sm" data-rm-more="1"><i class="bi bi-plus-circle me-1"></i>Show more from other Drones</button>`;
-      frag.appendChild(wrap);
+    const els = cardEls[kind];
+    const want = new Set();
+    let cursor = layer._head.nextSibling;
+    for (const card of shown) {
+      let el = els.get(card.key);
+      if (!el) { el = cardEl(kind, card); els.set(card.key, el); }
+      updateCard(el, card);
+      want.add(card.key);
+      if (el === cursor) cursor = cursor.nextSibling; // already in place: do not touch it
+      else layer.insertBefore(el, cursor);
     }
-    layer.replaceChildren(frag);
+    for (const [key, el] of els) {
+      if (want.has(key)) continue;
+      visibility.unobserve(el);
+      cancelArt(el);
+      el.remove();
+      els.delete(key);
+    }
+    if (layer.lastChild !== layer._tail) layer.appendChild(layer._tail);
+    layer._more = cards.length > shown.length;
+    if (layer._more && layer._tailVisible) revealMore(kind); // still at the end after drawing: keep going
   }
 
   function onLayerClick(event) {
     const layer = event.currentTarget;
-    if (event.target.closest("[data-rm-more]")) { loadMore(layer._kind); return; }
     const again = event.target.closest("[data-rm-retry]");
     if (again) { retry(layer._kind, again.dataset.rmRetry); return; }
-    const card = event.target.closest(".remote-card");
-    if (!card) return;
-    const entry = layer._cards && layer._cards[Number(card.dataset.rmIndex)];
-    if (entry) openDetails(layer._kind, entry);
+    const el = event.target.closest(".remote-card");
+    if (el && el._card) openDetails(layer._kind, el._card);
   }
 
   // ================================================================== activation (no edits to the big renderers)
