@@ -43,6 +43,7 @@ try:
         PeerIdentityHold,
         _peer_get_json_for_peer,
         _peer_open_stream_for_peer,
+        _peer_address,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import movies_store as _movies_store  # type: ignore
@@ -53,6 +54,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         PeerIdentityHold,
         _peer_get_json_for_peer,
         _peer_open_stream_for_peer,
+        _peer_address,
     )
 
 _ENTRY_KEY_RE = re.compile(r"^[0-9a-f]{1,64}$")
@@ -258,12 +260,14 @@ class HandlersMediaBrowseMixin:
         """Paired Drones, from local state only (no network).  Lets the page
         start one background request per Drone so each can finish -- or fail --
         independently without holding up the others."""
-        self._send_json(200, {
-            "sources": [
-                {"drone_id": s.drone_id, "name": s.name, "is_local": s.is_local}
-                for s in self._media_sources()
-            ],
-        })
+        sources = []
+        for source in self._media_sources():
+            item = {"drone_id": source.drone_id, "name": source.name, "is_local": source.is_local}
+            if not source.is_local:
+                peer = self._media_peer(source.drone_id)
+                item["address"] = _peer_address(peer) if peer else None
+            sources.append(item)
+        self._send_json(200, {"sources": sources})
 
     # --------------------------------------------------------------- list
 
@@ -302,6 +306,15 @@ class HandlersMediaBrowseMixin:
             return
         if kind == "music":
             self._media_overlay_likes(page["items"])
+        source_addresses = {
+            source.drone_id: (_peer_address(self._media_peer(source.drone_id)) if not source.is_local else None)
+            for source in sources
+        }
+        for item in page["items"]:
+            if not item.get("is_local"):
+                address = source_addresses.get(str(item.get("drone_id") or ""))
+                if address:
+                    item["address"] = address
         self._send_json(200, {"media_type": kind, **page})
 
     def _media_overlay_likes(self, items: list) -> None:

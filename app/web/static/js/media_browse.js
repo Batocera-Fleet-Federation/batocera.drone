@@ -718,7 +718,11 @@
     const host = scope.querySelector(".nm-player");
     if (!host) return;
     const tag = kind === "music" ? "audio" : "video";
-    const url = `${BASE}/${kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`;
+    const source = !it.is_local && (it.address || it.reachable_url || it.source_url);
+    const root = source ? String(source).replace(/\/$/, "") : "";
+    const url = root
+      ? `${root}/v1/api/media-browse/${kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`
+      : `${BASE}/${kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`;
     host.innerHTML = `<${tag} controls autoplay class="w-100 mb-2" src="${esc(url)}"></${tag}>`;
     host.firstElementChild.addEventListener("error", () => showToast("That Drone could not stream this file right now.", "warning", 6000));
     host.scrollIntoView({ block: "nearest" });
