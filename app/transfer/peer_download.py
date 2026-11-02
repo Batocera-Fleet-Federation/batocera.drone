@@ -30,6 +30,7 @@ try:
         PEER_CHECK_TIMEOUT_SECONDS,
         _drone_client_ssl_context,
         _is_ssl_url_error,
+        _peer_open_stream_for_peer,
         _preferred_peer_address,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         PEER_CHECK_TIMEOUT_SECONDS,
         _drone_client_ssl_context,
         _is_ssl_url_error,
+        _peer_open_stream_for_peer,
         _preferred_peer_address,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
@@ -870,6 +872,106 @@ def _download_movie_from_peer(
         "duration_seconds": round(duration_ms / 1000, 3),
         "selected_peer_reason": "healthy peer with requested movie and best sampled score",
     }
+
+
+def _download_music_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
+) -> dict:
+    """Pull one music file from a peer into ``music_root`` (flat namespace).
+
+    Same integrity bar as movies: sampled content fingerprint, plus a size
+    check when the peer advertised one.  Writes ``<name>.part`` and renames on
+    success; a cancelled/failed transfer leaves nothing behind."""
+    try:
+        from ..storage.music_store import build_music_fingerprint
+    except ImportError:  # pragma: no cover - flat execution
+        from storage.music_store import build_music_fingerprint  # type: ignore
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    rel = _safe_rom_relative_path(relative_path)
+    music_root = Path(settings.music_root).resolve()
+    target = (music_root / rel).resolve()
+    if music_root not in target.parents:
+        raise ValueError("invalid target path")
+    partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+
+    def stamp(extra: dict) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        base = {
+            "asset_type": "music", "file_type": "Music", "source_drone_id": peer_id,
+            "target_drone_id": settings.device_id, "system": "music",
+            "music_name": rel, "rom_name": rel, "relative_path": rel, "action": "download",
+            "started_at": started_dt.isoformat(), "download_started_at": started_dt.isoformat(),
+            "completed_at": completed_dt.isoformat(), "download_completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms, "duration_seconds": round(duration_ms / 1000, 3),
+        }
+        base.update(extra)
+        return base
+
+    if not overwrite and target.is_file():
+        return stamp({
+            "status": "skipped", "skip_reason": "target path already exists",
+            "failure_reason": "target path already exists", "bytes_transferred": 0,
+            "file_size": target.stat().st_size, "fingerprint": expected_fingerprint_clean,
+        })
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    endpoint = f"/v1/api/peer/music/{quote(rel, safe='/')}"
+    bytes_written = 0
+    try:
+        response, _address = _peer_open_stream_for_peer(
+            peer, endpoint, settings, peer_id=peer_id, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4)
+        )
+        with response, partial_target.open("wb") as handle:
+            try:
+                total_bytes = int(expected_size) if expected_size not in (None, "") else (
+                    int(response.headers.get("Content-Length") or 0) or None
+                )
+            except (TypeError, ValueError):
+                total_bytes = None
+            while True:
+                if cancellation_event is not None and cancellation_event.is_set():
+                    raise DownloadCancelled("download cancelled")
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+                if progress_callback:
+                    progress_callback(bytes_written, total_bytes)
+        if expected_size not in (None, ""):
+            try:
+                if int(expected_size) != bytes_written:
+                    raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+            except ValueError:
+                pass
+        actual_fingerprint = build_music_fingerprint(partial_target)
+        if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
+            raise RuntimeError(f"fingerprint mismatch expected={expected_fingerprint_clean} actual={actual_fingerprint}")
+        partial_target.replace(target)
+    except BaseException:
+        try:
+            partial_target.unlink()
+        except OSError:
+            pass
+        raise
+    return stamp({
+        "status": "completed", "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written, "fingerprint": actual_fingerprint,
+        "music_fingerprint": expected_fingerprint_clean or actual_fingerprint,
+        "selected_peer_reason": "healthy peer with requested track",
+    })
 
 
 def _download_config_backup_from_peer(

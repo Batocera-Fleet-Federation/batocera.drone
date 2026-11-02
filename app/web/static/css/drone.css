@@ -1419,6 +1419,30 @@
     .toast-alert.alert-warning { background: #d97706; color: #fff; border: none; }
     .toast-alert.alert-info { background: #2563eb; color: #fff; border: none; }
     .toast-alert.alert-loading { background: #334155; color: #fff; border: none; }
+    /* Persistent transfer-progress toast (media_browse.js): stays until the transfer ends. */
+    .toast-alert.transfer-toast { display: block; font-weight: 500; }
+    .transfer-toast .tt-head { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+    .transfer-toast .tt-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .transfer-toast .tt-close { background: transparent; border: 0; color: inherit; padding: 0 0.25rem; }
+    .transfer-toast .tt-sub { font-size: 0.8rem; opacity: 0.9; margin-top: 0.15rem; }
+    .transfer-toast .tt-bar { height: 0.55rem; margin: 0.45rem 0 0.35rem; background: rgba(255,255,255,0.28); }
+    .transfer-toast .tt-bar .progress-bar { background: #fff; transition: width 0.4s ease; }
+    .transfer-toast .tt-bar .progress-bar.bg-success, .transfer-toast .tt-bar .progress-bar.bg-danger { background: #fff !important; }
+    .transfer-toast .tt-meta { display: flex; justify-content: space-between; font-size: 0.8rem; }
+    .transfer-toast .tt-names { font-size: 0.75rem; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Browse every Drone (#network) */
+    .network-media .nm-search { max-width: 22rem; }
+    .network-media .nm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 0.9rem; }
+    .network-media .nm-card { display: flex; flex-direction: column; gap: 0.25rem; text-align: left; background: var(--admin-card-bg, #1e293b); color: inherit; border: 1px solid rgba(255,255,255,0.12); border-radius: 0.6rem; padding: 0.5rem; }
+    .network-media .nm-card:hover, .network-media .nm-card:focus-visible { border-color: #38bdf8; outline: none; }
+    .network-media .nm-art { position: relative; aspect-ratio: 2 / 3; border-radius: 0.4rem; background: rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 2rem; opacity: 0.95; }
+    .network-media .nm-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .network-media .nm-title { font-weight: 600; font-size: 0.85rem; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .network-media .nm-sub { font-size: 0.75rem; opacity: 0.7; min-height: 1em; }
+    .network-media .nm-badges { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .nm-drone-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .nm-chip .nm-dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.4rem; }
+    @media (max-width: 576px) { .network-media .nm-grid { grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr)); } }
 
     .mcp-token-reveal {
       color: var(--admin-text);

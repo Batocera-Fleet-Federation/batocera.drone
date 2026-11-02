@@ -171,6 +171,14 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS music_likes (entry_key TEXT PRIMARY KEY, liked_at TEXT NOT NULL)"
     )
+    # Likes on *another* Drone's tracks (multi-Drone browsing).  Recorded only
+    # here, keyed by (source drone, that Drone's entry key); never sent to or
+    # read from the peer.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS peer_music_likes ("
+        "source_drone_id TEXT NOT NULL, entry_key TEXT NOT NULL, liked_at TEXT NOT NULL, "
+        "PRIMARY KEY (source_drone_id, entry_key))"
+    )
     connection.commit()
 
 
@@ -615,6 +623,43 @@ def is_music_liked(music_root: Path, entry_key: str) -> bool:
     with _open(music_root) as connection:
         row = connection.execute("SELECT 1 FROM music_likes WHERE entry_key = ?", (entry_key,)).fetchone()
     return row is not None
+
+
+def set_peer_music_liked(music_root: Path, source_drone_id: str, entry_key: str, liked: bool) -> bool:
+    """Like/unlike a track that lives on another Drone.  Local-only state."""
+    with _open(music_root) as connection:
+        if liked:
+            connection.execute(
+                "INSERT INTO peer_music_likes (source_drone_id, entry_key, liked_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(source_drone_id, entry_key) DO NOTHING",
+                (source_drone_id, entry_key, datetime.now(timezone.utc).replace(microsecond=0).isoformat()),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM peer_music_likes WHERE source_drone_id = ? AND entry_key = ?",
+                (source_drone_id, entry_key),
+            )
+        connection.commit()
+    return liked
+
+
+def list_peer_music_liked_keys(music_root: Path, source_drone_id: str) -> set:
+    with _open(music_root) as connection:
+        rows = connection.execute(
+            "SELECT entry_key FROM peer_music_likes WHERE source_drone_id = ?", (source_drone_id,)
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def clear_peer_music_likes(music_root: Path, source_drone_id: Optional[str] = None) -> int:
+    """Drop likes on peers' tracks (one peer, or all) -- used by swarm reset."""
+    with _open(music_root) as connection:
+        if source_drone_id:
+            cursor = connection.execute("DELETE FROM peer_music_likes WHERE source_drone_id = ?", (source_drone_id,))
+        else:
+            cursor = connection.execute("DELETE FROM peer_music_likes")
+        connection.commit()
+        return int(cursor.rowcount or 0)
 
 
 def list_liked_music_keys(music_root: Path) -> set:

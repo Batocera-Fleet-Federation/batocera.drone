@@ -1327,6 +1327,62 @@ def _peer_download_file_for_peer(
     raise ValueError("no peer address available")
 
 
+def _peer_open_stream_for_peer(
+    peer: dict,
+    endpoint: str,
+    settings: Settings,
+    *,
+    peer_id: Optional[str] = None,
+    range_header: Optional[str] = None,
+    timeout: float = 30,
+):
+    """Open a cert-pinned GET to a peer and return ``(response, address)``.
+
+    Used by the browsing Drone's playback proxy: the caller streams the open
+    response body to the browser and must close it.  Same route failover and
+    pinned mTLS client as ``_peer_download_file_for_peer`` -- never a TLS
+    downgrade -- with an optional ``Range`` header forwarded so seeking works.
+    An ``HTTPError`` (including 416) means the peer answered and is re-raised.
+    """
+    path = str(endpoint or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("peer endpoint must start with /")
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
+    if not addresses:
+        raise ValueError("no peer address available")
+    last_error: Optional[Exception] = None
+    for index, address in enumerate(addresses):
+        attempt_timeout = float(timeout)
+        if index < len(addresses) - 1:
+            attempt_timeout = min(attempt_timeout, PEER_CHECK_TIMEOUT_SECONDS)
+        url = f"{address}{path}"
+        cafile = _peer_trust_cafile(settings, peer_id=normalized_peer_id)
+        if urlparse(url).scheme == "https" and normalized_peer_id and not cafile:
+            raise ssl.SSLError(f"no trusted certificate cached for peer {normalized_peer_id}")
+        headers = {"Accept": "*/*", "User-Agent": "batocera-drone-peer/1.0"}
+        if range_header:
+            headers["Range"] = range_header
+        request = Request(url, headers=headers)
+        try:
+            response = urlopen(
+                request,
+                timeout=attempt_timeout,
+                context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
+            )
+            _remember_successful_peer_route(settings, normalized_peer_id, address)
+            return response, address
+        except (HTTPError, PeerIdentityHold):
+            raise
+        except (OSError, URLError, ssl.SSLError) as error:
+            last_error = _more_diagnostic_error(last_error, error)
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no peer address available")
+
+
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     peer_id = target_id

@@ -1837,10 +1837,39 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalPeerDismissResponse": _object({"status": _enum(["dismissed", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
+        "MediaBrowseSource": _object(
+            {
+                "drone_id": _string(), "name": _string(), "is_local": _boolean(),
+                "status": _enum(["ok", "offline", "timeout", "unsupported", "error"]),
+                "total": _integer(), "returned": _integer(), "error": _string(),
+            },
+            ("drone_id", "name", "status"),
+        ),
+        "MediaBrowseListResponse": _object(
+            {
+                "media_type": _enum(["movies", "music", "roms"]),
+                "items": _array(_object({"drone_id": _string(), "drone_name": _string(), "is_local": _boolean()}, ("drone_id", "drone_name"))),
+                "total": _integer(), "limit": _integer(), "has_more": _boolean(),
+                "next_cursor": _string("Opaque cursor for the next page; empty when there is none"),
+                "sources": _array(_ref("MediaBrowseSource")),
+            },
+            ("media_type", "items", "total", "has_more", "sources"),
+            description="Merged page across this Drone and every paired peer; offline peers appear in sources, never as an error.",
+        ),
+        "MediaBrowseDetailResponse": _object(
+            {"drone_id": _string(), "drone_name": _string(), "is_local": _boolean(), "entry_key": _string(), "file_path": _string(), "display_title": _string(), "metadata": _object()},
+            ("drone_id", "drone_name"),
+        ),
+        "MediaBrowseAlsoOnResponse": _object(
+            {"media_type": _string(), "copies": _array(_object()), "sources": _array(_ref("MediaBrowseSource"))},
+            ("copies",),
+        ),
+        "MediaBrowseLikeRequest": _object({"drone_id": _string(), "entry_key": _string(), "liked": _boolean(default=True)}, ("drone_id", "entry_key")),
+        "MediaBrowseLikeResponse": _object({"drone_id": _string(), "entry_key": _string(), "liked": _boolean()}, ("drone_id", "entry_key", "liked")),
         "LocalSyncRequest": _object(
             {
                 "peer_id": _string(),
-                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies"]),
+                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies", "music"]),
                 "system": _string(),
                 "item": _ref("AssetEntry"),
                 "include_artwork": _boolean(default=True),
@@ -2335,6 +2364,96 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     {"200": _media_response("BIOS file stream", ["application/octet-stream"])},
                     parameters=[_path_param("unique_id")],
                     tags=["downloads"],
+                )
+            },
+            "/media-browse/{media_type}": {
+                "get": _operation(
+                    "Browse movies/shows, music or games across this Drone and every paired peer (merged, cursor-paged)",
+                    {"200": _json_response("MediaBrowseListResponse")},
+                    parameters=[_path_param("media_type", "movies, music or roms"), _query_param("q", _string()), _query_param("system", _string(), "roms only"), _query_param("limit", _integer(default=200, minimum=1, maximum=500)), _query_param("cursor", _string()), _query_param("drones", _string(), "Comma-separated Drone ids to include")],
+                    tags=["library", "local-network"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/media-browse/{media_type}/also-on": {
+                "get": _operation(
+                    "Other Drones that hold the same title as the described item",
+                    {"200": _json_response("MediaBrowseAlsoOnResponse")},
+                    parameters=[_path_param("media_type"), _query_param("title", _string()), _query_param("fingerprint", _string()), _query_param("artist", _string()), _query_param("system", _string()), _query_param("year", _string()), _query_param("exclude_drone", _string())],
+                    tags=["library", "local-network"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/media-browse/{media_type}/{drone_id}/{entry_key}": {
+                "get": _operation(
+                    "Detail for one movie or track on any Drone",
+                    {"200": _json_response("MediaBrowseDetailResponse")},
+                    parameters=[_path_param("media_type"), _path_param("drone_id"), _path_param("entry_key")],
+                    tags=["library", "local-network"],
+                    error_codes=("401", "403", "404", "429", "500", "502", "503"),
+                )
+            },
+            "/media-browse/{media_type}/{drone_id}/{entry_key}/stream": {
+                "get": _operation(
+                    "Stream a movie or track from any Drone; a peer's file is proxied through this Drone (Range/206 aware)",
+                    {"200": _media_response("Media bytes", ["video/mp4", "video/webm", "video/x-matroska", "audio/mpeg", "audio/flac", "application/octet-stream"])},
+                    parameters=[_path_param("media_type"), _path_param("drone_id"), _path_param("entry_key")],
+                    tags=["downloads", "local-network"],
+                    error_codes=("401", "403", "404", "416", "429", "500", "502", "503"),
+                )
+            },
+            "/media-browse/{media_type}/{drone_id}/{entry_key}/artwork/{field}": {
+                "get": _operation(
+                    "Poster / cover art for a movie or track on any Drone (proxied for peers)",
+                    {"200": _media_response("Artwork image bytes", ["image/jpeg"])},
+                    parameters=[_path_param("media_type"), _path_param("drone_id"), _path_param("entry_key"), _path_param("field")],
+                    tags=["library", "local-network"],
+                    error_codes=("401", "403", "404", "429", "500", "502", "503"),
+                )
+            },
+            "/media-browse/roms/{drone_id}/artwork/{system}/{artwork_type}/{rom_path}": {
+                "get": _operation(
+                    "A peer game's artwork, proxied through this Drone",
+                    {"200": _media_response("Artwork image bytes", ["image/jpeg"])},
+                    parameters=[_path_param("drone_id"), _path_param("system"), _path_param("artwork_type"), _path_param("rom_path")],
+                    tags=["library", "local-network"],
+                    error_codes=("400", "401", "403", "404", "429", "500", "502", "503"),
+                )
+            },
+            "/media-browse/music/like": {
+                "post": _operation(
+                    "Like/unlike a track on any Drone. Recorded only on this Drone, never sent to the peer.",
+                    {"200": _json_response("MediaBrowseLikeResponse")},
+                    request_body=_json_request("MediaBrowseLikeRequest"),
+                    tags=["library", "local-network"],
+                    error_codes=("400", "401", "403", "404", "429", "500"),
+                )
+            },
+            "/peer/music/{relative_path}": {
+                "get": _operation(
+                    "Download or range-stream a music file from a peer",
+                    {"200": _media_response("Peer music file stream", ["application/octet-stream"])},
+                    parameters=[_path_param("relative_path")],
+                    tags=["peer", "downloads"], security=peer_security,
+                    error_codes=("400", "403", "404", "429", "500"),
+                )
+            },
+            "/peer/media-artwork/{media_type}/{entry_key}/{field}": {
+                "get": _operation(
+                    "Poster / cover art for one of a peer's movies or tracks, by entry key",
+                    {"200": _media_response("Artwork image bytes", ["image/jpeg"])},
+                    parameters=[_path_param("media_type"), _path_param("entry_key"), _path_param("field")],
+                    tags=["peer"], security=peer_security,
+                    error_codes=("403", "404", "429", "500"),
+                )
+            },
+            "/peer/media-detail/{media_type}/{entry_key}": {
+                "get": _operation(
+                    "Detail for one of a peer's movies or tracks (never includes likes)",
+                    {"200": _json_response("MediaBrowseDetailResponse")},
+                    parameters=[_path_param("media_type"), _path_param("entry_key")],
+                    tags=["peer"], security=peer_security,
+                    error_codes=("403", "404", "429", "500"),
                 )
             },
             "/movies": {
@@ -2963,7 +3082,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     {"200": _json_response("PeerInventoryEnvelope")},
                     description="For asset_type=summary the response has the PeerInventorySummaryResponse shape; other asset types use PeerInventoryResponse.",
                     parameters=[
-                        _path_param("asset_type", "summary, roms, bios, artwork, saves, emulator_configs, or gameplay"),
+                        _path_param("asset_type", "summary, roms, bios, artwork, saves, movies, music, emulator_configs, or gameplay"),
                         *common_paging,
                         *system_filter_params,
                     ],

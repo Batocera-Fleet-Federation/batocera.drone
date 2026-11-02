@@ -383,6 +383,24 @@ Gameplay traffic is the emulator's own transport, never the HTTPS API. Invariant
 
 Skill: `drone-multiplayer`. Depth: `docs/multiplayer.md`.
 
+## Multi-Drone media browsing (`#network`)
+
+Browse Movies/Shows, Music and Games across this Drone **and** every paired peer from one page.
+`web/handlers_media_browse.py` (`/v1/api/media-browse/...`, session-gated like `/movies`) fans out in
+parallel through `transfer/media_browse.py` (`collect_page`: deterministic round-robin merge with an opaque
+per-source cursor; sources may be `ok`/`cached`/`offline`/`timeout`/`unsupported` and never fail the page).
+Peers serve it from the existing `/peer/inventory/{movies,music,roms}` plus `/peer/music/...`,
+`/peer/media-artwork/...`, `/peer/media-detail/...`; `/peer/movies|music` honor `Range`. **Playback and artwork
+of a peer's item are proxied through the browsing Drone** (`_peer_open_stream_for_peer`, pinned mTLS, Range
+forwarded, nothing written to disk) — the browser never talks to a peer. **Copy** reuses
+`POST /admin/local-network/sync` (same as Swarm > Transfers), so a game arrives with its artwork in the right
+system folder; music has its own `_download_music_from_peer` / `enqueue_music`. **Likes stay local**: peers'
+tracks are liked in `peer_music_likes` (keyed by source drone + entry key, cleared by `swarm_reset`), never sent
+to or read from a peer. Peer pages are cached in-memory (`SourceCache`: fresh 120 s, stale fallback 24 h, bounded;
+`?refresh=1` bypasses) and the page also caches client-side for 60 s. UI: `static/js/media_browse.js`, which also
+owns the persistent transfer toast (`DroneTransferToast.track(jobIds)`: progress bar, files n/m, speed, stays until
+done, survives reload via sessionStorage).
+
 ## Conventions
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a

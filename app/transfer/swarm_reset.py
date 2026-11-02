@@ -99,6 +99,15 @@ def _reset_multiplayer(settings: Any) -> None:
     reset_multiplayer_identity_state(settings)
 
 
+def _reset_peer_music_likes(settings: Any) -> None:
+    """Likes recorded on other Drones' tracks name the source swarm's peers."""
+    try:
+        from ..storage import music_store
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from storage import music_store  # type: ignore
+    music_store.clear_peer_music_likes(settings.music_root)
+
+
 def _clear_pinned_peer_certificates(settings: Any) -> int:
     """Remove every pinned peer certificate; raises if any cannot be removed.
 
@@ -235,6 +244,7 @@ def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
     # Multiplayer sessions/invitations/allow-list/imported reports name the source Drone's peers
     # (and may hold emulator settings to put back). Best effort; the SQLite reset below is the gate.
     _guarded("multiplayer", lambda: _reset_multiplayer(settings))
+    _guarded("peer music likes", lambda: _reset_peer_music_likes(settings))
     removed = _reset_database(settings)
     pins = _clear_pinned_peer_certificates(settings)
     incomplete = _revoke_shared_credentials(settings)

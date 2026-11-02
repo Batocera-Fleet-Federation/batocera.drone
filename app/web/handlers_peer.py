@@ -38,6 +38,8 @@ try:
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..storage import config_backup_store as _config_backup_store
     from ..storage import movies_store as _movies_store
+    from ..storage import music_store as _music_store
+    from ..common import http_range as _http_range
     from ..storage import saves_store as _saves_store
     from ..storage.rom_metadata_store import list_artwork_cache_page
     from ..transfer import local_network as _local_network
@@ -81,6 +83,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from storage import config_backup_store as _config_backup_store  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
+    from storage import music_store as _music_store  # type: ignore
+    from common import http_range as _http_range  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
     from storage.rom_metadata_store import list_artwork_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
@@ -378,6 +382,7 @@ class HandlersPeerMixin:
                 "systems": system_names,
                 "system_counts": system_counts,
                 "counts": counts,
+                "media_counts": self._local_media_counts(),
                 "genres": [
                     str(row.get("genre") or "") for row in genre_facets
                     if isinstance(row, dict) and str(row.get("genre") or "").strip()
@@ -544,14 +549,27 @@ class HandlersPeerMixin:
             # accepted for a uniform request shape but ignored.
             if self.settings.use_fake_data:
                 _movies_store.sync_movies_cache(self.settings.movies_root, self.settings.shows_root)
-            return paged_response(
-                _movies_store.list_movies_page(
-                    self.settings.movies_root,
-                    query=query,
-                    limit=limit,
-                    offset=offset,
-                )
+            movie_page = _movies_store.list_movies_page(
+                self.settings.movies_root,
+                query=query,
+                limit=limit,
+                offset=offset,
             )
+            self._enrich_media_items("movies", movie_page.get("items") or [])
+            return paged_response(movie_page)
+        elif normalized == "music":
+            # Same flat shape as movies. Likes are deliberately never added:
+            # they are private to the Drone that recorded them.
+            if self.settings.use_fake_data:
+                _music_store.sync_music_cache(self.settings.music_root)
+            music_page = _music_store.list_music_page(
+                self.settings.music_root,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+            self._enrich_media_items("music", music_page.get("items") or [])
+            return paged_response(music_page)
         elif normalized == "config_backups":
             # No system dimension at all -- selected_systems/system are
             # accepted for a uniform request shape but ignored, same as
@@ -691,7 +709,7 @@ class HandlersPeerMixin:
                 reverse=True,
             )
         else:
-            raise ValueError("asset type must be summary, roms, bios, artwork, saves, movies, config_backups, emulator_configs, gameplay, or systems")
+            raise ValueError("asset type must be summary, roms, bios, artwork, saves, movies, music, config_backups, emulator_configs, gameplay, or systems")
         rows = [
             {key: value for key, value in row.items() if key not in {"absolute_path"}}
             for row in rows
@@ -736,6 +754,130 @@ class HandlersPeerMixin:
             "offset": offset,
             "items": page,
         }
+
+    def _local_media_counts(self) -> dict:
+        """Movie/show and music totals for the summary (best effort)."""
+        counts = {"movies": 0, "music": 0}
+        try:
+            counts["movies"] = int(_movies_store.list_movies_page(self.settings.movies_root, limit=1)["total"])
+        except Exception:
+            pass
+        try:
+            counts["music"] = int(_music_store.list_music_page(self.settings.music_root, limit=1)["total"])
+        except Exception:
+            pass
+        return counts
+
+    def _enrich_media_items(self, kind: str, items: list) -> None:
+        """Overlay display titles, grouping and genres exactly like the local
+        Movies/Music lists so a browsing Drone can render a peer's library the
+        same way.  Never adds likes (private to each Drone)."""
+        try:
+            if kind == "movies":
+                self._apply_movie_display_titles(items)
+                self._apply_movie_kind_and_genres(items)
+            else:
+                self._apply_music_display_titles(items)
+                self._apply_music_grouping_and_genres(items)
+        except Exception as error:  # enrichment is cosmetic; never fail the page
+            self.log_error("peer media enrichment failed kind=%s error=%s", kind, error)
+
+    def _stream_media_file_range(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
+        """Range-aware (206/416) file response for peer media, used by the
+        browsing Drone's playback proxy so a viewer can seek."""
+        file_size = path.stat().st_size
+        header = self.headers.get("Range")
+        start, end, status = _http_range.parse_range_header(header, file_size)
+        if header and status == 200 and header.startswith("bytes=") and file_size > 0:
+            # parse_range_header treats an unsatisfiable range as absent; a
+            # start past EOF must be a 416 so players don't loop.
+            try:
+                first = header.split("=", 1)[1].split(",")[0].strip().partition("-")[0]
+                if first and int(first) >= file_size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.send_header("Content-Length", "0")
+                    self._send_security_headers()
+                    self.end_headers()
+                    return
+            except ValueError:
+                pass
+        length = end - start + 1 if file_size else 0
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        if as_attachment:
+            self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self._send_security_headers()
+        self.end_headers()
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def _handle_peer_music_download(self, relative_path: str) -> None:
+        """Serve one music file to an authenticated peer (flat namespace)."""
+        if not self._peer_request_authorized():
+            return
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid music path"})
+            return
+        root = Path(self.settings.music_root).resolve()
+        target = (root / rel).resolve()
+        if root not in target.parents or not target.is_file():
+            self._send_json(404, {"error": "not found"})
+            return
+        if getattr(self, "headers", None) is not None and self.headers.get("Range"):
+            self._stream_media_file_range(target, self._guess_content_type(target))
+            return
+        self.log_message("peer music download music=%s bytes=%s", rel, target.stat().st_size)
+        self._stream_file(
+            target, "application/octet-stream", as_attachment=True,
+            upload_meta={"asset_type": "music", "relative_path": rel},
+        )
+
+    def _handle_peer_media_artwork(self, kind: str, entry_key: str, field: str) -> None:
+        """Poster / cover art for a peer's movie or track, looked up by entry
+        key only (no client-supplied path)."""
+        if not self._peer_request_authorized():
+            return
+        try:
+            if kind == "movies":
+                self._handle_movie_artwork(entry_key, field)
+            elif kind == "music":
+                self._handle_music_artwork(entry_key, field)
+            else:
+                raise FileNotFoundError()
+        except FileNotFoundError:
+            self._send_json(404, {"error": "not found"})
+
+    def _handle_peer_media_detail(self, kind: str, entry_key: str) -> None:
+        """Detail payload for one of this Drone's movies/tracks (peer-facing).
+        ``liked`` is stripped: likes never leave the Drone that recorded them."""
+        if not self._peer_request_authorized():
+            return
+        import re as _re
+        if not _re.match(r"^[0-9a-f]{1,64}$", str(entry_key or "")):
+            self._send_json(404, {"error": "not found"})
+            return
+        if kind not in ("movies", "music"):
+            self._send_json(404, {"error": "not found"})
+            return
+        item = self._local_media_detail(kind, entry_key)
+        if not item:
+            self._send_json(404, {"error": "not found"})
+            return
+        item.pop("liked", None)  # likes never leave the Drone that recorded them
+        self._send_json(200, item)
 
     def _handle_peer_content_inventory(self, asset_type: str, query_params: dict) -> None:
         """Sign a bounded inventory for exactly one local asset and request nonce."""
@@ -937,6 +1079,9 @@ class HandlersPeerMixin:
         if not target.exists() or not target.is_file():
             self.log_error("peer movie download failed movie=%s resolved=%s reason=not_found", rel, str(target))
             self._send_json(404, {"error": "not found"})
+            return
+        if getattr(self, "headers", None) is not None and self.headers.get("Range"):
+            self._stream_media_file_range(target, self._guess_content_type(target))
             return
         self.log_message("peer movie download movie=%s bytes=%s", rel, target.stat().st_size)
         self._stream_file(

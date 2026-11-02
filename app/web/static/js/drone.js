@@ -2026,6 +2026,7 @@ function renderAssetTypeSwitcher(active) {
     ["systems", "Games", "bi-grid", "#systems"],
     ["movies", "Movies", "bi-film", "#movies"],
     ["music", "Music", "bi-music-note-beamed", "#music"],
+    ["network", "All Drones", "bi-diagram-3", "#network"],
   ];
   return `
     <div class="asset-type-switcher">
@@ -14793,6 +14794,14 @@ async function router(retryDepth = 0) {
         // "#movies/explore" both parse to view === "explore" and render the
         // same page.
         await renderMovieExplorerPage();
+      }
+    } else if (hash.startsWith("#network")) {
+      // Browse every paired Drone's Movies/Shows, Music and Games (media_browse.js).
+      if (typeof renderNetworkMediaPage === "function") {
+        await renderNetworkMediaPage(hash);
+      } else {
+        await redirectRouterHash("#movies");
+        return;
       }
     } else if (hash.startsWith("#music")) {
       const parsed = parseMusicHash(hash);

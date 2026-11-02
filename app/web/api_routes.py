@@ -136,6 +136,18 @@ class ApiRoutesMixin:
                 self._handle_peer_movie_download("/".join(parts[2:]))
                 return
 
+            if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "music":
+                self._handle_peer_music_download("/".join(parts[2:]))
+                return
+
+            if len(parts) == 5 and parts[0] == "peer" and parts[1] == "media-artwork":
+                self._handle_peer_media_artwork(parts[2], parts[3], parts[4])
+                return
+
+            if len(parts) == 4 and parts[0] == "peer" and parts[1] == "media-detail":
+                self._handle_peer_media_detail(parts[2], parts[3])
+                return
+
             if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "config-backups":
                 self._handle_peer_config_backup_download("/".join(parts[2:]))
                 return
@@ -342,6 +354,27 @@ class ApiRoutesMixin:
             if len(parts) == 2 and parts[0] == "movies":
                 self._handle_movie_detail(parts[1])
                 return
+
+            if len(parts) >= 2 and parts[0] == "media-browse":
+                kind = parts[1]
+                if kind == "roms" and len(parts) >= 7 and parts[3] == "artwork":
+                    self._handle_media_browse_rom_artwork(parts[2], parts[4], parts[5], "/".join(parts[6:]))
+                    return
+                if len(parts) == 2:
+                    self._handle_media_browse_list(kind, query_params)
+                    return
+                if len(parts) == 3 and parts[2] == "also-on":
+                    self._handle_media_browse_also_on(kind, query_params)
+                    return
+                if len(parts) == 4:
+                    self._handle_media_browse_detail(kind, parts[2], parts[3])
+                    return
+                if len(parts) == 5 and parts[4] == "stream":
+                    self._handle_media_browse_stream(kind, parts[2], parts[3])
+                    return
+                if len(parts) == 6 and parts[4] == "artwork":
+                    self._handle_media_browse_artwork(kind, parts[2], parts[3], parts[5])
+                    return
 
             if api_path == "/music":
                 limit = None
@@ -1249,6 +1282,11 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "movies" and parts[2] == "cast-token":
                 self._handle_movie_cast_token_create(parts[1])
+                return
+
+            if len(parts) == 3 and parts[0] == "media-browse" and parts[1] == "music" and parts[2] == "like":
+                payload = self._read_json_body()
+                self._handle_media_browse_like(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "music" and parts[2] == "like":
