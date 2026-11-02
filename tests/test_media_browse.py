@@ -707,6 +707,16 @@ class UiContractTests(unittest.TestCase):
         self.assertNotIn('api("/v1/api', script)
         self.assertIn('const API = "/media-browse"', script)
 
+    def test_remote_movies_and_music_open_the_full_local_detail_pages(self):
+        script = self._script()
+        router = (self.ROOT / "static" / "js" / "drone.js").read_text(encoding="utf-8")
+        self.assertIn("setHash(kind === \"movies\" ? movieDetailHash(key) : musicDetailHash(key))", script)
+        # the detail pages resolve a remote key through the browsing Drone's proxy, never a peer directly
+        for needle in ("function remoteEntryKey", "function remoteKeyParts", "fetchMediaDetail(\"movies\", entryKey)",
+                       "fetchMediaDetail(\"music\", entryKey)", "/media-browse/music/like"):
+            self.assertIn(needle, router)
+        self.assertIn("adminEnabled && !remoteKeyParts(entryKey)", router)  # no delete/scrape of another Drone's file
+
     def test_loading_is_reported_in_a_toast_and_one_request_per_drone(self):
         script = self._script()
         self.assertIn("LoadToast.begin(kind, list.length)", script)

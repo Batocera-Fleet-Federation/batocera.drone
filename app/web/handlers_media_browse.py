@@ -71,6 +71,10 @@ _source_cache = _media_browse.SourceCache()
 _fingerprint_cache: Dict[str, tuple] = {}
 
 
+class _FakePeerDone(Exception):
+    """Internal: demo peer answered from local data (skips the network call)."""
+
+
 class HandlersMediaBrowseMixin:
     # ------------------------------------------------------------ sources
 
@@ -298,12 +302,18 @@ class HandlersMediaBrowseMixin:
                 self._send_json(404, {"error": "unknown Drone"})
                 return
             try:
+                if self.settings.use_fake_data and peer.get("fake_data"):
+                    # Dev/demo peers have no address; answer from this Drone's own data.
+                    item = self._local_media_detail(kind, entry_key)
+                    raise _FakePeerDone
                 item, _ = _peer_get_json_for_peer(
                     peer, f"/v1/api/peer/media-detail/{kind}/{entry_key}", self.settings,
                     peer_id=drone_id, config={"network_mode": "local_network"},
                     timeout=BROWSE_PEER_TIMEOUT_SECONDS,
                     overall_deadline=time.monotonic() + BROWSE_PEER_BUDGET_SECONDS,
                 )
+            except _FakePeerDone:
+                pass
             except PeerIdentityHold:
                 self._send_json(503, {"error": "swarm networking is held pending Drone identity verification"})
                 return

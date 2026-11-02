@@ -624,6 +624,7 @@
     try {
       const res = await api(`${API}/${kind}/also-on?${params}`, { timeoutMs: 45000 });
       const copies = res.copies || [];
+      if (includeSelf && copies.some((c) => c.is_local)) it.exists_locally = true;
       copies.forEach((c) => registry.set(keyOf(c), c));
       const rows = (includeSelf ? [it] : []).concat(copies);
       rows.forEach((r) => registry.set(keyOf(r), r));
@@ -635,7 +636,17 @@
     }
   }
 
+  // Movies and music open the same full detail pages as local items (key "r~<drone>~<key>", see
+  // remoteEntryKey in drone.js); a show/album card opens its first episode/track.  Games keep the
+  // details dialog.
   function openDetails(kind, card) {
+    if (kind !== "roms") {
+      const first = card.items.slice().sort((a, b) => (a.season_number || 0) - (b.season_number || 0)
+        || (a.episode_number || a.track_number || 0) - (b.episode_number || b.track_number || 0))[0];
+      const key = remoteEntryKey(first.drone_id, first.entry_key);
+      setHash(kind === "movies" ? movieDetailHash(key) : musicDetailHash(key));
+      return;
+    }
     const modal = ensureModal();
     const it = card.items[0];
     modal.querySelector(".modal-title").textContent = card.title;
@@ -724,6 +735,7 @@
     document.querySelectorAll(".drone-availability").forEach((n) => n.remove());
     let kind = "";
     let item = null;
+    let remoteItem = false;
     try {
       if (hash.startsWith("#system/")) {
         const rom = (window.missingArtworkRoms || [])[0];
@@ -734,8 +746,14 @@
         const parsed = hash.startsWith("#movies/") ? parseMoviesHash(hash) : parseMusicHash(hash);
         if (!parsed || parsed.view !== "detail" || !parsed.entryKey) return;
         kind = hash.startsWith("#movies/") ? "movies" : "music";
-        const detail = await api(`/${kind}/${enc(parsed.entryKey)}`, { timeoutMs: 15000 });
+        const remote = remoteKeyParts(parsed.entryKey);
+        const detail = await fetchMediaDetail(kind, parsed.entryKey);
         item = { title: detail.display_title || detail.movie_name || detail.track_name, fingerprint: detail.fingerprint || "", artist: detail.artist || "" };
+        if (remote) {
+          // A page for another Drone's item: that Drone is the first row, then every other holder.
+          Object.assign(item, detail, { title: item.title, drone_id: remote.droneId, entry_key: remote.key, is_local: false });
+          remoteItem = true;
+        }
       } else {
         return;
       }
@@ -750,6 +768,7 @@
     card._kind = kind;
     card._registry = new Map();
     card.addEventListener("click", (event) => onAction(event, card));
+    if (remoteItem) { await fillAvailability(kind, item, card.querySelector(".nm-avail"), card._registry, true); return; }
     let self = null;
     try { self = (await peers()).find((p) => p.is_local); } catch (e) { /* offline listing is fine */ }
     const here = { ...item, drone_id: self ? self.drone_id : "", drone_name: "This Drone", is_local: true };

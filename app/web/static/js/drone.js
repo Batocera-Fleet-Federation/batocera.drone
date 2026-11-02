@@ -1877,13 +1877,37 @@ function setupLazyImages() {
 
   lazyImages.forEach((img) => imageObserver.observe(img));
 }
+// An item on another Drone opens in the same full detail pages as a local one,
+// under the key "r~<drone id>~<entry key>". Everything the page loads for it
+// (detail JSON, stream, artwork, likes) goes through this Drone's
+// /media-browse proxy -- the browser never talks to the other Drone.
+function remoteEntryKey(droneId, entryKey) {
+  return `r~${droneId}~${entryKey}`;
+}
+function remoteKeyParts(entryKey) {
+  const m = /^r~([^~]+)~(.+)$/.exec(String(entryKey || ""));
+  return m ? { droneId: m[1], key: m[2] } : null;
+}
+function remoteMediaPath(kind, entryKey, tail) {
+  const r = remoteKeyParts(entryKey);
+  return `/media-browse/${kind}/${encodeURIComponent(r.droneId)}/${encodeURIComponent(r.key)}${tail ? `/${tail}` : ""}`;
+}
+async function fetchMediaDetail(kind, entryKey) {
+  if (!remoteKeyParts(entryKey)) return api(`/${kind}/${encodeURIComponent(entryKey)}`);
+  const detail = await api(remoteMediaPath(kind, entryKey));
+  detail.entry_key = entryKey; // pages build their URLs from the item's own key
+  return detail;
+}
 function movieDownloadUrl(entryKey) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("movies", entryKey, "stream")}`;
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/download`;
 }
 function movieStreamUrl(entryKey) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("movies", entryKey, "stream")}`;
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/stream`;
 }
 function movieArtworkUrl(entryKey, field) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("movies", entryKey, `artwork/${encodeURIComponent(field)}`)}`;
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}`;
 }
 function movieDetailHash(entryKey) {
@@ -1916,9 +1940,11 @@ function parseMoviesHash(hash) {
   return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
 }
 function musicDownloadUrl(entryKey) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("music", entryKey, "stream")}`;
   return `${API_BASE}/music/${encodeURIComponent(entryKey)}/download`;
 }
 function musicStreamUrl(entryKey) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("music", entryKey, "stream")}`;
   return `${API_BASE}/music/${encodeURIComponent(entryKey)}/stream`;
 }
 // Bumped per entry_key right after a successful album-cover upload (see
@@ -1930,6 +1956,7 @@ function musicStreamUrl(entryKey) {
 // normal (never-uploaded-to) track's artwork URL is unaffected.
 const musicArtCacheBust = new Map();
 function musicArtworkUrl(entryKey, field) {
+  if (remoteKeyParts(entryKey)) return `${API_BASE}${remoteMediaPath("music", entryKey, `artwork/${encodeURIComponent(field)}`)}`;
   const bust = musicArtCacheBust.get(entryKey);
   return `${API_BASE}/music/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}${bust ? `?v=${bust}` : ""}`;
 }
@@ -3050,7 +3077,9 @@ async function toggleMusicLike(entryKey, likedNow, button) {
   const matches = document.querySelectorAll(`[data-music-like-key="${entryKey}"]`);
   matches.forEach((el) => { el.disabled = true; });
   try {
-    await apiPost(`/music/${encodeURIComponent(entryKey)}/like`, { liked: nextLiked });
+    const remote = remoteKeyParts(entryKey);
+    if (remote) await apiPost("/media-browse/music/like", { drone_id: remote.droneId, entry_key: remote.key, liked: nextLiked });
+    else await apiPost(`/music/${encodeURIComponent(entryKey)}/like`, { liked: nextLiked });
     const row = musicAllRows.find((m) => m.entry_key === entryKey);
     if (row) row.liked = nextLiked;
     document.querySelectorAll(`[data-music-like-key="${entryKey}"]`).forEach((el) => {
@@ -3067,7 +3096,7 @@ async function renderMusicDetailsPage(entryKey) {
   clearSystemTheme();
   setLoading(true, "Loading track...");
   try {
-    const track = await api(`/music/${encodeURIComponent(entryKey)}`);
+    const track = await fetchMediaDetail("music", entryKey);
     content.innerHTML = renderMusicDetailShell(track);
   } catch (err) {
     content.innerHTML = `
@@ -3110,7 +3139,7 @@ function renderMusicDetailShell(track) {
                 : `<a class="btn btn-outline-primary btn-sm" title="Download" href="${musicDownloadUrl(entryKey)}"><i class="bi bi-download"></i></a>`
             }
             ${
-              adminEnabled
+              adminEnabled && !remoteKeyParts(entryKey)
                 ? `<button class="btn btn-outline-danger btn-sm" type="button" title="Delete" onclick="deleteMusicFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash"></i></button>`
                 : ""
             }
@@ -3854,7 +3883,7 @@ async function renderMovieDetailsPage(entryKey) {
   clearSystemTheme();
   setLoading(true, "Loading movie...");
   try {
-    const movie = await api(`/movies/${encodeURIComponent(entryKey)}`);
+    const movie = await fetchMediaDetail("movies", entryKey);
     content.innerHTML = renderMovieDetailShell(movie);
     await renderMovieScraperCard(entryKey, movie);
   } catch (err) {
@@ -3912,7 +3941,7 @@ function renderMovieDetailShell(movie) {
                 : `<a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
             }
             ${
-              adminEnabled
+              adminEnabled && !remoteKeyParts(entryKey)
                 ? `<button class="btn btn-outline-danger" type="button" onclick="deleteMovieFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash me-1"></i>Delete</button>`
                 : ""
             }
@@ -3974,7 +4003,7 @@ function deleteMovieFromDetailPage(entryKey, title) {
 async function renderMovieScraperCard(entryKey, movie) {
   const container = document.getElementById("movie-scraper-card");
   if (!container) return;
-  if (!adminEnabled) {
+  if (!adminEnabled || remoteKeyParts(entryKey)) {
     container.innerHTML = "";
     return;
   }
