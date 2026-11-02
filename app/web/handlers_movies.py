@@ -296,8 +296,21 @@ class HandlersMoviesMixin:
 
     def _stream_movie_range(self, path: Path, content_type: str) -> None:
         file_size = path.stat().st_size
-        start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
-        length = end - start + 1
+        header = self.headers.get("Range")
+        start, end, status = _http_range.parse_range_header(header, file_size)
+        if header and status == 200 and header.startswith("bytes=") and file_size > 0:
+            try:
+                first = header.split("=", 1)[1].split(",")[0].strip().partition("-")[0]
+                if first and int(first) >= file_size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.send_header("Content-Length", "0")
+                    self._send_security_headers()
+                    self.end_headers()
+                    return
+            except ValueError:
+                pass
+        length = end - start + 1 if file_size else 0
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))

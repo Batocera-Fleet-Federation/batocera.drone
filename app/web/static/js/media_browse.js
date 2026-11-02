@@ -644,10 +644,7 @@
   const badge = (it) => `<span class="badge ${it.is_local ? "text-bg-secondary" : "text-bg-info"} nm-drone-badge" title="${esc(droneLabel(it))}"><i class="bi bi-hdd-network me-1"></i>${esc(droneLabel(it))}</span>`;
 
   function copyRow(kind, it) {
-    // Play is offered only for this Drone's own files (streamed straight from disk).
-    // Other Drones' items are copied here first, then played locally: no playback
-    // is proxied through this Drone for a peer's file.
-    const play = kind !== "roms" && it.entry_key && it.is_local
+    const play = kind !== "roms" && it.entry_key
       ? `<button type="button" class="btn btn-sm btn-success" data-act="play" data-key="${esc(keyOf(it))}"><i class="bi bi-play-fill me-1"></i>Play</button>` : "";
     const copy = !it.is_local && !it.exists_locally && canCopy()
       ? `<button type="button" class="btn btn-sm btn-primary" data-act="copy" data-key="${esc(keyOf(it))}"><i class="bi bi-download me-1"></i>Copy to this Drone</button>` : "";
@@ -722,7 +719,7 @@
     if (!host) return;
     const tag = kind === "music" ? "audio" : "video";
     const url = `${BASE}/${kind}/${enc(it.drone_id)}/${enc(it.entry_key)}/stream`;
-    host.innerHTML = `<${tag} controls autoplay class="w-100 mb-2" src="${esc(url)}"></${tag}><div class="small text-muted mb-2">Playing from ${esc(droneLabel(it))}</div>`;
+    host.innerHTML = `<${tag} controls autoplay class="w-100 mb-2" src="${esc(url)}"></${tag}>`;
     host.firstElementChild.addEventListener("error", () => showToast("That Drone could not stream this file right now.", "warning", 6000));
     host.scrollIntoView({ block: "nearest" });
   }
