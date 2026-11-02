@@ -32,7 +32,7 @@ import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
 from urllib.error import HTTPError
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 try:
     from ..storage import movies_store as _movies_store
@@ -56,6 +56,60 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _peer_open_stream_for_peer,
         _peer_address,
     )
+
+def _browser_source_address(peer: Optional[dict]) -> Optional[str]:
+    """Address a browser can reach the source Drone on (#677).
+
+    ``_peer_address`` resolves the dedicated peer-mTLS port, whose listener
+    serves only ``/peer/*``; the stream route lives on the browser/admin
+    listener, so swap the resolved port for the peer's ``api_port``.
+    """
+    if not peer:
+        return None
+    address = _peer_address(peer)
+    if not address:
+        return None
+    parts = urlsplit(address)
+    host = parts.hostname or ""
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = int(peer.get("api_port") or peer.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    default = 443 if parts.scheme == "https" else 80
+    suffix = f":{port}" if port and port != default else ""
+    return f"{parts.scheme}://{host}{suffix}"
+
+
+def _browser_source_address(peer: Optional[dict]) -> Optional[str]:
+    """Address a browser can reach the source Drone on (#677).
+
+    ``_peer_address`` resolves the dedicated peer-mTLS port, whose listener
+    serves only ``/peer/*``; the stream route lives on the browser/admin
+    listener, so swap the resolved port for the peer's ``api_port``.
+    """
+    if not peer:
+        return None
+    address = _peer_address(peer)
+    if not address:
+        return None
+    parts = urlsplit(address)
+    host = parts.hostname or ""
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = int(peer.get("api_port") or peer.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    default = 443 if parts.scheme == "https" else 80
+    suffix = f":{port}" if port and port != default else ""
+    return f"{parts.scheme}://{host}{suffix}"
+
 
 _ENTRY_KEY_RE = re.compile(r"^[0-9a-f]{1,64}$")
 _DRONE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -265,7 +319,7 @@ class HandlersMediaBrowseMixin:
             item = {"drone_id": source.drone_id, "name": source.name, "is_local": source.is_local}
             if not source.is_local:
                 peer = self._media_peer(source.drone_id)
-                item["address"] = _peer_address(peer) if peer else None
+                item["address"] = _browser_source_address(peer)
             sources.append(item)
         self._send_json(200, {"sources": sources})
 
@@ -307,7 +361,7 @@ class HandlersMediaBrowseMixin:
         if kind == "music":
             self._media_overlay_likes(page["items"])
         source_addresses = {
-            source.drone_id: (_peer_address(self._media_peer(source.drone_id)) if not source.is_local else None)
+            source.drone_id: (_browser_source_address(self._media_peer(source.drone_id)) if not source.is_local else None)
             for source in sources
         }
         for item in page["items"]:
