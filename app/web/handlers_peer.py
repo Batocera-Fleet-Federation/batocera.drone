@@ -1158,7 +1158,7 @@ class HandlersPeerMixin:
         self.log_message("peer artwork download system=%s type=%s rom=%s artwork=%s bytes=%s", system, artwork_type, rom_path, relative_path, target.stat().st_size)
         self._stream_file(
             target,
-            "application/octet-stream",
+            self._guess_content_type(target),
             as_attachment=True,
             extra_headers={"X-Asset-Relative-Path": relative_path, "X-Gamelist-Reference": gamelist_ref},
             upload_meta={"asset_type": "artwork", "system": system, "relative_path": relative_path},

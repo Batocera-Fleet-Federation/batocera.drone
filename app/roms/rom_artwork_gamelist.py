@@ -111,17 +111,73 @@ class RomArtworkGamelistMixin:
         field = str(artwork_type or "").strip()
         if field not in ARTWORK_FIELDS:
             raise ValueError("invalid artwork type")
-        tree, root = self._read_gamelist(system_dir)
-        game = self._find_gamelist_entry_by_path(root, rom_path)
-        if game is None:
-            raise FileNotFoundError()
-        artwork_ref = _normalize_gamelist_rom_path(_text_or_empty(game, field))
-        if not artwork_ref:
-            raise FileNotFoundError()
-        target = (system_dir / artwork_ref).resolve()
-        if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
-            raise FileNotFoundError()
-        return target, target.relative_to(system_dir).as_posix(), artwork_ref
+        root = None
+        try:
+            _, root = self._read_gamelist(system_dir)
+        except Exception:
+            root = None
+
+        game = self._find_gamelist_entry_by_path(root, rom_path) if root is not None else None
+        if root is not None and game is None:
+            rom_stem = Path(rom_path).stem.lower()
+            rom_name = Path(rom_path).name.lower()
+            for g in root.findall("game"):
+                p = _normalize_gamelist_rom_path(_text_or_empty(g, "path")).lower()
+                if Path(p).name.lower() == rom_name or Path(p).stem.lower() == rom_stem:
+                    game = g
+                    break
+
+        candidate_fields = [field]
+        if field in ("image", "thumbnail", "boxart"):
+            for alt in ("image", "thumbnail", "boxart", "marquee", "fanart"):
+                if alt not in candidate_fields:
+                    candidate_fields.append(alt)
+
+        if game is not None:
+            for f in candidate_fields:
+                artwork_ref = _normalize_gamelist_rom_path(_text_or_empty(game, f))
+                if not artwork_ref:
+                    continue
+                target = (system_dir / artwork_ref).resolve()
+                if target.exists() and target.is_file() and (target == system_dir or system_dir in target.parents):
+                    return target, target.relative_to(system_dir).as_posix(), artwork_ref
+
+        if field in ("image", "thumbnail", "boxart"):
+            images_dir = (system_dir / "images").resolve()
+            if images_dir.exists() and images_dir.is_dir():
+                stem = Path(rom_path).stem
+                name = Path(rom_path).name
+                stem_lower = stem.lower()
+                candidate_names = [
+                    f"{stem}-image.png",
+                    f"{stem}-image.jpg",
+                    f"{stem}-image.jpeg",
+                    f"{stem}-image.webp",
+                    f"{stem}.png",
+                    f"{stem}.jpg",
+                    f"{stem}.jpeg",
+                    f"{stem}.webp",
+                    f"{stem}-thumb.png",
+                    f"{stem}-thumb.jpg",
+                    f"{stem}-boxart.png",
+                    f"{stem}-boxart.jpg",
+                    f"{name}.png",
+                    f"{name}.jpg",
+                ]
+                for c_name in candidate_names:
+                    cand = (images_dir / c_name).resolve()
+                    if cand.exists() and cand.is_file() and (cand == system_dir or system_dir in cand.parents):
+                        rel = cand.relative_to(system_dir).as_posix()
+                        return cand, rel, rel
+                for cand in images_dir.iterdir():
+                    if cand.is_file():
+                        cand_stem = cand.stem.lower()
+                        if cand_stem in (stem_lower, f"{stem_lower}-image", f"{stem_lower}-thumb", f"{stem_lower}-boxart"):
+                            if cand.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                                rel = cand.relative_to(system_dir).as_posix()
+                                return cand, rel, rel
+
+        raise FileNotFoundError()
 
     def resolve_rom_file_by_gamelist_id(self, system: str, gamelist_id: str) -> Tuple[Path, str, str, str]:
         """Resolve a ROM by its gamelist ``<game id>`` -> (target, relative_path,

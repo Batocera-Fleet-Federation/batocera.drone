@@ -331,14 +331,23 @@
   }
 
   function artUrl(kind, it) {
+    if (!it) return "";
     if (kind === "movies" && it.entry_key) return `${BASE}/movies/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/poster`;
     if (kind === "music" && it.entry_key) return `${BASE}/music/${enc(it.drone_id)}/${enc(it.entry_key)}/artwork/art`;
     if (kind === "roms") {
-      const image = it.gamelist && it.gamelist.image;
-      if (!image) return "";
-      if (it.is_local) return `/v1/api/public/systems/${enc(it.system || "")}/images/${enc(String(image).split("/").pop())}`;
-      const rom = it.relative_path || it.rom_path || it.file_path || "";
-      return `${BASE}/roms/${enc(it.drone_id)}/artwork/${enc(it.system || "")}/image/${rom.split("/").map(enc).join("/")}`;
+      if (it.is_local) {
+        const image = (it.gamelist && it.gamelist.image) || it.image_relative_path || "";
+        if (image) return `/v1/api/public/systems/${enc(it.system || "")}/images/${enc(String(image).split("/").pop())}`;
+        const romName = it.rom_file || it.rom_name || it.name || it.relative_path || "";
+        if (romName && it.system) {
+          const stem = (it.image_stem || romName.replace(/\.[^/.]+$/, "")).trim();
+          return `/v1/api/public/systems/${enc(it.system)}/images/${enc(stem)}-image.png`;
+        }
+        return "";
+      }
+      const rom = it.relative_path || it.rom_path || it.file_path || it.rom_file || "";
+      if (!it.drone_id || !it.system || !rom) return "";
+      return `${BASE}/roms/${enc(it.drone_id)}/artwork/${enc(it.system)}/image/${rom.split("/").map(enc).join("/")}`;
     }
     return "";
   }
@@ -459,6 +468,7 @@
     btn.type = "button";
     btn.className = "movie-explorer-card remote-card";
     btn.dataset.rmKey = card.key;
+    btn._kind = kind;
     btn._art = artUrl(kind, it);
     btn.innerHTML = `
       <div class="movie-explorer-card-poster rm-poster">
@@ -473,6 +483,15 @@
 
   function updateCard(el, card) {
     el._card = card;
+    if (!el._art && card.items && card.items.length) {
+      const url = artUrl(el._kind || "roms", card.items[0]);
+      if (url) {
+        el._art = url;
+        const skel = el.querySelector(".rm-skel");
+        if (skel) skel.classList.remove("rm-final");
+        if (el._visible) requestArt(el);
+      }
+    }
     const drones = [...new Map(card.items.map((x) => [x.drone_id, x])).values()];
     const badge = `${droneLabel(drones[0])}${drones.length > 1 ? ` +${drones.length - 1}` : ""}`;
     const set = (sel, text) => { const n = el.querySelector(sel); if (n.textContent !== text) n.textContent = text; };

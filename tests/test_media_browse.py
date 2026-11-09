@@ -72,7 +72,12 @@ class _Base:
         pass
 
     def _guess_content_type(self, path):
-        return "audio/mpeg" if Path(path).suffix == ".mp3" else "video/mp4"
+        s = Path(path).suffix.lower()
+        if s == ".png":
+            return "image/png"
+        if s in (".jpg", ".jpeg"):
+            return "image/jpeg"
+        return "audio/mpeg" if s == ".mp3" else "video/mp4"
 
     def _peer_request_authorized(self):
         return True
@@ -88,6 +93,7 @@ class _Base:
 
     def _stream_file(self, path, content_type, as_attachment=False, **kwargs):
         self.status = 200
+        self.out_headers["Content-Type"] = content_type
         self.wfile.write(Path(path).read_bytes())
 
 
@@ -373,6 +379,43 @@ class PlaybackProxyAndLikesTests(unittest.TestCase):
         handler = _Handler(self.settings)
         handler._handle_media_browse_rom_artwork("drone-peer", "snes", "image", "../../x.png")
         self.assertEqual(handler.json[0], 400)
+
+    def test_artwork_proxy_sniffs_octet_stream_image(self):
+        handlers_media_browse._artwork_cache.__init__()
+        # When a peer serves an image with application/octet-stream, the proxy sniffs magic bytes
+        png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        stream_resp = _FakeResponse(png_bytes, headers={"Content-Type": "application/octet-stream"})
+        with mock.patch.object(handlers_media_browse, "_peer_open_stream_for_peer", return_value=(stream_resp, "x")):
+            handler = _Handler(self.settings)
+            handler._handle_media_browse_rom_artwork("drone-peer", "snes", "image", "Game.sfc")
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.out_headers.get("Content-Type"), "image/png")
+        self.assertEqual(handler.wfile.getvalue(), png_bytes)
+        handlers_media_browse._artwork_cache.__init__()
+
+    def test_rom_artwork_proxy_success(self):
+        handlers_media_browse._artwork_cache.__init__()
+        jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF"
+        stream_resp = _FakeResponse(jpeg_bytes, headers={"Content-Type": "image/jpeg"})
+        with mock.patch.object(handlers_media_browse, "_peer_open_stream_for_peer", return_value=(stream_resp, "x")) as opener:
+            handler = _Handler(self.settings)
+            handler._handle_media_browse_rom_artwork("drone-peer", "oricatmos", "image", "House of Death (Europe).zip")
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.out_headers.get("Content-Type"), "image/jpeg")
+        self.assertEqual(opener.call_args.args[1], "/v1/api/peer/artwork/oricatmos/image/House%20of%20Death%20%28Europe%29.zip")
+        handlers_media_browse._artwork_cache.__init__()
+
+    def test_peer_artwork_download_serves_guessed_image_type(self):
+        handler = _Handler(self.settings)
+        handler.repository = mock.MagicMock()
+        img_path = self.root / "test.png"
+        img_path.write_bytes(b"\x89PNG123")
+        handler.repository.resolve_artwork_file.return_value = (img_path, "images/test.png", "images/test.png")
+        handler.repository.get_local_system_dir.return_value = img_path.parent
+        handler._handle_peer_artwork_download("snes", "image", "game.zip")
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.out_headers.get("Content-Type"), "image/png")
+        self.assertEqual(handler.wfile.getvalue(), b"\x89PNG123")
 
     def test_peer_likes_stay_local_and_never_call_the_peer(self):
         with mock.patch.object(handlers_media_browse, "_peer_get_json_for_peer") as get, \

@@ -134,6 +134,23 @@ class _FakePeerDone(Exception):
     """Internal: demo peer answered from local data (skips the network call)."""
 
 
+def _sniff_image_type(data: bytes) -> Optional[str]:
+    """Sniff standard image magic bytes when a peer served a generic or binary MIME type."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"\x00\x00\x01\x00"):
+        return "image/x-icon"
+    if data.startswith(b"<?xml") or data.startswith(b"<svg"):
+        return "image/svg+xml"
+    return None
+
+
 class HandlersMediaBrowseMixin:
     # ------------------------------------------------------------ sources
 
@@ -596,14 +613,19 @@ class HandlersMediaBrowseMixin:
             self._send_json(502, {"error": "Drone unreachable"})
             return None
         try:
-            content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            if not content_type.startswith("image/"):
-                _artwork_cache.miss(key)
-                self._send_json(502, {"error": "unexpected artwork response"})
-                return None
+            raw_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             body = response.read(MAX_ARTWORK_BYTES + 1)
         finally:
             response.close()
+        content_type = raw_type
+        if not content_type.startswith("image/"):
+            sniffed = _sniff_image_type(body)
+            if sniffed:
+                content_type = sniffed
+            else:
+                _artwork_cache.miss(key)
+                self._send_json(502, {"error": "unexpected artwork response"})
+                return None
         if len(body) > MAX_ARTWORK_BYTES:
             _artwork_cache.miss(key)
             self._send_json(502, {"error": "artwork too large"})

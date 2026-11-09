@@ -4251,6 +4251,37 @@ class RepositoryTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 repo.resolve_artwork_file("snes", "Chrono Trigger (USA).zip", "video")
 
+    def test_resolve_artwork_file_fallback_to_alternate_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            system_dir = root / "roms" / "snes"
+            thumb_path = system_dir / "images" / "Chrono Trigger (USA)-thumb.png"
+            thumb_path.parent.mkdir(parents=True, exist_ok=True)
+            thumb_path.write_bytes(b"\x89PNG\r\n\x1a\nFAKE-PNG")
+            (system_dir / "gamelist.xml").write_text(
+                "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger</name>"
+                "<thumbnail>./images/Chrono Trigger (USA)-thumb.png</thumbnail></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+            target, relative_path, artwork_ref = repo.resolve_artwork_file("snes", "Chrono Trigger (USA).zip", "image")
+            self.assertEqual(target, thumb_path.resolve())
+            self.assertEqual(relative_path, "images/Chrono Trigger (USA)-thumb.png")
+
+    def test_resolve_artwork_file_fallback_to_images_dir_without_gamelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            system_dir = root / "roms" / "snes"
+            img_path = system_dir / "images" / "Chrono Trigger (USA)-image.png"
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            img_path.write_bytes(b"\x89PNG\r\n\x1a\nFAKE-PNG")
+            repo = RomRepository(root / "roms", root / "bios")
+            target, relative_path, artwork_ref = repo.resolve_artwork_file("snes", "Chrono Trigger (USA).zip", "image")
+            self.assertEqual(target, img_path.resolve())
+            self.assertEqual(relative_path, "images/Chrono Trigger (USA)-image.png")
+
     def test_apply_launchbox_artwork_only_missing_fields(self) -> None:
         class FakeLaunchBoxClient:
             def details(self, game_key: str) -> dict:
