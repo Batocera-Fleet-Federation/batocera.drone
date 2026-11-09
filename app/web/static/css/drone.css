@@ -2203,6 +2203,21 @@
         overflow-y: visible;
       }
       .movie-explorer-sidebar-search { max-width: none; }
+      /* Compact mobile filters: collapsed behind the topbar "Filters" button
+         so the grid is visible without scrolling past the lists. */
+      .movie-explorer-sidebar:not(.filters-open) { display: none; }
+      .movie-explorer-sidebar.filters-open {
+        gap: 0.75rem;
+        padding: 0.6rem;
+        border: 1px solid var(--admin-border);
+        border-radius: 0.5rem;
+        max-height: 50vh;
+        overflow-y: auto;
+      }
+    }
+    .explorer-filters-toggle { display: none; }
+    @media (max-width: 768px) {
+      .explorer-filters-toggle { display: inline-flex; align-items: center; }
     }
     .movie-explorer-card {
       background: transparent;
