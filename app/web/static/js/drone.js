@@ -677,6 +677,13 @@ function wildcardToRegExp(pattern) {
   const wildcard = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
   return new RegExp(wildcard, "i");
 }
+function toggleExplorerFilters(button, sidebarId) {
+  const sidebar = document.getElementById(sidebarId);
+  if (!sidebar) return;
+  const open = sidebar.classList.toggle("filters-open");
+  button.setAttribute("aria-expanded", open ? "true" : "false");
+  button.classList.toggle("active", open);
+}
 function renderFilterDropdown(prefix, options, selected) {
   const selectedSet = new Set(selected || []);
   const label = selectedSet.size ? `${selectedSet.size} selected` : "No systems";
@@ -2088,6 +2095,7 @@ async function renderMovieExplorerPage() {
             <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
           </div>
           <button id="movieExplorerDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate movies/shows" onclick="toggleMovieExplorerDuplicatesMode()"><i class="bi bi-files"></i></button>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="movie-explorer-sidebar" onclick="toggleExplorerFilters(this, 'movie-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("movies")}
         </div>
         <div class="movie-explorer-body">
@@ -2910,6 +2918,7 @@ async function renderMusicExplorerPage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="musicExplorerSearch" type="search" class="form-control" placeholder="Search artists, albums, songs" oninput="filterMusicExplorer(this.value)" autofocus>
           </div>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="music-explorer-sidebar" onclick="toggleExplorerFilters(this, 'music-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("music")}
         </div>
         <div class="movie-explorer-body">
@@ -5231,6 +5240,7 @@ async function renderSystemsExplorePage() {
           </div>
           <button id="systemsExploreBrowserPlayBtn" class="btn btn-outline-light btn-sm" type="button" title="Show only games playable in Chrome (Play in Browser -- other browsers aren't supported yet)" onclick="toggleSystemsExploreBrowserPlayOnly()"><i class="bi bi-play-circle"></i></button>
           <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="systems-explore-sidebar" onclick="toggleExplorerFilters(this, 'systems-explore-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("systems")}
         </div>
         <div class="movie-explorer-body">
