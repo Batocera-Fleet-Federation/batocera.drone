@@ -5185,6 +5185,37 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_678_paging_stale_fetch_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-678-paging-stale-fetch-uat",
+      "name": "Issue #678: a stale in-flight page fetch must not freeze further paging",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/static/js/media_browse.js",
+          "tests/adversarial/test_issue_678_paging_stale_fetch_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
