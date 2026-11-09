@@ -753,6 +753,13 @@ class UiContractTests(unittest.TestCase):
             self.assertIn(needle, script)
         self.assertNotIn("replaceChildren", script)  # repainting must not rebuild existing cards (flicker)
 
+    def test_remote_media_pages_by_twenty_and_has_online_filter(self):
+        script = self._script()
+        self.assertIn("const PAGE = 20;", script)
+        self.assertIn("function loadMore", script)  # next page only when scrolled to the end
+        self.assertNotIn("SAFETY_CAP", script)
+        self.assertIn("data-rm-online", script)
+
     def test_transfer_toast_has_no_dismiss_while_running(self):
         self.assertIn('classList.toggle("d-none", !finished)', self._script())
 
