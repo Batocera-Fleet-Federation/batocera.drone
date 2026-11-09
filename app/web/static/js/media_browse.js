@@ -210,7 +210,7 @@
   const sigOf = (f) => JSON.stringify([f.q, f.system, f.genre]);
 
   function newEntry(p) {
-    return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, error: "", age: null };
+    return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, busy: false, error: "", age: null };
   }
 
   // Loads ONE page (PAGE items) of one Drone; the next page is requested by loadMore() when the
@@ -222,34 +222,32 @@
     entry.hasMore = false;
     entry.busy = true;
     try {
-      {
-        const params = new URLSearchParams({ limit: String(PAGE), drones: entry.id, exclude_local: "1" });
-        if (f.q) params.set("q", f.q);
-        if (f.system) params.set("system", f.system);
-        if (f.genre) params.set("genre", f.genre);
-        if (entry.cursor) params.set("cursor", entry.cursor);
-        const page = await api(`${API}/${kind}?${params}`, { timeoutMs: 60000 });
-        if (token !== ls.token) return;
-        const src = (page.sources || [])[0] || { status: "ok" };
-        entry.total = Number(src.total || 0);
-        entry.age = src.cached_age_seconds == null ? null : src.cached_age_seconds;
-        entry.error = src.error || "";
-        entry.items.push(...(page.items || []));
-        entry.cursor = page.next_cursor || "";
-        entry.hasMore = !!page.has_more;
-        const ok = src.status === "ok" || src.status === "cached";
-        // A Drone is "loading" until its last page is in; a failure/stale status shows at once.
-        entry.status = src.status;
-        if (!ok || !(page.items || []).length) entry.hasMore = false;
-      }
+      const params = new URLSearchParams({ limit: String(PAGE), drones: entry.id, exclude_local: "1" });
+      if (f.q) params.set("q", f.q);
+      if (f.system) params.set("system", f.system);
+      if (f.genre) params.set("genre", f.genre);
+      if (entry.cursor) params.set("cursor", entry.cursor);
+      const page = await api(`${API}/${kind}?${params}`, { timeoutMs: 60000 });
+      if (token !== ls.token) return;
+      const src = (page.sources || [])[0] || { status: "ok" };
+      entry.total = Number(src.total || 0);
+      entry.age = src.cached_age_seconds == null ? null : src.cached_age_seconds;
+      entry.error = src.error || "";
+      entry.items.push(...(page.items || []));
+      entry.cursor = page.next_cursor || "";
+      entry.hasMore = !!page.has_more;
+      const ok = src.status === "ok" || src.status === "cached";
+      // A Drone is "loading" until its last page is in; a failure/stale status shows at once.
+      entry.status = src.status;
+      if (!ok || !(page.items || []).length) entry.hasMore = false;
     } catch (err) {
-      entry.busy = false;
       if (token !== ls.token) return;
       entry.status = "error";
       entry.error = String(err && err.message || "failed");
       entry.hasMore = false;
+    } finally {
+      entry.busy = false;
     }
-    entry.busy = false;
     if (token !== ls.token) return;
     if (entry.status === "loading") entry.status = "ok";
     schedulePaint(kind, true);
@@ -274,6 +272,9 @@
     ls.sig = sig;
     ls.limit = RENDER_STEP;
     for (const other of Object.keys(L)) if (other !== kind) { L[other].token += 1; }
+    const grid = document.getElementById(GRIDS[kind]);
+    let layer = grid ? grid.querySelector(":scope > .remote-media-layer") : null;
+    if (layer) layer._deferred = false;
     const hit = cache.get(`${kind}|${sig}`);
     const fresh = hit && Date.now() - hit.at < FRESH_MS;
     if (hit) {
@@ -293,7 +294,7 @@
       return;
     }
     if (token !== ls.token) return;
-    if (!list.length) { ls.peers = new Map(); paint(kind); return; }
+    if (!list.length) { ls.peers = new Map(); if (layer) layer.remove(); return; }
     // Keep whatever was already shown while a refresh runs (no flicker); swap in each Drone's
     // fresh result as soon as it answers.
     const staging = new Map(list.map((p) => [p.drone_id, newEntry(p)]));
@@ -490,9 +491,8 @@
       if (onlineOnly && OFFLINE_STATES.has(e.status)) continue;
       const name = esc(e.name);
       const retryBtn = (cls, text, title) => `<button type="button" class="badge border-0 ${cls}" data-rm-retry="${esc(e.id)}" title="${esc(title)}">${text} <i class="bi bi-arrow-clockwise"></i></button>`;
-      if (e.status === "loading") {
-        const pct = e.total ? Math.min(100, Math.round((e.items.length / e.total) * 100)) : 0;
-        out.push(`<span class="badge text-bg-secondary rm-chip-loading" title="Loading from ${name}"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem"></span>${name}${e.total ? ` · ${n(e.items.length)} / ${n(e.total)}` : ""}<span class="rm-chip-bar"><span style="width:${pct}%"></span></span></span>`);
+      if (e.status === "loading" || e.busy) {
+        out.push(`<span class="badge text-bg-secondary rm-chip-loading" title="Loading from ${name}"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem"></span>${name}</span>`);
       } else if (e.status === "cached") {
         out.push(`<span class="badge text-bg-warning" title="Unreachable — showing the last copy${e.age != null ? ` (${Math.max(1, Math.round(e.age / 60))} min old)` : ""}">${name}: saved copy · ${n(e.items.length)}</span>`);
       } else if (e.status === "timeout") {
@@ -504,7 +504,7 @@
       } else if (e.status === "unsupported") {
         out.push(`<span class="badge text-bg-secondary" title="This Drone's software is too old to share this">${name}: needs update</span>`);
       } else {
-        out.push(`<span class="badge text-bg-info">${name} · ${n(e.items.length)}${e.hasMore && e.total ? ` / ${n(e.total)}` : ""}</span>`);
+        out.push(`<span class="badge text-bg-info">${name}${e.items.length ? ` · ${n(e.items.length)}` : ""}</span>`);
       }
     }
     return out.join(" ");
@@ -526,13 +526,27 @@
     return layer;
   }
 
-  // Reaching the end of what is drawn draws more (data is already loaded): infinite scroll.
+  // Reaching the end of what is drawn draws more (data in memory or next page from peers): infinite scroll.
   const tailWatch = new IntersectionObserver((entries) => {
     for (const e of entries) {
       const layer = e.target.parentElement;
       if (!layer) continue;
       layer._tailVisible = e.isIntersecting;
-      if (e.isIntersecting && layer._more) revealMore(layer._kind);
+      if (e.isIntersecting) {
+        const kind = layer._kind;
+        if (layer._more) {
+          revealMore(kind);
+        } else {
+          const f = filtersFor(kind);
+          if (f && L[kind]) {
+            for (const entry of L[kind].peers.values()) {
+              if (entry.hasMore && !entry.loadingMore && entry.status !== "error") {
+                loadPeer(kind, entry, f, L[kind].token, true);
+              }
+            }
+          }
+        }
+      }
     }
   }, { rootMargin: "800px 0px" });
   function revealMore(kind) {
@@ -561,8 +575,17 @@
       ? items.filter((it) => `${titleOf(it)} ${it.artist || ""} ${it.album || ""} ${it.file_path || ""}`.toLowerCase().includes(needle))
       : items);
     cards.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
+
+    const isAnyLoading = [...ls.peers.values()].some((e) => e.status === "loading" || e.busy);
+    const hasProblems = [...ls.peers.values()].some((e) => ["timeout", "offline", "error"].includes(e.status));
+    if (!cards.length && !isAnyLoading && !hasProblems) {
+      if (layer) layer.remove();
+      return;
+    }
+
     if (!layer) layer = makeLayer(grid);
     layer._kind = kind;
+    layer._deferred = false;
 
     const count = cards.length ? ` · ${cards.length.toLocaleString()}` : "";
     const countEl = layer._head.querySelector(".rm-count");
@@ -605,6 +628,13 @@
       for (const k of Object.keys(L)) { L[k].limit = RENDER_STEP; schedulePaint(k, true); }
       return;
     }
+    const trigger = event.target.closest("[data-rm-trigger]");
+    if (trigger) {
+      const kind = layer._kind;
+      const f = filtersFor(kind);
+      if (f) start(kind, sigOf(f), f);
+      return;
+    }
     const again = event.target.closest("[data-rm-retry]");
     if (again) { retry(layer._kind, again.dataset.rmRetry); return; }
     const el = event.target.closest(".remote-card");
@@ -612,6 +642,54 @@
   }
 
   // ================================================================== activation (no edits to the big renderers)
+  function isDeferred(kind, f) {
+    // ROMs with no query, no system, and no genre is "All Systems" overview:
+    // With tens of thousands of ROMs, don't query peers until the remote section
+    // is scrolled into view or the user narrows the scope with a filter/search.
+    return kind === "roms" && !f.q && !f.system && !f.genre;
+  }
+
+  const dividerWatch = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const layer = e.target.closest(".remote-media-layer");
+      if (!layer || !layer._deferred) continue;
+      dividerWatch.unobserve(e.target);
+      const kind = layer._kind;
+      const f = filtersFor(kind);
+      if (f) start(kind, sigOf(f), f);
+    }
+  }, { rootMargin: "600px 0px" });
+
+  async function ensureDeferredDivider(grid, kind, sig, f) {
+    let list = [];
+    try {
+      list = (await peers()).filter((p) => !p.is_local);
+    } catch (e) { list = []; }
+    if (!list.length) {
+      const existing = grid.querySelector(":scope > .remote-media-layer");
+      if (existing) existing.remove();
+      return;
+    }
+    const currentF = filtersFor(kind);
+    if (!currentF || sigOf(currentF) !== sig) return;
+    let layer = grid.querySelector(":scope > .remote-media-layer");
+    if (layer && !layer._deferred) layer.remove();
+    if (!layer || !layer.isConnected) {
+      layer = document.createElement("div");
+      layer.className = "remote-media-layer";
+      layer.addEventListener("click", onLayerClick);
+      layer._head = document.createElement("div");
+      layer._head.className = "remote-media-divider";
+      layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones</span><span class="remote-media-status"><button type="button" class="btn btn-outline-light btn-sm py-0 px-2" data-rm-trigger="1"><i class="bi bi-cloud-arrow-down me-1"></i>Check other Drones</button></span>`;
+      layer.appendChild(layer._head);
+      grid.appendChild(layer);
+    }
+    layer._kind = kind;
+    layer._deferred = true;
+    dividerWatch.observe(layer._head);
+  }
+
   let activeKind = "";
   let scanQueued = false;
   function scan() {
@@ -628,11 +706,23 @@
       const ls = L[kind];
       if (sig !== ls.sig) {
         clearTimeout(ls.pending);
-        // First load starts immediately; filter changes wait for the user to stop typing.
-        ls.pending = setTimeout(() => start(kind, sig, f), ls.sig === "" ? 0 : 400);
-        if (layer) paint(kind);
+        if (isDeferred(kind, f)) {
+          ls.sig = sig;
+          ls.token += 1;
+          ls.peers = new Map();
+          if (layer) layer.remove();
+          ensureDeferredDivider(grid, kind, sig, f);
+        } else {
+          // Filter changes wait for the user to stop typing
+          ls.pending = setTimeout(() => start(kind, sig, f), ls.sig === "" ? 150 : 350);
+          if (layer) paint(kind);
+        }
       } else if (!layer) {
-        paint(kind); // local grid re-rendered: put the remote cards back (from memory, no network)
+        if (isDeferred(kind, f) && !ls.peers.size) {
+          ensureDeferredDivider(grid, kind, sig, f);
+        } else {
+          paint(kind); // local grid re-rendered: put the remote cards back (from memory, no network)
+        }
       }
     }
     if (found !== activeKind) {

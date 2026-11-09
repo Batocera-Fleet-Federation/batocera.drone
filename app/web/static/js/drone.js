@@ -1835,6 +1835,9 @@ function loadLazyCardImage(img) {
     // caller regardless of whether it has one.
     this.style.display = "none";
     this.nextElementSibling?.classList.remove("d-none");
+    if (this.classList.contains("music-artist-sidebar-avatar")) {
+      this.remove();
+    }
   };
   img.src = primarySrc;
   img.dataset.loaded = "1";
@@ -2747,7 +2750,7 @@ function renderMusicExplorerSidebar() {
   const artistButton = (value, label) => {
     const representativeEntryKey = value ? musicArtistRepresentativeEntryKey(value) : null;
     const avatar = representativeEntryKey
-      ? `<img class="music-artist-sidebar-avatar" src="${escapeHtml(musicArtworkUrl(representativeEntryKey, "artist"))}" alt="" onerror="this.remove();">`
+      ? `<img class="music-artist-sidebar-avatar lazy-image" loading="lazy" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3C/svg%3E" data-src="${escapeHtml(musicArtworkUrl(representativeEntryKey, "artist"))}" data-fallbacks='[]' alt="" onerror="this.remove();">`
       : "";
     return `
     <button type="button" class="movie-explorer-category-btn ${musicExplorerArtistFilter === value ? "active" : ""}" onclick="setMusicExplorerArtistFilter(${jsAttr(value)})">
@@ -2798,6 +2801,7 @@ function renderMusicExplorerSidebar() {
       ` : ""}
     </div>
   `;
+  setupLazyImages();
 }
 function setMusicExplorerLikedFilter(value) {
   musicExplorerLikedFilter = value;
