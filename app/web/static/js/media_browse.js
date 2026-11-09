@@ -20,9 +20,12 @@
   // api()/apiPost() prepend /v1/api themselves; BASE is for <img>/<video> URLs, which are not routed through them.
   const API = "/media-browse";
   const BASE = "/v1/api/media-browse";
-  const PAGE = 500; // the server's page maximum: fewest round trips per Drone
-  const SAFETY_CAP = 50000; // per Drone and view; everything loads in the background, nothing is paged away
-  const RENDER_STEP = 300;
+  const PAGE = 20; // items fetched per Drone per request; further pages load only as the user scrolls
+  const RENDER_STEP = 20;
+  const OFFLINE_STATES = new Set(["offline", "timeout", "cached", "error", "unsupported"]);
+  const ONLINE_KEY = "droneMediaOnlineOnly";
+  let onlineOnly = false;
+  try { onlineOnly = window.localStorage.getItem(ONLINE_KEY) === "1"; } catch (e) { /* storage unavailable */ }
   const FRESH_MS = 60 * 1000;
   const SOURCES_MS = 5 * 60 * 1000;
   const GRIDS = { roms: "systems-explore-grid", movies: "movie-explorer-grid", music: "music-explorer-grid" };
@@ -210,16 +213,16 @@
     return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, error: "", age: null };
   }
 
-  // Loads every page of one Drone, painting as pages arrive.  Progress and problems are shown by
-  // that Drone's chip next to the "On other Drones" divider -- no toast, nothing modal.
+  // Loads ONE page (PAGE items) of one Drone; the next page is requested by loadMore() when the
+  // user scrolls to the end.  Progress and problems show on that Drone's chip next to the
+  // "On other Drones" divider -- no toast, nothing modal.
   async function loadPeer(kind, entry, f, token) {
     const ls = L[kind];
     entry.status = "loading";
     entry.hasMore = false;
-    let first = true;
+    entry.busy = true;
     try {
-      while (token === ls.token && entry.items.length < SAFETY_CAP && (first || entry.hasMore)) {
-        first = false;
+      {
         const params = new URLSearchParams({ limit: String(PAGE), drones: entry.id, exclude_local: "1" });
         if (f.q) params.set("q", f.q);
         if (f.system) params.set("system", f.system);
@@ -236,19 +239,33 @@
         entry.hasMore = !!page.has_more;
         const ok = src.status === "ok" || src.status === "cached";
         // A Drone is "loading" until its last page is in; a failure/stale status shows at once.
-        entry.status = ok && entry.hasMore && (page.items || []).length ? "loading" : src.status;
-        schedulePaint(kind);
-        if (!ok || !(page.items || []).length) break;
+        entry.status = src.status;
+        if (!ok || !(page.items || []).length) entry.hasMore = false;
       }
     } catch (err) {
+      entry.busy = false;
       if (token !== ls.token) return;
       entry.status = "error";
       entry.error = String(err && err.message || "failed");
       entry.hasMore = false;
     }
+    entry.busy = false;
     if (token !== ls.token) return;
     if (entry.status === "loading") entry.status = "ok";
     schedulePaint(kind, true);
+  }
+
+  // Fetch the next page for every Drone that still has more and is not already fetching.
+  function loadMore(kind) {
+    const ls = L[kind];
+    const f = filtersFor(kind);
+    if (!f) return;
+    for (const e of ls.peers.values()) {
+      if (e.hasMore && !e.busy && e.cursor && (e.status === "ok" || e.status === "cached")) {
+        cache.delete(`${kind}|${ls.sig}`);
+        loadPeer(kind, e, f, ls.token);
+      }
+    }
   }
 
   async function start(kind, sig, f) {
@@ -296,7 +313,7 @@
     if (id === "_list") { sourcesCache = { at: 0, promise: null }; cache.clear(); ls.sig = ""; queueScan(); return; }
     const entry = ls.peers.get(id);
     if (!entry) return;
-    entry.items = []; entry.cursor = ""; entry.error = "";
+    entry.items = []; entry.cursor = ""; entry.error = ""; entry.busy = false;
     cache.delete(`${kind}|${ls.sig}`);
     loadPeer(kind, entry, f, ls.token);
     paint(kind);
@@ -328,6 +345,10 @@
   // Apply the page's own client-side filters (type / category / artist / liked) to remote rows.
   function passes(kind, it, f) {
     if (it.exists_locally) return false; // already shown as a normal local card
+    if (onlineOnly) {
+      const owner = L[kind].peers.get(it.drone_id);
+      if (owner && OFFLINE_STATES.has(owner.status)) return false;
+    }
     if (kind === "movies") {
       if (f.type && f.type !== "all") {
         const k = it.kind || "movie";
@@ -466,6 +487,7 @@
     const out = [];
     const n = (v) => Number(v || 0).toLocaleString();
     for (const e of L[kind].peers.values()) {
+      if (onlineOnly && OFFLINE_STATES.has(e.status)) continue;
       const name = esc(e.name);
       const retryBtn = (cls, text, title) => `<button type="button" class="badge border-0 ${cls}" data-rm-retry="${esc(e.id)}" title="${esc(title)}">${text} <i class="bi bi-arrow-clockwise"></i></button>`;
       if (e.status === "loading") {
@@ -482,7 +504,7 @@
       } else if (e.status === "unsupported") {
         out.push(`<span class="badge text-bg-secondary" title="This Drone's software is too old to share this">${name}: needs update</span>`);
       } else {
-        out.push(`<span class="badge text-bg-info">${name} · ${n(e.items.length)}</span>`);
+        out.push(`<span class="badge text-bg-info">${name} · ${n(e.items.length)}${e.hasMore && e.total ? ` / ${n(e.total)}` : ""}</span>`);
       }
     }
     return out.join(" ");
@@ -495,7 +517,7 @@
     layer.addEventListener("click", onLayerClick);
     layer._head = document.createElement("div");
     layer._head.className = "remote-media-divider";
-    layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones<span class="rm-count"></span></span><span class="remote-media-status"></span>`;
+    layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones<span class="rm-count"></span></span><span class="remote-media-status"></span><label class="form-check form-switch m-0 small rm-online-toggle"><input class="form-check-input" type="checkbox" data-rm-online ${onlineOnly ? "checked" : ""}><span class="form-check-label ms-1">Online only</span></label>`;
     layer._tail = document.createElement("div");
     layer._tail.className = "remote-media-tail";
     layer.append(layer._head, layer._tail);
@@ -514,8 +536,13 @@
     }
   }, { rootMargin: "800px 0px" });
   function revealMore(kind) {
-    L[kind].limit += RENDER_STEP;
-    schedulePaint(kind, true);
+    const ls = L[kind];
+    if (ls.drawable > ls.limit) {
+      ls.limit += RENDER_STEP;
+      schedulePaint(kind, true);
+    } else {
+      loadMore(kind); // everything fetched is already drawn: ask the Drones for the next page
+    }
   }
 
   function paint(kind) {
@@ -544,6 +571,7 @@
     const statusEl = layer._head.querySelector(".remote-media-status");
     if (layer._statusHtml !== html) { statusEl.innerHTML = html; layer._statusHtml = html; }
 
+    ls.drawable = cards.length;
     const shown = cards.slice(0, ls.limit);
     const els = cardEls[kind];
     const want = new Set();
@@ -564,12 +592,19 @@
       els.delete(key);
     }
     if (layer.lastChild !== layer._tail) layer.appendChild(layer._tail);
-    layer._more = cards.length > shown.length;
+    layer._more = cards.length > shown.length || [...ls.peers.values()].some((e) => e.hasMore);
     if (layer._more && layer._tailVisible) revealMore(kind); // still at the end after drawing: keep going
   }
 
   function onLayerClick(event) {
     const layer = event.currentTarget;
+    const toggle = event.target.closest("[data-rm-online]");
+    if (toggle) {
+      onlineOnly = !!toggle.checked;
+      try { window.localStorage.setItem(ONLINE_KEY, onlineOnly ? "1" : "0"); } catch (e) { /* ignore */ }
+      for (const k of Object.keys(L)) { L[k].limit = RENDER_STEP; schedulePaint(k, true); }
+      return;
+    }
     const again = event.target.closest("[data-rm-retry]");
     if (again) { retry(layer._kind, again.dataset.rmRetry); return; }
     const el = event.target.closest(".remote-card");
