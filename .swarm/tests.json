@@ -5216,6 +5216,40 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-security-issue-685-active-artwork",
+      "name": "Issue #685 uploaded artwork must not execute script in the Drone origin",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_685_active_artwork.py"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/security/test_issue_685_active_artwork.py",
+          "app/web/handlers_artwork.py",
+          "app/web/handlers_peer.py",
+          "app/drone_api.py",
+          "app/web/static/js/drone.js"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
