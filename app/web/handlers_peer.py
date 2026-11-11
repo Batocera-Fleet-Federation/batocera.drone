@@ -61,7 +61,9 @@ try:
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
     from ..transfer.transfer_batch import get_upload_batches as _get_upload_batches
     from .server_tls import load_peer_cert_everywhere
+    from .media_security import MEDIA_CONTENT_SECURITY_POLICY
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from web.media_security import MEDIA_CONTENT_SECURITY_POLICY  # type: ignore
     from common import identity_provisioning as _identity  # type: ignore
     from common.auth import record_unauthorized_response  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
@@ -1397,7 +1399,9 @@ class HandlersPeerMixin:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            self._send_security_headers(cache_control="public, max-age=3600")
+            self._send_security_headers(
+                cache_control="public, max-age=3600", csp_override=MEDIA_CONTENT_SECURITY_POLICY,
+            )
             self.end_headers()
             self.wfile.write(data)
             return
@@ -1416,6 +1420,8 @@ class HandlersPeerMixin:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self._send_security_headers(cache_control="public, max-age=3600")
+        self._send_security_headers(
+            cache_control="public, max-age=3600", csp_override=MEDIA_CONTENT_SECURITY_POLICY,
+        )
         self.end_headers()
         self.wfile.write(data)
