@@ -26,6 +26,20 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from web.route_config import api_url  # type: ignore
 
 
+def _rom_explorer_filters(system: str, browser_playable: bool, missing_art):
+    """Share the validated explorer scope between cards and duplicate groups."""
+    requested_art = {str(field or "").strip().lower() for field in (missing_art or [])}
+    missing_artwork = [field for field in ARTWORK_FIELDS if field in requested_art]
+    if browser_playable:
+        if system:
+            systems = [system] if system.lower() in SYSTEM_CORE_MAP else ["__no_match__"]
+        else:
+            systems = sorted(SYSTEM_CORE_MAP)
+    else:
+        systems = [system] if system else None
+    return systems, missing_artwork
+
+
 class HandlersContentMixin:
     def _handle_theme_meta(self) -> None:
         self._send_json(200, self._build_theme_meta(), cache_key="json:/theme/meta")
@@ -346,16 +360,7 @@ class HandlersContentMixin:
         system_value = str(system or "").strip()
         genre_value = str(genre or "").strip()
         query_value = str(query or "").strip()
-        requested_art = {str(field or "").strip().lower() for field in (missing_art or [])}
-        missing_artwork = [field for field in ARTWORK_FIELDS if field in requested_art]
-        if browser_playable:
-            playable_systems = sorted(SYSTEM_CORE_MAP.keys())
-            if system_value:
-                systems_filter = [system_value] if system_value.lower() in SYSTEM_CORE_MAP else ["__no_match__"]
-            else:
-                systems_filter = playable_systems
-        else:
-            systems_filter = [system_value] if system_value else None
+        systems_filter, missing_artwork = _rom_explorer_filters(system_value, browser_playable, missing_art)
         page = self.repository.list_rom_browse_page(
             systems=systems_filter, genre=genre_value, query=query_value, limit=safe_limit, offset=safe_offset,
             missing_artwork=missing_artwork,
@@ -387,20 +392,27 @@ class HandlersContentMixin:
             },
         )
 
-    def _handle_admin_rom_duplicates(self, system: Optional[str] = None, genre: Optional[str] = None, query: Optional[str] = None) -> None:
-        """Duplicate-game groups for the Systems Browse page's duplicate
-        finder -- the same System/Category/search filters as GET /roms."""
+    def _handle_admin_rom_duplicates(
+        self, system: Optional[str] = None, genre: Optional[str] = None,
+        query: Optional[str] = None, browser_playable: bool = False,
+        missing_art: Optional[List[str]] = None,
+    ) -> None:
+        """Duplicate groups with the same validated scope as the ROM grid."""
         system_value = str(system or "").strip()
         genre_value = str(genre or "").strip()
         query_value = str(query or "").strip()
-        systems_filter = [system_value] if system_value else None
-        groups = self.repository.find_duplicate_roms(systems=systems_filter, genre=genre_value, query=query_value)
-        self._send_json(200, {"groups": groups})
+        systems_filter, missing_artwork = _rom_explorer_filters(system_value, browser_playable, missing_art)
+        groups = self.repository.find_duplicate_roms(
+            systems=systems_filter, genre=genre_value, query=query_value, missing_artwork=missing_artwork,
+        )
+        genres = self.repository.list_rom_genre_facets(
+            systems=systems_filter, query=query_value, missing_artwork=missing_artwork,
+        )
+        self._send_json(200, {"groups": groups, "count": sum(len(group["items"]) for group in groups), "genres": genres})
 
     def _handle_admin_roms_delete(self, payload: dict) -> None:
         """Permanently deletes one or more ROMs (their file(s) plus gamelist.xml
-        entry and cache row) -- the Systems Browse ROM detail page's delete
-        action, and the duplicate-cleanup bulk delete. Takes a batch so
+        entry and cache row) -- used by duplicate-cleanup bulk delete. Takes a batch so
         clearing several duplicates is one request instead of one per ROM.
         Unlike movies (a single flat entry_key across the library), a ROM
         needs both its system and unique_id to identify -- entries are

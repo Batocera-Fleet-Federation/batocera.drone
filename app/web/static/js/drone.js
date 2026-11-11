@@ -115,7 +115,7 @@ let systemsExploreLoadingMore = false;
 const SYSTEMS_EXPLORE_BIOS_KEY = "__bios__";
 let systemsExploreBiosTotal = 0;
 let systemsExploreBiosItems = [];
-// Duplicate-game finder: an icon-only toggle next to the search box (see
+// Duplicate-game filter in the explorer sidebar (see
 // renderSystemsExplorePage) that swaps the grid from paginated ROM cards to
 // a flat list of duplicate groups within whatever System/Category/search
 // filter is currently active -- fetched in full (no "Show more" paging,
@@ -4156,11 +4156,6 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
             : `<a class="btn btn-primary" href="${romDownloadUrl(system, rom.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
         }
-        ${
-          adminEnabled
-            ? `<button class="btn btn-outline-danger" type="button" onclick="deleteRomFromDetailPage(${jsAttr(system)}, ${jsAttr(rom.unique_id)}, ${jsAttr(rom.title || rom.name || "")})"><i class="bi bi-trash me-1"></i>Delete</button>`
-            : ""
-        }
       </div>
       ${
         browserPlayRomsetSensitive
@@ -4290,25 +4285,6 @@ async function deleteRomsBatch(items) {
   systemRomCache = {};
   return result;
 }
-function deleteRomFromDetailPage(system, uniqueId, title) {
-  openConfirmDeleteModal({
-    title: "Delete ROM?",
-    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
-    confirmLabel: "Delete",
-    onConfirm: async () => {
-      setLoading(true, "Deleting...");
-      try {
-        await deleteRomsBatch([{ system, unique_id: uniqueId }]);
-        showToast("ROM deleted.", "success");
-        setHash(systemsExploreHash(system));
-      } catch (err) {
-        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-      } finally {
-        setLoading(false);
-      }
-    },
-  });
-}
 // "show" is reserved on the movies side for the same reason noted at
 // showDetailHash -- not relevant here, but kept as a plain query-string hash
 // (not a path segment) for the same reason: system/genre names can contain
@@ -4317,7 +4293,11 @@ function deleteRomFromDetailPage(system, uniqueId, title) {
 function systemsExploreHash(system = systemsExploreSelectedSystem, genre = systemsExploreSelectedGenre) {
   const params = new URLSearchParams();
   if (system) params.set("system", system);
-  if (genre) params.set("genre", genre);
+  if (genre && system !== SYSTEMS_EXPLORE_BIOS_KEY) params.set("genre", genre);
+  if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+  if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
+  if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
+  if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreDuplicatesMode) params.set("duplicates", "1");
   const qs = params.toString();
   return `#systems/explore${qs ? `?${qs}` : ""}`;
 }
@@ -4325,7 +4305,14 @@ function parseSystemsExploreHash(hash) {
   if (!hash.startsWith("#systems/explore")) return null;
   const queryIndex = hash.indexOf("?");
   const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
-  return { system: params.get("system") || "", genre: params.get("genre") || "" };
+  const requestedArt = params.getAll("missing_art").flatMap((value) => value.split(","));
+  return {
+    system: params.get("system") || "", genre: params.get("genre") || "",
+    query: params.get("q") || "",
+    missingArt: SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([field]) => field).filter((field) => requestedArt.includes(field)),
+    browserPlayable: params.get("browser_playable") === "1",
+    duplicates: params.get("duplicates") === "1",
+  };
 }
 async function renderSystemsExplorePage() {
   currentSystemContext = null;
@@ -4333,16 +4320,19 @@ async function renderSystemsExplorePage() {
   const parsed = parseSystemsExploreHash(window.location.hash) || { system: "", genre: "" };
   systemsExploreSelectedSystem = parsed.system;
   systemsExploreSelectedGenre = parsed.genre;
-  systemsExploreSearchQuery = "";
+  clearTimeout(systemsExploreSearchDebounce);
+  ++systemsExploreRequestId;
+  systemsExploreLoadingMore = false;
+  systemsExploreSearchQuery = parsed.query || "";
   systemsExploreShowAllSystems = false;
   systemsExploreShowAllCategories = false;
   systemsExploreSystemFilterQuery = "";
   systemsExploreCategoryFilterQuery = "";
   systemsExploreBiosItems = [];
-  systemsExploreDuplicatesMode = false;
+  systemsExploreDuplicatesMode = Boolean(parsed.duplicates);
   systemsExploreDuplicateGroups = [];
-  systemsExploreBrowserPlayOnly = false;
-  systemsExploreMissingArt = [];
+  systemsExploreBrowserPlayOnly = Boolean(parsed.browserPlayable);
+  systemsExploreMissingArt = parsed.missingArt || [];
   setLoading(true, "Loading systems...");
   try {
     const [data, biosSummary, browserPlayInfo] = await Promise.all([
@@ -4353,21 +4343,22 @@ async function renderSystemsExplorePage() {
     systemsExploreAllSystems = (data.systems || []).slice().sort((a, b) => Number(b.rom_count || 0) - Number(a.rom_count || 0));
     systemsExploreBiosTotal = Number(biosSummary.count || 0);
     systemsExploreBrowserPlayMap = browserPlayInfo.systems || {};
+    normalizeSystemsExploreFilters();
+    updateSystemsExploreHash(true);
     content.innerHTML = `
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
           <div class="movie-explorer-brand"><i class="bi bi-controller me-2"></i>Systems</div>
           <div class="movie-explorer-search flex-grow-1">
-            <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" oninput="filterSystemsExplore(this.value)" autofocus>
+            <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" value="${escapeHtml(systemsExploreSearchQuery)}" oninput="filterSystemsExplore(this.value)" autofocus>
           </div>
-          <button id="systemsExploreBrowserPlayBtn" class="btn btn-outline-light btn-sm" type="button" title="Show only games playable in Chrome (Play in Browser -- other browsers aren't supported yet)" onclick="toggleSystemsExploreBrowserPlayOnly()"><i class="bi bi-play-circle"></i></button>
-          <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
           <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-haspopup="dialog" onclick="openExplorerFiltersModal('systems-explore-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("systems")}
         </div>
         <div class="movie-explorer-body">
           <aside id="systems-explore-sidebar" class="movie-explorer-sidebar"></aside>
           <div id="systems-explore-grid-wrap" class="movie-explorer-grid-wrap min-width-0">
+            <div id="systems-explore-active-filters" class="explorer-active-filters d-none" role="group" aria-label="Active filters"></div>
             <div id="systems-explore-grid" class="movie-explorer-grid"></div>
             <div id="systems-explore-more" class="text-center mt-3"></div>
           </div>
@@ -4414,18 +4405,28 @@ function renderSystemsExploreSidebarShell() {
       <div class="movie-explorer-sidebar-title">Missing artwork</div>
       <div id="systems-explore-missing-art-list"></div>
     </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Game filters</div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="systemsExploreBrowserPlayFilter" onchange="toggleSystemsExploreBrowserPlayOnly()">
+        <label class="form-check-label" for="systemsExploreBrowserPlayFilter">Show games playable in browser</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="systemsExploreDuplicatesFilter" onchange="toggleSystemsExploreDuplicatesMode()">
+        <label class="form-check-label" for="systemsExploreDuplicatesFilter">Only show duplicates</label>
+      </div>
+      <div class="small text-muted mt-1">Game filters switch BIOS to All Systems. Browser play requires a supported system and Chrome.</div>
+    </div>
   `;
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
   renderSystemsExploreMissingArtList();
 }
-// BIOS rows have no artwork and the duplicate finder (/admin/roms/duplicates)
-// doesn't take this filter, so the checkboxes are disabled in those views
-// rather than silently doing nothing.
+// BIOS rows have no artwork, so artwork filters are disabled for BIOS.
 function renderSystemsExploreMissingArtList() {
   const list = document.getElementById("systems-explore-missing-art-list");
   if (!list) return;
-  const disabled = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY || systemsExploreDuplicatesMode;
+  const disabled = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY;
   list.innerHTML = `
     <div class="small text-muted mb-1">${disabled ? "Not available in this view." : "Show games missing any of:"}</div>
     ${SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([field, label]) => `
@@ -4446,13 +4447,11 @@ async function toggleSystemsExploreMissingArt(field, checked) {
   if (checked) next.add(field);
   else next.delete(field);
   systemsExploreMissingArt = SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([value]) => value).filter((value) => next.has(value));
-  renderSystemsExploreMissingArtList();
-  await loadSystemsExploreCurrentMode({ reset: true });
+  await refreshSystemsExploreFilters();
 }
 async function clearSystemsExploreMissingArt() {
   systemsExploreMissingArt = [];
-  renderSystemsExploreMissingArtList();
-  await loadSystemsExploreCurrentMode({ reset: true });
+  await refreshSystemsExploreFilters();
 }
 function systemsExploreVisibleSystems() {
   const base = systemsExploreBrowserPlayOnly
@@ -4554,19 +4553,17 @@ function filterSystemsExploreCategoryList(value) {
 }
 async function setSystemsExploreSystem(value) {
   systemsExploreSelectedSystem = value;
-  systemsExploreSelectedGenre = "";
-  updateSystemsExploreHash();
-  renderSystemsExploreSystemList();
-  renderSystemsExploreCategoryList();
-  renderSystemsExploreMissingArtList();
-  await loadSystemsExploreCurrentMode({ reset: true });
+  if (value === SYSTEMS_EXPLORE_BIOS_KEY) {
+    systemsExploreSelectedGenre = "";
+    systemsExploreMissingArt = [];
+    systemsExploreBrowserPlayOnly = false;
+    systemsExploreDuplicatesMode = false;
+  }
+  await refreshSystemsExploreFilters();
 }
 async function setSystemsExploreGenre(value) {
   systemsExploreSelectedGenre = value;
-  updateSystemsExploreHash();
-  renderSystemsExploreSystemList();
-  renderSystemsExploreCategoryList();
-  await loadSystemsExploreCurrentMode({ reset: true });
+  await refreshSystemsExploreFilters();
 }
 function toggleSystemsExploreShowAllSystems() {
   systemsExploreShowAllSystems = !systemsExploreShowAllSystems;
@@ -4576,53 +4573,100 @@ function toggleSystemsExploreShowAllCategories() {
   systemsExploreShowAllCategories = !systemsExploreShowAllCategories;
   renderSystemsExploreCategoryList();
 }
-function updateSystemsExploreHash() {
+function updateSystemsExploreHash(replace = false) {
   const nextHash = systemsExploreHash();
-  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
+  if (window.location.hash !== nextHash) {
+    history[replace ? "replaceState" : "pushState"](null, "", nextHash);
+  }
+}
+function normalizeSystemsExploreFilters() {
+  const selected = systemsExploreSelectedSystem.toLowerCase();
+  if ((systemsExploreDuplicatesMode || systemsExploreBrowserPlayOnly) && selected === SYSTEMS_EXPLORE_BIOS_KEY) {
+    systemsExploreSelectedSystem = "";
+  }
+  if (systemsExploreBrowserPlayOnly && selected && !systemsExploreBrowserPlayMap[selected]) {
+    systemsExploreSelectedSystem = "";
+  }
+  if (systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) {
+    systemsExploreSelectedGenre = "";
+    systemsExploreMissingArt = [];
+  }
+}
+function renderSystemsExploreFilterState() {
+  renderSystemsExploreSystemList();
+  renderSystemsExploreCategoryList();
+  renderSystemsExploreMissingArtList();
+  const playable = document.getElementById("systemsExploreBrowserPlayFilter");
+  const duplicates = document.getElementById("systemsExploreDuplicatesFilter");
+  if (playable) playable.checked = systemsExploreBrowserPlayOnly;
+  if (duplicates) duplicates.checked = systemsExploreDuplicatesMode;
+  renderSystemsExploreActiveFilters();
+}
+function renderSystemsExploreActiveFilters() {
+  const row = document.getElementById("systems-explore-active-filters");
+  if (!row) return;
+  const filters = [];
+  if (systemsExploreSelectedSystem) filters.push(["system", "", `System: ${systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY ? "BIOS" : systemsExploreSelectedSystem}`]);
+  if (systemsExploreSelectedGenre) filters.push(["genre", "", `Category: ${systemsExploreSelectedGenre}`]);
+  if (systemsExploreSearchQuery.trim()) filters.push(["q", "", `Search: ${systemsExploreSearchQuery.trim()}`]);
+  SYSTEMS_EXPLORE_ARTWORK_TYPES.forEach(([field, label]) => {
+    if (systemsExploreMissingArt.includes(field)) filters.push(["missing_art", field, `Missing: ${label}`]);
+  });
+  if (systemsExploreBrowserPlayOnly) filters.push(["browser_playable", "", "Playable in browser"]);
+  if (systemsExploreDuplicatesMode) filters.push(["duplicates", "", "Duplicates"]);
+  row.classList.toggle("d-none", !filters.length);
+  row.innerHTML = filters.map(([key, value, label]) => `
+    <button type="button" class="btn btn-sm btn-outline-light explorer-filter-chip" aria-label="${escapeHtml(`Remove ${label} filter`)}" onclick="removeSystemsExploreFilter(${jsAttr(key)}, ${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><i class="bi bi-x" aria-hidden="true"></i>
+    </button>
+  `).join("");
+}
+async function removeSystemsExploreFilter(key, value = "") {
+  if (key === "system") systemsExploreSelectedSystem = "";
+  if (key === "genre") systemsExploreSelectedGenre = "";
+  if (key === "q") {
+    systemsExploreSearchQuery = "";
+    const search = document.getElementById("systemsExploreSearch");
+    if (search) search.value = "";
+  }
+  if (key === "missing_art") systemsExploreMissingArt = systemsExploreMissingArt.filter((field) => field !== value);
+  if (key === "browser_playable") systemsExploreBrowserPlayOnly = false;
+  if (key === "duplicates") systemsExploreDuplicatesMode = false;
+  await refreshSystemsExploreFilters();
+  // Removing a chip replaces its DOM node; retain a useful keyboard focus.
+  const row = document.getElementById("systems-explore-active-filters");
+  (row?.querySelector("button") || document.getElementById("systemsExploreSearch"))?.focus();
+}
+async function refreshSystemsExploreFilters() {
+  clearTimeout(systemsExploreSearchDebounce);
+  normalizeSystemsExploreFilters();
+  updateSystemsExploreHash();
+  await loadSystemsExploreCurrentMode({ reset: true });
 }
 let systemsExploreSearchDebounce = null;
+let systemsExploreRequestId = 0;
 function filterSystemsExplore(value) {
   systemsExploreSearchQuery = value || "";
+  renderSystemsExploreActiveFilters();
   clearTimeout(systemsExploreSearchDebounce);
-  systemsExploreSearchDebounce = setTimeout(() => loadSystemsExploreCurrentMode({ reset: true }), 300);
+  systemsExploreSearchDebounce = setTimeout(() => refreshSystemsExploreFilters(), 300);
 }
 function loadSystemsExploreCurrentMode(opts = {}) {
+  renderSystemsExploreFilterState();
   if (systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) return loadSystemsExploreBios(opts);
   if (systemsExploreDuplicatesMode) return loadSystemsExploreDuplicates();
   return loadSystemsExploreRoms(opts);
 }
 async function toggleSystemsExploreDuplicatesMode() {
   systemsExploreDuplicatesMode = !systemsExploreDuplicatesMode;
-  // BIOS has no "duplicate" concept of its own -- turning duplicates mode
-  // on while it's selected falls back to "All Systems" instead.
-  if (systemsExploreDuplicatesMode && systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) {
-    systemsExploreSelectedSystem = "";
-    updateSystemsExploreHash();
-    renderSystemsExploreSystemList();
-    renderSystemsExploreCategoryList();
-  }
-  renderSystemsExploreMissingArtList();
-  document.getElementById("systemsExploreDuplicatesBtn")?.classList.toggle("active", systemsExploreDuplicatesMode);
-  await loadSystemsExploreCurrentMode({ reset: true });
+  await refreshSystemsExploreFilters();
 }
 async function toggleSystemsExploreBrowserPlayOnly() {
   systemsExploreBrowserPlayOnly = !systemsExploreBrowserPlayOnly;
-  // BIOS isn't a game system and no system outside SYSTEM_CORE_MAP has any
-  // results left once filtered -- both fall back to "All Systems" (playable
-  // systems only) rather than leaving the selection pointed at something
-  // that can only ever show zero results while the toggle is on.
-  const selected = systemsExploreSelectedSystem.toLowerCase();
-  if (systemsExploreBrowserPlayOnly && (selected === SYSTEMS_EXPLORE_BIOS_KEY.toLowerCase() || (selected && !systemsExploreBrowserPlayMap[selected]))) {
-    systemsExploreSelectedSystem = "";
-    updateSystemsExploreHash();
-  }
-  renderSystemsExploreSystemList();
-  renderSystemsExploreCategoryList();
-  renderSystemsExploreMissingArtList();
-  document.getElementById("systemsExploreBrowserPlayBtn")?.classList.toggle("active", systemsExploreBrowserPlayOnly);
-  await loadSystemsExploreCurrentMode({ reset: true });
+  await refreshSystemsExploreFilters();
 }
 async function loadSystemsExploreDuplicates() {
+  const requestId = ++systemsExploreRequestId;
   systemsExploreLoadingMore = true;
   renderSystemsExploreGrid();
   try {
@@ -4630,40 +4674,55 @@ async function loadSystemsExploreDuplicates() {
     if (systemsExploreSelectedSystem) params.set("system", systemsExploreSelectedSystem);
     if (systemsExploreSelectedGenre) params.set("genre", systemsExploreSelectedGenre);
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+    if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
+    if (systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
     const data = await api(`/admin/roms/duplicates?${params.toString()}`);
+    if (requestId !== systemsExploreRequestId) return;
     systemsExploreDuplicateGroups = data.groups || [];
+    systemsExploreGenreCounts = data.genres || [];
+    systemsExploreTotal = Number(data.count || 0);
+    renderSystemsExploreCategoryList();
   } catch (err) {
+    if (requestId !== systemsExploreRequestId) return;
     showToast(`Failed to load duplicates: ${escapeHtml(err.message || "unknown error")}`, "danger");
     systemsExploreDuplicateGroups = [];
   } finally {
-    systemsExploreLoadingMore = false;
-    renderSystemsExploreGrid();
+    if (requestId === systemsExploreRequestId) {
+      systemsExploreLoadingMore = false;
+      renderSystemsExploreGrid();
+    }
   }
 }
 async function loadSystemsExploreBios(opts = {}) {
   const reset = Boolean(opts.reset);
   const offset = reset ? 0 : systemsExploreBiosItems.length;
-  if (systemsExploreLoadingMore) return;
+  if (systemsExploreLoadingMore && !reset) return;
+  const requestId = ++systemsExploreRequestId;
   systemsExploreLoadingMore = true;
   renderSystemsExploreMoreButton();
   try {
     const params = new URLSearchParams({ limit: String(SYSTEMS_EXPLORE_PAGE_SIZE), offset: String(offset) });
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
     const data = await api(`/bios?${params.toString()}`);
+    if (requestId !== systemsExploreRequestId) return;
     systemsExploreBiosItems = reset ? (data.bios || []) : [...systemsExploreBiosItems, ...(data.bios || [])];
     systemsExploreTotal = Number(data.count || 0);
     systemsExploreHasMore = Boolean(data.has_more);
   } catch (err) {
+    if (requestId !== systemsExploreRequestId) return;
     showToast(`Failed to load BIOS files: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
-    systemsExploreLoadingMore = false;
-    renderSystemsExploreGrid();
+    if (requestId === systemsExploreRequestId) {
+      systemsExploreLoadingMore = false;
+      renderSystemsExploreGrid();
+    }
   }
 }
 async function loadSystemsExploreRoms(opts = {}) {
   const reset = Boolean(opts.reset);
   const offset = reset ? 0 : systemsExploreRoms.length;
-  if (systemsExploreLoadingMore) return;
+  if (systemsExploreLoadingMore && !reset) return;
+  const requestId = ++systemsExploreRequestId;
   systemsExploreLoadingMore = true;
   renderSystemsExploreMoreButton();
   try {
@@ -4674,6 +4733,7 @@ async function loadSystemsExploreRoms(opts = {}) {
     if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
     if (systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
     const data = await api(`/roms?${params.toString()}`);
+    if (requestId !== systemsExploreRequestId) return;
     systemsExploreRoms = reset ? (data.roms || []) : [...systemsExploreRoms, ...(data.roms || [])];
     systemsExploreTotal = Number(data.count || 0);
     systemsExploreHasMore = Boolean(data.has_more);
@@ -4683,10 +4743,13 @@ async function loadSystemsExploreRoms(opts = {}) {
     // per query.
     if (reset) renderSystemsExploreCategoryList();
   } catch (err) {
+    if (requestId !== systemsExploreRequestId) return;
     showToast(`Failed to load games: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
-    systemsExploreLoadingMore = false;
-    renderSystemsExploreGrid();
+    if (requestId === systemsExploreRequestId) {
+      systemsExploreLoadingMore = false;
+      renderSystemsExploreGrid();
+    }
   }
 }
 function renderSystemsExploreGrid() {
@@ -4770,8 +4833,7 @@ function renderSystemsExploreDuplicateGroup(group) {
 }
 // Targeted single delete for one duplicate-list row -- distinct from the bulk
 // "Review & Delete Duplicates" modal (openRomDuplicatesReviewModal): confirms
-// then deletes just this one copy and refreshes the duplicates list in place
-// (no navigation away, unlike deleteRomFromDetailPage's own-page delete).
+// then deletes just this one copy and refreshes the duplicates list in place.
 function deleteRomDuplicateItem(system, uniqueId, title) {
   openConfirmDeleteModal({
     title: "Delete game?",
@@ -8536,9 +8598,6 @@ function romMetadataEditFormHtml(rom) {
   const editableFields = Array.from(new Set(
     knownMetadataFields.concat(Object.keys(details).filter((key) => key !== "path" && !ROM_MEDIA_ARTWORK_FIELDS.has(key)))
   ));
-  const removeBtn = rom.has_gamelist_entry
-    ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeRomMediaGamelistEntry()"><i class="bi bi-trash me-1"></i>Remove gamelist entry</button>`
-    : "";
   return `
     <form id="romMediaGamelistForm" class="compact-edit">
       <div class="gamelist-edit-grid">
@@ -8546,7 +8605,6 @@ function romMetadataEditFormHtml(rom) {
       </div>
       <div class="d-flex gap-2 mt-2">
         <button class="btn btn-sm btn-primary" type="button" onclick="saveRomMediaMetadata()">Save Metadata</button>
-        ${removeBtn}
       </div>
     </form>
   `;
@@ -8570,35 +8628,18 @@ async function saveRomMediaMetadata() {
     setLoading(false);
   }
 }
-async function removeRomMediaGamelistEntry() {
-  const rom = (window.missingArtworkRoms || [])[0];
-  if (!rom) return;
-  const label = rom.title || rom.name || rom.rom_path || "this ROM";
-  if (!window.confirm(`Remove "${label}" from gamelist.xml? The ROM file itself will not be deleted, but all of its metadata and artwork references (including any video) will be cleared.`)) return;
-  setLoading(true, "Removing gamelist entry...");
-  try {
-    await apiPost("/admin/artwork/gamelist/remove", { system: rom.system, rom_path: rom.rom_path });
-    showToast(`Removed ${escapeHtml(label)} from gamelist.xml.`, "success");
-    await renderRomMediaPage(rom.system, rom.unique_id);
-  } catch (err) {
-    showToast(`Remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
 function artworkImageUploadHtml(rom, field) {
   const isVideo = field === "video";
   const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : null;
   const existingUrl = artworkExistingAssetUrl(rom, field, existingValue);
-  const existingDisplay = existingValue ? `<span class="text-muted small artwork-upload-status">has ${escapeHtml(field)}</span>` : `<span class="text-muted small artwork-upload-status">no ${escapeHtml(field)}</span>`;
+  const existingDisplay = existingValue ? `<span class="text-muted small artwork-upload-status" role="status" aria-live="polite">has ${escapeHtml(field)}</span>` : `<span class="text-muted small artwork-upload-status" role="status" aria-live="polite">no ${escapeHtml(field)}</span>`;
   const viewBtn = existingUrl
     ? `<button class="btn btn-sm btn-outline-secondary btn-icon artwork-view-btn" type="button" data-image-url="${escapeHtml(existingUrl)}" data-image-title="${escapeHtml(field)}" data-is-video="${isVideo ? "1" : "0"}" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
     : `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" disabled title="No ${escapeHtml(field)} to view"><i class="bi bi-eye-slash"></i></button>`;
   return `
     <div class="artwork-upload-item">
       <span class="artwork-upload-label" title="${escapeHtml(field)}">${escapeHtml(field)}</span>
-      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="${isVideo ? "video/*" : "image/*"}" data-field="${escapeHtml(field)}">
-      <button class="btn btn-sm btn-primary btn-icon artwork-upload-btn" type="button" data-field="${escapeHtml(field)}" title="Upload"><i class="bi bi-upload"></i></button>
+      <input type="file" class="form-control form-control-sm artwork-upload-file" aria-label="Select ${escapeHtml(field)} to upload immediately" accept="${isVideo ? "video/*" : "image/*"}" data-field="${escapeHtml(field)}">
       ${viewBtn}
       ${existingDisplay}
     </div>
@@ -8686,9 +8727,10 @@ function artworkExternalLinksHtml(rom) {
 }
 // Upload image for a given field
 function bindArtworkEditButtons(rom, index) {
-  document.querySelectorAll(".artwork-upload-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      uploadArtworkImage(rom, button.getAttribute("data-field") || "", button);
+  document.querySelectorAll(".artwork-upload-file").forEach((input) => {
+    input.disabled = artworkUploadInProgress;
+    input.addEventListener("change", () => {
+      if (input.files?.length) uploadArtworkImage(rom, input.getAttribute("data-field") || "", input);
     });
   });
   document.querySelectorAll(".artwork-view-btn").forEach((button) => {
@@ -8708,14 +8750,17 @@ function bindArtworkEditButtons(rom, index) {
     });
   });
 }
-async function uploadArtworkImage(rom, field, btnEl) {
-  const fileInput = btnEl.closest(".artwork-upload-item").querySelector(".artwork-upload-file");
+let artworkUploadInProgress = false;
+async function uploadArtworkImage(rom, field, fileInput) {
+  if (artworkUploadInProgress) return;
   const file = fileInput && fileInput.files[0];
   if (!file) { showToast(`Please select a ${field === "video" ? "video" : "image"} file first.`, "warning"); return; }
   const system = rom.system || "";
-  btnEl.disabled = true;
-  btnEl.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
-  setLoading(true, `Uploading ${field}...`);
+  artworkUploadInProgress = true;
+  document.querySelectorAll(".artwork-upload-file").forEach((input) => { input.disabled = true; });
+  const status = fileInput.closest(".artwork-upload-item").querySelector(".artwork-upload-status");
+  if (status) status.textContent = `Uploading ${field}…`;
+  const detailHash = window.location.hash;
   try {
     const formData = new FormData();
     formData.append("file", file);
@@ -8743,15 +8788,18 @@ async function uploadArtworkImage(rom, field, btnEl) {
     if (result.missing) rom.missing = result.missing;
     if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
-    if (rom.system && rom.unique_id) {
+    if (status) status.textContent = `Uploaded ${field}.`;
+    delete systemRomCache[system];
+    if (rom.system && rom.unique_id && window.location.hash === detailHash) {
       await renderRomMediaPage(rom.system, rom.unique_id);
     }
   } catch (err) {
+    if (status) status.textContent = `Upload failed: ${err.message || "unknown error"}`;
     showToast(`Upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
-    setLoading(false);
-    btnEl.disabled = false;
-    btnEl.innerHTML = `<i class="bi bi-upload"></i>`;
+    artworkUploadInProgress = false;
+    fileInput.value = "";
+    document.querySelectorAll(".artwork-upload-file").forEach((input) => { input.disabled = false; });
   }
 }
 function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
@@ -12990,6 +13038,8 @@ async function redirectRouterHash(hash) {
 // underlying race, not a fix for one specific trigger).
 async function router(retryDepth = 0) {
   const myNavToken = ++routerNavToken;
+  clearTimeout(systemsExploreSearchDebounce);
+  ++systemsExploreRequestId;
   clearError();
   const hash = window.location.hash || "";
   // A second pass over the page the user is already on (theme re-render,
