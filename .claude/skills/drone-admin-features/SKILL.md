@@ -150,6 +150,26 @@ with its bulk TMDb/MusicBrainz scrape jobs, `/theme/images`, and
 `/admin/artwork/gamelist/{update,remove}`, the marquee cropper and metadata edit
 form on the ROM detail page, and the per-movie/per-album scraper cards.
 
+### ROM explorer filters and detail actions
+
+System, Category, Missing Artwork, browser-playable, and duplicates are sidebar
+filters, including in the mobile Filters modal (the same sidebar node is moved,
+not cloned). The results area shows keyboard-accessible removable chips, one
+per active filter including search and each missing-art type. All filter state
+is encoded in the explorer hash; user changes push history, and reload/back
+restore it. Removing a chip preserves every other selection. Duplicate groups
+use the same server-side system/category/search/browser/missing-art scope as
+cards. Enabling game filters from BIOS falls back to All Systems; browser play
+also clears unsupported systems. Guard async results against stale requests.
+
+Artwork/video upload starts only on explicit file-input change. Inputs stay
+disabled during the upload to prevent duplicate requests; inline status and
+toasts report progress/errors/success. Invalidate the system ROM cache before
+refreshing detail after success, and do not navigate back if the user left.
+The detail view has no Delete or Remove Gamelist action. Keep the deletion and
+gamelist-remove APIs for their other callers; duplicate cleanup still uses the
+shared batch deletion API.
+
 ### Torrents
 
 Watched-folder torrent downloads via a locally-spawned aria2c daemon —

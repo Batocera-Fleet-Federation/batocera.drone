@@ -1785,9 +1785,22 @@
       padding-right: 0.35rem;
     }
     .artwork-upload-status {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .explorer-active-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-bottom: 0.75rem;
+    }
+    .explorer-filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      max-width: 100%;
+      text-align: left;
+      overflow-wrap: anywhere;
     }
     .artwork-upload-item .btn-icon {
       width: 1.6rem;

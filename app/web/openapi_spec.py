@@ -402,7 +402,7 @@ def _schemas() -> Dict[str, Schema]:
             ("system", "normalized_title", "items"),
         ),
         "RomDuplicatesResponse": _object(
-            {"groups": _array(_ref("RomDuplicateGroup"))},
+            {"groups": _array(_ref("RomDuplicateGroup")), "count": _integer(), "genres": _array(_ref("GenreCount"))},
             ("groups",),
             description="Games with more than one copy (same system, same title once region/revision/scene tags are stripped), within whatever System/Category/search filter is active.",
         ),
@@ -2210,6 +2210,8 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                         _query_param("system", _string(), "Narrow to one system"),
                         _query_param("genre", _string(), "Narrow to one Category/genre"),
                         _query_param("q", _string(), "Search query"),
+                        _query_param("browser_playable", _boolean(), "Only browser-supported systems"),
+                        _query_param("missing_art", _string(), "Comma-separated artwork types; match any missing type"),
                     ],
                     tags=["admin", "library"],
                     error_codes=("401", "403", "429", "500", "503"),

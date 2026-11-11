@@ -17,6 +17,7 @@ try:
     from ..common.http_cache import valid_segment
     from ..common.runtime_state import _GAMELIST_WRITE_LOCK
     from .route_config import api_url
+    from .media_security import MEDIA_CONTENT_SECURITY_POLICY
     from ..roms.gamelist import (
         ARTWORK_DUPLICATE_FILTER,
         ARTWORK_FIELDS,
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from common.runtime_state import _GAMELIST_WRITE_LOCK  # type: ignore
     from web.route_config import api_url  # type: ignore
+    from web.media_security import MEDIA_CONTENT_SECURITY_POLICY  # type: ignore
     from roms.gamelist import (  # type: ignore
         ARTWORK_DUPLICATE_FILTER,
         ARTWORK_FIELDS,
@@ -572,7 +574,9 @@ class HandlersArtworkMixin:
         """
         system = valid_segment(unquote(system))
         target, _relative_path, _artwork_ref = self.repository.resolve_artwork_file(system, unquote(rom_path or ""), "video")
-        self._stream_file(target, self._guess_content_type(target))
+        self._stream_file(
+            target, self._guess_content_type(target), csp_override=MEDIA_CONTENT_SECURITY_POLICY,
+        )
 
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
         if not self.settings.downloads_enabled:

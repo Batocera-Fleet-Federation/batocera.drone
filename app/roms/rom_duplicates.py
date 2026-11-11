@@ -81,7 +81,7 @@ def rom_version_rank(rom_name: str) -> tuple:
 
 
 class RomDuplicatesMixin:
-    def find_duplicate_roms(self, *, systems=None, genre: str = "", query: str = "") -> List[dict]:
+    def find_duplicate_roms(self, *, systems=None, genre: str = "", query: str = "", missing_artwork=None) -> List[dict]:
         """Group ROMs (within the given System/Category/search filters --
         the same filters the Browse grid itself uses) by (system, normalized
         title) and return only groups with more than one member. Each
@@ -90,7 +90,10 @@ class RomDuplicatesMixin:
         UI's default selection is everything *except* that one."""
         if self.settings is None:
             return []
-        page = list_rom_cache_page(self.settings, systems=systems, genre=genre, query=query, limit=5000, offset=0)
+        page = list_rom_cache_page(
+            self.settings, systems=systems, genre=genre, query=query,
+            limit=5000, offset=0, missing_artwork=missing_artwork,
+        )
         if page is None:
             return []
         groups: dict = {}
