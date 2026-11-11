@@ -27,7 +27,7 @@ const browserPlaySupportedSystems = async () => ({systems: {snes: 'snes'}});
 const renderAssetTypeSwitcher = () => '';
 const restoreMovieListScroll = () => {};
 const API_BASE = '/v1/api';
-const systemRomCache = {snes: {stale: true}};
+const systemRomCache = {snes: {data: {roms: [{unique_id: 'one', stale: true}]}, loadedAt: 1}};
 const renderRomMediaPage = async () => { refreshes++; };
 let fetchResult;
 const fetch = async (...args) => { calls.push(args); return await fetchResult; };
@@ -36,6 +36,7 @@ const run = eval('(function(){' +
   slice('const SYSTEMS_EXPLORE_PAGE_SIZE', '// Movies Browse (own top-level page') +
   slice('function systemsExploreHash(', 'function renderSystemsExploreSidebarShell(') +
   slice('async function setSystemsExploreSystem(', 'function renderSystemsExploreGrid(') +
+  slice('const artworkAssetVersions', 'function artworkEditableImageFields(') +
   slice('function bindArtworkEditButtons(', 'function openMarqueeCropper(') + `
 return async function test() {
   // Rendering helpers irrelevant to networking; active chips still use real markup.
@@ -114,8 +115,18 @@ return async function test() {
   assert.equal(calls.at(-1)[1].body.get('field'), 'video');
   assert.equal(calls.at(-1)[1].body.get('rom_path'), './one.zip');
   await uploadArtworkImage(rom, 'video', input); assert.equal(calls.length, before + 1);
-  resolveUpload({status: 200, ok: true, json: async () => ({rom_name: 'One'})}); await uploading;
-  assert.equal(refreshes, 1); assert.equal(systemRomCache.snes, undefined); assert(!input.disabled); assert.equal(input.value, '');
+  resolveUpload({status: 200, ok: true, json: async () => ({rom_name: 'One', existing: {video: './images/one-video.mp4'}})}); await uploading;
+  // The refreshed detail page must render the updated ROM, not a list fetched before the upload.
+  assert.equal(refreshes, 1); assert.equal(systemRomCache.snes.data.roms[0], rom); assert.equal(systemRomCache.snes.data.roms[0].existing.video, './images/one-video.mp4');
+  assert(systemRomCache.snes.loadedAt > 1); assert(!input.disabled); assert.equal(input.value, '');
+  // The replaced file is re-requested instead of served from the 1 h browser cache.
+  assert(artworkExistingAssetUrl(rom, 'video', 'x.mp4').includes('?v='));
+  assert(artworkExistingAssetUrl(rom, 'video', 'x.mp4').startsWith('/v1/api/public/systems/snes/video/'));
+  assert(!artworkExistingImageUrl({system: 'snes'}, './images/other.png').includes('?v='));
+  // Oversized files are refused up front with a readable message and no request.
+  const bigCalls = calls.length;
+  await uploadArtworkImage(rom, 'video', {files: [{size: 51 * 1024 * 1024}], value: 'x', closest: () => ({querySelector: () => status})});
+  assert.equal(calls.length, bigCalls); assert(status.textContent.includes('too large'));
   fetchResult = {status: 400, ok: false, json: async () => ({error: '<bad file>'})};
   await uploadArtworkImage(rom, 'video', input);
   assert.equal(status.textContent, 'Upload failed: <bad file>'); assert(!input.disabled); assert.equal(refreshes, 1);
