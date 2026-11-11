@@ -25,11 +25,13 @@ browser for peer fetches, and responses are size-capped.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.error import HTTPError
 from urllib.parse import quote, unquote
@@ -271,13 +273,51 @@ class HandlersMediaBrowseMixin:
 
         return fetch
 
+    def _media_online_peer_ids(self) -> set:
+        """Paired Drones whose latest background health check passed recently
+        (peer_workers' health loop, every DRONE_LOCAL_HEALTH_INTERVAL_SECONDS).
+        Local state only -- no network.  Demo peers (fake data) count as online."""
+        if not _local_network.is_local_mode(self.settings):
+            return set()
+        try:
+            interval = max(10, int(os.environ.get("DRONE_LOCAL_HEALTH_INTERVAL_SECONDS", "30")))
+        except ValueError:
+            interval = 30
+        # A few missed rounds of slack, so one slow check does not flip a Drone offline.
+        window = interval * 3 + 30
+        now = datetime.now(timezone.utc)
+        online = set()
+        for check in _local_network.load_peer_checks(self.settings):
+            if not isinstance(check, dict) or check.get("status") != "pass":
+                continue
+            try:
+                checked_at = datetime.fromisoformat(str(check.get("checked_at") or ""))
+            except ValueError:
+                continue
+            if checked_at.tzinfo is None:
+                checked_at = checked_at.replace(tzinfo=timezone.utc)
+            if 0 <= (now - checked_at).total_seconds() <= window:
+                online.add(str(check.get("target_drone_id") or ""))
+        if self.settings.use_fake_data:
+            for peer in _local_network.paired_peers(self.settings):
+                if peer.get("fake_data"):
+                    online.add(str(peer.get("drone_id") or peer.get("device_id") or ""))
+        return online
+
     def _handle_media_browse_sources(self) -> None:
         """Paired Drones, from local state only (no network).  Lets the page
         start one background request per Drone so each can finish -- or fail --
-        independently without holding up the others."""
+        independently without holding up the others.  ``online`` is the latest
+        background health check, so the page only offers reachable Drones."""
+        online = self._media_online_peer_ids()
         self._send_json(200, {
             "sources": [
-                {"drone_id": s.drone_id, "name": s.name, "is_local": s.is_local}
+                {
+                    "drone_id": s.drone_id,
+                    "name": s.name,
+                    "is_local": s.is_local,
+                    "online": s.is_local or s.drone_id in online,
+                }
                 for s in self._media_sources()
             ],
         })

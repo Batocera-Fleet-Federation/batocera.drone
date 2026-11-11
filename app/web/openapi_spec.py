@@ -1798,7 +1798,7 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("drone_id", "name", "status"),
         ),
-        "MediaBrowseSourcesResponse": _object({"sources": _array(_object({"drone_id": _string(), "name": _string(), "is_local": _boolean()}, ("drone_id", "name")))}, ("sources",)),
+        "MediaBrowseSourcesResponse": _object({"sources": _array(_object({"drone_id": _string(), "name": _string(), "is_local": _boolean(), "online": _boolean()}, ("drone_id", "name")))}, ("sources",)),
         "MediaBrowseListResponse": _object(
             {
                 "media_type": _enum(["movies", "music", "roms"]),

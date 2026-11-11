@@ -3,6 +3,12 @@
 // explorers: it never replaces their rendering, it appends remote cards to the end of their grid
 // and adds an "Available on" card to local detail pages.
 //
+// * The pages show only this Drone's items by default.  A "Drones" section injected at the top
+//   of each explorer's filter sidebar lists the paired Drones that are online (latest background
+//   health check, GET /media-browse/sources); checking one adds its items.  One selection is
+//   shared by Games/Movies/Music and resets when the user leaves those pages.  "This Drone" can
+//   be unchecked to see only the picked Drones.  A picked Drone that goes offline is dropped.
+//
 // * Loading is asynchronous, one request per paired Drone, so a slow or offline Drone never
 //   blocks the page or the others, and nothing the user is doing (typing, scrolling, a modal)
 //   is interrupted: cards are appended in a display:contents wrapper in animation-frame batches.
@@ -22,13 +28,14 @@
   const BASE = "/v1/api/media-browse";
   const PAGE = 20; // items fetched per Drone per request; further pages load only as the user scrolls
   const RENDER_STEP = 20;
-  const OFFLINE_STATES = new Set(["offline", "timeout", "cached", "error", "unsupported"]);
-  const ONLINE_KEY = "droneMediaOnlineOnly";
-  let onlineOnly = false;
-  try { onlineOnly = window.localStorage.getItem(ONLINE_KEY) === "1"; } catch (e) { /* storage unavailable */ }
+  const UNREACHABLE_STATES = new Set(["offline", "cached"]);
   const FRESH_MS = 60 * 1000;
-  const SOURCES_MS = 5 * 60 * 1000;
+  // Online status comes from the source list, so it is re-read often while an Assets page is open.
+  const SOURCES_MS = 30 * 1000;
   const GRIDS = { roms: "systems-explore-grid", movies: "movie-explorer-grid", music: "music-explorer-grid" };
+  const SIDEBARS = { roms: "systems-explore-sidebar", movies: "movie-explorer-sidebar", music: "music-explorer-sidebar" };
+  // Games list/detail, Movies, Music: staying anywhere in here keeps the Drone selection.
+  const ASSET_ROUTE = /^#(systems|system\/|movies|music)/;
   const NOUN = { roms: "games", movies: "movies & shows", music: "music" };
   const ICON = { roms: "bi-controller", movies: "bi-film", music: "bi-music-note-beamed" };
 
@@ -166,9 +173,9 @@
 
   // ================================================================== sources + data
   let sourcesCache = { at: 0, promise: null };
-  function peers() {
+  function peers(force) {
     const now = Date.now();
-    if (!sourcesCache.promise || now - sourcesCache.at > SOURCES_MS) {
+    if (force || !sourcesCache.promise || now - sourcesCache.at > SOURCES_MS) {
       sourcesCache = {
         at: now,
         promise: api(`${API}/sources`, { timeoutMs: 15000 })
@@ -177,6 +184,84 @@
       };
     }
     return sourcesCache.promise;
+  }
+
+  // ---- which Drones are shown (shared by all three pages; in memory only, so a reload resets it)
+  const pick = { local: true, remote: new Set() };
+  let onlinePeers = []; // remote sources currently online: [{ drone_id, name }]
+  let sourcesLoaded = false;
+  let sourcesRefreshing = null;
+
+  async function refreshSources(force) {
+    if (sourcesRefreshing) return sourcesRefreshing;
+    sourcesRefreshing = (async () => {
+      let list = null;
+      try { list = await peers(force); } catch (e) { list = null; }
+      if (list) {
+        onlinePeers = list.filter((p) => !p.is_local && p.online).map((p) => ({ drone_id: p.drone_id, name: p.name || p.drone_id }));
+        const online = new Set(onlinePeers.map((p) => p.drone_id));
+        let dropped = false;
+        for (const id of [...pick.remote]) if (!online.has(id)) { pick.remote.delete(id); dropped = true; }
+        if (!pick.remote.size) pick.local = true;
+        sourcesLoaded = true;
+        if (dropped) queueScan();
+      }
+      renderDroneFilters();
+    })().finally(() => { sourcesRefreshing = null; });
+    return sourcesRefreshing;
+  }
+
+  // A picked Drone that turns out to be unreachable leaves the selection (and its items go away).
+  function dropDrone(id) {
+    if (!pick.remote.delete(id)) return;
+    onlinePeers = onlinePeers.filter((p) => p.drone_id !== id);
+    if (!pick.remote.size) pick.local = true;
+    sourcesCache = { at: 0, promise: null };
+    renderDroneFilters();
+    queueScan();
+  }
+
+  function resetPick() {
+    pick.local = true;
+    pick.remote.clear();
+  }
+
+  function droneFilterHtml() {
+    const row = (id, label, checked, disabled) => `<div class="form-check">
+      <input class="form-check-input" type="checkbox" id="rmDrone-${esc(id)}" data-rm-drone="${esc(id)}"${checked ? " checked" : ""}${disabled ? " disabled" : ""}>
+      <label class="form-check-label text-truncate d-block" for="rmDrone-${esc(id)}" title="${esc(label)}">${esc(label)}</label></div>`;
+    const others = onlinePeers.map((p) => row(p.drone_id, p.name, pick.remote.has(p.drone_id), false)).join("");
+    const note = sourcesLoaded ? "No other Drones online." : "Looking for other Drones…";
+    // "This Drone" cannot be unchecked while it is the only Drone shown.
+    return `<div class="movie-explorer-sidebar-title">Drones</div>${row("local", "This Drone", pick.local, pick.local && !pick.remote.size)}${others || `<div class="small text-muted">${note}</div>`}`;
+  }
+
+  function renderDroneFilters() {
+    const html = droneFilterHtml();
+    for (const id of Object.values(SIDEBARS)) {
+      const sidebar = document.getElementById(id);
+      if (!sidebar) continue;
+      let section = sidebar.querySelector(":scope > .rm-drone-filter");
+      if (!section) {
+        section = document.createElement("div");
+        section.className = "movie-explorer-sidebar-section rm-drone-filter";
+        section.addEventListener("change", onDroneFilterChange);
+        sidebar.prepend(section);
+      }
+      if (section._html !== html) { section.innerHTML = html; section._html = html; }
+    }
+  }
+
+  function onDroneFilterChange(event) {
+    const box = event.target.closest("[data-rm-drone]");
+    if (!box) return;
+    const id = box.dataset.rmDrone;
+    if (id === "local") pick.local = box.checked;
+    else if (box.checked) pick.remote.add(id);
+    else pick.remote.delete(id);
+    if (!pick.remote.size) pick.local = true;
+    renderDroneFilters();
+    queueScan();
   }
 
   const L = {
@@ -207,7 +292,7 @@
       return null; // explorer globals not ready yet
     }
   }
-  const sigOf = (f) => JSON.stringify([f.q, f.system, f.genre]);
+  const sigOf = (f) => JSON.stringify([f.q, f.system, f.genre, [...pick.remote].sort()]);
 
   function newEntry(p) {
     return { id: p.drone_id, name: p.name, items: [], total: 0, status: "loading", cursor: "", hasMore: false, busy: false, error: "", age: null };
@@ -249,6 +334,7 @@
       entry.busy = false;
     }
     if (token !== ls.token) return;
+    if (UNREACHABLE_STATES.has(entry.status)) { dropDrone(entry.id); return; }
     if (entry.status === "loading") entry.status = "ok";
     schedulePaint(kind, true);
   }
@@ -284,7 +370,7 @@
     }
     let list;
     try {
-      list = (await peers()).filter((p) => !p.is_local);
+      list = (await peers()).filter((p) => !p.is_local && p.online && pick.remote.has(p.drone_id));
     } catch (err) {
       if (token === ls.token) {
         const msg = err && err.message === "not found" ? "needs an update" : (err && err.message) || "error";
@@ -354,11 +440,7 @@
 
   // Apply the page's own client-side filters (type / category / artist / liked) to remote rows.
   function passes(kind, it, f) {
-    if (it.exists_locally) return false; // already shown as a normal local card
-    if (onlineOnly) {
-      const owner = L[kind].peers.get(it.drone_id);
-      if (owner && OFFLINE_STATES.has(owner.status)) return false;
-    }
+    if (it.exists_locally && pick.local) return false; // already shown as a normal local card
     if (kind === "movies") {
       if (f.type && f.type !== "all") {
         const k = it.kind || "movie";
@@ -507,7 +589,6 @@
     const out = [];
     const n = (v) => Number(v || 0).toLocaleString();
     for (const e of L[kind].peers.values()) {
-      if (onlineOnly && OFFLINE_STATES.has(e.status)) continue;
       const name = esc(e.name);
       const retryBtn = (cls, text, title) => `<button type="button" class="badge border-0 ${cls}" data-rm-retry="${esc(e.id)}" title="${esc(title)}">${text} <i class="bi bi-arrow-clockwise"></i></button>`;
       if (e.status === "loading" || e.busy) {
@@ -536,7 +617,7 @@
     layer.addEventListener("click", onLayerClick);
     layer._head = document.createElement("div");
     layer._head.className = "remote-media-divider";
-    layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones<span class="rm-count"></span></span><span class="remote-media-status"></span><label class="form-check form-switch m-0 small rm-online-toggle"><input class="form-check-input" type="checkbox" data-rm-online ${onlineOnly ? "checked" : ""}><span class="form-check-label ms-1">Online only</span></label>`;
+    layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones<span class="rm-count"></span></span><span class="remote-media-status"></span>`;
     layer._tail = document.createElement("div");
     layer._tail.className = "remote-media-tail";
     layer.append(layer._head, layer._tail);
@@ -597,7 +678,7 @@
 
     const isAnyLoading = [...ls.peers.values()].some((e) => e.status === "loading" || e.busy);
     const hasProblems = [...ls.peers.values()].some((e) => ["timeout", "offline", "error"].includes(e.status));
-    if (!cards.length && !isAnyLoading && !hasProblems) {
+    if (!cards.length && !isAnyLoading && !hasProblems && pick.local) {
       if (layer) layer.remove();
       return;
     }
@@ -640,20 +721,6 @@
 
   function onLayerClick(event) {
     const layer = event.currentTarget;
-    const toggle = event.target.closest("[data-rm-online]");
-    if (toggle) {
-      onlineOnly = !!toggle.checked;
-      try { window.localStorage.setItem(ONLINE_KEY, onlineOnly ? "1" : "0"); } catch (e) { /* ignore */ }
-      for (const k of Object.keys(L)) { L[k].limit = RENDER_STEP; schedulePaint(k, true); }
-      return;
-    }
-    const trigger = event.target.closest("[data-rm-trigger]");
-    if (trigger) {
-      const kind = layer._kind;
-      const f = filtersFor(kind);
-      if (f) start(kind, sigOf(f), f);
-      return;
-    }
     const again = event.target.closest("[data-rm-retry]");
     if (again) { retry(layer._kind, again.dataset.rmRetry); return; }
     const el = event.target.closest(".remote-card");
@@ -661,54 +728,6 @@
   }
 
   // ================================================================== activation (no edits to the big renderers)
-  function isDeferred(kind, f) {
-    // ROMs with no query, no system, and no genre is "All Systems" overview:
-    // With tens of thousands of ROMs, don't query peers until the remote section
-    // is scrolled into view or the user narrows the scope with a filter/search.
-    return kind === "roms" && !f.q && !f.system && !f.genre;
-  }
-
-  const dividerWatch = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      const layer = e.target.closest(".remote-media-layer");
-      if (!layer || !layer._deferred) continue;
-      dividerWatch.unobserve(e.target);
-      const kind = layer._kind;
-      const f = filtersFor(kind);
-      if (f) start(kind, sigOf(f), f);
-    }
-  }, { rootMargin: "600px 0px" });
-
-  async function ensureDeferredDivider(grid, kind, sig, f) {
-    let list = [];
-    try {
-      list = (await peers()).filter((p) => !p.is_local);
-    } catch (e) { list = []; }
-    if (!list.length) {
-      const existing = grid.querySelector(":scope > .remote-media-layer");
-      if (existing) existing.remove();
-      return;
-    }
-    const currentF = filtersFor(kind);
-    if (!currentF || sigOf(currentF) !== sig) return;
-    let layer = grid.querySelector(":scope > .remote-media-layer");
-    if (layer && !layer._deferred) layer.remove();
-    if (!layer || !layer.isConnected) {
-      layer = document.createElement("div");
-      layer.className = "remote-media-layer";
-      layer.addEventListener("click", onLayerClick);
-      layer._head = document.createElement("div");
-      layer._head.className = "remote-media-divider";
-      layer._head.innerHTML = `<span class="fw-semibold"><i class="bi bi-diagram-3 me-2"></i>On other Drones</span><span class="remote-media-status"><button type="button" class="btn btn-outline-light btn-sm py-0 px-2" data-rm-trigger="1"><i class="bi bi-cloud-arrow-down me-1"></i>Check other Drones</button></span>`;
-      layer.appendChild(layer._head);
-      grid.appendChild(layer);
-    }
-    layer._kind = kind;
-    layer._deferred = true;
-    dividerWatch.observe(layer._head);
-  }
-
   let activeKind = "";
   let scanQueued = false;
   function scan() {
@@ -720,29 +739,30 @@
       found = kind;
       const f = filtersFor(kind);
       const layer = grid.querySelector(":scope > .remote-media-layer");
+      // "This Drone" unchecked: hide the explorer's own cards (and its "show more"), keep ours.
+      if (grid.parentElement) grid.parentElement.classList.toggle("rm-hide-local", !!f && !pick.local);
       if (!f) { if (layer) layer.remove(); continue; }
       const sig = sigOf(f);
       const ls = L[kind];
+      if (!pick.remote.size) {
+        // Default: this Drone only -- nothing to ask the swarm.
+        clearTimeout(ls.pending);
+        if (layer) layer.remove();
+        if (sig !== ls.sig) { ls.sig = sig; ls.token += 1; ls.peers = new Map(); }
+        continue;
+      }
       if (sig !== ls.sig) {
         clearTimeout(ls.pending);
-        if (isDeferred(kind, f)) {
-          ls.sig = sig;
-          ls.token += 1;
-          ls.peers = new Map();
-          if (layer) layer.remove();
-          ensureDeferredDivider(grid, kind, sig, f);
-        } else {
-          // Filter changes wait for the user to stop typing
-          ls.pending = setTimeout(() => start(kind, sig, f), ls.sig === "" ? 150 : 350);
-          if (layer) paint(kind);
-        }
+        // Filter changes wait for the user to stop typing
+        ls.pending = setTimeout(() => start(kind, sig, f), ls.sig === "" ? 150 : 350);
+        if (layer) paint(kind);
       } else if (!layer) {
-        if (isDeferred(kind, f) && !ls.peers.size) {
-          ensureDeferredDivider(grid, kind, sig, f);
-        } else {
-          paint(kind); // local grid re-rendered: put the remote cards back (from memory, no network)
-        }
+        paint(kind); // local grid re-rendered: put the remote cards back (from memory, no network)
       }
+    }
+    if (found) {
+      renderDroneFilters();
+      if (!sourcesLoaded) refreshSources();
     }
     if (found !== activeKind) {
       if (!found) {
@@ -757,13 +777,21 @@
     requestAnimationFrame(scan);
   }
   function observe() {
-    const host = document.getElementById("content");
-    if (!host) return;
+    // The whole body, not just #content: on mobile the explorer's sidebar lives in the Filters
+    // modal (appended to <body>), and a sidebar re-render there must get its Drones section back.
     new MutationObserver((records) => {
-      // Our own layer updates (and image loads inside it) must not retrigger a scan.
-      if (records.every((r) => r.target.closest && r.target.closest(".remote-media-layer"))) return;
+      // Our own updates (and image loads, toasts) must not retrigger a scan.
+      if (records.every((r) => r.target.closest && r.target.closest(".remote-media-layer, .rm-drone-filter, .toast-alert-container"))) return;
       queueScan();
-    }).observe(host, { childList: true, subtree: true });
+    }).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("hashchange", () => {
+      if (!ASSET_ROUTE.test(window.location.hash)) resetPick();
+    });
+    // Keep the online list current while an Assets page is open; drops Drones that went offline.
+    setInterval(() => {
+      if (document.hidden || !activeKind) return;
+      refreshSources(true);
+    }, SOURCES_MS);
     queueScan();
   }
 

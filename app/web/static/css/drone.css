@@ -1328,7 +1328,11 @@
     .rm-chip-loading { position: relative; overflow: hidden; }
     .rm-chip-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,0.15); }
     .rm-chip-bar > span { display: block; height: 100%; background: #38bdf8; transition: width 0.3s; }
-    .rm-online-toggle { margin-left: auto !important; white-space: nowrap; }
+    /* "This Drone" unchecked in the Drones filter: hide the explorer's own cards and its "show
+       more", keep the other Drones' layer (media_browse.js toggles .rm-hide-local). */
+    .movie-explorer-grid-wrap.rm-hide-local > .movie-explorer-grid > :not(.remote-media-layer),
+    .movie-explorer-grid-wrap.rm-hide-local > .movie-explorer-grid ~ * { display: none !important; }
+    .rm-drone-filter .form-check { min-width: 0; }
     @media (max-width: 576px) { .remote-media-divider { padding: 0.4rem 0.1rem 0.25rem; gap: 0.3rem; } .remote-media-status .badge { font-size: 0.68rem; } }
     button.badge[data-rm-retry] { cursor: pointer; }
     .remote-media-tail { grid-column: 1 / -1; height: 1px; }

@@ -5,6 +5,7 @@ local-only likes, and copying a track/game via the normal download path."""
 import io
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
@@ -622,6 +623,24 @@ class InPlaceLoadingBackendTests(unittest.TestCase):
         self.assertTrue(body["sources"][0]["is_local"])
         self.assertEqual(self.asked, [])
 
+    def test_sources_mark_only_recently_healthy_peers_online(self):
+        now = datetime.now(timezone.utc)
+        checks = [
+            {"target_drone_id": "drone-a", "status": "pass", "checked_at": (now - timedelta(seconds=20)).isoformat()},
+            {"target_drone_id": "drone-b", "status": "pass", "checked_at": (now - timedelta(hours=1)).isoformat()},
+        ]
+        handler = _Handler(self.settings)
+        with mock.patch("app.transfer.local_network.load_peer_checks", return_value=checks):
+            handler._handle_media_browse_sources()
+        online = {s["drone_id"]: s["online"] for s in handler.json[1]["sources"]}
+        self.assertEqual(online, {"drone-local": True, "drone-a": True, "drone-b": False})
+        self.assertEqual(self.asked, [])
+
+        checks[0]["status"] = "fail"
+        with mock.patch("app.transfer.local_network.load_peer_checks", return_value=checks):
+            handler._handle_media_browse_sources()
+        self.assertFalse({s["drone_id"]: s["online"] for s in handler.json[1]["sources"]}["drone-a"])
+
     def test_one_drone_peers_only_request_asks_only_that_drone(self):
         handler = _Handler(self.settings)
         handler._handle_media_browse_list("music", {"drones": ["drone-b"], "exclude_local": ["1"]})
@@ -796,12 +815,37 @@ class UiContractTests(unittest.TestCase):
             self.assertIn(needle, script)
         self.assertNotIn("replaceChildren", script)  # repainting must not rebuild existing cards (flicker)
 
-    def test_remote_media_pages_by_twenty_and_has_online_filter(self):
+    def test_remote_media_pages_by_twenty(self):
         script = self._script()
         self.assertIn("const PAGE = 20;", script)
         self.assertIn("function loadMore", script)  # next page only when scrolled to the end
         self.assertNotIn("SAFETY_CAP", script)
-        self.assertIn("data-rm-online", script)
+
+    def test_pages_show_only_this_drone_until_online_drones_are_picked(self):
+        script = self._script()
+        # Default: this Drone only, nothing asked of the swarm.
+        self.assertIn("const pick = { local: true, remote: new Set() };", script)
+        self.assertIn("if (!pick.remote.size) {", script)
+        # The "Online only" switch is replaced by the Drones filter.
+        self.assertNotIn("data-rm-online", script)
+        self.assertNotIn("onlineOnly", script)
+        self.assertIn('data-rm-drone="${esc(id)}"', script)
+        self.assertIn('section.className = "movie-explorer-sidebar-section rm-drone-filter"', script)
+        for sidebar in ("systems-explore-sidebar", "movie-explorer-sidebar", "music-explorer-sidebar"):
+            self.assertIn(sidebar, script)
+        # Only picked Drones that are online are listed and fetched; the pick is part of the cache key.
+        self.assertIn("list.filter((p) => !p.is_local && p.online).map(", script)
+        self.assertIn("!p.is_local && p.online && pick.remote.has(p.drone_id)", script)
+        self.assertIn("const sigOf = (f) => JSON.stringify([f.q, f.system, f.genre, [...pick.remote].sort()]);", script)
+        # A picked Drone that goes offline is dropped; leaving the Assets pages resets the pick.
+        self.assertIn("if (UNREACHABLE_STATES.has(entry.status)) { dropDrone(entry.id); return; }", script)
+        self.assertIn("if (!ASSET_ROUTE.test(window.location.hash)) resetPick();", script)
+        self.assertIn("refreshSources(true);", script)
+        # "This Drone" can be unchecked (but never leaves nothing checked).
+        self.assertIn('pick.local && !pick.remote.size)', script)
+        self.assertIn('classList.toggle("rm-hide-local", !!f && !pick.local)', script)
+        css = (self.ROOT / "static" / "css" / "drone.css").read_text(encoding="utf-8")
+        self.assertIn(".movie-explorer-grid-wrap.rm-hide-local > .movie-explorer-grid > :not(.remote-media-layer)", css)
 
     def test_transfer_toast_has_no_dismiss_while_running(self):
         self.assertIn('classList.toggle("d-none", !finished)', self._script())

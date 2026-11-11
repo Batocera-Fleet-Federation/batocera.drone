@@ -385,11 +385,15 @@ Skill: `drone-multiplayer`. Depth: `docs/multiplayer.md`.
 
 ## Multi-Drone media browsing (in place on `#systems`, `#movies`, `#music`)
 
-There is no separate page: the normal Games/Movies/Music explorers always append the other paired Drones' items
-(`static/js/media_browse.js` is a *layer* — a MutationObserver re-attaches a `display:contents` wrapper after the
-explorers re-render; it never replaces their rendering) and local game/movie/track detail pages get an "Available on"
+There is no separate page: the normal Games/Movies/Music explorers show **only this Drone's items by default**; a
+"Drones" section that `static/js/media_browse.js` injects at the top of each explorer's filter sidebar lists the paired
+Drones that are **online** (`online` on `GET /media-browse/sources`, from the background peer health check) and checking
+one appends its items. One selection is shared by all three pages, lives in memory only and resets when the user leaves
+the Assets routes; "This Drone" can be unchecked (`.rm-hide-local`); a picked Drone that goes offline is dropped
+(`media_browse.js` is a *layer* — a MutationObserver on `<body>` re-attaches a `display:contents` wrapper and the Drones
+section after the explorers re-render, including inside the mobile Filters modal; it never replaces their rendering) and local game/movie/track detail pages get an "Available on"
 card. Loading is async, **one request per Drone** (`GET /media-browse/sources`, then `/media-browse/{kind}?drones=<id>&exclude_local=1`),
-each Drone is fetched 20 items at a time and the next page loads only when the user scrolls to the end (`loadMore`); an "Online only" switch hides offline/stale Drones; progress/problems show in the per-Drone chips beside the "On other Drones" divider (no toast; a failed chip click retries). Peer images are proxied through a bounded in-memory cache with a per-Drone concurrency cap (`_ArtworkCache`). `api()`/`apiPost()` already prepend `/v1/api` — pass `/media-browse/...`,
+each Drone is fetched 20 items at a time and the next page loads only when the user scrolls to the end (`loadMore`); progress/problems show in the per-Drone chips beside the "On other Drones" divider (no toast; a failed chip click retries). Peer images are proxied through a bounded in-memory cache with a per-Drone concurrency cap (`_ArtworkCache`). `api()`/`apiPost()` already prepend `/v1/api` — pass `/media-browse/...`,
 never the full path (that exact mistake produced a "not found" in the UI).
 `web/handlers_media_browse.py` (`/v1/api/media-browse/...`, session-gated like `/movies`) fans out in
 parallel through `transfer/media_browse.py` (`collect_page`: deterministic round-robin merge with an opaque
