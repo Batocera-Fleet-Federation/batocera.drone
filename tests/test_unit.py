@@ -7979,21 +7979,19 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn('systems.length ? systems.join(", ") : "Unassigned"', row_body)
         self.assertIn("systemsLabel", row_body)
 
-    def test_duplicates_button_is_an_icon_only_toggle_next_to_search(self) -> None:
-        page_start = self.js.index("async function renderSystemsExplorePage()")
-        page_end = self.js.index("function renderSystemsExploreSidebarShell(")
-        body = self.js[page_start:page_end]
-        self.assertIn('id="systemsExploreDuplicatesBtn"', body)
-        self.assertIn("toggleSystemsExploreDuplicatesMode()", body)
-        # Icon-only: a bi- icon with no adjacent label text inside the button.
-        self.assertIn('title="Find duplicate games"', body)
+    def test_duplicates_is_a_sidebar_filter(self) -> None:
+        page = self.js[self.js.index("async function renderSystemsExplorePage()"):self.js.index("function renderSystemsExploreSidebarShell(")]
+        sidebar = self.js[self.js.index("function renderSystemsExploreSidebarShell("):self.js.index("function renderSystemsExploreMissingArtList(")]
+        self.assertNotIn('id="systemsExploreDuplicatesBtn"', page)
+        self.assertIn('id="systemsExploreDuplicatesFilter"', sidebar)
+        self.assertIn("Only show duplicates", sidebar)
 
-    def test_toggle_falls_back_off_bios_and_dispatches_through_current_mode(self) -> None:
-        fn_start = self.js.index("async function toggleSystemsExploreDuplicatesMode(")
-        fn_end = self.js.index("async function loadSystemsExploreDuplicates(")
-        body = self.js[fn_start:fn_end]
-        self.assertIn("systemsExploreSelectedSystem = \"\"", body)
-        self.assertIn("loadSystemsExploreCurrentMode({ reset: true })", body)
+    def test_toggle_normalizes_filters_then_refreshes(self) -> None:
+        body = self.js[self.js.index("async function toggleSystemsExploreDuplicatesMode("):self.js.index("async function loadSystemsExploreDuplicates(")]
+        self.assertIn("refreshSystemsExploreFilters()", body)
+        normalize = self.js[self.js.index("function normalizeSystemsExploreFilters("):self.js.index("function renderSystemsExploreFilterState(")]
+        self.assertIn('systemsExploreSelectedSystem = ""', normalize)
+        self.assertIn("SYSTEMS_EXPLORE_BIOS_KEY", normalize)
 
     def test_load_current_mode_dispatches_to_duplicates_before_roms(self) -> None:
         fn_start = self.js.index("function loadSystemsExploreCurrentMode(")
@@ -8089,7 +8087,7 @@ class SystemsExplorePageTests(unittest.TestCase):
         # and cursor position mid-type.
         shell_start = self.js.index("function renderSystemsExploreSidebarShell()")
         shell_end = self.js.index("function renderSystemsExploreMissingArtList(", shell_start)
-        self.assertEqual(self.js[shell_start:shell_end].count("<input"), 2)
+        self.assertEqual(self.js[shell_start:shell_end].count('type="search"'), 2)
 
         for fn_name, next_fn_name in (
             ("function renderSystemsExploreSystemList()", "function renderSystemsExploreCategoryList()"),
@@ -9193,24 +9191,15 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
         self.assertIn("romMetadataEditFormHtml(rom)", body)
         self.assertIn('document.getElementById("romMediaVideoBody")', body)
 
-    def test_rom_detail_page_has_admin_gated_delete_button(self) -> None:
-        fn_start = self.js.index("async function renderRomMediaPage(")
-        fn_end = self.js.index("\nfunction systemsExploreHash(")
-        body = self.js[fn_start:fn_end]
-        self.assertIn("adminEnabled", body)
-        self.assertIn("deleteRomFromDetailPage(", body)
-
-    def test_delete_rom_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
-        fn_start = self.js.index("function deleteRomFromDetailPage(")
-        fn_end = self.js.index("function systemsExploreHash(")
-        body = self.js[fn_start:fn_end]
-        self.assertIn("openConfirmDeleteModal(", body)
-        self.assertIn("deleteRomsBatch([{ system, unique_id: uniqueId }])", body)
-        self.assertIn("setHash(systemsExploreHash(system))", body)
+    def test_rom_detail_page_has_no_destructive_actions(self) -> None:
+        body = self.js[self.js.index("async function renderRomMediaPage("):self.js.index("async function deleteRomsBatch(")]
+        self.assertNotIn("deleteRomFromDetailPage", self.js)
+        self.assertNotIn("removeRomMediaGamelistEntry", self.js)
+        self.assertNotIn("bi-trash", body)
 
     def test_delete_roms_batch_posts_to_admin_roms_delete_and_invalidates_caches(self) -> None:
         fn_start = self.js.index("async function deleteRomsBatch(")
-        fn_end = self.js.index("function deleteRomFromDetailPage(")
+        fn_end = self.js.index("function systemsExploreHash(")
         body = self.js[fn_start:fn_end]
         self.assertIn('apiPost("/admin/roms/delete", { items })', body)
         self.assertIn("systemsCache = null", body)
@@ -9255,16 +9244,15 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
 
     def test_save_rom_media_metadata_posts_gamelist_update(self) -> None:
         fn_start = self.js.index("async function saveRomMediaMetadata(")
-        fn_end = self.js.index("\nasync function removeRomMediaGamelistEntry(")
+        fn_end = self.js.index("\nfunction artworkImageUploadHtml(")
         body = self.js[fn_start:fn_end]
         self.assertIn('apiPost("/admin/artwork/gamelist/update"', body)
 
-    def test_remove_rom_media_gamelist_entry_confirms_before_posting(self) -> None:
-        fn_start = self.js.index("async function removeRomMediaGamelistEntry(")
-        fn_end = self.js.index("\nfunction artworkImageUploadHtml(")
-        body = self.js[fn_start:fn_end]
-        self.assertIn("window.confirm(", body)
-        self.assertIn('apiPost("/admin/artwork/gamelist/remove"', body)
+    def test_metadata_form_has_save_without_gamelist_removal(self) -> None:
+        body = self.js[self.js.index("function romMetadataEditFormHtml("):self.js.index("async function saveRomMediaMetadata(")]
+        self.assertIn("Save Metadata", body)
+        self.assertNotIn("removeRomMediaGamelistEntry", body)
+        self.assertNotIn("bi-trash", body)
 
     def test_metadata_form_excludes_artwork_and_video_fields(self) -> None:
         fn_start = self.js.index("function romMetadataEditFormHtml(")
