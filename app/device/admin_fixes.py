@@ -19,10 +19,13 @@ LINDBERGH_INPUT_GUARD_ID = "lindbergh-input-device-guard"
 SWITCH_GUI_WORKAROUND_ID = "switch-gui-autoload"
 CRASH_NOTIFIER_ID = "game-crash-notifier"
 CRASH_NOTIFIER_HOOK_FILENAME = "drone-game-crash-notifier.py"
+SWITCH2_GAMECUBE_GUARD_ID = "switch2-gamecube-adapter-guard"
+SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME = "drone-switch2-gamecube-guard.py"
 HOOK_FILENAME = "drone-lindbergh-input-device-guard.py"
 ASSET_ROOT = Path(__file__).resolve().parent / "fix_assets"
 ASSET_PATH = ASSET_ROOT / "lindbergh_input_guard.py"
 CRASH_NOTIFIER_ASSET = ASSET_ROOT / "game_crash_notifier.py"
+SWITCH2_GAMECUBE_GUARD_ASSET = ASSET_ROOT / "switch2_gamecube_guard.py"
 SWITCH_LAUNCHER_ASSET = ASSET_ROOT / "switch_gui_launcher.py"
 SWITCH_WRAPPER_ASSET = ASSET_ROOT / "switch_gui_autoload.sh"
 SWITCH_GENERATOR_MARKER_START = "# >>> drone switch-gui-autoload fix"
@@ -47,6 +50,24 @@ FIX_CATALOG = (
             "Does not modify Batocera's read-only system image or emulator files",
         ],
         "caution": "While a Lindbergh game is running, a selected multi-port adapter is unavailable. It is restored when the game exits.",
+    },
+    {
+        "id": SWITCH2_GAMECUBE_GUARD_ID,
+        "name": "Switch 2 GameCube adapter guard",
+        "summary": "Takes a Wii U GameCube adapter offline while a Switch 2 game runs, so the emulator does not crash at startup.",
+        "applies_to": "Nintendo Switch 2 (eglantine, orchid and lichii through RGS)",
+        "details": [
+            "The Switch 2 emulators can abort with \"stack smashing detected\" while setting up controllers when a Wii U GameCube adapter is connected, returning to EmulationStation a few seconds after launch. Unplugging the adapter avoids it.",
+            "Batocera drives the adapter with the wii-u-gc-adapter daemon, which presents its four ports as virtual joysticks. At a Switch 2 gameStart this hook stops that daemon, which removes those joysticks, and unbinds the adapter's USB device so the emulator cannot open it directly either. That is the same as unplugging it. Other controllers and light guns are not touched.",
+            "At gameStop it binds the adapter again and restarts the daemon with the command line it had, unless udev has already started it. A detached watchdog also restores it if emulatorlauncher exits without delivering gameStop, stale state is repaired at the next launch, and a reboot restores everything as an additional safety net.",
+        ],
+        "changes": [
+            f"Installs /userdata/system/scripts/{SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME}",
+            "Stores configuration in /userdata/system/switch2-gamecube-guard/config.json",
+            "Writes activity to /userdata/system/logs/switch2-gamecube-guard.log",
+            "Does not modify Batocera's read-only system image or emulator files",
+        ],
+        "caution": "GameCube controllers on the adapter cannot be used in Switch 2 games. They come back when the game exits.",
     },
     {
         "id": CRASH_NOTIFIER_ID,
@@ -97,6 +118,9 @@ def _paths(settings: Settings) -> Dict[str, Path]:
         "crash_hook": system_root / "scripts" / CRASH_NOTIFIER_HOOK_FILENAME,
         "crash_config": system_root / "game-crash-notifier" / "config.json",
         "crash_log": system_root / "logs" / "game-crash-notifier.log",
+        "gc_hook": system_root / "scripts" / SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME,
+        "gc_config": system_root / "switch2-gamecube-guard" / "config.json",
+        "gc_log": system_root / "logs" / "switch2-gamecube-guard.log",
         "switch_config": system_root / "switch-gui-workaround" / "config.json",
         "switch_backup": system_root / "backups" / "hotfixes" / "drone-switch-gui-workaround",
         "switch_generator": system_root / "rgs" / "generators" / "yuzu" / "yuzuMainlineGenerator.py",
@@ -137,6 +161,8 @@ def _fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str, Any]:
     hook_key, asset, log_key = "hook", ASSET_PATH, "log"
     if metadata["id"] == CRASH_NOTIFIER_ID:
         hook_key, asset, log_key = "crash_hook", CRASH_NOTIFIER_ASSET, "crash_log"
+    elif metadata["id"] == SWITCH2_GAMECUBE_GUARD_ID:
+        hook_key, asset, log_key = "gc_hook", SWITCH2_GAMECUBE_GUARD_ASSET, "gc_log"
     installed = paths[hook_key].is_file()
     managed = installed and _sha256(paths[hook_key]) == _sha256(asset)
     payload = dict(metadata)
@@ -298,9 +324,26 @@ def _disable_crash_notifier(settings: Settings) -> None:
         pass
 
 
-def _disable_lindbergh_input_guard(settings: Settings) -> None:
+def _enable_switch2_gamecube_guard(settings: Settings) -> None:
     paths = _paths(settings)
-    hook = paths["hook"]
+    config = {
+        "systems": ["switch2"],
+        "usb_ids": ["057e:0337"],
+        "daemon_names": ["wii-u-gc-adapter", "wii-u-gc-adapter-daemon"],
+    }
+    _atomic_write(paths["gc_config"], (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o644)
+    _atomic_write(paths["gc_hook"], SWITCH2_GAMECUBE_GUARD_ASSET.read_bytes(), 0o755)
+
+
+def _disable_switch2_gamecube_guard(settings: Settings) -> None:
+    _restore_and_remove_hook(settings, _paths(settings)["gc_hook"])
+
+
+def _disable_lindbergh_input_guard(settings: Settings) -> None:
+    _restore_and_remove_hook(settings, _paths(settings)["hook"])
+
+
+def _restore_and_remove_hook(settings: Settings, hook: Path) -> None:
     # Only execute the recovery action on the real Batocera userdata tree;
     # tests and desktop development roots must never manipulate host USB.
     if hook.is_file() and settings.userdata_root.resolve() == Path("/userdata"):
@@ -489,6 +532,11 @@ def set_fix_enabled(
             _enable_crash_notifier(settings)
         else:
             _disable_crash_notifier(settings)
+    elif fix_id == SWITCH2_GAMECUBE_GUARD_ID:
+        if enabled:
+            _enable_switch2_gamecube_guard(settings)
+        else:
+            _disable_switch2_gamecube_guard(settings)
     elif fix_id == SWITCH_GUI_WORKAROUND_ID:
         if enabled:
             _enable_switch_gui_workaround(settings, scope, selected_games)

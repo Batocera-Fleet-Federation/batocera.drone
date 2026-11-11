@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Admin → Fixes: add the **Switch 2 GameCube adapter guard**. Switch 2 emulators crash with
+  "stack smashing detected" at launch while a Wii U GameCube adapter is connected; the guard stops
+  the `wii-u-gc-adapter` daemon and unbinds the adapter for `switch2` games, then rebinds it and
+  restarts the daemon at `gameStop` (with a watchdog for crashed launches). Unlike the Lindbergh
+  guard it also handles the daemon's virtual joysticks, which have no USB parent.
+
 - Keep Downloads progress, byte counts, and speed updating while a transfer search field,
   pager, or action button is focused, preserving the active control during queue refreshes.
 

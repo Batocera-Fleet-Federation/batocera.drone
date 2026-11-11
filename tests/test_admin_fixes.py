@@ -5,9 +5,70 @@ from pathlib import Path
 from unittest import mock
 
 from app.device import admin_fixes
-from app.device.fix_assets import game_crash_notifier, lindbergh_input_guard, switch_gui_launcher
+from app.device.fix_assets import game_crash_notifier, lindbergh_input_guard, switch2_gamecube_guard, switch_gui_launcher
 from app.drone_api import Settings
 from app.web import handlers_system
+
+
+class FakeGameCubeHost:
+    """A sysfs/proc tree with a Wii U GameCube adapter and its userspace daemon."""
+
+    ADAPTER = "5-1.4"
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.devices = root / "sys" / "bus" / "usb" / "devices"
+        self.drivers = root / "sys" / "bus" / "usb" / "drivers"
+        self.proc = root / "proc"
+        (self.drivers / "usb").mkdir(parents=True)
+        for action in ("bind", "unbind"):
+            (self.drivers / "usb" / action).write_text("", encoding="utf-8")
+        self.add_usb_device(self.ADAPTER, "057e", "0337")
+        self.add_usb_device("3-1", "054c", "09cc")  # DualShock 4 stays untouched
+        self.add_process(100, ["python3", "emulatorlauncher.py"], ppid=1, start="777")
+
+    def add_usb_device(self, usb_id: str, vendor: str, product: str) -> None:
+        device = self.devices / usb_id
+        device.mkdir(parents=True)
+        (device / "idVendor").write_text(vendor + "\n", encoding="utf-8")
+        (device / "idProduct").write_text(product + "\n", encoding="utf-8")
+        (device / "driver").mkdir()
+        interface = self.devices / f"{usb_id}:1.0"  # interfaces have no ids and are skipped
+        interface.mkdir()
+
+    def add_process(self, pid: int, argv, ppid: int = 1, start: str = "500") -> None:
+        folder = self.proc / str(pid)
+        folder.mkdir(parents=True)
+        (folder / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in argv) + b"\0")
+        fields = ["S", str(ppid)] + ["0"] * 17 + [start]
+        (folder / "stat").write_text(f"{pid} ({Path(argv[0]).name[:15]}) " + " ".join(fields), encoding="utf-8")
+
+    def kill(self, pid: int, _signal: int) -> None:
+        folder = self.proc / str(pid)
+        for child in folder.iterdir():
+            child.unlink()
+        folder.rmdir()
+
+    def driver_action(self, action: str) -> str:
+        return (self.drivers / "usb" / action).read_text(encoding="utf-8")
+
+    def patches(self):
+        guard = switch2_gamecube_guard
+        return [
+            mock.patch.object(guard, "USB_DEVICES_ROOT", self.devices),
+            mock.patch.object(guard, "USB_DRIVERS_ROOT", self.drivers),
+            mock.patch.object(guard, "SYS_INPUT_ROOT", self.root / "sys" / "class" / "input"),
+            mock.patch.object(guard, "PROC_ROOT", self.proc),
+            mock.patch.object(guard, "RUNTIME_ROOT", self.root / "run"),
+            mock.patch.object(guard, "STATE_PATH", self.root / "run" / "state.json"),
+            mock.patch.object(guard, "LOCK_PATH", self.root / "run" / "state.lock"),
+            mock.patch.object(guard, "CONFIG_PATH", self.root / "config.json"),
+            mock.patch.object(guard, "LOG_PATH", self.root / "guard.log"),
+            mock.patch.object(guard, "UDEV_RESTART_GRACE_SECONDS", 0),
+            mock.patch.object(guard.time, "sleep"),
+            mock.patch.object(guard.os, "kill", side_effect=self.kill),
+            mock.patch.object(guard, "spawn_watchdog"),
+        ]
 
 
 GENERATOR_SOURCE = '''def generate(emulator, rom):
@@ -88,6 +149,32 @@ class AdminFixManagerTests(unittest.TestCase):
             self.assertFalse(admin_fixes.get_fix(settings, admin_fixes.LINDBERGH_INPUT_GUARD_ID)["enabled"])
 
             disabled = admin_fixes.set_fix_enabled(settings, admin_fixes.CRASH_NOTIFIER_ID, False)
+            self.assertFalse(disabled["enabled"])
+            self.assertFalse(hook.exists())
+
+    def test_switch2_gamecube_guard_enable_and_disable_are_reversible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = build_settings(Path(tmp))
+            fix_id = admin_fixes.SWITCH2_GAMECUBE_GUARD_ID
+            hook = Path(tmp) / "system" / "scripts" / admin_fixes.SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME
+            self.assertEqual(admin_fixes.get_fix(settings, fix_id)["status"], "disabled")
+            enabled = admin_fixes.set_fix_enabled(settings, fix_id, True)
+            self.assertEqual(enabled["status"], "enabled")
+            self.assertTrue(hook.stat().st_mode & 0o100)
+            self.assertEqual(enabled["log_path"], str(Path(tmp) / "system" / "logs" / "switch2-gamecube-guard.log"))
+            config = json.loads((Path(tmp) / "system" / "switch2-gamecube-guard" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["systems"], ["switch2"])
+            self.assertEqual(config["usb_ids"], ["057e:0337"])
+            # Independent of the other input guard.
+            self.assertFalse(admin_fixes.get_fix(settings, admin_fixes.LINDBERGH_INPUT_GUARD_ID)["enabled"])
+
+            hook.write_text("# edited\n", encoding="utf-8")
+            self.assertEqual(admin_fixes.get_fix(settings, fix_id)["status"], "modified")
+
+            # A non-/userdata root never runs the hook's USB restore.
+            with mock.patch.object(admin_fixes.subprocess, "run") as run:
+                disabled = admin_fixes.set_fix_enabled(settings, fix_id, False)
+            run.assert_not_called()
             self.assertFalse(disabled["enabled"])
             self.assertFalse(hook.exists())
 
@@ -220,6 +307,83 @@ class InstalledFixAssetTests(unittest.TestCase):
         }
         selected = lindbergh_input_guard.select_groups_to_detach(groups, 4, config)
         self.assertEqual([group["usb_id"] for group in selected], ["1-2"])
+
+
+class Switch2GameCubeGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.host = FakeGameCubeHost(Path(self._tmp.name))
+        for patcher in self.host.patches():
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.guard = switch2_gamecube_guard
+
+    def test_game_start_stops_the_daemon_and_detaches_only_the_adapter(self) -> None:
+        self.host.add_process(4242, ["/usr/bin/wii-u-gc-adapter"])
+        self.guard.main(["gameStart", "switch2", "eglantine", "eglantine", "/userdata/roms/switch2/DK.nsp"])
+
+        self.assertFalse((self.host.proc / "4242").exists())
+        self.assertEqual(self.host.driver_action("unbind"), FakeGameCubeHost.ADAPTER)
+        state = self.guard.load_state()
+        self.assertEqual(state["adapters"], [FakeGameCubeHost.ADAPTER])
+        self.assertEqual(state["daemons"], [["/usr/bin/wii-u-gc-adapter"]])
+        self.guard.spawn_watchdog.assert_called_once()
+
+    def test_game_stop_rebinds_and_restarts_the_recorded_daemon(self) -> None:
+        self.host.add_process(4242, ["/usr/bin/wii-u-gc-adapter", "--flag"])
+        self.guard.main(["gameStart", "switch2", "eglantine", "eglantine", "rom"])
+        (self.host.devices / FakeGameCubeHost.ADAPTER / "driver").rmdir()  # what the kernel does on unbind
+
+        with mock.patch.object(self.guard.subprocess, "Popen") as popen:
+            self.guard.main(["gameStop", "switch2", "eglantine", "eglantine", "rom"])
+        self.assertEqual(self.host.driver_action("bind"), FakeGameCubeHost.ADAPTER)
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/wii-u-gc-adapter", "--flag"])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertFalse(self.guard.STATE_PATH.exists())
+
+    def test_restore_does_not_start_a_second_daemon_when_udev_already_did(self) -> None:
+        self.host.add_process(4242, ["/usr/bin/wii-u-gc-adapter"])
+        self.guard.main(["gameStart", "switch2", "orchid", "orchid", "rom"])
+        self.host.add_process(5555, ["/usr/bin/wii-u-gc-adapter"])
+        with mock.patch.object(self.guard.subprocess, "Popen") as popen:
+            self.guard.main(["gameStop", "switch2", "orchid", "orchid", "rom"])
+        popen.assert_not_called()
+        self.assertFalse(self.guard.STATE_PATH.exists())
+
+    def test_only_the_outermost_wrapper_is_recorded_for_restart(self) -> None:
+        self.host.add_process(300, ["/bin/sh", "/usr/bin/wii-u-gc-adapter-daemon"])
+        self.host.add_process(301, ["/usr/bin/wii-u-gc-adapter"], ppid=300)
+        self.guard.main(["gameStart", "switch2", "lichii", "lichii", "rom"])
+        self.assertFalse((self.host.proc / "300").exists())
+        self.assertFalse((self.host.proc / "301").exists())
+        self.assertEqual(self.guard.load_state()["daemons"], [["/bin/sh", "/usr/bin/wii-u-gc-adapter-daemon"]])
+
+    def test_other_systems_and_hosts_without_an_adapter_are_left_alone(self) -> None:
+        self.host.add_process(4242, ["/usr/bin/wii-u-gc-adapter"])
+        self.guard.main(["gameStart", "gamecube", "dolphin", "dolphin", "rom"])
+        self.assertTrue((self.host.proc / "4242").exists())
+        self.assertEqual(self.host.driver_action("unbind"), "")
+
+        self.host.kill(4242, 15)
+        (self.host.devices / FakeGameCubeHost.ADAPTER / "idProduct").write_text("0306\n", encoding="utf-8")
+        self.guard.main(["gameStart", "switch2", "eglantine", "eglantine", "rom"])
+        self.assertEqual(self.host.driver_action("unbind"), "")
+        self.assertFalse(self.guard.STATE_PATH.exists())
+        self.guard.spawn_watchdog.assert_not_called()
+
+    def test_configured_systems_extend_the_guard(self) -> None:
+        self.guard.CONFIG_PATH.write_text(json.dumps({"systems": ["switch2", "switch"]}), encoding="utf-8")
+        self.guard.main(["gameStart", "switch", "eden", "eden", "rom"])
+        self.assertEqual(self.host.driver_action("unbind"), FakeGameCubeHost.ADAPTER)
+
+    def test_watchdog_restores_after_the_launcher_disappears(self) -> None:
+        self.guard.main(["gameStart", "switch2", "eglantine", "eglantine", "rom"])
+        (self.host.devices / FakeGameCubeHost.ADAPTER / "driver").rmdir()
+        self.host.kill(100, 9)  # emulatorlauncher died without gameStop
+        self.guard.watch(100, "777")
+        self.assertEqual(self.host.driver_action("bind"), FakeGameCubeHost.ADAPTER)
+        self.assertFalse(self.guard.STATE_PATH.exists())
 
     def test_crash_signature_is_detected_but_launcher_error_level_is_not(self) -> None:
         config = {"short_session_seconds": 15, "joystick_hint_threshold": 8}
@@ -539,6 +703,7 @@ class AdminFixHandlerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual({fix["id"] for fix in payload["fixes"]}, {
                 admin_fixes.LINDBERGH_INPUT_GUARD_ID,
+                admin_fixes.SWITCH2_GAMECUBE_GUARD_ID,
                 admin_fixes.CRASH_NOTIFIER_ID,
                 admin_fixes.SWITCH_GUI_WORKAROUND_ID,
             })

@@ -12,6 +12,16 @@ It acts only on `lindbergh` launches. When `/sys/class/input/js*` exceeds eight 
 
 Configuration and the rotating activity log are stored under `/userdata/system/input-device-guard` and `/userdata/system/logs/input-device-guard.log`. Disabling the fix restores any active adapter before removing the Drone-owned hook.
 
+## Switch 2 GameCube adapter guard
+
+The Switch 2 emulators (eglantine, orchid and lichii through RGS) can abort with `stack smashing detected` while setting up controllers when a Wii U GameCube adapter (`057e:0337`) is connected. The launch returns to EmulationStation a few seconds later, and unplugging the adapter avoids it. The Lindbergh guard cannot help here: Batocera drives the adapter with the userspace `wii-u-gc-adapter` daemon, whose four ports are virtual (uinput) joysticks with no USB parent to group by. The guard is installed as:
+
+`/userdata/system/scripts/drone-switch2-gamecube-guard.py`
+
+It acts only on `switch2` launches (the `systems` list in its config). At `gameStart` it records the running adapter daemon's command line and the adapter's USB id, stops the daemon (SIGTERM, then SIGKILL after three seconds), which removes its virtual joysticks, and unbinds the adapter from the `usb` driver so the emulator's own libusb GameCube driver cannot open it either. Other controllers and light guns are never touched, and a host without an adapter is left alone. At `gameStop` it binds the adapter again and waits a few seconds for udev to start the daemon. If udev has not started it, the guard starts the recorded command itself. When a wrapper and the daemon it runs both match, only the outermost one is restarted. Like the Lindbergh guard, a detached watchdog handles abnormal `emulatorlauncher` exits, the next launch repairs stale state, and a reboot restores everything.
+
+Configuration is `/userdata/system/switch2-gamecube-guard/config.json` (`systems`, `usb_ids`, `daemon_names`) and activity is logged to `/userdata/system/logs/switch2-gamecube-guard.log`, including the joystick count before and after. Disabling the fix restores an active adapter and daemon before removing the hook.
+
 ## Game crash notifier
 
 Batocera returns silently to EmulationStation when an emulator dies at launch. This fix installs `/userdata/system/scripts/drone-game-crash-notifier.py`, which starts a detached watcher at every `gameStart` (any system) tied to the `emulatorlauncher` process. When the launcher exits, the watcher reads only the part of `es_launch_stderr.log` and `es_launch_stdout.log` written during that session and scores it:
