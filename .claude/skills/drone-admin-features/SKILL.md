@@ -164,8 +164,16 @@ also clears unsupported systems. Guard async results against stale requests.
 
 Artwork/video upload starts only on explicit file-input change. Inputs stay
 disabled during the upload to prevent duplicate requests; inline status and
-toasts report progress/errors/success. Invalidate the system ROM cache before
-refreshing detail after success, and do not navigate back if the user left.
+toasts report progress/errors/success. After success keep the cached system
+ROM list (it holds the mutated ROM) rather than deleting it: a refetch of
+`/systems/<id>` is served from the server `json_cache` (1 h, no per-key
+invalidation) and the browser's `max-age=3600`, so it would render the pre-upload
+entry and the new artwork would never appear. The upload/gamelist handlers call
+`_invalidate_rom_json_cache()` for the same reason. Re-uploads reuse the file name
+(`<stem>-<field>.<ext>`), so the page tags the replaced URL with `?v=` to defeat
+the browser's image cache. Do not strip trailing bytes of a multipart part with
+`rstrip(b"--")`-style byte sets (it eats file data); remove one CRLF only. Do not
+navigate back if the user left.
 The detail view has no Delete or Remove Gamelist action. Keep the deletion and
 gamelist-remove APIs for their other callers; duplicate cleanup still uses the
 shared batch deletion API.

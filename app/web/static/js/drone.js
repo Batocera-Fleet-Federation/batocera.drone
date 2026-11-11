@@ -8645,6 +8645,14 @@ function artworkImageUploadHtml(rom, field) {
     </div>
   `;
 }
+// Public artwork URLs are served with a 1 h Cache-Control and re-uploads reuse the same
+// file name, so a fresh upload would keep showing the old bytes. Remember when each URL
+// was last replaced from this page and tag it (?v=) so the browser refetches it.
+const artworkAssetVersions = new Map();
+function withArtworkVersion(url) {
+  const version = artworkAssetVersions.get(url);
+  return version ? `${url}${url.includes("?") ? "&" : "?"}v=${version}` : url;
+}
 function artworkExistingImageUrl(rom, value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -8656,7 +8664,7 @@ function artworkExistingImageUrl(rom, value) {
     ? normalized.substring(imagePrefix.length)
     : normalized.split("/").pop();
   if (!imageFile) return raw;
-  return `${API_BASE}/public/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`;
+  return withArtworkVersion(`${API_BASE}/public/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`);
 }
 // Unlike images (looked up by guessed filename -- see artworkExistingImageUrl),
 // video files land in either images/ or videos/ depending on how they arrived
@@ -8667,7 +8675,7 @@ function artworkExistingVideoUrl(rom, value) {
   const system = rom.system || "";
   const romPath = rom.rom_path || "";
   if (!system || !romPath) return "";
-  return `${API_BASE}/public/systems/${encodeURIComponent(system)}/video/${encodeURIComponent(romPath)}`;
+  return withArtworkVersion(`${API_BASE}/public/systems/${encodeURIComponent(system)}/video/${encodeURIComponent(romPath)}`);
 }
 function artworkExistingAssetUrl(rom, field, value) {
   return field === "video" ? artworkExistingVideoUrl(rom, value) : artworkExistingImageUrl(rom, value);
@@ -8751,14 +8759,24 @@ function bindArtworkEditButtons(rom, index) {
   });
 }
 let artworkUploadInProgress = false;
+const ARTWORK_UPLOAD_MAX_BYTES = 50 * 1024 * 1024; // mirrors the server's multipart body cap
 async function uploadArtworkImage(rom, field, fileInput) {
   if (artworkUploadInProgress) return;
   const file = fileInput && fileInput.files[0];
   if (!file) { showToast(`Please select a ${field === "video" ? "video" : "image"} file first.`, "warning"); return; }
   const system = rom.system || "";
+  const status = fileInput.closest(".artwork-upload-item").querySelector(".artwork-upload-status");
+  if (file.size > ARTWORK_UPLOAD_MAX_BYTES) {
+    // The server rejects bodies over 50 MB without reading them, which the browser
+    // reports as a bare network error; say what actually went wrong instead.
+    const msg = `${field} file is too large (${Math.ceil(file.size / 1048576)} MB; the limit is 50 MB).`;
+    if (status) status.textContent = `Upload failed: ${msg}`;
+    showToast(`Upload failed: ${escapeHtml(msg)}`, "danger");
+    fileInput.value = "";
+    return;
+  }
   artworkUploadInProgress = true;
   document.querySelectorAll(".artwork-upload-file").forEach((input) => { input.disabled = true; });
-  const status = fileInput.closest(".artwork-upload-item").querySelector(".artwork-upload-status");
   if (status) status.textContent = `Uploading ${field}…`;
   const detailHash = window.location.hash;
   try {
@@ -8787,9 +8805,22 @@ async function uploadArtworkImage(rom, field, fileInput) {
     if (result.gamelist) rom.gamelist = result.gamelist;
     if (result.missing) rom.missing = result.missing;
     if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
+    // Tag the replaced file's URL so the browser does not keep serving the cached old bytes.
+    const uploadedUrl = artworkExistingAssetUrl(rom, field, rom.existing && rom.existing[field]).split("?v=")[0];
+    if (uploadedUrl) artworkAssetVersions.set(uploadedUrl, Date.now());
+    // Keep this ROM's cached system list, now carrying the server's updated entry, instead of
+    // dropping it: re-fetching /systems/<id> can return a list from before the upload and the
+    // detail page would then show no new artwork.
+    const cachedSystem = systemRomCache[system];
+    if (cachedSystem && cachedSystem.data && Array.isArray(cachedSystem.data.roms)) {
+      const at = cachedSystem.data.roms.findIndex((item) => String(item.unique_id || "") === String(rom.unique_id || ""));
+      if (at >= 0) cachedSystem.data.roms[at] = rom;
+      cachedSystem.loadedAt = Date.now();
+    } else {
+      delete systemRomCache[system];
+    }
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
     if (status) status.textContent = `Uploaded ${field}.`;
-    delete systemRomCache[system];
     if (rom.system && rom.unique_id && window.location.hash === detailHash) {
       await renderRomMediaPage(rom.system, rom.unique_id);
     }

@@ -41,6 +41,12 @@ class ExpiringLRUCache:
             self._items.move_to_end(key)
             return value
 
+    def clear(self) -> None:
+        """Drop every entry; callers use this after changing the data behind cached responses."""
+        with self._lock:
+            self._items.clear()
+            self.total_bytes = 0
+
     def put(self, key: str, data: bytes, meta: Optional[dict] = None) -> None:
         size = len(data)
         if size > self.max_bytes:

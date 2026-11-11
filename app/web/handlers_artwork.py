@@ -232,6 +232,7 @@ class HandlersArtworkMixin:
             self.repository._search_index_expires_at = 0
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
+        self._invalidate_rom_json_cache()
         result["override_existing"] = override_existing
         result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "launchbox_metadata"])
         self._send_json(200, result)
@@ -332,6 +333,18 @@ class HandlersArtworkMixin:
             raise ValueError("game_id is required")
         raise ValueError("MobyGames scraping is disabled because the site often requires a browser challenge. Use the MobyGames link to search manually.")
 
+    def _invalidate_rom_json_cache(self) -> None:
+        """Forget cached ROM list/browse JSON after artwork or gamelist changes.
+
+        ``json_cache`` has no per-key invalidation and keeps ``/systems/<id>`` style
+        responses for up to ``json_cache_ttl_seconds`` (1 h), so without this the
+        ROM detail page re-renders from a stale list right after an upload and the
+        new artwork never appears.
+        """
+        cache = getattr(self, "json_cache", None)
+        if cache is not None:
+            cache.clear()
+
     def _handle_admin_artwork_upload(self) -> None:
         import urllib.parse
         content_type = self.headers.get("Content-Type", "")
@@ -380,7 +393,11 @@ class HandlersArtworkMixin:
             payload = lines[-1:] if len(lines) == 1 else raw_body  # simplified
             # Re-extract payload properly
             payload = part[part.find(b"\r\n\r\n")+4:] if b"\r\n\r\n" in part else b""
-            payload = payload.rstrip(b"\r\n").rstrip(b"--")
+            # Drop only the single CRLF that precedes the next boundary. Stripping a
+            # *set* of trailing bytes would also eat legitimate file bytes (0x0d, 0x0a,
+            # 0x2d) and corrupt the uploaded image/video.
+            if payload.endswith(b"\r\n"):
+                payload = payload[:-2]
             if has_file and fn:
                 file_data = payload
                 filename = fn
@@ -460,6 +477,7 @@ class HandlersArtworkMixin:
         # Invalidate caches
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
+        self._invalidate_rom_json_cache()
         rom_name = str(rom.get("name") or Path(rom_path or rom_id).stem or rom_path or rom_id)
         self._send_json(200, {
             "rom_name": rom_name,
@@ -481,6 +499,7 @@ class HandlersArtworkMixin:
         if not rom_path:
             raise ValueError("rom_path is required")
         result = self.repository.remove_gamelist_entry(system, rom_path)
+        self._invalidate_rom_json_cache()
         self._send_json(200, result)
 
     def _handle_admin_gamelist_update(self, payload: dict) -> None:
@@ -494,6 +513,7 @@ class HandlersArtworkMixin:
         if not isinstance(fields, dict):
             raise ValueError("fields must be an object")
         result = self.repository.update_gamelist_entry(system, rom_path, fields)
+        self._invalidate_rom_json_cache()
         self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:
