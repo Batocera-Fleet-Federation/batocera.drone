@@ -50,14 +50,12 @@ and the scraper (keyless, unlike TMDb).
    shipped-feature-default production traffic; if picked up later it should
    get a real user-supplied key, following the TMDb pattern, not the shared
    key.
-   - **Bulk scrape must be grouped by (artist, album), not iterated per
-     track** — a release lookup (`inc=recordings+artist-credits+tags`)
-     returns the whole tracklist in one call. This is load-bearing given
-     MusicBrainz's stricter throttle: per-track would make a 2,000-song
-     library take 30+ minutes minimum; per-album keeps it to a few minutes
-     for a typical library. Cache the resolved release MBID per (artist,
-     album) within one bulk-job run, exactly like Movies caches
-     `show_id`/`show_details` per show title within a run.
+   - **Scraping is grouped by (artist, album), not per track** — a release
+     lookup (`inc=recordings+artist-credits+tags`) returns the whole
+     tracklist in one call, which matters given MusicBrainz's stricter
+     throttle. (The admin bulk-scrape job that originally lived on the
+     Admin > Artwork "Music" tab has been removed; scraping is the album
+     page's manual search-and-apply only.)
 
 2. **Grouping source: folder structure, primary and required; embedded tags
    (ID3v2/Vorbis/MP4 atoms) are an optional future enrichment, not v1.**
@@ -90,7 +88,8 @@ and the scraper (keyless, unlike TMDb).
      browsing unlike Movies' one-video-at-a-time modal). Simple next/prev
      within the currently-open album's queue; no repeat in v1 (shuffle
      added later, see "Shipped deviations" below).
-   - **Phase 3** — scraper client + admin bulk-scrape job + genres.
+   - **Phase 3** — scraper client + genres (an admin bulk-scrape job shipped
+     here and was later removed along with Admin > Artwork).
    - **Phase 4 (explicit follow-up, out of scope for the initial build)** —
      P2P peer-sync route parity (`/peer/music/...`, mirroring the `movies`
      block in `handlers_peer.py`), `music_duplicates.py`, TheAudioDB artist
@@ -175,21 +174,17 @@ file set:
 - `app/music/filename_parser.py`, `app/music/musicbrainz_client.py`
   (`MusicBrainzClient` + `MusicBrainzUnavailableError`/
   `MusicBrainzNotFoundError(MusicBrainzUnavailableError)` — same
-  subclass-before-parent exception shape as `tmdb_client.py`, same reason: a
-  single not-found lookup must not abort an entire bulk job), `app/music/
+  subclass-before-parent exception shape as `tmdb_client.py`), `app/music/
   coverart_client.py` (`CoverArtClient` — checks a release's image list
   before fetching, to avoid a guaranteed-404 request for art-less releases),
   `app/music/metadata_manager.py` (orchestration; no key-storage code path
   at all, unlike movies' `metadata_manager.py`)
-- `app/storage/music_scrape_jobs.py`, `app/storage/music_scrape_job_items.py`
-  — 1:1 mirrors of the movie equivalents
 - `app/web/handlers_music.py` (`HandlersMusicMixin`) — list/detail/stream/
-  download/artwork + admin scrape search/apply/delete/bulk + batch delete
+  download/artwork + admin scrape search/apply/delete + batch delete
 - Tests: `tests/test_music_store.py`, `tests/test_music_filename_parser.py`,
   `tests/test_music_metadata_manager.py` (with `FakeMusicBrainzClient`/
   `FakeCoverArtClient`, same injectable-`client=` shape `metadata_manager.py`
   already uses), `tests/test_music_handlers.py`,
-  `tests/test_music_scrape_jobs.py`, `tests/test_music_scrape_job_items.py`,
   `tests/test_music_transfer.py` (Phase 4)
 
 ## Planned routes (mirrors the Movies route table exactly, minus scraper-settings)
@@ -204,7 +199,6 @@ file set:
 | GET | `/admin/music/{key}/scrape/search?q=` | manual search |
 | POST | `/admin/music/{key}/scrape/apply` | apply a match |
 | POST | `/admin/music/{key}/scrape/delete` | remove scraped metadata |
-| GET/POST | `/admin/music/scrape/bulk[/items][/retry]` | bulk job status/start/items/retry |
 | POST | `/admin/music/delete` | batch delete |
 | GET | `/peer/music/...` (Phase 4) | P2P transfer, mirrors `handlers_peer.py`'s `movies` block |
 
@@ -295,7 +289,7 @@ Real changes made after initial launch, not reflected in the sections above:
 
 - **Scraping went from per-track matching to album-only, and the manual
   scraper UI moved from the track page to the bottom of the album page.**
-  The bulk scraper (and the manual "search and apply" card) used to match
+  The scraper (the manual "search and apply" card) used to match
   each local mp3/flac file to a specific track within a resolved release's
   tracklist and write that track's title/track-number/disc-number/recording
   MBID -- real bugs kept coming from exactly that per-file matching (an
@@ -346,10 +340,7 @@ Real changes made after initial launch, not reflected in the sections above:
   none, which is the normal case, not a failure. `app/music/
   wikimedia_client.py` (new file) resolves that Commons page URL to a real
   downloadable image via Wikimedia's own public MediaWiki Action API (also
-  keyless). `_apply_release_to_group` fetches this best-effort, cached per
-  `artist_mbid` across a bulk run the same way album art is cached per
-  `release_mbid` (`artist_bytes_cache`, parallel to `cover_bytes_cache`),
-  and writes it to `images/artist-photo.jpg` alongside the album cover
+  keyless). `_apply_release_to_group` fetches this best-effort and writes it to `images/artist-photo.jpg` alongside the album cover
   (same "one shared file per apply call" reasoning as
   `_album_artwork_path`, just a different fixed filename) -- populating
   `artist_art_relative_path`, which `handlers_music._handle_music_artwork`
@@ -423,10 +414,8 @@ Real changes made after initial launch, not reflected in the sections above:
 
 - Using a scraped artist/album name as the grouping key instead of the
   folder-derived one — splits a partially-scraped album into two cards.
-- Iterating the bulk-scrape job per track instead of per (artist, album) —
-  blows through MusicBrainz's throttle budget for no reason.
-- Treating a single MusicBrainz not-found lookup the same as a genuine
-  service-unavailable failure — mass-fails an entire bulk run.
+- Scraping per track instead of per (artist, album) — blows through
+  MusicBrainz's throttle budget for no reason.
 - Reusing `renderAdminPanelTabs` for the asset-type switcher instead of a
   dedicated inline component — wrong semantics, wrong DOM position.
 - Naming the music playback bar's mount function `bootstrap` — see the

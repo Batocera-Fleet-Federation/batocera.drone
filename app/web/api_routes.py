@@ -230,24 +230,6 @@ class ApiRoutesMixin:
                 self._handle_theme_logos()
                 return
 
-            if api_path == "/theme/images":
-                limit_raw = query_params.get("limit", ["500"])[0]
-                offset_raw = query_params.get("offset", ["0"])[0]
-                query = query_params.get("q", [None])[0]
-                system_filter = query_params.get("system", [None])[0]
-                systems_raw = query_params.get("systems", [None])[0]
-                system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
-                try:
-                    limit = int(limit_raw)
-                except Exception:
-                    limit = 500
-                try:
-                    offset = int(offset_raw)
-                except Exception:
-                    offset = 0
-                self._handle_theme_images(limit, offset, query, system_filter, system_filters=system_filters)
-                return
-
             if len(parts) == 3 and parts[0] == "theme" and parts[1] == "system":
                 self._handle_system_theme_meta(parts[2])
                 return
@@ -321,6 +303,11 @@ class ApiRoutesMixin:
                     genre=query_params.get("genre", [None])[0],
                     query=query_params.get("q", [None])[0],
                     browser_playable=query_params.get("browser_playable", ["false"])[0].strip().lower() in {"1", "true", "yes"},
+                    missing_art=[
+                        part
+                        for value in query_params.get("missing_art", [])
+                        for part in value.split(",")
+                    ],
                 )
                 return
 
@@ -672,32 +659,8 @@ class ApiRoutesMixin:
                 )
                 return
 
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":
-                self._handle_admin_movie_scrape_bulk_status()
-                return
-
-            if len(parts) == 6 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "items":
-                self._handle_admin_movie_scrape_bulk_items(
-                    parts[5],
-                    int(query_params["limit"][0]) if query_params.get("limit") else None,
-                    int(query_params.get("offset", ["0"])[0]),
-                )
-                return
-
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "search":
                 self._handle_admin_movie_scrape_search(parts[2], query_params.get("q", [None])[0])
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk":
-                self._handle_admin_music_scrape_bulk_status()
-                return
-
-            if len(parts) == 6 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "items":
-                self._handle_admin_music_scrape_bulk_items(
-                    parts[5],
-                    int(query_params["limit"][0]) if query_params.get("limit") else None,
-                    int(query_params.get("offset", ["0"])[0]),
-                )
                 return
 
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[3] == "scrape" and parts[4] == "search":
@@ -1341,34 +1304,6 @@ class ApiRoutesMixin:
                 self._handle_admin_roms_delete(payload)
                 return
 
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":
-                payload = self._read_json_body()
-                self._handle_admin_movie_scrape_bulk_start(payload)
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "retry":
-                payload = self._read_json_body()
-                self._handle_admin_movie_scrape_bulk_retry(payload)
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "stop":
-                self._handle_admin_movie_scrape_bulk_stop()
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk":
-                payload = self._read_json_body()
-                self._handle_admin_music_scrape_bulk_start(payload)
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "retry":
-                payload = self._read_json_body()
-                self._handle_admin_music_scrape_bulk_retry(payload)
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "stop":
-                self._handle_admin_music_scrape_bulk_stop()
-                return
-
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_launchbox_apply(payload)
@@ -1392,11 +1327,6 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "update":
                 payload = self._read_json_body()
                 self._handle_admin_gamelist_update(payload)
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove-missing":
-                payload = self._read_json_body()
-                self._handle_admin_gamelist_remove_missing(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "upload":

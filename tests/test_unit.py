@@ -2810,7 +2810,7 @@ class SettingsTests(unittest.TestCase):
         ]
         controls_source = js_source[
             js_source.index("async function renderAdminControlsPage()"):
-            js_source.index("async function loadThemePage(")
+            js_source.index("function _sysInfoBadge(")
         ]
 
         self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
@@ -2844,7 +2844,7 @@ class SettingsTests(unittest.TestCase):
         js_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         controls_source = js_source[
             js_source.index("async function renderAdminControlsPage()"):
-            js_source.index("async function loadThemePage(")
+            js_source.index("function _sysInfoBadge(")
         ]
         self.assertIn('id="esCollectionsSearchInput"', controls_source)
         self.assertIn('id="esCollectionsNoMatches"', controls_source)
@@ -3057,7 +3057,6 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("emulator-config-tree", js_source)
         self.assertIn(".tree-grid-row.emulator-tree-row", css_source)
         self.assertIn("var(--tree-depth, 0) * 1.35rem", css_source)
-        self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
         self.assertIn("emulatorConfigSelectionRequestId", js_source)
         self.assertIn("document.activeElement !== versionSelect", js_source)
@@ -6772,6 +6771,182 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
             self.assertEqual(payload["count"], 1)
 
 
+class RomMissingArtworkFilterTests(unittest.TestCase):
+    """Systems Browse's "Missing artwork" filter: the scan records which
+    gamelist artwork tags are empty (rom_missing_artwork) and GET /roms
+    narrows to games missing any of the requested types."""
+
+    def _settings(self, root):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
+                "DRONE_DEVICE_ID": "missing-art-test",
+            },
+            clear=True,
+        ):
+            return drone_api.Settings.from_env()
+
+    def _seed(self, root):
+        settings = self._settings(root)
+        entries = {
+            "snes:mario.zip": {
+                "system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "genre": "Platform",
+                "missing_artwork": ["marquee", "video"],
+            },
+            "snes:zelda.zip": {
+                "system": "snes", "file_path": "zelda.zip", "rom_name": "Zelda", "genre": "Adventure",
+                "missing_artwork": [],
+            },
+            "genesis:sonic.zip": {
+                "system": "genesis", "file_path": "sonic.zip", "rom_name": "Sonic", "genre": "Platform",
+                "missing_artwork": ["image", "marquee"],
+            },
+        }
+        _persist_rom_metadata_cache(
+            settings,
+            {
+                **_empty_rom_metadata_cache(),
+                "entries": entries,
+                "systems": [{"name": "snes", "rom_count": 2}, {"name": "genesis", "rom_count": 1}],
+                "last_full_scan_at": "2026-08-09T00:00:00Z",
+                "scan_in_progress": False,
+            },
+            rom_updates=entries,
+        )
+        return settings
+
+    def _persist(self, settings, **kwargs):
+        _persist_rom_metadata_cache(
+            settings,
+            {**_empty_rom_metadata_cache(), "last_full_scan_at": "2026-08-09T00:00:00Z", "scan_in_progress": False},
+            queue_changes=False,
+            **kwargs,
+        )
+
+    def test_database_rom_metadata_fields_lists_empty_artwork_tags(self) -> None:
+        from app.roms.gamelist import ARTWORK_FIELDS, _database_rom_metadata_fields
+
+        rom = {"file_path": "ct.zip", "existing": {"image": "./images/ct.png", "video": "./videos/ct.mp4", "marquee": " "}}
+        fields = _database_rom_metadata_fields(rom, "snes", "ct.zip", Path("/tmp/x"), 1, 0)
+        self.assertEqual(fields["missing_artwork"], [f for f in ARTWORK_FIELDS if f not in {"image", "video"}])
+
+    def test_classifier_version_was_bumped_so_existing_scans_backfill(self) -> None:
+        from app.roms.rom_scanner import ROM_CLASSIFIER_VERSION
+
+        self.assertGreaterEqual(ROM_CLASSIFIER_VERSION, 4)
+
+    def test_filter_matches_games_missing_any_requested_type(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_cache_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            names = lambda fields: {item["rom_name"] for item in list_rom_cache_page(settings, missing_artwork=fields)["items"]}
+            self.assertEqual(names(["marquee"]), {"Mario", "Sonic"})
+            self.assertEqual(names(["image"]), {"Sonic"})
+            self.assertEqual(names(["image", "video"]), {"Mario", "Sonic"})
+            self.assertEqual(names(["wheel"]), set())
+            self.assertEqual(names([]), {"Mario", "Zelda", "Sonic"})
+            page = list_rom_cache_page(settings, systems=["snes"], missing_artwork=["marquee"])
+            self.assertEqual([item["rom_name"] for item in page["items"]], ["Mario"])
+            self.assertEqual(page["total"], 1)
+
+    def test_genre_counts_follow_the_filter(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings, missing_artwork=["video"])}
+            self.assertEqual(counts, {"Platform": 1})
+
+    def test_rescan_replaces_rows_delete_clears_them_and_reload_keeps_them(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_cache_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            names = lambda fields: {item["rom_name"] for item in list_rom_cache_page(settings, missing_artwork=fields)["items"]}
+            # A fresh scan of Mario now has a marquee.
+            self._persist(settings, rom_updates={"snes:mario.zip": {
+                "system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "missing_artwork": ["video"],
+            }})
+            self.assertEqual(names(["marquee"]), {"Sonic"})
+            # A row re-persisted without the list (reloaded from SQLite, e.g.
+            # after hashing) keeps what was indexed.
+            self._persist(settings, rom_updates={"snes:mario.zip": {
+                "system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "fingerprint": "abc",
+            }})
+            self.assertEqual(names(["video"]), {"Mario"})
+            self._persist(settings, rom_deletes=["genesis:sonic.zip"])
+            self.assertEqual(names(["image", "marquee"]), set())
+
+    def test_handle_rom_browse_missing_art_param(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = drone_api.RomRequestHandler.__new__(drone_api.RomRequestHandler)
+            handler.settings = settings
+            handler.repository = repo
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_rom_browse(limit=50, offset=0, missing_art=["Image", "bogus"])
+            self.assertEqual({item["rom_name"] for item in captured["payload"]["roms"]}, {"Sonic"})
+            self.assertEqual(captured["payload"]["count"], 1)
+            # Only unknown names -> no filter at all.
+            handler._handle_rom_browse(limit=50, offset=0, missing_art=["bogus"])
+            self.assertEqual(captured["payload"]["count"], 3)
+
+    def test_route_passes_comma_separated_missing_art(self) -> None:
+        routes = (Path(__file__).resolve().parents[1] / "app" / "web" / "api_routes.py").read_text(encoding="utf-8")
+        start = routes.index('if api_path == "/roms":')
+        block = routes[start:routes.index('if api_path == "/movies":', start)]
+        self.assertIn('query_params.get("missing_art", [])', block)
+        self.assertIn('value.split(",")', block)
+
+
+class ExplorerFiltersUiTests(unittest.TestCase):
+    """Mobile explorer filters open in a modal; Systems Browse has a
+    per-artwork-type "Missing artwork" filter."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        static = Path(__file__).resolve().parents[1] / "app" / "web" / "static"
+        cls.js = (static / "js" / "drone.js").read_text(encoding="utf-8")
+        cls.css = (static / "css" / "drone.css").read_text(encoding="utf-8")
+
+    def test_every_explorer_filters_button_opens_the_modal(self) -> None:
+        for sidebar_id in ("systems-explore-sidebar", "movie-explorer-sidebar", "music-explorer-sidebar"):
+            self.assertIn(f"onclick=\"openExplorerFiltersModal('{sidebar_id}')\"", self.js)
+        self.assertNotIn("toggleExplorerFilters", self.js)
+        self.assertNotIn("filters-open", self.css)
+
+    def test_modal_moves_the_sidebar_in_and_restores_it(self) -> None:
+        start = self.js.index("function openExplorerFiltersModal(")
+        end = self.js.index("function setBackground(", start)
+        block = self.js[start:end]
+        self.assertIn("themed-modal", block)
+        self.assertIn("btn-close-white", block)
+        self.assertIn('"hidden.bs.modal", restoreExplorerFiltersSidebar', block)
+        self.assertIn("placeholder.replaceWith(moved.sidebar)", block)
+        self.assertIn('"hashchange"', block)
+        self.assertIn(".explorer-filters-modal .movie-explorer-sidebar", self.css)
+        self.assertIn(".movie-explorer-body > .movie-explorer-sidebar { display: none; }", self.css)
+
+    def test_missing_artwork_checkboxes_cover_every_artwork_type(self) -> None:
+        from app.roms.gamelist import ARTWORK_FIELDS
+
+        start = self.js.index("const SYSTEMS_EXPLORE_ARTWORK_TYPES = [")
+        block = self.js[start:self.js.index("];", start)]
+        import re as _re
+
+        self.assertEqual(tuple(_re.findall(r'\["(\w+)", "', block)), ARTWORK_FIELDS)
+        self.assertIn("renderSystemsExploreMissingArtList();", self.js)
+        self.assertIn('params.set("missing_art", systemsExploreMissingArt.join(","))', self.js)
+
+
 class RomDeleteTests(unittest.TestCase):
     """delete_rom() -- the Systems Browse ROM detail page's delete action
     (and the duplicate-cleanup bulk delete): removes the file (or the whole
@@ -7913,7 +8088,7 @@ class SystemsExplorePageTests(unittest.TestCase):
         # list-render function re-emitted the <input> too) would drop focus
         # and cursor position mid-type.
         shell_start = self.js.index("function renderSystemsExploreSidebarShell()")
-        shell_end = self.js.index("function systemsExploreVisibleSystems(", shell_start)
+        shell_end = self.js.index("function renderSystemsExploreMissingArtList(", shell_start)
         self.assertEqual(self.js[shell_start:shell_end].count("<input"), 2)
 
         for fn_name, next_fn_name in (
@@ -8841,33 +9016,26 @@ class NavRestructureTests(unittest.TestCase):
         self.assertNotIn('const themeMenuBtn = document.getElementById("themeMenuBtn");', self.js)
         self.assertNotIn("themeMenuBtn.addEventListener", self.js)
 
-    def test_theme_is_reachable_via_the_artwork_panel_tabs(self) -> None:
-        # Theme was folded into the "Artwork" admin panel as a second tab
-        # (alongside Artwork & Metadata) rather than getting its own
-        # admin-menu card. The tile itself lands on #theme by default, not
-        # #admin/artwork -- that tab's gamelist scan can take several
-        # seconds on a large ROM library, so defaulting to it meant every
-        # visit to this tile paid that cost even for someone who only
-        # wanted Movies or Theme Gallery (see the tile's own comment in
-        # drone.js). Artwork & Metadata is still one click away via the tab
-        # bar checked below.
+    def test_artwork_admin_panel_is_removed(self) -> None:
+        # The Admin > Artwork tile and all of its tabs (Artwork & Metadata,
+        # Theme Gallery, Movies, Music) were removed outright.
         menu_start = self.js.index("async function renderAdminMenu()")
         menu_end = self.js.index("async function updateDroneApp()")
         menu = self.js[menu_start:menu_end]
-        self.assertIn("setHash('#theme')", menu)
-        self.assertIn(">Artwork<", menu)
-        self.assertNotIn(">Theme<", menu)
-
-        tabs_start = self.js.index("function renderArtworkTabBar(")
-        tabs_end = self.js.index("\n}", tabs_start)
-        tabs_body = self.js[tabs_start:tabs_end]
-        self.assertIn('"#theme"', tabs_body)
-        self.assertIn("Theme Gallery", tabs_body)
-
-    def test_theme_page_route_is_unchanged(self) -> None:
-        # Moving the entry point doesn't gate or rename the page itself.
-        self.assertIn('hash === "#theme"', self.js)
-        self.assertIn("await renderThemeGalleryPage();", self.js)
+        self.assertNotIn(">Artwork<", menu)
+        self.assertNotIn("setHash('#theme')", menu)
+        for removed in (
+            "function renderArtworkTabBar(",
+            "function renderMissingArtworkPage(",
+            "function renderThemeGalleryPage(",
+            "function renderAdminMoviesArtworkPage(",
+            "function renderAdminMusicArtworkPage(",
+            'hash === "#theme"',
+            'hash.startsWith("#admin/artwork")',
+            'hash === "#admin/movies"',
+            'hash === "#admin/music"',
+        ):
+            self.assertNotIn(removed, self.js)
 
     def test_transfers_is_reachable_via_the_swarm_panel_tabs(self) -> None:
         # Transfers was folded into the Swarm navbar destination as a second
@@ -9018,7 +9186,7 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
 
     def test_render_rom_media_page_includes_video_player_and_metadata_form(self) -> None:
         fn_start = self.js.index("async function renderRomMediaPage(")
-        fn_end = self.js.index("\nfunction renderThemeGallery(")
+        fn_end = self.js.index("\nfunction systemsExploreHash(")
         body = self.js[fn_start:fn_end]
         self.assertIn('id="romMediaVideoPlayer"', body)
         self.assertIn("romVideoUrl(rom)", body)
@@ -9027,14 +9195,14 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
 
     def test_rom_detail_page_has_admin_gated_delete_button(self) -> None:
         fn_start = self.js.index("async function renderRomMediaPage(")
-        fn_end = self.js.index("\nfunction renderThemeGallery(")
+        fn_end = self.js.index("\nfunction systemsExploreHash(")
         body = self.js[fn_start:fn_end]
         self.assertIn("adminEnabled", body)
         self.assertIn("deleteRomFromDetailPage(", body)
 
     def test_delete_rom_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
         fn_start = self.js.index("function deleteRomFromDetailPage(")
-        fn_end = self.js.index("function renderThemeGallery(")
+        fn_end = self.js.index("function systemsExploreHash(")
         body = self.js[fn_start:fn_end]
         self.assertIn("openConfirmDeleteModal(", body)
         self.assertIn("deleteRomsBatch([{ system, unique_id: uniqueId }])", body)
@@ -9076,15 +9244,13 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
         body = self.js[fn_start:fn_end]
         self.assertIn("video.pause();", body)
 
-    def test_upload_refresh_is_page_aware_instead_of_assuming_artwork_admin_page(self) -> None:
-        # uploadArtworkImage is shared by the Artwork admin page and the ROM
-        # Details page; unconditionally calling the admin page's own
-        # selectArtworkRom() used to crash with a null #selectedArtworkRom
-        # lookup whenever an upload happened from the ROM Details page.
+    def test_upload_refreshes_the_rom_details_page(self) -> None:
+        # uploadArtworkImage only runs from the ROM Details page now (the
+        # Artwork admin page is gone), so it re-renders that page directly.
         fn_start = self.js.index("async function uploadArtworkImage(")
         fn_end = self.js.index("\nfunction openMarqueeCropper(")
         body = self.js[fn_start:fn_end]
-        self.assertIn('document.getElementById("selectedArtworkRom")', body)
+        self.assertNotIn("selectArtworkRom", body)
         self.assertIn("renderRomMediaPage(rom.system, rom.unique_id)", body)
 
     def test_save_rom_media_metadata_posts_gamelist_update(self) -> None:
@@ -9095,7 +9261,7 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
 
     def test_remove_rom_media_gamelist_entry_confirms_before_posting(self) -> None:
         fn_start = self.js.index("async function removeRomMediaGamelistEntry(")
-        fn_end = self.js.index("\nfunction artworkPayloadUrl(")
+        fn_end = self.js.index("\nfunction artworkImageUploadHtml(")
         body = self.js[fn_start:fn_end]
         self.assertIn("window.confirm(", body)
         self.assertIn('apiPost("/admin/artwork/gamelist/remove"', body)

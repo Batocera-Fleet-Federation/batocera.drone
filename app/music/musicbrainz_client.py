@@ -14,9 +14,8 @@ requires a descriptive ``User-Agent`` identifying the application (not a
 browser UA the way TMDb's scraper client uses -- MusicBrainz explicitly asks
 for the opposite) and a *proactive* self-throttle to roughly one request per
 second, unlike TMDb's purely reactive 429-retry-with-backoff. Both matter
-here: skipping the User-Agent gets a client blocked outright, and a bulk
-scrape run that doesn't self-throttle will trip MusicBrainz's own rate
-limiting well before a modest-sized library finishes.
+here: skipping the User-Agent gets a client blocked outright, and a client
+that doesn't self-throttle will trip MusicBrainz's own rate limiting.
 """
 
 from __future__ import annotations
@@ -39,19 +38,15 @@ MUSICBRAINZ_USER_AGENT = (
     "(+https://github.com/Batocera-Fleet-Federation/batocera.drone)"
 )
 # MusicBrainz's own guidance: no more than ~1 request/second for an
-# unauthenticated client. Enforced unconditionally on every request (not just
-# inside the bulk job), via a module-level "time of last call" gate shared by
-# every MusicBrainzClient instance in this process.
+# unauthenticated client. Enforced unconditionally on every request, via a
+# module-level "time of last call" gate shared by every MusicBrainzClient
+# instance in this process.
 MUSICBRAINZ_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 MUSICBRAINZ_MAX_503_RETRIES = 3
 MUSICBRAINZ_RETRY_BASE_DELAY_SECONDS = 1.0
 # A server-sent Retry-After is honored (see _retry_delay_seconds), but never
 # past this cap. Real live bug: MusicBrainz rate-limited this Drone and sent
-# a large Retry-After; with no cap, _run_bulk_scrape_job's background thread
-# slept synchronously for hours -- Stop correctly set stop_requested in
-# SQLite, but the thread never returned to the top of its loop to see it,
-# and there was no way to start a fresh scrape (any_running() still saw
-# "running") short of hand-editing the job row on the live device.
+# a large Retry-After; with no cap, the caller slept synchronously for hours.
 MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS = 60.0
 
 _throttle_lock = threading.Lock()
@@ -77,11 +72,7 @@ class MusicBrainzNotFoundError(MusicBrainzUnavailableError):
     which mean every subsequent call will fail the same way, this is scoped
     to one lookup. Subclasses MusicBrainzUnavailableError so any existing
     ``except MusicBrainzUnavailableError`` catch still catches this
-    unchanged; only the bulk scrape job's per-(artist,album) loop needs to
-    tell the two apart, so a single 404 fails just that one album instead of
-    aborting the whole run -- the exact TMDb-incident-shaped bug
-    ``tmdb_client.TmdbNotFoundError`` exists to avoid, applied here
-    preemptively rather than waited-for."""
+    unchanged."""
 
 
 class MusicBrainzClient:
@@ -150,11 +141,9 @@ class MusicBrainzClient:
         return str(artist.get("id")) if isinstance(artist, dict) and artist.get("id") else ""
 
     def search_release(self, query: str, limit: int = 10) -> List[dict]:
-        """Release (album) search -- the primary entry point for the bulk
-        scraper, which resolves one release per on-disk album rather than
-        one recording per track (see the module docstring and
-        ``metadata_manager``'s bulk job for why: a release lookup returns
-        the whole tracklist in one call, which matters a lot given
+        """Release (album) search -- the scraper resolves one release per
+        on-disk album rather than one recording per track (a release lookup
+        returns the whole tracklist in one call, which matters a lot given
         MusicBrainz's stricter throttle than TMDb's)."""
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -178,40 +167,12 @@ class MusicBrainzClient:
             )
         return output[: max(1, min(int(limit), 25))]
 
-    def search_recording(self, query: str, limit: int = 10) -> List[dict]:
-        """Recording (track) search -- the fallback for a file with no
-        resolvable album (a "singles" track with no parent-folder grouping),
-        where there's no whole-release tracklist worth fetching."""
-        normalized_query = str(query or "").strip()
-        if not normalized_query:
-            return []
-        payload = self._get_json("/recording/", {"query": normalized_query})
-        recordings = payload.get("recordings") if isinstance(payload, dict) else None
-        if not isinstance(recordings, list):
-            return []
-        output = []
-        for item in recordings:
-            if not isinstance(item, dict) or not item.get("id"):
-                continue
-            releases = item.get("releases") if isinstance(item.get("releases"), list) else []
-            first_release = releases[0] if releases and isinstance(releases[0], dict) else {}
-            output.append(
-                {
-                    "recording_mbid": item.get("id"),
-                    "title": item.get("title") or "",
-                    "artist": self._artist_credit_name(item),
-                    "release_mbid": first_release.get("id"),
-                    "release_title": first_release.get("title") or "",
-                }
-            )
-        return output[: max(1, min(int(limit), 25))]
-
     def release_lookup(self, release_mbid: str) -> dict:
         """Full release detail including the complete tracklist (every medium
         -- a "Double Album"'s two discs are two media, matching this app's
         own disc_number concept) and genres. One call serves every track on
-        the release, which is the whole reason the bulk scraper is grouped
-        by (artist, album) rather than iterating per track."""
+        the release, which is why the scraper works per (artist, album)
+        rather than per track."""
         safe_id = str(release_mbid or "").strip()
         if not safe_id:
             raise ValueError("release_mbid is required")

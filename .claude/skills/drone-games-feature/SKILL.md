@@ -47,6 +47,15 @@ keys:
 - `rom_genres` (~L365) — **normalized** one-row-per-(rom,genre) side table
   (unlike Movies' JSON-blob genres) — deliberately split out for indexed
   facet counts; a multi-valued `<genre>` tag gets split into separate rows.
+- `rom_missing_artwork` — one row per (rom, artwork field whose gamelist tag
+  is empty), from the scan's `missing_artwork` list
+  (`_database_rom_metadata_fields`; same rule as `_entry_missing_artwork`,
+  tag emptiness only, no file-existence check). Backs `/roms?missing_art=
+  image,marquee` (games missing **any** listed type; unknown names ignored)
+  and the Systems Browse sidebar's "Missing artwork" checkboxes. Only synced
+  when a payload carries the list, so a row reloaded from SQLite and
+  re-persisted (e.g. after hashing) keeps its rows. Backfilled by
+  `ROM_CLASSIFIER_VERSION` 4.
 - `bios_cache_entries` (~L374) — separate table, **full-file `md5`**, not the
   sampled fingerprint ROMs use.
 - `artwork_cache_entries` (~L379-384) — filesystem-discovered artwork,
@@ -128,19 +137,17 @@ Routes (`app/web/api_routes.py`):
 GET  /admin/artwork/missing
 GET  /admin/artwork/{launchbox,thegamesdb,mobygames}/search
 POST /admin/artwork/{launchbox,thegamesdb,mobygames}/apply
-POST /admin/artwork/gamelist/{remove,update,remove-missing}
+POST /admin/artwork/gamelist/{remove,update}
 POST /admin/artwork/upload
 ```
 Handlers: `_handle_admin_launchbox_search`/`apply` etc. in
 `handlers_artwork.py`.
 
-**No bulk-scrape job exists for ROMs** — confirmed by repo-wide grep for
-`bulk_scrape`/`ScrapeJob`; only Movies has that pattern
-(`movie_scrape_jobs.py`/`MovieBulkScrapeJob`). ROM scraping is **purely
-per-item, manual, admin-page-driven** — there is no "rescan whole library"
-button/job for Games the way there is for Movies. Worth knowing before
-assuming parity: a request to "add bulk scraping for ROMs" is new work, not
-a wiring gap.
+The missing-artwork listing and the three scraper search/apply routes have
+**no browser UI** any more (the Admin > Artwork page that used them was
+removed); they stay because the MCP tools `list_missing_artwork` and
+`scrape_asset_artwork` (`web/mcp_tools.py`) call them. There is no bulk
+scrape job for ROMs (or Movies/Music) either.
 
 ## Artwork handling
 
@@ -232,23 +239,15 @@ faceting — a real difference worth preserving if you're comparing the two).
   TheGamesDB/MobyGames — **external search-page links only**, opens a new
   tab, does not itself call the scraper). Manual image/video upload + a
   marquee cropper live here too.
-- **The real scraper search+apply UI is a separate page**,
-  `renderMissingArtworkPage` (`#admin/artwork`, the Admin panel's "Artwork &
-  Metadata" tab — see `drone-admin-features`) — a "Matches"/"Edit" tabbed
-  panel (`selectArtworkRom`) with `#launchboxMatches`/
-  `#theGamesDBImageMatches` result lists calling `applyLaunchboxArtwork`/
-  `applyTheGamesDBArtwork`/`applyMobyGamesArtwork`. **Not directly reachable
-  from the Games navbar link** — per-ROM scraping is a two-hop flow: browse
-  in Games, notice missing art, then separately go to Admin → Artwork →
-  find that row → search/apply. (Compare Movies, where the scraper card is
-  embedded directly in the movie's own detail page.)
+- There is **no in-browser scraper search+apply UI for ROMs** — the old
+  Admin > Artwork "Artwork & Metadata" page was removed. The backend routes
+  remain only for the MCP tools (see above).
 
 ## Common failure patterns
 
 - Assuming a tree/folder-browse UI exists for ROMs/BIOS — it doesn't; see
   "Correction" above.
-- Assuming ROM scraping has a bulk/background-job mode like Movies — it
-  doesn't; it's manual per-item only.
+- Assuming ROM scraping has a bulk/background-job mode — it doesn't.
 - Assuming `browser_playable` is a field on each ROM row — it's a
   list-narrowing query filter, not a per-row flag.
 - Forgetting MobyGames when reasoning about "the ROM scrapers" — it's a
@@ -262,7 +261,5 @@ faceting — a real difference worth preserving if you're comparing the two).
 
 When comparing Games to Movies (e.g. while building Music — see
 `drone-music-feature`), Games is the **less feature-complete** precedent for
-scraping (no bulk job, no in-detail-page scraper card, no API-key
-management) — prefer Movies as the template for a new bulk-scrape-capable
-media feature, not Games, unless the per-item-only, admin-page-driven shape
-is specifically what's wanted.
+scraping (no in-browser scraper card, no API-key management) — prefer Movies
+as the template for a new scraper-capable media feature, not Games.

@@ -1,6 +1,6 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, network-share peer ROM referencing, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), Torrents, VPN, Email (SMTP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, network-share peer ROM referencing, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
 ---
 
 # Drone Admin Features Skill
@@ -95,13 +95,13 @@ update). Never add a hard-coded fallback login; tests should pass `env_password=
 
 ## Admin menu (tiles, some of them tabbed)
 
-`renderAdminMenu()` (`drone.js`) includes **Debug, Artwork, Torrents, VPN, Email,
+`renderAdminMenu()` (`drone.js`) includes **Debug, Torrents, VPN, Email,
 Backups, Automation, Fixes, and Integrations**. Integrations is the common local-only
 home for optional hardware/software extensions; Stream Deck is its first card. See
 `drone-integrations-streamdeck` for the lifecycle, worker, action, game, script, image,
-and safe-removal invariants. Debug and Artwork are each a tabbed panel bundling what used
+and safe-removal invariants. Debug is a tabbed panel bundling what used
 to be separate tiles; the shared `renderAdminPanelTabs(active, tabs)` helper builds
-the tab bar for both (and for the Swarm page's Swarm/Transfers tabs — see below),
+its tab bar (and for the Swarm page's Swarm/Transfers tabs — see below),
 prepended via string concatenation onto each underlying page's existing
 `content.innerHTML` template, so none of the underlying render functions needed
 restructuring. Do not confuse the plural **Integrations** tile with the retired
@@ -139,28 +139,16 @@ entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
   viewing/editing emulator config files on the machine. Backend:
   `handlers_config.py`.
 
-### Artwork (Artwork & Metadata / Theme Gallery / Movies tabs)
+### Artwork (removed)
 
-`renderArtworkTabBar(active)` collapses the former standalone Artwork & Metadata
-and Theme tiles into one entry point (`#admin/artwork`, icon `bi-images`), plus a
-third **Movies** tab (`#admin/movies`) added alongside them for the bulk TMDb
-scraper below.
-
-- **Artwork & Metadata** — scraping (LaunchBox/TheGamesDB/MobyGames):
-  `/admin/artwork/{launchbox,thegamesdb,mobygames}/{search,apply}`; gamelist
-  maintenance: `/admin/artwork/gamelist/{update,remove,remove-missing}`; plus
-  `/admin/artwork/missing`, marquee crop, and `/admin/artwork/upload`. Backend:
-  `handlers_artwork.py`.
-- **Theme Gallery** — `renderThemeGalleryPage()` — browse and preview installed
-  EmulationStation theme artwork (`#theme`, outside the admin route tree; reached
-  via this tab, not a standalone tile anymore).
-- **Movies** — `renderAdminMoviesArtworkPage()` — TMDb API key entry (reusing the
-  same `has_api_key`-gated form shape as the per-movie details page's scraper
-  card, see the ROMs/BIOS TreeGrid section's Movies-tab writeup below) plus a
-  **bulk scrape** action: one "Rescan all movies" checkbox and a Start button
-  that scrapes either every movie or only ones still missing a poster. See
-  "Bulk movie scraping" under the Movies-tab writeup for the background-job
-  design.
+The former Artwork tile (Artwork & Metadata / Theme Gallery / Movies / Music tabs,
+`#admin/artwork`, `#theme`, `#admin/movies`, `#admin/music`) was removed along
+with its bulk TMDb/MusicBrainz scrape jobs, `/theme/images`, and
+`/admin/artwork/gamelist/remove-missing`. Still present on purpose:
+`/admin/artwork/missing` and `/admin/artwork/{launchbox,thegamesdb,mobygames}/{search,apply}`
+(used only by the MCP tools in `web/mcp_tools.py`), plus `/admin/artwork/upload`,
+`/admin/artwork/gamelist/{update,remove}`, the marquee cropper and metadata edit
+form on the ROM detail page, and the per-movie/per-album scraper cards.
 
 ### Torrents
 
@@ -299,7 +287,7 @@ the Swarm page"). There is no central hub anymore — every Drone pairs directly
 its peers.
 
 The page itself is now two tabs via `renderSwarmTabBar(active)` (shared
-`renderAdminPanelTabs` helper, same pattern as Debug/Artwork above), defaulting to
+`renderAdminPanelTabs` helper, same pattern as Debug above), defaulting to
 **Swarm**: the fleet-overview/tailnet/pairing content below lives under the
 **Swarm** tab; the download/upload queue (formerly its own top-level `Transfers`
 navbar link, `transfersMenuBtn`) lives under the **Transfers** tab
@@ -545,7 +533,7 @@ bucket. Backend listing: `handlers_content.py` (`_handle_bios_list`,
 `system`/`unassigned` query params).
 
 The Assets page is two tabs, `renderAssetsTabBar(active)` (built on the shared
-`renderAdminPanelTabs` helper, same pattern as Debug/Artwork/Swarm) prepended
+`renderAdminPanelTabs` helper, same pattern as Debug/Swarm) prepended
 onto each tab's own render function — **Systems** (`#systems`, unchanged
 tree above) and **Movies** (`#movies`, its own top-level router entry →
 `renderMoviesPage()`), not two sections stacked on one page. Both tabs are
@@ -850,7 +838,7 @@ of TMDb's own titles). Investigated live: TMDb's own site search for "Hell of
 the Dead" **does** eventually surface "Night of the Zombies / Virus" -- but at
 position 13 of 18 results, buried among a wall of similarly-worded
 "___ of the (Living) Dead" horror titles. `TmdbClient.search()`'s default
-`limit=10` (used by both the manual search box and the bulk-scrape ladder,
+`limit=10` (used by the manual search box and its default-query ladder,
 neither of which passes an override) never reaches that far, so no amount of
 retyping the search box finds it -- the fix isn't a better query, it's
 bypassing search entirely for this one title. `tmdb_client.parse_tmdb_movie_id()`
@@ -869,33 +857,17 @@ component, keyed by the same `entry_key`), though the URL parser is
 movie-only (`/movie/{id}`, not `/tv/{id}`) since that's what a mis-matched
 title search actually needs in practice.
 
-**Bulk movie scraping** (the Movies tab on the Artwork admin page,
-`renderAdminMoviesArtworkPage()`) auto-scrapes the whole library in one
-click instead of the per-movie manual search-and-apply flow above, with no
-human picking a match. "Rescan all movies" (unchecked by default) controls
-the candidate set: unchecked only queues movies with no poster yet
-(`metadata_manager._has_artwork()` — a movie counts as "has artwork" once it
-has a poster, regardless of backdrop); checked queues every movie,
-re-scraping ones already done. The bulk job has no human in the loop, so it
-needs to get the query right automatically — the manual per-movie search box
-**shares that exact same logic** for its default (blank-box) query rather
-than a separate, weaker cleanup: they used to diverge (the per-movie search
-fell back to `metadata_manager.clean_movie_query()`, a plain punctuation-
-strip with no scene-tag stripping and no year filter), which is why a
-release like `"10.Cloverfield.Lane.2016.1080p.BluRay.x264-[YTS.AG].mp4"`
-scraped fine in bulk but came up empty from the movie's own details page
-unless the file was renamed by hand first — a real reported bug, fixed by
-routing both flows through the same ladder
-(`metadata_manager._search_movie_ladder_with_label`, wrapped as
-`_search_movie_with_ladder` for bulk — discards the label — and
-`search_movie_default_query` for the per-movie search's blank-box default,
-which also returns the label so the box can be filled in with whatever title
-actually matched, for a human to see and edit before a follow-up retry). A
-human-typed query still searches verbatim, one plain call, no ladder — the
-ladder only applies when the box is empty. Two pieces make the ladder work,
-both in `app/movies/filename_parser.py` (pure, no I/O — see
-`test_movies_filename_parser.py`, written against a real 257-file mixed
-movie/TV library):
+**Default search query ladder.** When the per-movie search box is left
+blank, `metadata_manager.search_movie_default_query` (built on
+`_search_movie_ladder_with_label`) tries an ordered candidate ladder and
+returns the label that matched so the box can be filled in for a human to see
+and edit. A human-typed query still searches verbatim, one plain call, no
+ladder. A release like `"10.Cloverfield.Lane.2016.1080p.BluRay.x264-[YTS.AG].mp4"`
+used to come up empty here (the old default was a plain punctuation strip,
+`clean_movie_query()`, with no scene-tag stripping and no year filter). Two
+pieces make the ladder work, both in `app/movies/filename_parser.py` (pure, no
+I/O — see `test_movies_filename_parser.py`, written against a real 257-file
+mixed movie/TV library):
 
 - **`classify(file_path, file_name)`** decides *what kind of thing a file
   is* before anything gets searched: `"episode"` if the filename matches the
@@ -924,77 +896,14 @@ movie/TV library):
   looser version of this regex turned "Ant-Man" into "Ant" and "Bride of
   Re-Animator" into "Bride of Re" by matching from the first hyphen to end
   of string; see that regression test in `test_movies_metadata_manager.py`.
-  `_run_bulk_scrape_job` (movies) and `_search_movie_with_ladder` try each
-  rung against `client.search(title, year=year)` and stop at the first hit.
-- **TV episodes** get their own path: the show title parsed by `classify()`
-  is searched via `TmdbClient.search_tv`/`first_air_date_year` (same
-  year-then-no-year two-rung ladder, `_search_show_with_ladder`), then
-  `metadata_manager.apply_tv_episode()` fetches show-level details
-  (poster/backdrop/genres/cast — all show-level in TMDb's data model) plus
-  this specific episode's title/overview/air-date/still via
-  `TmdbClient.tv_episode_details`, and saves it as an ordinary
-  `movies_metadata_entries` row with `provider="tmdb_tv"` and an
-  `extra_json.media_type = "tv_episode"` marker (`show_title`/
-  `season_number`/`episode_number` alongside it — no schema change, same
-  loose-`extra_json`-blob convention as the movie fields). The bulk job
-  caches both the resolved TMDb show id and the fetched show-details payload
-  **per job run**, keyed by show title, so a season with a dozen episode
-  files costs exactly one TV search and one show-details fetch, not one of
-  each per episode (`test_multiple_episodes_of_the_same_show_only_search_and_fetch_show_details_once`).
-  The movie details page shows a `TV · S01E01` badge + show title above the
-  episode title when `metadata.media_type === "tv_episode"`
-  (`renderMovieDetailShell` in `drone.js`).
+  `search_movie_default_query` tries each rung against
+  `client.search(title, year=year)` and stops at the first hit.
 
-This is a one-shot **background job with a pollable status**, not one of
-this app's forever-loop pollers (VPN self-heal, SMTP digest, the ROM
-metadata scan) — for that shape, the closest and intentionally-copied
-precedent is **Config Backups** (`device/config_backup.py` +
-`storage/config_backup_store.py`), not those always-on threads. Mirrored
-directly:
-
-- **State lives in a SQLite row, not an in-process flag** —
-  `storage/movie_scrape_jobs.py`'s `movie_scrape_jobs` table
-  (`status: running|complete|error`, `total`/`processed`/`current_movie`,
-  `matched_count`/`skipped_count`/`failed_count`, `error_message`). Only the
-  most recent job matters (`latest()`) — unlike config backups, a bulk
-  scrape run isn't a downloadable artifact worth listing historically, so
-  this store has no `list_all`.
-- **`any_running()` is the guard**, checked before `create_running()`
-  inserts the new row — same shape as config backup's `any_creating()`. A
-  second start attempt gets `{"status": "already_running"}`, mapped to HTTP
-  409 by the handler (`_handle_admin_movie_scrape_bulk_start`), exactly like
-  `_handle_admin_config_backups_create`'s `already_creating` → 409 mapping.
-  **Unlike config backups**, `metadata_manager.start_bulk_scrape()` wraps
-  the check-then-insert in `_BULK_SCRAPE_START_LOCK` (a module-level
-  `threading.Lock()`) — found live-testing this feature: two POSTs arriving
-  on different request-handling threads at nearly the same instant could
-  both read "nothing running yet" before either had inserted its row,
-  starting two jobs at once. The SQLite row is still what makes the guard
-  survive a process restart; the lock only closes the same-process race
-  window between the read and the write. See
-  `test_two_truly_simultaneous_starts_only_let_one_through` in
-  `test_movies_metadata_manager.py` — a genuine two-thread test, not a
-  sequential "pre-insert a running row" check like the rest of that file's
-  guard tests, and it needs a real per-call delay in its fake TMDb client
-  (`search_delay_seconds`) or the winning job can finish before the losing
-  call even checks, making the race impossible to observe.
-- **`threading.Thread(daemon=True)`**, no pool, no cancel — one-shot, exactly
-  like `_run_backup_job`. `_run_bulk_scrape_job` stops early (breaks out of
-  the loop, counting every remaining candidate as failed) the moment TMDb
-  itself becomes unavailable (bad/revoked key, network down) rather than
-  retrying the same doomed call once per remaining movie; a single movie
-  with no TMDb match, or an empty query after cleaning (skipped, no request
-  even attempted), does **not** stop the run.
-- **Frontend polling**: `startMovieBulkScrapeAutoRefreshIfNeeded()` /
-  `patchMovieBulkScrapeLive()` in `drone.js` — the identical
-  only-poll-while-something-is-running, `document.hidden`-aware,
-  in-flight-guarded `setInterval(..., 2000)` shape as Config Backups'
-  `startConfigBackupsAutoRefreshIfNeeded`. (This is also why a
-  claude-in-chrome browser-automation session watching this page live may
-  see zero poll ticks: `document.hidden` is true for a backgrounded MCP tab,
-  same as it would be for a real minimized browser tab — check the job's
-  real state with a direct `GET /admin/movies/scrape/bulk` fetch instead of
-  waiting on the visible progress bar to move.)
+The movie details page shows a `TV · S01E01` badge + show title above the
+episode title when `metadata.media_type === "tv_episode"`
+(`renderMovieDetailShell` in `drone.js`). That metadata was only ever
+produced by the removed bulk job's TV path, so it now appears only on
+entries scraped before the removal.
 
 **Netflix-style movie explorer** (`renderMovieExplorerPage()`, route
 `#movies/explore`, reached via the **Browse** button on the Movies tab) is
@@ -1105,23 +1014,6 @@ the **existing** single-movie detail page via `movieDetailHash(entry_key)`
 for Watch/Download/full metadata — this page only ever aggregates and
 routes, it doesn't duplicate the per-episode detail view.
 
-**Season-level TMDb data**: `TmdbClient.tv_season_details(tv_id,
-season_number)` hits `/tv/{id}/season/{n}`, which — unlike the show-level
-`/tv/{id}` — has its **own poster** (often visibly different from the
-show's general poster; TMDb has no season-level `backdrop_path` though, so
-backdrops stay show-level as before). `apply_tv_episode` now fetches this
-(via a new `season_details` param, cached per `(tv_id, season_number)` in
-`_run_bulk_scrape_job` exactly like `show_details` is cached per `tv_id` —
-one extra TMDb call per season, not per episode) and **prefers the season
-poster over the show poster** for what gets downloaded as the episode
-file's own artwork, falling back to the show poster only when TMDb has none
-for that season. `season_name`/`season_overview` are stored in
-`extra_json` alongside the existing per-episode fields. This is what
-actually makes the show detail page's season-switching change the artwork,
-not just re-list episodes — before this, every episode of every season
-downloaded the identical show-wide poster, so there was nothing to
-visually change between seasons.
-
 **The plain Movies tree** (`renderMoviesTreeLeafRow`) also shows a small
 poster thumbnail per row now, same `movieArtworkUrl` + inline-`onerror`-to-
 film-icon pattern as the explorer cards — this was the actual fix for "I
@@ -1144,17 +1036,7 @@ alongside the new one.
 router's `hash === "" || hash === "#"` branch redirects via `setHash`
 (same one-line pattern the `#bios` redirect already used), and `#home`/
 `#help` still work as explicit routes for anyone who wants the tour.
-Movies loads fast (no gamelist scan involved), unlike the Artwork &
-Metadata tab.
-
-**The Admin Artwork page (`renderMissingArtworkPage`) now paints its shell
-before scanning**, not after: the tab bar + a scoped spinner render into
-`content` immediately, then the (potentially multi-second) gamelist/ROM
-scan runs and replaces just that placeholder. Previously nothing rendered
-into `content` until the scan resolved, so navigating here left whatever
-page you came from sitting there looking stuck for the whole scan — the
-scan itself wasn't and isn't made faster, only the *page* stops blocking on
-it before showing anything.
+Movies loads fast (no gamelist scan involved).
 
 **Artwork response caching** (`_stream_cached_image` in
 `handlers_peer.py`, shared by ROM artwork and movie posters/backdrops/
@@ -1173,120 +1055,30 @@ instead of a hardcoded literal — every other call site is unaffected (all
 zero-arg), only `_stream_cached_image` passes the real value, so there's
 now exactly one `Cache-Control` header on that response, not two.
 
-**Bulk-scrape breakdown + retry**: the "X matched · Y skipped · Z failed"
-line on the Movies admin tab is now three clickable segments
-(`toggleMovieBulkScrapeBreakdown`), each opening a paginated list
-(`GET /admin/movies/scrape/bulk/items/{status}`, backed by
-`storage/movie_scrape_job_items.py` — one row per movie in the *most
-recent* run, same "only the latest run matters" convention
-`movie_scrape_jobs` uses, cleared and repopulated by
-`metadata_manager._run_bulk_scrape_job` via `_record_item` on every
-outcome) with the human-readable reason `_run_bulk_scrape_job` recorded for
-each (`"no TMDb results for any tried title/year"`, `"TMDb is
-rate-limiting this Drone (429), retries exhausted"`, etc.). Failed items
-get a per-row **Retry** and a bulk **Retry all N** button
-(`metadata_manager.retry_bulk_scrape_items`, `POST
-/admin/movies/scrape/bulk/retry` with either `{status: "failed"}` or an
-explicit `{entry_keys: [...]}`) — this reuses the same
-`_run_bulk_scrape_job` machinery scoped to just that candidate set, and
-deliberately does **not** clear the items table first, so a retry updates
-just the retried rows in place while everything else from the last run
-stays exactly as it was. This exists because a real 2,667-movie run once
-came back "1,054 matched, 1,576 failed," and the actual cause turned out to
-be TMDb rate-limiting cascading through the old "any `TmdbUnavailableError`
-mid-job marks every remaining candidate failed and stops" handling — not
-1,576 genuinely unmatchable movies. Two things now make that specific
-failure mode rarer *and* recoverable: `TmdbClient` retries a 429 with
-backoff (honoring `Retry-After`) before giving up
-(`TMDB_MAX_429_RETRIES`), and the bulk job pauses briefly before each
-TMDb-touching candidate (`_throttle_before_tmdb_call`,
-`_REQUEST_THROTTLE_SECONDS`) so a large library doesn't trip rate-limiting
-in the first place — but when a run *does* still hit a wall, "Retry all
-failed" is the recovery path instead of a full rescan-all.
+**TMDb error handling**: `TmdbClient` retries a 429 with backoff (honoring
+`Retry-After`, capped) before giving up (`TMDB_MAX_429_RETRIES`). A plain 404
+raises `TmdbNotFoundError(TmdbUnavailableError)` — a subclass, so every
+existing `except TmdbUnavailableError` (the per-movie scrape's HTTP 502
+mapping, the "no API key" guards) still catches it. `_digits_only()` checks
+`is None` rather than truthiness so an id of `0` isn't treated as missing.
 
-**A second, distinct cascade of the same shape was found and fixed later**
-(this one not about rate-limiting at all): a plain `404` on a single
-movie/show/season/episode lookup — most commonly a locally-numbered TV
-episode or season that doesn't match TMDb's own numbering (a season finale
-split into a different number of parts than TMDb's, a "Season 0" specials
-folder TMDb has no matching season for) — raised the exact same
-`TmdbUnavailableError`, so it *also* aborted the whole job and mass-failed
-every untouched remaining candidate, indistinguishable from the API key
-being rejected. Confirmed live against a real ~1,250-movie library: two
-consecutive bulk runs each reported "2 matched / 88 skipped / 1156 failed"
-in under 15 seconds — 1,151 of those "failures" shared one identical reason
-string (`"TMDb has no movie with that id"`), including obviously-unrelated
-movies and Featurettes-folder extras that were never actually attempted,
-just swept up after the first 404. Fixed by giving 404 its own exception,
-`TmdbNotFoundError(TmdbUnavailableError)` — the subclass relationship means
-every existing `except TmdbUnavailableError` catch (the per-movie manual
-scrape's HTTP 502 mapping, the job-start "no API key" guards) needed zero
-changes, since it still catches this too; only `_run_bulk_scrape_job`'s
-per-candidate loop gained a new `except TmdbNotFoundError` clause *before*
-its `except TmdbUnavailableError` clause (order matters — a subclass catch
-must come first or the parent clause shadows it) that fails just that one
-candidate and keeps going, leaving the broader "stop everything" behavior
-intact for a genuinely revoked key or exhausted rate-limit retries. A
-related bug surfaced by the same live investigation: `season_number=0` (a
-real, common "Season 0" convention) is falsy in Python, so the
-`str(x or "")` idiom `TmdbClient` used for digit-extraction silently treated
-a legitimate season-0 episode as a *missing* parameter, raising a spurious
-`ValueError` before ever reaching TMDb — fixed by a `_digits_only()` helper
-that checks `is None` instead of truthiness, used for every id/season/
-episode parameter.
-
-**Three more match-quality fixes landed in the same follow-up round, from
-more real reported misses:**
+**Match-quality fixes in the candidate ladder** (from real reported misses):
 
 - **Edition/cut tags leaking into the best candidate.** The year-cut
   candidate (`search_candidates`'s highest-priority rung) used to only run a
   punctuation collapse, never the scene-token strip — fine when an edition
-  tag comes *after* the year (the common case, already stripped by the
-  tag-stripped fallback further down the ladder), but
+  tag comes *after* the year, but
   `"Alien.Resurrection.Directors.Cut.1997....mp4"` puts `"Directors.Cut"`
-  *before* the year, so it rode straight into candidate #1 as `"Alien
-  Resurrection Directors Cut"` — never TMDb's actual title. Fixed by running
+  *before* the year, so it rode straight into candidate #1. Fixed by running
   `_SCENE_TOKENS_RE`/`_BRACKETED_RE` over the pre-year segment too before
   collapsing it; the un-stripped version is still kept as a lower-priority
-  fallback rung rather than dropped, in case the vocabulary ever over-matches
-  part of a legitimate title.
+  fallback rung.
 - **A parent folder's "Title (Year)" as an extra, high-priority candidate.**
-  `search_candidates(stem, folder_name=...)` now tries a well-formed folder
+  `search_candidates(stem, folder_name=...)` tries a well-formed folder
   name (`filename_parser.folder_title_candidate`, deliberately conservative —
-  requires a *parenthesized* year, since a bare year in a folder name is too
-  often unrelated branding/release-group text) before any filename-derived
-  rung at all. This rescues a file whose own name has nothing usable in it
-  (a bare release id, a badly mangled name) as long as it sits in a
-  curated `"Title (Year)/"` folder — `metadata_manager.movie_folder_name()`
-  computes it from the movie's `file_path` and threads it through both
-  `_search_movie_with_ladder` (bulk) and `search_movie_default_query`
-  (per-movie manual search default), so both flows benefit identically, same
-  as every other fix in this section.
-- **Show-level metadata fallback instead of a bare failure.** A `TmdbNotFoundError`
-  on a TV *episode* lookup (inside `apply_tv_episode`) or *season* lookup
-  (in `_run_bulk_scrape_job`, before calling it) now degrades to an empty
-  dict instead of propagating — every field these feed into already falls
-  back to show-level data when the episode/season-specific value is absent
-  (`poster_source = season.get("poster_url") or show.get("poster_url")`,
-  etc.), so the entry ends up with the *show's* poster/backdrop/overview/
-  genres/cast and a generic `"Show - SxxEyy"` title rather than nothing at
-  all. This is exactly the right outcome for an anthology/documentary show
-  (the reported *Forensic Files* "Season 00" case) whose specials/episodes
-  rarely line up with TMDb's own numbering — some useful artwork beats none.
-  The degraded season_details is still cached under `season_details_by_key`
-  so a whole season of these doesn't re-attempt the same failing lookup once
-  per episode.
-- **"Multiple retries before it gives up"**: a specific `tmdb_id` from a
-  search hit can still 404 on its own `details()`/`tv_details()` call (a
-  stale/merged/removed catalog entry) even though the *search* succeeded —
-  previously this failed the whole candidate after just the top result.
-  `_apply_first_working_movie_match` (movies) and `_resolve_tv_show` (shows)
-  now try up to `_MAX_MATCH_ATTEMPTS` (3) of the search response's top
-  results in turn, stopping at the first whose details lookup actually
-  succeeds, and only raising/failing once every attempt has 404'd. `_resolve_tv_show`
-  caches only a *working* `(tv_id, show_details)` pair, never a broken one,
-  so a later episode of the same show doesn't re-attempt an id already known
-  to fail.
+  requires a *parenthesized* year) before any filename-derived rung.
+  `metadata_manager.movie_folder_name()` computes it from the movie's
+  `file_path` and threads it through `search_movie_default_query`.
 
 ## Per-system BIOS association (new — absent from the old doc)
 
@@ -1406,7 +1198,7 @@ markup or its custom open/close functions.
 ## Browser-automation note: `window.confirm()` blocks the tab
 
 Every destructive admin action in this app (Delete, Cancel, Clear, purge,
-remove-missing, ...) guards itself with a plain `window.confirm("...")` before
+clear pending changes, ...) guards itself with a plain `window.confirm("...")` before
 calling the API — a real, intentional safety pattern (see the Safety rules
 below), not a bug. It also means clicking one of those buttons under
 claude-in-chrome/CDP-based automation triggers a native, **unscriptable**
@@ -1453,7 +1245,7 @@ Do not:
   they resolve inside the expected directory,
 - duplicate BIOS-association logic outside the `drone_bios_systems` join table
   and its vendored MD5 map,
-- add a destructive action (purge, clear, rotate cert, remove-missing) without
+- add a destructive action (purge, clear, rotate cert) without
   a confirm dialog, matching the existing pattern for those buttons.
 
 ## Default bias

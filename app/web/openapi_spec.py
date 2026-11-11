@@ -557,37 +557,6 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("deleted", "requested"),
         ),
-        "MovieBulkScrapeJob": _object(
-            {
-                "id": _integer(),
-                "status": _enum(["running", "complete", "error"]),
-                "rescan_all": _boolean(),
-                "total": _integer(),
-                "processed": _integer(),
-                "matched_count": _integer(),
-                "skipped_count": _integer(),
-                "failed_count": _integer(),
-                "current_movie": _string(),
-                "error_message": _string(nullable=True),
-                "started_at": _string(fmt="date-time"),
-                "completed_at": _string(fmt="date-time", nullable=True),
-            },
-            description="Progress of the most recent bulk artwork/metadata scrape job.",
-        ),
-        "MovieBulkScrapeStatusResponse": _object(
-            {"job": _ref("MovieBulkScrapeJob")}, description="``job`` is null if no bulk scrape has ever been run."
-        ),
-        "MovieBulkScrapeStartRequest": _object(
-            {"rescan_all": _boolean("Re-scrape every movie, not just ones missing a poster (default false)")}
-        ),
-        "MovieBulkScrapeStartResponse": _object(
-            {
-                "status": _enum(["ok", "already_running", "error"]),
-                "job": _ref("MovieBulkScrapeJob"),
-                "error": _string(nullable=True),
-            },
-            ("status",),
-        ),
         "SearchResponse": _object({"query": _string(), "system": _string(nullable=True), "results": _array(_ref("AssetEntry"))}, ("query", "results")),
         "RomFingerprintResponse": _object(
             {"system": _string(), "unique_id": _string(), "fingerprint": _string(), "cached": _boolean()},
@@ -634,21 +603,6 @@ def _schemas() -> Dict[str, Schema]:
         "ThemeLogosResponse": _object(
             {"enabled": _boolean(), "theme_name": _string(nullable=True), "count": _integer(), "logos": _array(_string()), "cache_seconds": _integer()},
             ("enabled", "count", "logos", "cache_seconds"),
-        ),
-        "ThemeImage": _object({"path": _string(), "folder": _string(), "name": _string(), "url": _string()}),
-        "ThemeImagesResponse": _object(
-            {
-                "enabled": _boolean(),
-                "theme_name": _string(nullable=True),
-                "systems": _array(_string()),
-                "count": _integer(),
-                "offset": _integer(),
-                "limit": _integer(),
-                "returned": _integer(),
-                "has_more": _boolean(),
-                "images": _array(_ref("ThemeImage")),
-            },
-            ("enabled", "count", "images"),
         ),
         "AdminLogResponse": _object(
             {"source": _string(), "path": _string(), "lines": _integer(), "content": _string(), "attempted_paths": _array(_string()), "searched_roots": _array(_string())},
@@ -1528,7 +1482,6 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "GamelistRemoveRequest": _object({"system": _string(), "rom_path": _string()}, ("system", "rom_path")),
         "GamelistUpdateRequest": _object({"system": _string(), "rom_path": _string(), "fields": freeform}, ("system", "rom_path", "fields")),
-        "GamelistRemoveMissingRequest": _object({"confirm": _enum(["DELETE_MISSING_GAMELIST_ENTRIES"]), "include_filesystem": _boolean(), "fields": _array(_string()), "systems": _array(_string()), "q": _string()}, ("confirm",)),
         "GamelistMutationResponse": _object(
             {"status": _string(), "removed": _integer(), "updated": _integer(), "matched_count": _integer(), "entry": freeform, "entries": _array(freeform)},
             description="Gamelist mutation result.",
@@ -2579,25 +2532,6 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     error_codes=("401", "403", "429", "500", "503"),
                 )
             },
-            "/admin/movies/scrape/bulk": {
-                "get": _operation(
-                    "Get the progress of the most recent bulk artwork/metadata scrape job",
-                    {"200": _json_response("MovieBulkScrapeStatusResponse")},
-                    tags=["admin", "movies"],
-                ),
-                "post": _operation(
-                    "Start a background job that scrapes every movie missing a poster (or all movies, if rescan_all is set) -- "
-                    "auto-applies the top TMDb search match for each, no per-movie confirmation",
-                    {
-                        "200": _json_response("MovieBulkScrapeStartResponse"),
-                        "409": _json_response("MovieBulkScrapeStartResponse", "A bulk scrape is already running"),
-                        "502": _json_response("MovieBulkScrapeStartResponse", "TMDb unreachable or no API key configured"),
-                    },
-                    request_body=_json_request("MovieBulkScrapeStartRequest"),
-                    tags=["admin", "movies"],
-                    error_codes=("401", "403", "409", "429", "500", "502", "503"),
-                ),
-            },
             "/openapi.json": {
                 "get": _operation("OpenAPI spec", {"200": _json_response("OpenApiDocument", "OpenAPI JSON")}, tags=["meta"], error_codes=("401", "403", "429", "500"))
             },
@@ -2632,14 +2566,6 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/theme/backgrounds": {"get": _operation("List candidate background images from active Batocera theme", {"200": _json_response("ThemeBackgroundsResponse", "Theme background candidates")}, tags=["theme"])},
             "/theme/logos": {"get": _operation("List candidate logo images from active Batocera theme", {"200": _json_response("ThemeLogosResponse", "Theme logo candidates")}, tags=["theme"])},
-            "/theme/images": {
-                "get": _operation(
-                    "List all image assets from active Batocera theme",
-                    {"200": _json_response("ThemeImagesResponse", "Paged theme image catalog")},
-                    parameters=[*common_paging, *system_filter_params],
-                    tags=["theme"],
-                )
-            },
             "/admin/logs/{source}": {
                 "get": _operation(
                     "Get logs from Batocera system or emulators",
@@ -2937,7 +2863,6 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/artwork/upload": {"post": _operation("Upload an artwork file and update gamelist metadata", {"200": _json_response("ArtworkUploadResponse")}, request_body=_multipart_request("ArtworkUploadRequest"), tags=["admin", "artwork"])},
             "/admin/artwork/gamelist/remove": {"post": _operation("Remove one gamelist entry", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistRemoveRequest"), tags=["admin", "artwork"])},
             "/admin/artwork/gamelist/update": {"post": _operation("Update one gamelist entry", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistUpdateRequest"), tags=["admin", "artwork"])},
-            "/admin/artwork/gamelist/remove-missing": {"post": _operation("Remove gamelist entries whose ROM files are missing", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistRemoveMissingRequest"), tags=["admin", "artwork"])},
             "/admin/network-mode": {
                 "get": _operation("Get active integration network mode", {"200": _json_response("NetworkModeResponse")}, tags=["admin", "local-network"]),
                 "post": _operation("Update integration network mode", {"200": _json_response("NetworkModeResponse")}, request_body=_json_request("NetworkModeUpdateRequest"), tags=["admin", "local-network"]),

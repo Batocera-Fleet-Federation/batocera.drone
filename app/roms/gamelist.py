@@ -101,12 +101,19 @@ def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, a
     #    Carried through RomCacheRow.extra (see its ALLOWED keys) same as
     #    transfer_unit_path/marker_relative_path -- a single string, so it
     #    doesn't need its own table the way genre's multi-value case does.
+    #  - missing_artwork lists the ARTWORK_FIELDS whose gamelist tag is empty
+    #    (same rule as RomArtworkGamelistMixin._entry_missing_artwork), indexed
+    #    into rom_missing_artwork for the Systems Browse page's "Missing
+    #    artwork" filter.
+    existing = rom.get("existing") or {}
     genre = _first_metadata_value((rom.get("gamelist") or {}).get("genre"))
-    image_relative_path = _first_metadata_value((rom.get("existing") or {}).get("image"))
+    image_relative_path = _first_metadata_value(existing.get("image"))
+    missing_artwork = [field for field in ARTWORK_FIELDS if not str(existing.get(field) or "").strip()]
     return {
         **{k: v for k, v in rom.items() if k not in {"fingerprint", "rom_fingerprint", "gamelist", "existing", "name", "title", "rom_name"}},
         "genre": genre,
         "image_relative_path": image_relative_path,
+        "missing_artwork": missing_artwork,
         "system": system_name,
         "system_name": system_name,
         "rom_name": display_name,

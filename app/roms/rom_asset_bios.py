@@ -125,6 +125,7 @@ class RomAssetBiosMixin:
         query: str = "",
         limit: int = 200,
         offset: int = 0,
+        missing_artwork=None,
     ) -> Optional[dict]:
         """The Systems Browse page's card grid: a plain SQLite-cache page,
         across every system by default. Deliberately skips
@@ -140,7 +141,10 @@ class RomAssetBiosMixin:
         _database_rom_metadata_fields)."""
         if self.settings is None:
             return None
-        page = list_rom_cache_page(self.settings, systems=systems, genre=genre, query=query, limit=limit, offset=offset)
+        page = list_rom_cache_page(
+            self.settings, systems=systems, genre=genre, query=query, limit=limit, offset=offset,
+            missing_artwork=missing_artwork,
+        )
         if page is None:
             return None
         for item in page.get("items") or []:
@@ -172,10 +176,10 @@ class RomAssetBiosMixin:
             offset=offset,
         )
 
-    def list_rom_genre_facets(self, *, systems=None, query: str = "") -> List[dict]:
+    def list_rom_genre_facets(self, *, systems=None, query: str = "", missing_artwork=None) -> List[dict]:
         if self.settings is None:
             return []
-        return list_rom_genre_counts(self.settings, systems=systems, query=query)
+        return list_rom_genre_counts(self.settings, systems=systems, query=query, missing_artwork=missing_artwork)
 
     def list_bios_page(
         self,

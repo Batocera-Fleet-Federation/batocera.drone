@@ -50,7 +50,7 @@ def resolve_image_url(commons_page_url: str, *, timeout_seconds: int = 15) -> Op
     ``None`` if the page URL isn't a recognizable Commons file link or the
     lookup fails for any reason -- always best-effort, never raises, since
     an artist photo is optional enrichment and must never fail the
-    album-art apply/bulk job it rides along with (mirrors the existing
+    album-art apply it rides along with (mirrors the existing
     Cover Art Archive fetch's own never-fail-the-caller convention)."""
     title = _commons_file_title(commons_page_url)
     if not title:

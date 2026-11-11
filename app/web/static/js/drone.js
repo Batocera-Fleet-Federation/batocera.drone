@@ -62,10 +62,6 @@ let activeSystemThemeCssNode = null;
 let activeRandomBackground = null;
 let activeRandomLogo = null;
 let currentSystemContext = null;
-let themeFilterSelectedSystems = [];
-let themeFilterQuery = "";
-const THEME_GALLERY_PAGE_SIZE = 100;
-const ARTWORK_PAGE_SIZE = 200;
 const GAMELIST_EDIT_FIELDS = [
   "name", "sortname", "desc", "genre", "developer", "publisher", "releasedate",
   "players", "rating", "favorite", "hidden", "kidgame", "adult",
@@ -127,6 +123,20 @@ let systemsExploreBiosItems = [];
 // just the games that matched, not the whole library.
 let systemsExploreDuplicatesMode = false;
 let systemsExploreDuplicateGroups = [];
+// "Missing artwork" sidebar filter: the checked gamelist artwork types (GET
+// /roms?missing_art=...). A game matches when it is missing *any* checked
+// type. Same field names/order as ARTWORK_FIELDS in roms/gamelist.py.
+const SYSTEMS_EXPLORE_ARTWORK_TYPES = [
+  ["image", "Image"],
+  ["thumbnail", "Thumbnail"],
+  ["marquee", "Marquee"],
+  ["fanart", "Fan art"],
+  ["boxart", "Box art"],
+  ["video", "Video"],
+  ["wheel", "Wheel"],
+  ["manual", "Manual"],
+];
+let systemsExploreMissingArt = [];
 // Movies Browse (own top-level page, see renderMovieExplorerPage) -- the
 // whole set loads once (movie libraries are far smaller than ROM sets) and
 // is grouped/filtered client-side.
@@ -194,9 +204,6 @@ let movieExplorerDuplicateGroups = [];
 // one paint. Reset to the page size on every filter/search change.
 const MOVIE_EXPLORE_PAGE_SIZE = 200;
 let movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
-let filterDropdownGlobalCloseBound = false;
-let filterDropdownState = {};
-let themeFilterInitialized = false;
 let currentLogSource = null;
 let logRefreshTimer = null;
 let logRefreshInFlight = false;
@@ -208,27 +215,6 @@ let torrentsLastPayload = null;
 let configBackupsTimer = null;
 let configBackupsInFlight = false;
 let configBackupsLastPayload = [];
-let movieBulkScrapeTimer = null;
-let movieBulkScrapeInFlight = false;
-let movieBulkScrapeWasRunning = false;
-// The open matched/skipped/failed breakdown panel on the admin Movies bulk
-// scrape card (see toggleMovieBulkScrapeBreakdown) -- null when closed.
-let movieBulkScrapeBreakdownStatus = null;
-let movieBulkScrapeBreakdownOffset = 0;
-const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
-// True from the moment "Stop" is clicked until the job's status actually
-// leaves "running" -- keeps the Stop button showing "Stopping..." across
-// the 2s poll ticks that land before the running job reaches its next
-// per-candidate stop-check, instead of flickering back to a clickable
-// "Stop" state on every tick in between (see patchMovieBulkScrapeLive).
-let movieBulkScrapeStopRequested = false;
-let musicBulkScrapeTimer = null;
-let musicBulkScrapeInFlight = false;
-let musicBulkScrapeWasRunning = false;
-let musicBulkScrapeBreakdownStatus = null;
-let musicBulkScrapeBreakdownOffset = 0;
-const MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
-let musicBulkScrapeStopRequested = false;
 let swarmDronesById = {};
 // Bumped at the start of every renderSwarmPage(). In-flight overview fetches
 // and per-peer probes capture the value and refuse to write the DOM once a
@@ -259,23 +245,6 @@ let selectedEmulatorConfigIndex = 0;
 let selectedEmulatorConfigVersionIndex = 0;
 let emulatorConfigSelectionRequestId = 0;
 let emulatorConfigTreeExpanded = new Set();
-let artworkCurrentOffset = 0;
-let artworkIncludeFilesystem = false;
-let artworkSelectedFields = ["image", "marquee"];
-let artworkSelectedSystems = [];
-let artworkFilterQuery = "";
-let artworkRomStatus = "any";
-let artworkFilterDebounceTimer = null;
-// Bumped by every renderMissingArtworkPage()/refreshArtworkResults() call --
-// the gamelist scan those await can take several seconds on a large ROM
-// library, so if the user navigates away (or re-enters the tab, firing a
-// second scan) before it resolves, the older call's own eventual completion
-// must not overwrite whatever is now on screen. Same local-token idiom as
-// emulatorConfigSelectionRequestId, scoped to this one feature rather than
-// router()'s page-navigation-wide routerNavToken, since a same-page double
-// fetch (e.g. Refresh clicked twice, or leaving and re-entering the tab)
-// needs the same guard without an intervening router() navigation.
-let artworkRenderRequestId = 0;
 let systemsCache = null;
 let systemRomCache = {};
 let systemInfoLoaded = false;
@@ -677,132 +646,60 @@ function wildcardToRegExp(pattern) {
   const wildcard = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
   return new RegExp(wildcard, "i");
 }
-function toggleExplorerFilters(button, sidebarId) {
+// Mobile explorer filters (the Filters button only shows at <=768px). The
+// explorer's own sidebar node is moved into a modal while it is open and put
+// back when it closes, so every filter input, list and handler keeps working
+// unchanged and the page only ever has one copy of each filter.
+let explorerFiltersMoved = null;
+function openExplorerFiltersModal(sidebarId) {
   const sidebar = document.getElementById(sidebarId);
-  if (!sidebar) return;
-  const open = sidebar.classList.toggle("filters-open");
-  button.setAttribute("aria-expanded", open ? "true" : "false");
-  button.classList.toggle("active", open);
-}
-function renderFilterDropdown(prefix, options, selected) {
-  const selectedSet = new Set(selected || []);
-  const label = selectedSet.size ? `${selectedSet.size} selected` : "No systems";
-  return `
-    <div class="dropdown app-checkbox-dropdown">
-      <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${prefix}FilterToggle" aria-expanded="false">${label}</button>
-      <div class="dropdown-menu filter-dropdown-menu app-checkbox-menu" data-prefix="${prefix}" aria-labelledby="${prefix}FilterToggle">
-        <input id="${prefix}FilterSearch" type="search" class="form-control form-control-sm mb-2" placeholder="Filter systems...">
-        <div class="d-flex gap-2 mb-2">
-          <button type="button" class="btn btn-outline-primary btn-sm" id="${prefix}FilterSelectAll">Select all</button>
-          <button type="button" class="btn btn-outline-secondary btn-sm" id="${prefix}FilterUnselectAll">Unselect all</button>
-        </div>
-        <div id="${prefix}FilterOptions" class="filter-options-scroll">
-          ${
-            options.map((sys) => `
-              <div class="form-check m-0 mb-1 ${prefix}-filter-option" data-value="${escapeHtml(sys)}">
-                <input class="form-check-input ${prefix}-system-filter" type="checkbox" value="${escapeHtml(sys)}" id="${prefix}-filter-${escapeHtml(sys)}" ${selectedSet.has(sys) ? "checked" : ""}>
-                <label class="form-check-label small" for="${prefix}-filter-${escapeHtml(sys)}">${escapeHtml(sys === "_root" ? "root" : sys)}</label>
-              </div>
-            `).join("")
-          }
+  if (!sidebar || !window.bootstrap) return;
+  const modalId = "explorerFiltersModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade explorer-filters-modal";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-labelledby", "explorerFiltersModalTitle");
+    modal.innerHTML = `
+      <div class="modal-dialog modal-dialog-scrollable modal-fullscreen-sm-down">
+        <div class="modal-content themed-modal">
+          <div class="modal-header">
+            <h5 class="modal-title mb-0" id="explorerFiltersModalTitle"><i class="bi bi-funnel me-2"></i>Filters</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body"></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-primary btn-sm" data-bs-dismiss="modal">Done</button>
+          </div>
         </div>
       </div>
-    </div>
-  `;
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener("hidden.bs.modal", restoreExplorerFiltersSidebar);
+    const close = () => {
+      restoreExplorerFiltersSidebar();
+      bootstrap.Modal.getInstance(modal)?.hide();
+    };
+    window.addEventListener("hashchange", close);
+    window.matchMedia("(min-width: 769px)").addEventListener("change", (event) => {
+      if (event.matches) close();
+    });
+  }
+  restoreExplorerFiltersSidebar();
+  const placeholder = document.createComment("explorer-filters");
+  sidebar.before(placeholder);
+  explorerFiltersMoved = { sidebar, placeholder };
+  modal.querySelector(".modal-body").appendChild(sidebar);
+  bootstrap.Modal.getOrCreateInstance(modal).show();
 }
-function setupFilterDropdown(prefix, onSelectionChange) {
-  const toggle = document.getElementById(`${prefix}FilterToggle`);
-  const menu = toggle ? toggle.parentElement?.querySelector(".dropdown-menu") : null;
-  if (toggle && menu) {
-    toggle.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const isOpen = menu.classList.contains("show");
-      document.querySelectorAll(".filter-dropdown-menu.show").forEach((node) => node.classList.remove("show"));
-      document.querySelectorAll("[id$='FilterToggle'][aria-expanded='true']").forEach((node) => node.setAttribute("aria-expanded", "false"));
-      if (filterDropdownState[prefix] && filterDropdownState[prefix].dirty) {
-        filterDropdownState[prefix].dirty = false;
-        onSelectionChange();
-      }
-      if (!isOpen) {
-        menu.classList.add("show");
-        toggle.setAttribute("aria-expanded", "true");
-      } else {
-        toggle.setAttribute("aria-expanded", "false");
-      }
-    });
-  }
-  if (!filterDropdownState[prefix]) {
-    filterDropdownState[prefix] = { dirty: false };
-  }
-  if (!filterDropdownGlobalCloseBound) {
-    document.addEventListener("click", (event) => {
-      const target = event.target;
-      if (target && target.closest && target.closest(".dropdown")) return;
-      document.querySelectorAll(".filter-dropdown-menu.show").forEach((node) => {
-        const pfx = node.getAttribute("data-prefix") || "";
-        node.classList.remove("show");
-        if (pfx && filterDropdownState[pfx] && filterDropdownState[pfx].dirty) {
-          filterDropdownState[pfx].dirty = false;
-          if (pfx === "bios" || pfx === "theme") {
-            document.dispatchEvent(new CustomEvent(`filter-apply-${pfx}`));
-          }
-        }
-      });
-      document.querySelectorAll("[id$='FilterToggle'][aria-expanded='true']").forEach((node) => node.setAttribute("aria-expanded", "false"));
-    });
-    filterDropdownGlobalCloseBound = true;
-  }
-
-  const searchEl = document.getElementById(`${prefix}FilterSearch`);
-  const selectAllBtn = document.getElementById(`${prefix}FilterSelectAll`);
-  const unselectAllBtn = document.getElementById(`${prefix}FilterUnselectAll`);
-  if (searchEl) {
-    searchEl.addEventListener("input", () => {
-      const q = (searchEl.value || "").trim().toLowerCase();
-      document.querySelectorAll(`.${prefix}-filter-option`).forEach((node) => {
-        const value = (node.getAttribute("data-value") || "").toLowerCase();
-        node.style.display = !q || value.includes(q) ? "" : "none";
-      });
-    });
-  }
-  document.querySelectorAll(`.${prefix}-system-filter`).forEach((node) => {
-    node.addEventListener("change", () => {
-      if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
-      if (prefix === "bios") {
-        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
-        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
-      }
-    });
-  });
-  if (selectAllBtn) {
-    selectAllBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      document.querySelectorAll(`.${prefix}-system-filter`).forEach((node) => {
-        node.checked = true;
-      });
-      if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
-      if (prefix === "bios") {
-        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
-        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
-      }
-    });
-  }
-  if (unselectAllBtn) {
-    unselectAllBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      document.querySelectorAll(`.${prefix}-system-filter`).forEach((node) => {
-        node.checked = false;
-      });
-      if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
-      if (prefix === "bios") {
-        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
-        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
-      }
-    });
-  }
-  document.removeEventListener(`filter-apply-${prefix}`, onSelectionChange);
-  document.addEventListener(`filter-apply-${prefix}`, onSelectionChange);
+function restoreExplorerFiltersSidebar() {
+  const moved = explorerFiltersMoved;
+  explorerFiltersMoved = null;
+  if (!moved) return;
+  if (moved.placeholder.isConnected) moved.placeholder.replaceWith(moved.sidebar);
+  else moved.sidebar.remove();
 }
 function setBackground(url) {
   document.body.style.backgroundImage = "";
@@ -1740,44 +1637,6 @@ function parseAdminConfigsHash(hash) {
   const maxBytes = clampMaxBytes(params.get("max_bytes") || "131072");
   return { source, maxBytes };
 }
-function parseArtworkHash(hash) {
-  if (!hash.startsWith("#admin/artwork")) return null;
-  const queryIndex = hash.indexOf("?");
-  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
-  const offset = Math.max(0, Number.parseInt(params.get("offset") || "0", 10) || 0);
-  const includeFilesystem = ["1", "true", "yes", "on"].includes(String(params.get("include_filesystem") || "0").toLowerCase());
-  const fieldsRaw = params.get("fields");
-  const fields = fieldsRaw
-    ? fieldsRaw.split(",").map((item) => item.trim()).filter(Boolean)
-    : ["image", "marquee"];
-  const systemsRaw = params.get("systems") || "";
-  const systems = systemsRaw.split(",").map((item) => item.trim()).filter(Boolean);
-  const q = params.get("q") || "";
-  const romStatus = ["any", "exists", "missing"].includes(params.get("rom_status")) ? params.get("rom_status") : "any";
-  return { offset, includeFilesystem, fields, systems, q, romStatus };
-}
-function artworkShowAllSelected(fields = artworkSelectedFields) {
-  return (fields || []).includes("show_all");
-}
-function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
-  const params = new URLSearchParams();
-  params.set("offset", String(Math.max(0, Number(offset || 0))));
-  params.set("fields", (fields && fields.length ? fields : ["any"]).join(","));
-  if (systems && systems.length) params.set("systems", systems.join(","));
-  if (query) params.set("q", query);
-  if (romStatus && romStatus !== "any") params.set("rom_status", romStatus);
-  if (includeFilesystem || artworkShowAllSelected(fields)) params.set("include_filesystem", "1");
-  return `#admin/artwork?${params.toString()}`;
-}
-function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
-  setHash(artworkHash(includeFilesystem, offset, fields, systems, query, romStatus));
-}
-function syncArtworkHash() {
-  const nextHash = artworkHash();
-  if (window.location.hash !== nextHash) {
-    history.replaceState(null, "", nextHash);
-  }
-}
 function romDownloadUrl(system, uniqueId) {
   return `${API_BASE}/systems/${encodeURIComponent(system)}/${encodeURIComponent(uniqueId)}`;
 }
@@ -2095,7 +1954,7 @@ async function renderMovieExplorerPage() {
             <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
           </div>
           <button id="movieExplorerDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate movies/shows" onclick="toggleMovieExplorerDuplicatesMode()"><i class="bi bi-files"></i></button>
-          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="movie-explorer-sidebar" onclick="toggleExplorerFilters(this, 'movie-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-haspopup="dialog" onclick="openExplorerFiltersModal('movie-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("movies")}
         </div>
         <div class="movie-explorer-body">
@@ -2918,7 +2777,7 @@ async function renderMusicExplorerPage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="musicExplorerSearch" type="search" class="form-control" placeholder="Search artists, albums, songs" oninput="filterMusicExplorer(this.value)" autofocus>
           </div>
-          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="music-explorer-sidebar" onclick="toggleExplorerFilters(this, 'music-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-haspopup="dialog" onclick="openExplorerFiltersModal('music-explorer-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("music")}
         </div>
         <div class="movie-explorer-body">
@@ -4066,8 +3925,7 @@ async function saveMovieScraperApiKey(entryKey) {
 function renderMovieScraperSearchUi(entryKey, movie) {
   // Deliberately blank, not the raw filename: an empty query tells the
   // backend to search using its own cleaned-up-title candidate ladder
-  // (same one the bulk scraper uses) rather than the messy filename
-  // verbatim -- see searchMovieScraper, which fills this box in with
+  // rather than the messy filename verbatim -- see searchMovieScraper, which fills this box in with
   // whichever title that ladder actually searched once results come back.
   const hasMetadata = !!(movie && movie.metadata);
   return `
@@ -4177,625 +4035,6 @@ async function applyMovieScraperResult(entryKey, tmdbId, button) {
       button.disabled = false;
       button.innerHTML = originalHtml;
     }
-  } finally {
-    setLoading(false);
-  }
-}
-
-// ---------------------------------------------------- Admin Movies (bulk scrape)
-
-function stopMovieBulkScrapeAutoRefresh() {
-  if (movieBulkScrapeTimer) {
-    clearInterval(movieBulkScrapeTimer);
-    movieBulkScrapeTimer = null;
-  }
-  movieBulkScrapeInFlight = false;
-}
-// Only polls while a job is "running" -- a rare, one-off admin action (not a
-// persistent queue like Torrents), same reasoning as Config Backups' own
-// auto-refresh: starts on demand, stops itself once nothing is left running.
-function startMovieBulkScrapeAutoRefreshIfNeeded(job) {
-  if (!job || job.status !== "running") {
-    stopMovieBulkScrapeAutoRefresh();
-    return;
-  }
-  if (movieBulkScrapeTimer) return;
-  movieBulkScrapeTimer = setInterval(async () => {
-    if (document.hidden || movieBulkScrapeInFlight) return;
-    if (window.location.hash !== "#admin/movies") return;
-    const statusEl = document.getElementById("movieBulkScrapeStatus");
-    if (!statusEl) return;
-    movieBulkScrapeInFlight = true;
-    try {
-      const payload = await api("/admin/movies/scrape/bulk");
-      if (window.location.hash === "#admin/movies" && statusEl.isConnected) {
-        patchMovieBulkScrapeLive(payload.job || null);
-      }
-    } catch (err) {
-      // Transient poll failure: leave the last good data in place silently.
-    } finally {
-      movieBulkScrapeInFlight = false;
-    }
-  }, 2000);
-}
-function movieBulkScrapeStatusBadge(job) {
-  const status = String(job.status || "running");
-  const cls = status === "error" ? "danger" : status === "complete" ? "success" : status === "stopped" ? "secondary" : "info";
-  const title = status === "error" ? escapeHtml(job.error_message || "") : "";
-  return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
-}
-function renderMovieBulkScrapeStatus(job) {
-  if (!job) {
-    return `<div class="text-muted small">No scrape has been run yet.</div>`;
-  }
-  const total = Number(job.total || 0);
-  const processed = Number(job.processed || 0);
-  const pct = total > 0 ? Math.round((processed / total) * 100) : 100;
-  const running = job.status === "running";
-  return `
-    <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
-      <div>${movieBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all movies" : "Scraping movies missing artwork"}</span></div>
-      <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
-    </div>
-    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : job.status === "stopped" ? "secondary" : "primary"}" style="width:${pct}%"></div></div>` : ""}
-    ${running && job.current_movie ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_movie)}</div>` : ""}
-    <div class="small text-muted">
-      ${movieBulkScrapeCountLink("matched", job.matched_count)}
-      &middot; ${movieBulkScrapeCountLink("skipped", job.skipped_count)}
-      &middot; ${movieBulkScrapeCountLink("failed", job.failed_count)}
-    </div>
-    ${job.status === "error" && job.error_message ? `<div class="alert alert-warning small mt-2 mb-0">${escapeHtml(job.error_message)}</div>` : ""}
-  `;
-}
-function movieBulkScrapeCountLink(status, count) {
-  const n = Number(count || 0);
-  if (!n) return `${n.toLocaleString()} ${escapeHtml(status)}`;
-  return `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="toggleMovieBulkScrapeBreakdown(${jsAttr(status)})">${n.toLocaleString()} ${escapeHtml(status)}</button>`;
-}
-function patchMovieBulkScrapeLive(job) {
-  const statusEl = document.getElementById("movieBulkScrapeStatus");
-  if (statusEl) statusEl.innerHTML = renderMovieBulkScrapeStatus(job);
-  const running = job && job.status === "running";
-  const startBtn = document.getElementById("movieBulkScrapeStartBtn");
-  if (startBtn) {
-    startBtn.disabled = running;
-    startBtn.innerHTML = running
-      ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
-      : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
-  }
-  const stopBtn = document.getElementById("movieBulkScrapeStopBtn");
-  if (stopBtn) {
-    stopBtn.classList.toggle("d-none", !running);
-    if (!running) movieBulkScrapeStopRequested = false;
-    if (!movieBulkScrapeStopRequested) {
-      stopBtn.disabled = false;
-      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-    }
-  }
-  const checkbox = document.getElementById("movieBulkScrapeRescanAll");
-  if (checkbox) checkbox.disabled = running;
-  // A job that just finished (running -> anything else) can have changed
-  // every bucket's contents -- refresh whichever breakdown panel is open
-  // (e.g. after "Retry failed", the failed list should reflect what's
-  // *still* failing, not what was failing before the retry ran).
-  if (movieBulkScrapeWasRunning && !running && movieBulkScrapeBreakdownStatus) {
-    loadMovieBulkScrapeBreakdown(movieBulkScrapeBreakdownStatus, 0);
-  }
-  movieBulkScrapeWasRunning = running;
-  startMovieBulkScrapeAutoRefreshIfNeeded(job);
-}
-function renderMovieAdminApiKeyForm() {
-  return `
-    <div class="card">
-      <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
-      <div class="card-body">
-        <p class="text-muted small">Set a TMDb API key (v3 auth) to enable scraping movie posters, backdrops, and metadata. This can also be set from any movie's own details page.</p>
-        <div class="input-group">
-          <input id="movieAdminApiKeyInput" type="password" class="form-control" placeholder="TMDb API key">
-          <button class="btn btn-primary" type="button" onclick="saveMovieAdminApiKey()"><i class="bi bi-check-lg me-1"></i>Save</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-async function saveMovieAdminApiKey() {
-  const input = document.getElementById("movieAdminApiKeyInput");
-  const apiKey = (input && input.value || "").trim();
-  if (!apiKey) {
-    showToast("Enter a TMDb API key first.", "warning");
-    return;
-  }
-  setLoading(true, "Saving TMDb API key...");
-  try {
-    await apiPost("/admin/movies/scraper-settings", { api_key: apiKey });
-    showToast("TMDb API key saved.", "success");
-    await renderAdminMoviesArtworkPage();
-  } catch (err) {
-    showToast(`Failed to save TMDb API key: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-function renderMovieAdminBulkScrapeCard(job) {
-  const running = job && job.status === "running";
-  return `
-    <div class="card">
-      <div class="card-header"><i class="bi bi-collection-play me-1"></i>Bulk Scrape</div>
-      <div class="card-body">
-        <div class="form-check mb-3">
-          <input class="form-check-input" type="checkbox" id="movieBulkScrapeRescanAll" ${running ? "disabled" : ""}>
-          <label class="form-check-label" for="movieBulkScrapeRescanAll">Rescan all movies (unchecked: only scrape movies missing artwork)</label>
-        </div>
-        <button id="movieBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMovieBulkScrape()" ${running ? "disabled" : ""}>
-          ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
-        </button>
-        <button id="movieBulkScrapeStopBtn" class="btn btn-outline-danger ${running ? "" : "d-none"}" type="button" onclick="cancelMovieBulkScrape()">
-          <i class="bi bi-stop-fill me-1"></i>Stop
-        </button>
-        <div id="movieBulkScrapeStatus" class="mt-3">${renderMovieBulkScrapeStatus(job)}</div>
-        <div id="movieBulkScrapeBreakdown" class="mt-3"></div>
-      </div>
-    </div>
-  `;
-}
-async function startMovieBulkScrape() {
-  const checkbox = document.getElementById("movieBulkScrapeRescanAll");
-  const rescanAll = checkbox ? checkbox.checked : false;
-  setLoading(true, "Starting bulk scrape...");
-  try {
-    const result = await apiPost("/admin/movies/scrape/bulk", { rescan_all: rescanAll });
-    if (result.status === "already_running") {
-      showToast("A bulk scrape is already running.", "warning");
-    } else if (result.status === "error") {
-      showToast(`Could not start scraping: ${escapeHtml(result.error || "unknown error")}`, "danger");
-    } else {
-      showToast("Bulk scrape started.", "success");
-    }
-  } catch (err) {
-    showToast(`Could not start scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-  if (window.location.hash === "#admin/movies") {
-    await renderAdminMoviesArtworkPage();
-  }
-}
-// Not a full re-render (unlike startMovieBulkScrape) -- the running job's
-// own poll loop (startMovieBulkScrapeAutoRefreshIfNeeded) is already
-// patching the status card live every 2s, so this just needs to flip the
-// button into a "Stopping..." state and let the next poll tick reflect the
-// real outcome once the job actually reaches its next stop-check.
-async function cancelMovieBulkScrape() {
-  movieBulkScrapeStopRequested = true;
-  const stopBtn = document.getElementById("movieBulkScrapeStopBtn");
-  if (stopBtn) {
-    stopBtn.disabled = true;
-    stopBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Stopping...`;
-  }
-  try {
-    const result = await apiPost("/admin/movies/scrape/bulk/stop", {});
-    if (result.status === "not_running") {
-      showToast("No bulk scrape is currently running.", "warning");
-      movieBulkScrapeStopRequested = false;
-      if (stopBtn) {
-        stopBtn.disabled = false;
-        stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-      }
-    } else {
-      showToast("Stopping bulk scrape...", "success");
-    }
-  } catch (err) {
-    showToast(`Could not stop scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    movieBulkScrapeStopRequested = false;
-    if (stopBtn) {
-      stopBtn.disabled = false;
-      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-    }
-  }
-}
-async function toggleMovieBulkScrapeBreakdown(status) {
-  const container = document.getElementById("movieBulkScrapeBreakdown");
-  if (movieBulkScrapeBreakdownStatus === status) {
-    movieBulkScrapeBreakdownStatus = null;
-    if (container) container.innerHTML = "";
-    return;
-  }
-  await loadMovieBulkScrapeBreakdown(status, 0);
-}
-async function loadMovieBulkScrapeBreakdown(status, offset) {
-  const container = document.getElementById("movieBulkScrapeBreakdown");
-  if (!container) return;
-  movieBulkScrapeBreakdownStatus = status;
-  movieBulkScrapeBreakdownOffset = Math.max(0, offset || 0);
-  container.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Loading ${escapeHtml(status)} movies...</div>`;
-  try {
-    const page = await api(`/admin/movies/scrape/bulk/items/${encodeURIComponent(status)}?limit=${MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE}&offset=${movieBulkScrapeBreakdownOffset}`);
-    if (movieBulkScrapeBreakdownStatus === status) container.innerHTML = renderMovieBulkScrapeBreakdownPanel(status, page);
-  } catch (err) {
-    container.innerHTML = `<div class="alert alert-warning small mb-0">Could not load ${escapeHtml(status)} list: ${escapeHtml(err.message || "unknown error")}</div>`;
-  }
-}
-function renderMovieBulkScrapeBreakdownPanel(status, page) {
-  const items = page.items || [];
-  const total = Number(page.total || 0);
-  const offset = Number(page.offset || 0);
-  const limit = Number(page.limit || MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE);
-  const showing = items.length ? `${(offset + 1).toLocaleString()}-${(offset + items.length).toLocaleString()} of ${total.toLocaleString()}` : "0 of 0";
-  const retryAllBtn = status === "failed" && total
-    ? `<button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="retryAllMovieBulkScrapeFailed()"><i class="bi bi-arrow-repeat me-1"></i>Retry all ${total.toLocaleString()}</button>`
-    : "";
-  const rows = items.length
-    ? items.map((item) => `
-      <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-bottom movie-bulk-scrape-item-row">
-        <div class="min-width-0">
-          <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate d-block" style="max-width: 100%;" title="${escapeHtml(item.file_path || item.movie_name || "")}" onclick="setHash(movieDetailHash(${jsAttr(item.entry_key)}))">${escapeHtml(item.movie_name || item.file_path || "")}</button>
-          ${item.reason ? `<div class="text-muted small">${escapeHtml(item.reason)}</div>` : ""}
-        </div>
-        ${
-          status === "failed"
-            ? `<button class="btn btn-outline-secondary btn-sm text-nowrap" type="button" onclick="retryMovieBulkScrapeItem(${jsAttr(item.entry_key)})"><i class="bi bi-arrow-repeat me-1"></i>Retry</button>`
-            : ""
-        }
-      </div>
-    `).join("")
-    : `<div class="text-muted small py-2">Nothing here.</div>`;
-  return `
-    <div class="card log-card">
-      <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
-        <span class="text-capitalize">${escapeHtml(status)} movies</span>
-        <div class="d-flex align-items-center gap-2">
-          ${retryAllBtn}
-          <button class="btn btn-outline-secondary btn-sm" type="button" title="Close" onclick="toggleMovieBulkScrapeBreakdown(${jsAttr(status)})"><i class="bi bi-x-lg"></i></button>
-        </div>
-      </div>
-      <div class="card-body p-0" style="max-height: 360px; overflow-y: auto;">
-        <div class="px-3">${rows}</div>
-      </div>
-      <div class="card-footer d-flex align-items-center justify-content-between gap-2">
-        <span class="small text-muted">${showing}</span>
-        <div class="d-flex gap-2">
-          <button class="btn btn-sm btn-outline-primary" type="button" ${offset <= 0 ? "disabled" : ""} onclick="loadMovieBulkScrapeBreakdown(${jsAttr(status)}, ${Math.max(0, offset - limit)})">Previous</button>
-          <button class="btn btn-sm btn-outline-primary" type="button" ${offset + items.length >= total ? "disabled" : ""} onclick="loadMovieBulkScrapeBreakdown(${jsAttr(status)}, ${offset + limit})">Next</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-async function startMovieBulkScrapeRetry(body, loadingText) {
-  setLoading(true, loadingText);
-  try {
-    const result = await apiPost("/admin/movies/scrape/bulk/retry", body);
-    if (result.status === "already_running") {
-      showToast("A scrape is already running -- try again once it finishes.", "warning");
-    } else if (result.status === "error") {
-      showToast(`Could not start retry: ${escapeHtml(result.error || "unknown error")}`, "danger");
-    } else {
-      showToast("Retry started.", "success");
-      const statusPayload = await api("/admin/movies/scrape/bulk");
-      patchMovieBulkScrapeLive(statusPayload.job || null);
-    }
-  } catch (err) {
-    showToast(`Could not start retry: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function retryMovieBulkScrapeItem(entryKey) {
-  await startMovieBulkScrapeRetry({ entry_keys: [entryKey] }, "Retrying...");
-}
-async function retryAllMovieBulkScrapeFailed() {
-  await startMovieBulkScrapeRetry({ status: "failed" }, "Retrying all failed movies...");
-}
-async function renderAdminMoviesArtworkPage() {
-  currentSystemContext = null;
-  clearSystemTheme();
-  // A fresh visit to this page always starts with the breakdown panel
-  // closed (its container is rebuilt below) -- reset the tracked state to
-  // match, so a stale "failed" from a previous visit can't cause
-  // patchMovieBulkScrapeLive to silently reopen it on the next poll tick.
-  movieBulkScrapeBreakdownStatus = null;
-  setLoading(true, "Loading movie scraper settings...");
-  try {
-    const [settingsPayload, statusPayload] = await Promise.all([
-      api("/admin/movies/scraper-settings"),
-      api("/admin/movies/scrape/bulk"),
-    ]);
-    content.innerHTML = `
-      ${renderArtworkTabBar("movies")}
-      <div class="text-muted small mb-3">Scrape TMDb for movie poster/backdrop art and metadata (overview, cast, genres) -- the same scraper available on each movie's own details page, run here in bulk across your whole library.</div>
-      <div id="movieAdminScraperCard">${settingsPayload.has_api_key ? renderMovieAdminBulkScrapeCard(statusPayload.job) : renderMovieAdminApiKeyForm()}</div>
-    `;
-    startMovieBulkScrapeAutoRefreshIfNeeded(statusPayload.job);
-  } catch (err) {
-    content.innerHTML = `${renderArtworkTabBar("movies")}<div class="alert alert-danger">Failed to load movie scraper settings: ${escapeHtml(err.message || "unknown error")}</div>`;
-  } finally {
-    setLoading(false);
-  }
-}
-
-// ---------------------------------------------------- Admin Music (bulk scrape)
-//
-// Mirrors the Admin Movies bulk-scrape block above closely -- the one
-// structural difference is there is no API-key gate at all (MusicBrainz +
-// Cover Art Archive are both keyless), so renderAdminMusicArtworkPage goes
-// straight to the bulk-scrape card with no has_api_key branch, and there is
-// no equivalent of renderMovieAdminApiKeyForm/saveMovieAdminApiKey here.
-
-function stopMusicBulkScrapeAutoRefresh() {
-  if (musicBulkScrapeTimer) {
-    clearInterval(musicBulkScrapeTimer);
-    musicBulkScrapeTimer = null;
-  }
-  musicBulkScrapeInFlight = false;
-}
-function startMusicBulkScrapeAutoRefreshIfNeeded(job) {
-  if (!job || job.status !== "running") {
-    stopMusicBulkScrapeAutoRefresh();
-    return;
-  }
-  if (musicBulkScrapeTimer) return;
-  musicBulkScrapeTimer = setInterval(async () => {
-    if (document.hidden || musicBulkScrapeInFlight) return;
-    if (window.location.hash !== "#admin/music") return;
-    const statusEl = document.getElementById("musicBulkScrapeStatus");
-    if (!statusEl) return;
-    musicBulkScrapeInFlight = true;
-    try {
-      const payload = await api("/admin/music/scrape/bulk");
-      if (window.location.hash === "#admin/music" && statusEl.isConnected) {
-        patchMusicBulkScrapeLive(payload.job || null);
-      }
-    } catch (err) {
-      // Transient poll failure: leave the last good data in place silently.
-    } finally {
-      musicBulkScrapeInFlight = false;
-    }
-  }, 2000);
-}
-function musicBulkScrapeStatusBadge(job) {
-  const status = String(job.status || "running");
-  const cls = status === "error" ? "danger" : status === "complete" ? "success" : status === "stopped" ? "secondary" : "info";
-  const title = status === "error" ? escapeHtml(job.error_message || "") : "";
-  return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
-}
-function renderMusicBulkScrapeStatus(job) {
-  if (!job) {
-    return `<div class="text-muted small">No scrape has been run yet.</div>`;
-  }
-  const total = Number(job.total || 0);
-  const processed = Number(job.processed || 0);
-  const pct = total > 0 ? Math.round((processed / total) * 100) : 100;
-  const running = job.status === "running";
-  return `
-    <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
-      <div>${musicBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all music" : "Scraping tracks missing artwork"}</span></div>
-      <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
-    </div>
-    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : job.status === "stopped" ? "secondary" : "primary"}" style="width:${pct}%"></div></div>` : ""}
-    ${running && job.current_music ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_music)}</div>` : ""}
-    <div class="small text-muted">
-      ${musicBulkScrapeCountLink("matched", job.matched_count)}
-      &middot; ${musicBulkScrapeCountLink("skipped", job.skipped_count)}
-      &middot; ${musicBulkScrapeCountLink("failed", job.failed_count)}
-    </div>
-    ${job.status === "error" && job.error_message ? `<div class="alert alert-warning small mt-2 mb-0">${escapeHtml(job.error_message)}</div>` : ""}
-  `;
-}
-function musicBulkScrapeCountLink(status, count) {
-  const n = Number(count || 0);
-  if (!n) return `${n.toLocaleString()} ${escapeHtml(status)}`;
-  return `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="toggleMusicBulkScrapeBreakdown(${jsAttr(status)})">${n.toLocaleString()} ${escapeHtml(status)}</button>`;
-}
-function patchMusicBulkScrapeLive(job) {
-  const statusEl = document.getElementById("musicBulkScrapeStatus");
-  if (statusEl) statusEl.innerHTML = renderMusicBulkScrapeStatus(job);
-  const running = job && job.status === "running";
-  const startBtn = document.getElementById("musicBulkScrapeStartBtn");
-  if (startBtn) {
-    startBtn.disabled = running;
-    startBtn.innerHTML = running
-      ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
-      : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
-  }
-  const stopBtn = document.getElementById("musicBulkScrapeStopBtn");
-  if (stopBtn) {
-    stopBtn.classList.toggle("d-none", !running);
-    if (!running) musicBulkScrapeStopRequested = false;
-    if (!musicBulkScrapeStopRequested) {
-      stopBtn.disabled = false;
-      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-    }
-  }
-  const checkbox = document.getElementById("musicBulkScrapeRescanAll");
-  if (checkbox) checkbox.disabled = running;
-  if (musicBulkScrapeWasRunning && !running && musicBulkScrapeBreakdownStatus) {
-    loadMusicBulkScrapeBreakdown(musicBulkScrapeBreakdownStatus, 0);
-  }
-  musicBulkScrapeWasRunning = running;
-  startMusicBulkScrapeAutoRefreshIfNeeded(job);
-}
-function renderMusicAdminBulkScrapeCard(job) {
-  const running = job && job.status === "running";
-  return `
-    <div class="card">
-      <div class="card-header"><i class="bi bi-collection-play me-1"></i>Bulk Scrape</div>
-      <div class="card-body">
-        <div class="form-check mb-3">
-          <input class="form-check-input" type="checkbox" id="musicBulkScrapeRescanAll" ${running ? "disabled" : ""}>
-          <label class="form-check-label" for="musicBulkScrapeRescanAll">Rescan all music (unchecked: only scrape tracks missing artwork)</label>
-        </div>
-        <button id="musicBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMusicBulkScrape()" ${running ? "disabled" : ""}>
-          ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
-        </button>
-        <button id="musicBulkScrapeStopBtn" class="btn btn-outline-danger ${running ? "" : "d-none"}" type="button" onclick="cancelMusicBulkScrape()">
-          <i class="bi bi-stop-fill me-1"></i>Stop
-        </button>
-        <div id="musicBulkScrapeStatus" class="mt-3">${renderMusicBulkScrapeStatus(job)}</div>
-        <div id="musicBulkScrapeBreakdown" class="mt-3"></div>
-      </div>
-    </div>
-  `;
-}
-async function startMusicBulkScrape() {
-  const checkbox = document.getElementById("musicBulkScrapeRescanAll");
-  const rescanAll = checkbox ? checkbox.checked : false;
-  setLoading(true, "Starting bulk scrape...");
-  try {
-    const result = await apiPost("/admin/music/scrape/bulk", { rescan_all: rescanAll });
-    if (result.status === "already_running") {
-      showToast("A bulk scrape is already running.", "warning");
-    } else if (result.status === "error") {
-      showToast(`Could not start scraping: ${escapeHtml(result.error || "unknown error")}`, "danger");
-    } else {
-      showToast("Bulk scrape started.", "success");
-    }
-  } catch (err) {
-    showToast(`Could not start scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-  if (window.location.hash === "#admin/music") {
-    await renderAdminMusicArtworkPage();
-  }
-}
-// See cancelMovieBulkScrape's comment -- same shape, the running job's own
-// poll loop patches the status card live, this just flips the button state.
-async function cancelMusicBulkScrape() {
-  musicBulkScrapeStopRequested = true;
-  const stopBtn = document.getElementById("musicBulkScrapeStopBtn");
-  if (stopBtn) {
-    stopBtn.disabled = true;
-    stopBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Stopping...`;
-  }
-  try {
-    const result = await apiPost("/admin/music/scrape/bulk/stop", {});
-    if (result.status === "not_running") {
-      showToast("No bulk scrape is currently running.", "warning");
-      musicBulkScrapeStopRequested = false;
-      if (stopBtn) {
-        stopBtn.disabled = false;
-        stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-      }
-    } else {
-      showToast("Stopping bulk scrape...", "success");
-    }
-  } catch (err) {
-    showToast(`Could not stop scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    musicBulkScrapeStopRequested = false;
-    if (stopBtn) {
-      stopBtn.disabled = false;
-      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
-    }
-  }
-}
-async function toggleMusicBulkScrapeBreakdown(status) {
-  const container = document.getElementById("musicBulkScrapeBreakdown");
-  if (musicBulkScrapeBreakdownStatus === status) {
-    musicBulkScrapeBreakdownStatus = null;
-    if (container) container.innerHTML = "";
-    return;
-  }
-  await loadMusicBulkScrapeBreakdown(status, 0);
-}
-async function loadMusicBulkScrapeBreakdown(status, offset) {
-  const container = document.getElementById("musicBulkScrapeBreakdown");
-  if (!container) return;
-  musicBulkScrapeBreakdownStatus = status;
-  musicBulkScrapeBreakdownOffset = Math.max(0, offset || 0);
-  container.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Loading ${escapeHtml(status)} music...</div>`;
-  try {
-    const page = await api(`/admin/music/scrape/bulk/items/${encodeURIComponent(status)}?limit=${MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE}&offset=${musicBulkScrapeBreakdownOffset}`);
-    if (musicBulkScrapeBreakdownStatus === status) container.innerHTML = renderMusicBulkScrapeBreakdownPanel(status, page);
-  } catch (err) {
-    container.innerHTML = `<div class="alert alert-warning small mb-0">Could not load ${escapeHtml(status)} list: ${escapeHtml(err.message || "unknown error")}</div>`;
-  }
-}
-function renderMusicBulkScrapeBreakdownPanel(status, page) {
-  const items = page.items || [];
-  const total = Number(page.total || 0);
-  const offset = Number(page.offset || 0);
-  const limit = Number(page.limit || MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE);
-  const showing = items.length ? `${(offset + 1).toLocaleString()}-${(offset + items.length).toLocaleString()} of ${total.toLocaleString()}` : "0 of 0";
-  const retryAllBtn = status === "failed" && total
-    ? `<button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="retryAllMusicBulkScrapeFailed()"><i class="bi bi-arrow-repeat me-1"></i>Retry all ${total.toLocaleString()}</button>`
-    : "";
-  const rows = items.length
-    ? items.map((item) => `
-      <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-bottom movie-bulk-scrape-item-row">
-        <div class="min-width-0">
-          <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate d-block" style="max-width: 100%;" title="${escapeHtml(item.file_path || item.track_name || "")}" onclick="setHash(musicDetailHash(${jsAttr(item.entry_key)}))">${escapeHtml(item.track_name || item.file_path || "")}</button>
-          ${item.reason ? `<div class="text-muted small">${escapeHtml(item.reason)}</div>` : ""}
-        </div>
-        ${
-          status === "failed"
-            ? `<button class="btn btn-outline-secondary btn-sm text-nowrap" type="button" onclick="retryMusicBulkScrapeItem(${jsAttr(item.entry_key)})"><i class="bi bi-arrow-repeat me-1"></i>Retry</button>`
-            : ""
-        }
-      </div>
-    `).join("")
-    : `<div class="text-muted small py-2">Nothing here.</div>`;
-  return `
-    <div class="card log-card">
-      <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
-        <span class="text-capitalize">${escapeHtml(status)} music</span>
-        <div class="d-flex align-items-center gap-2">
-          ${retryAllBtn}
-          <button class="btn btn-outline-secondary btn-sm" type="button" title="Close" onclick="toggleMusicBulkScrapeBreakdown(${jsAttr(status)})"><i class="bi bi-x-lg"></i></button>
-        </div>
-      </div>
-      <div class="card-body p-0" style="max-height: 360px; overflow-y: auto;">
-        <div class="px-3">${rows}</div>
-      </div>
-      <div class="card-footer d-flex align-items-center justify-content-between gap-2">
-        <span class="small text-muted">${showing}</span>
-        <div class="d-flex gap-2">
-          <button class="btn btn-sm btn-outline-primary" type="button" ${offset <= 0 ? "disabled" : ""} onclick="loadMusicBulkScrapeBreakdown(${jsAttr(status)}, ${Math.max(0, offset - limit)})">Previous</button>
-          <button class="btn btn-sm btn-outline-primary" type="button" ${offset + items.length >= total ? "disabled" : ""} onclick="loadMusicBulkScrapeBreakdown(${jsAttr(status)}, ${offset + limit})">Next</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-async function startMusicBulkScrapeRetry(body, loadingText) {
-  setLoading(true, loadingText);
-  try {
-    const result = await apiPost("/admin/music/scrape/bulk/retry", body);
-    if (result.status === "already_running") {
-      showToast("A scrape is already running -- try again once it finishes.", "warning");
-    } else if (result.status === "error") {
-      showToast(`Could not start retry: ${escapeHtml(result.error || "unknown error")}`, "danger");
-    } else {
-      showToast("Retry started.", "success");
-      const statusPayload = await api("/admin/music/scrape/bulk");
-      patchMusicBulkScrapeLive(statusPayload.job || null);
-    }
-  } catch (err) {
-    showToast(`Could not start retry: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function retryMusicBulkScrapeItem(entryKey) {
-  await startMusicBulkScrapeRetry({ entry_keys: [entryKey] }, "Retrying...");
-}
-async function retryAllMusicBulkScrapeFailed() {
-  await startMusicBulkScrapeRetry({ status: "failed" }, "Retrying all failed tracks...");
-}
-async function renderAdminMusicArtworkPage() {
-  currentSystemContext = null;
-  clearSystemTheme();
-  musicBulkScrapeBreakdownStatus = null;
-  setLoading(true, "Loading music scraper status...");
-  try {
-    const statusPayload = await api("/admin/music/scrape/bulk");
-    content.innerHTML = `
-      ${renderArtworkTabBar("music")}
-      <div class="text-muted small mb-3">Scrape MusicBrainz + Cover Art Archive for album cover art and release-level metadata (artist, album, genres) -- the same album-level scraper available at the bottom of each album's own details page, run here in bulk across your whole library. Track titles are always taken from your own filenames, never overwritten. No account or API key needed.</div>
-      <div id="musicAdminScraperCard">${renderMusicAdminBulkScrapeCard(statusPayload.job)}</div>
-    `;
-    startMusicBulkScrapeAutoRefreshIfNeeded(statusPayload.job);
-  } catch (err) {
-    content.innerHTML = `${renderArtworkTabBar("music")}<div class="alert alert-danger">Failed to load music scraper status: ${escapeHtml(err.message || "unknown error")}</div>`;
   } finally {
     setLoading(false);
   }
@@ -4998,7 +4237,6 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
       </div>
     `;
     window.missingArtworkRoms = [rom];
-    window.selectedArtworkRomIndex = 0;
     bindArtworkEditButtons(rom, 0);
     const videoPlayer = document.getElementById("romMediaVideoPlayer");
     if (videoPlayer) {
@@ -5071,123 +4309,6 @@ function deleteRomFromDetailPage(system, uniqueId, title) {
     },
   });
 }
-function renderThemeGallery(data) {
-  backBtn.classList.remove("d-none");
-  if (!data || !Array.isArray(data.images)) {
-    data = { images: [], count: 0, has_more: false, returned: 0, offset: 0, limit: THEME_GALLERY_PAGE_SIZE, theme_name: "unknown" };
-  }
-  const systems = (data.systems || []).slice().sort((a, b) => a.localeCompare(b));
-  if (!themeFilterInitialized) {
-    themeFilterSelectedSystems = [...systems];
-    themeFilterInitialized = true;
-  }
-  const total = Number(data.count || 0);
-  const offset = Number(data.offset || 0);
-  const limit = Number(data.limit || THEME_GALLERY_PAGE_SIZE);
-  const page = Math.floor(offset / limit) + 1;
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-
-  content.innerHTML = `
-    ${renderArtworkTabBar("theme")}
-    <div class="mb-3">
-      <h2 class="h4 mb-1"><i class="bi bi-image me-2"></i>Theme Gallery</h2>
-      <div class="text-muted">Theme: ${escapeHtml((data && data.theme_name) || "unknown")} · Images: ${total} · Page: ${page}/${totalPages}</div>
-    </div>
-    <div class="card shadow-sm mb-3">
-      <div class="card-body">
-        <div class="row g-3">
-          <div class="col-12 col-lg-6">
-            <label class="form-label mb-1">Search path/system (supports wildcard <code>*</code> and <code>?</code>)</label>
-            <div class="input-group">
-              <span class="input-group-text"><i class="bi bi-funnel"></i></span>
-              <input id="themeSearchInput" class="form-control" type="search" value="${escapeHtml(themeFilterQuery)}" placeholder="examples: snes/* , */_inc/*logo*">
-              <button id="themeSearchBtn" type="button" class="btn btn-primary">Search</button>
-              <button id="themeSearchClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
-            </div>
-          </div>
-          <div class="col-12 col-lg-6">
-            <label class="form-label mb-1">System filters</label>
-            ${renderFilterDropdown("theme", systems, themeFilterSelectedSystems)}
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="row g-3">
-      ${
-        (data.images || []).map((item) => `
-          <div class="col-12 col-md-6 col-xl-2">
-            <div class="card shadow-sm tile h-100">
-              <img
-                src=""
-                data-src="${item.url}"
-                data-fallbacks='[]'
-                class="card-img-top"
-                alt="${escapeHtml(item.name)}"
-                style="height: 180px; object-fit: contain; background: rgba(0,0,0,0.25);"
-                loading="lazy"
-              >
-              <div class="card-body">
-                <div class="fw-semibold small mb-1">${escapeHtml(item.name)}</div>
-                <div class="text-muted small mono">${escapeHtml(item.folder)}</div>
-              </div>
-            </div>
-          </div>
-        `).join("") || `<div class="col-12"><div class="text-muted">No theme images found.</div></div>`
-      }
-    </div>
-    <div class="mt-3 d-flex gap-2">
-      <button id="themePrevBtn" type="button" class="btn btn-outline-primary btn-sm" ${offset <= 0 ? "disabled" : ""}>Previous</button>
-      <button id="themeNextBtn" type="button" class="btn btn-outline-primary btn-sm" ${!data.has_more ? "disabled" : ""}>Next</button>
-    </div>
-  `;
-  const searchInputEl = document.getElementById("themeSearchInput");
-  const themeSearchBtn = document.getElementById("themeSearchBtn");
-  const themeSearchClearBtn = document.getElementById("themeSearchClearBtn");
-  if (searchInputEl) searchInputEl.style.color = "#eef4ff";
-  if (themeSearchBtn && searchInputEl) {
-    themeSearchBtn.addEventListener("click", async () => {
-      themeFilterQuery = searchInputEl.value || "";
-      await loadThemePage(0);
-    });
-  }
-  if (themeSearchClearBtn && searchInputEl) {
-    themeSearchClearBtn.addEventListener("click", async () => {
-      searchInputEl.value = "";
-      themeFilterQuery = "";
-      await loadThemePage(0);
-    });
-  }
-  setupFilterDropdown("theme", async () => {
-      const checked = Array.from(document.querySelectorAll(".theme-system-filter:checked")).map((el) => el.value);
-      themeFilterSelectedSystems = checked;
-      await loadThemePage(0);
-  });
-  const themePrevBtn = document.getElementById("themePrevBtn");
-  const themeNextBtn = document.getElementById("themeNextBtn");
-  if (themePrevBtn) {
-    themePrevBtn.addEventListener("click", async () => {
-      const nextOffset = Math.max(0, offset - THEME_GALLERY_PAGE_SIZE);
-      await loadThemePage(nextOffset);
-    });
-  }
-  if (themeNextBtn) {
-    themeNextBtn.addEventListener("click", async () => {
-      const nextOffset = offset + THEME_GALLERY_PAGE_SIZE;
-      await loadThemePage(nextOffset);
-    });
-  }
-  setupLazyImages();
-}
-async function renderThemeGalleryPage() {
-  currentSystemContext = null;
-  setLoading(true, "Loading theme images...");
-  clearSystemTheme();
-  await refreshRandomThemeLogo();
-  themeFilterInitialized = false;
-  themeFilterSelectedSystems = [];
-  await loadThemePage(0);
-  setLoading(false);
-}
 // "show" is reserved on the movies side for the same reason noted at
 // showDetailHash -- not relevant here, but kept as a plain query-string hash
 // (not a path segment) for the same reason: system/genre names can contain
@@ -5221,6 +4342,7 @@ async function renderSystemsExplorePage() {
   systemsExploreDuplicatesMode = false;
   systemsExploreDuplicateGroups = [];
   systemsExploreBrowserPlayOnly = false;
+  systemsExploreMissingArt = [];
   setLoading(true, "Loading systems...");
   try {
     const [data, biosSummary, browserPlayInfo] = await Promise.all([
@@ -5240,7 +4362,7 @@ async function renderSystemsExplorePage() {
           </div>
           <button id="systemsExploreBrowserPlayBtn" class="btn btn-outline-light btn-sm" type="button" title="Show only games playable in Chrome (Play in Browser -- other browsers aren't supported yet)" onclick="toggleSystemsExploreBrowserPlayOnly()"><i class="bi bi-play-circle"></i></button>
           <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
-          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-expanded="false" aria-controls="systems-explore-sidebar" onclick="toggleExplorerFilters(this, 'systems-explore-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
+          <button type="button" class="btn btn-outline-light btn-sm explorer-filters-toggle" aria-haspopup="dialog" onclick="openExplorerFiltersModal('systems-explore-sidebar')"><i class="bi bi-funnel me-1"></i>Filters</button>
           ${renderAssetTypeSwitcher("systems")}
         </div>
         <div class="movie-explorer-body">
@@ -5288,9 +4410,49 @@ function renderSystemsExploreSidebarShell() {
       <input type="search" class="form-control form-control-sm movie-explorer-sidebar-search" placeholder="Search categories" oninput="filterSystemsExploreCategoryList(this.value)">
       <div id="systems-explore-category-list"></div>
     </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Missing artwork</div>
+      <div id="systems-explore-missing-art-list"></div>
+    </div>
   `;
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
+  renderSystemsExploreMissingArtList();
+}
+// BIOS rows have no artwork and the duplicate finder (/admin/roms/duplicates)
+// doesn't take this filter, so the checkboxes are disabled in those views
+// rather than silently doing nothing.
+function renderSystemsExploreMissingArtList() {
+  const list = document.getElementById("systems-explore-missing-art-list");
+  if (!list) return;
+  const disabled = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY || systemsExploreDuplicatesMode;
+  list.innerHTML = `
+    <div class="small text-muted mb-1">${disabled ? "Not available in this view." : "Show games missing any of:"}</div>
+    ${SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([field, label]) => `
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="systemsExploreMissingArt-${field}" value="${field}"
+          ${systemsExploreMissingArt.includes(field) ? "checked" : ""} ${disabled ? "disabled" : ""}
+          onchange="toggleSystemsExploreMissingArt(${jsAttr(field)}, this.checked)">
+        <label class="form-check-label" for="systemsExploreMissingArt-${field}">${escapeHtml(label)}</label>
+      </div>
+    `).join("")}
+    ${systemsExploreMissingArt.length && !disabled ? `
+      <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="clearSystemsExploreMissingArt()">Clear</button>
+    ` : ""}
+  `;
+}
+async function toggleSystemsExploreMissingArt(field, checked) {
+  const next = new Set(systemsExploreMissingArt);
+  if (checked) next.add(field);
+  else next.delete(field);
+  systemsExploreMissingArt = SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([value]) => value).filter((value) => next.has(value));
+  renderSystemsExploreMissingArtList();
+  await loadSystemsExploreCurrentMode({ reset: true });
+}
+async function clearSystemsExploreMissingArt() {
+  systemsExploreMissingArt = [];
+  renderSystemsExploreMissingArtList();
+  await loadSystemsExploreCurrentMode({ reset: true });
 }
 function systemsExploreVisibleSystems() {
   const base = systemsExploreBrowserPlayOnly
@@ -5396,6 +4558,7 @@ async function setSystemsExploreSystem(value) {
   updateSystemsExploreHash();
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
+  renderSystemsExploreMissingArtList();
   await loadSystemsExploreCurrentMode({ reset: true });
 }
 async function setSystemsExploreGenre(value) {
@@ -5438,6 +4601,7 @@ async function toggleSystemsExploreDuplicatesMode() {
     renderSystemsExploreSystemList();
     renderSystemsExploreCategoryList();
   }
+  renderSystemsExploreMissingArtList();
   document.getElementById("systemsExploreDuplicatesBtn")?.classList.toggle("active", systemsExploreDuplicatesMode);
   await loadSystemsExploreCurrentMode({ reset: true });
 }
@@ -5454,6 +4618,7 @@ async function toggleSystemsExploreBrowserPlayOnly() {
   }
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
+  renderSystemsExploreMissingArtList();
   document.getElementById("systemsExploreBrowserPlayBtn")?.classList.toggle("active", systemsExploreBrowserPlayOnly);
   await loadSystemsExploreCurrentMode({ reset: true });
 }
@@ -5507,6 +4672,7 @@ async function loadSystemsExploreRoms(opts = {}) {
     if (systemsExploreSelectedGenre) params.set("genre", systemsExploreSelectedGenre);
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
     if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
+    if (systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
     const data = await api(`/roms?${params.toString()}`);
     systemsExploreRoms = reset ? (data.roms || []) : [...systemsExploreRoms, ...(data.roms || [])];
     systemsExploreTotal = Number(data.count || 0);
@@ -6296,14 +5462,6 @@ function renderDebugTabBar(active) {
   ]);
 }
 
-function renderArtworkTabBar(active) {
-  return renderAdminPanelTabs(active, [
-    ["metadata", "Artwork & Metadata", "bi-images", "#admin/artwork"],
-    ["theme", "Theme Gallery", "bi-brush", "#theme"],
-    ["movies", "Movies", "bi-film", "#admin/movies"],
-    ["music", "Music", "bi-music-note-beamed", "#admin/music"],
-  ]);
-}
 
 function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
@@ -6323,21 +5481,6 @@ async function renderAdminMenu() {
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-bug me-2"></i>Debug</h5>
             <p class="card-text">System info, logs, and emulator config files -- runtime health, storage, network, Batocera details, and every tracked log source in one tabbed panel.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <!-- Lands on Theme Gallery (#theme, a small paginated image list), not
-             Artwork & Metadata (#admin/artwork) -- that tab's gamelist scan can
-             take several seconds on a large ROM library, so making it the
-             *default* meant every visit to this tile paid that cost even for
-             someone who only wanted Movies or Theme Gallery. Same reasoning
-             already applied to the root "" hash defaulting to #movies instead
-             of a gamelist-scan-involving page -- see router()'s own comment. -->
-        <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork</h5>
-            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, browse installed EmulationStation themes, and scrape movie/TV posters and metadata from TMDb.</p>
           </div>
         </div>
       </div>
@@ -9361,82 +8504,6 @@ async function renderAssetCachePage() {
     setLoading(false);
   }
 }
-function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel = "Any", enableTools = false) {
-  const selectedSet = new Set(selected || []);
-  const buttonLabel = selectedSet.has("__none__")
-    ? "None"
-    : selectedSet.has("show_all")
-    ? "Show All"
-    : selectedSet.has("any")
-    ? allLabel
-    : selectedSet.size
-      ? `${selectedSet.size} selected`
-      : allLabel;
-  return `
-    <div class="dropdown app-checkbox-dropdown">
-      <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${kind}ArtworkFilterToggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">${escapeHtml(label)}: ${escapeHtml(buttonLabel)}</button>
-      <div class="dropdown-menu filter-dropdown-menu app-checkbox-menu">
-        ${enableTools ? `
-          <input id="artwork-${kind}-search" type="search" class="form-control form-control-sm mb-2" placeholder="Search ${escapeHtml(label.toLowerCase())}...">
-          <div class="d-flex gap-2 mb-2">
-            <button type="button" class="btn btn-outline-primary btn-sm" id="artwork-${kind}-select-all">Select all</button>
-            <button type="button" class="btn btn-outline-secondary btn-sm" id="artwork-${kind}-unselect-all">Unselect all</button>
-          </div>
-        ` : ""}
-        <div class="filter-options-scroll">
-          ${options.map((option) => `
-            <div class="form-check m-0 mb-1 artwork-${kind}-option" data-value="${escapeHtml(String(option.label || option.value).toLowerCase())}">
-              <input class="form-check-input artwork-${kind}-filter" type="checkbox" value="${escapeHtml(option.value)}" id="artwork-${kind}-${escapeHtml(option.value)}" ${selectedSet.has(option.value) ? "checked" : ""}>
-              <label class="form-check-label small" for="artwork-${kind}-${escapeHtml(option.value)}">${escapeHtml(option.label)}</label>
-            </div>
-          `).join("")}
-        </div>
-      </div>
-    </div>
-  `;
-}
-function selectedArtworkCheckboxValues(selector) {
-  return Array.from(document.querySelectorAll(`${selector}:checked`)).map((el) => el.value);
-}
-function artworkMissingRowsHtml(roms) {
-  return (roms || []).map((rom, idx) => `
-    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}" onclick="selectArtworkRom(${idx})" style="cursor: pointer;">
-      <td class="mono small">${escapeHtml(rom.system || "")}</td>
-      <td>
-        <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
-        <div class="text-muted small">${escapeHtml(rom.rom_name || rom.name || "")}</div>
-        <div class="mt-1">
-          <span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>
-          ${rom.has_gamelist_entry ? "" : `<span class="badge text-bg-warning ms-1">new gamelist entry needed</span>`}
-        </div>
-      </td>
-      <td>${(rom.missing || []).length ? (rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("") : `<span class="badge text-bg-success">complete</span>`}</td>
-    </tr>
-  `).join("") || `<tr><td colspan="3" class="text-muted p-3">No artwork or metadata results found.</td></tr>`;
-}
-function refreshArtworkTableRows() {
-  const rows = document.getElementById("artworkRows");
-  if (!rows) return;
-  rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
-  if (window.selectedArtworkRomIndex !== undefined) {
-    const row = document.getElementById(`artwork-row-${window.selectedArtworkRomIndex}`);
-    if (row) row.classList.add("artwork-selected-row");
-  }
-}
-function artworkGamelistValueHtml(value) {
-  if (Array.isArray(value)) {
-    return value.map((item) => artworkGamelistValueHtml(item)).join(`<div class="border-top my-1"></div>`);
-  }
-  if (value && typeof value === "object") {
-    const text = value.text ? `<div>${escapeHtml(value.text)}</div>` : "";
-    const attrs = value.attributes
-      ? Object.entries(value.attributes).map(([key, attrValue]) => `<div class="text-muted small">${escapeHtml(key)}: ${escapeHtml(attrValue)}</div>`).join("")
-      : "";
-    return text + attrs;
-  }
-  const normalized = String(value || "").trim();
-  return normalized ? escapeHtml(normalized) : `<span class="text-muted">empty</span>`;
-}
 function artworkGamelistEditValue(value) {
   if (Array.isArray(value)) return value.map((item) => artworkGamelistEditValue(item)).filter(Boolean).join("\n");
   if (value && typeof value === "object") return String(value.text || "");
@@ -9458,62 +8525,6 @@ function artworkGamelistFieldControl(field, value) {
       <label class="gamelist-edit-label" title="${escapeHtml(label)}">${escapeHtml(label)}</label>
       <input class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" value="${escapeHtml(normalized)}">
     </div>
-  `;
-}
-function artworkGamelistDetailsHtml(rom) {
-  const details = rom && rom.gamelist ? rom.gamelist : {};
-  const entries = Object.entries(details);
-  const statusBadge = `<span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>`;
-  if (!rom.has_gamelist_entry) {
-    return `
-      <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
-      <div class="text-muted small mb-2">${escapeHtml(rom.system || "")} · ${escapeHtml(rom.rom_path || rom.rom_name || "")}</div>
-      <div class="mb-3">${statusBadge}</div>
-      <div class="text-warning small fw-semibold">No gamelist.xml entry exists for this ROM.</div>
-      <div class="text-muted small">Use the <strong>Edit</strong> tab to create one.</div>
-    `;
-  }
-  return `
-    <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
-      <div>
-        <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
-        <div class="text-muted small">${escapeHtml(rom.system || "")} · Missing ${(rom.missing || []).map(escapeHtml).join(", ")}</div>
-      </div>
-      ${statusBadge}
-    </div>
-    <dl class="gamelist-details mb-0">
-      ${entries.map(([key, value]) => `
-        <dt>${escapeHtml(key)}</dt>
-        <dd class="small mb-2">${artworkGamelistValueHtml(value)}</dd>
-      `).join("") || `<dd class="text-muted small mb-0">No gamelist details found.</dd>`}
-    </dl>
-  `;
-}
-function artworkGamelistEditFormHtml(rom) {
-  const details = rom && rom.gamelist ? rom.gamelist : {};
-  const editableFields = Array.from(new Set(GAMELIST_EDIT_FIELDS.concat(Object.keys(details).filter((key) => key !== "path"))));
-  if (!rom.has_gamelist_entry) {
-    return `
-      <form id="gamelistEditForm" class="compact-edit">
-        <div class="gamelist-edit-grid">
-          ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
-          ${artworkGamelistFieldControl("desc", "")}
-        </div>
-        <div class="d-flex gap-2 mt-2">
-          <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
-        </div>
-      </form>
-    `;
-  }
-  return `
-    <form id="gamelistEditForm" class="compact-edit">
-      <div class="gamelist-edit-grid">
-        ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
-      </div>
-      <div class="d-flex gap-2 mt-2">
-        <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Metadata</button>
-      </div>
-    </form>
   `;
 }
 // Metadata-only field names (GAMELIST_EDIT_FIELDS minus the artwork/video fields,
@@ -9575,306 +8586,6 @@ async function removeRomMediaGamelistEntry() {
     setLoading(false);
   }
 }
-function artworkPayloadUrl(forceRefresh = false) {
-  const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
-  const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
-  const includeFilesystem = artworkIncludeFilesystem || artworkShowAllSelected();
-  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}&rom_status=${encodeURIComponent(artworkRomStatus)}${includeFilesystem ? "&include_filesystem=1" : ""}`;
-}
-function updateArtworkPageFromPayload(payload) {
-  const roms = payload.roms || [];
-  const fieldCounts = payload.field_counts || {};
-  const total = Number(payload.count || 0);
-  const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
-  const pageOffset = Number(payload.offset || 0);
-  const page = Math.floor(pageOffset / limit) + 1;
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  const firstItem = total ? pageOffset + 1 : 0;
-  const lastItem = pageOffset + roms.length;
-  artworkCurrentOffset = pageOffset;
-  window.missingArtworkRoms = roms;
-
-  const rows = document.getElementById("artworkRows");
-  if (rows) {
-    rows.innerHTML = artworkMissingRowsHtml(roms);
-    const row = document.getElementById(`artwork-row-${window.selectedArtworkRomIndex}`);
-    if (row) row.classList.add("artwork-selected-row");
-  }
-  const summary = document.getElementById("artworkSummary");
-  if (summary) {
-    summary.innerHTML = `
-      <span class="badge text-bg-secondary">ROM Files: ${total}</span>
-      <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
-      <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
-      <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
-      <span class="badge text-bg-light border">Scan: ${Number(payload.elapsed_ms || 0)} ms</span>
-      ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
-    `;
-  }
-  const prevBtn = document.getElementById("artworkPrevBtn");
-  const nextBtn = document.getElementById("artworkNextBtn");
-  if (prevBtn) prevBtn.disabled = pageOffset <= 0;
-  if (nextBtn) nextBtn.disabled = !payload.has_more;
-  const cleanupBtn = document.getElementById("removeMissingGamelistBtn");
-  if (cleanupBtn) cleanupBtn.disabled = total <= 0;
-}
-async function refreshArtworkResults(forceRefresh = false) {
-  const myArtworkRequestId = ++artworkRenderRequestId;
-  setLoading(true, "Updating artwork results...");
-  try {
-    const payload = await api(artworkPayloadUrl(forceRefresh));
-    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
-    updateArtworkPageFromPayload(payload);
-    history.replaceState(null, "", artworkHash());
-  } catch (err) {
-    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
-    showToast(`Failed to update artwork results: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-function setupArtworkDropdownTools(kind, onApply) {
-  const search = document.getElementById(`artwork-${kind}-search`);
-  const selectAll = document.getElementById(`artwork-${kind}-select-all`);
-  const unselectAll = document.getElementById(`artwork-${kind}-unselect-all`);
-  if (search) {
-    search.addEventListener("input", () => {
-      const q = (search.value || "").trim().toLowerCase();
-      document.querySelectorAll(`.artwork-${kind}-option`).forEach((node) => {
-        node.style.display = !q || (node.getAttribute("data-value") || "").includes(q) ? "" : "none";
-      });
-    });
-  }
-  if (selectAll) {
-    selectAll.addEventListener("click", (event) => {
-      event.preventDefault();
-      document.querySelectorAll(`.artwork-${kind}-filter`).forEach((node) => {
-        node.checked = true;
-      });
-      onApply();
-    });
-  }
-  if (unselectAll) {
-    unselectAll.addEventListener("click", (event) => {
-      event.preventDefault();
-      document.querySelectorAll(`.artwork-${kind}-filter`).forEach((node) => {
-        node.checked = false;
-      });
-      onApply();
-    });
-  }
-}
-async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
-  const myArtworkRequestId = ++artworkRenderRequestId;
-  titleNode.textContent = "Artwork & Metadata";
-  subtitleNode.textContent = "Manage gamelist.xml artwork, metadata, imports, uploads, and marquee crops";
-  artworkIncludeFilesystem = !!includeFilesystem;
-  artworkCurrentOffset = Math.max(0, Number(offset || 0));
-  artworkSelectedFields = fields && fields.length ? fields : ["any"];
-  artworkSelectedSystems = systems || [];
-  artworkFilterQuery = query || "";
-  artworkRomStatus = ["any", "exists", "missing"].includes(romStatus) ? romStatus : "any";
-  syncArtworkHash();
-  clearSystemTheme();
-  // Paint the shell (tab bar + a scoped spinner) immediately, before the
-  // scan below -- previously nothing rendered into `content` until the scan
-  // resolved (which can take several seconds on a large ROM library),
-  // leaving whatever page you navigated from just sitting there looking
-  // stuck, with only a toast to say otherwise, for the whole wait. The tab
-  // bar being live right away also means Movies/Theme are one click away
-  // without waiting on this page's own scan at all.
-  content.innerHTML = `
-    ${renderArtworkTabBar("metadata")}
-    <div class="text-muted small py-5 text-center">
-      <span class="spinner-border spinner-border-sm me-2"></span>${includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists..."}
-    </div>
-  `;
-  refreshRandomThemeLogo().catch(() => {});
-  try {
-    const payload = await api(artworkPayloadUrl(forceRefresh));
-    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
-    const roms = payload.roms || [];
-    const fieldCounts = payload.field_counts || {};
-    const availableFields = [{ value: "any", label: "Any" }, { value: "show_all", label: "Show All" }].concat((payload.fields || []).map((field) => ({ value: field, label: field === "duplicate_artwork" ? "Duplicate Artwork" : field })));
-    const availableSystems = (payload.systems || []).map((system) => ({ value: system, label: system }));
-    const total = Number(payload.count || 0);
-    const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
-    const pageOffset = Number(payload.offset || 0);
-    const page = Math.floor(pageOffset / limit) + 1;
-    const totalPages = Math.max(1, Math.ceil(total / limit));
-    const firstItem = total ? pageOffset + 1 : 0;
-    const lastItem = pageOffset + roms.length;
-    content.innerHTML = `
-      ${renderArtworkTabBar("metadata")}
-      <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
-        <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
-      </div>
-      <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
-        <span class="badge text-bg-secondary">ROM Files: ${total}</span>
-        <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
-        <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
-        <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
-        <span class="badge text-bg-light border">Scan: ${Number(payload.elapsed_ms || 0)} ms</span>
-        ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
-      </div>
-      <div class="card log-card artwork-filter-panel mb-3">
-        <div class="card-body">
-          <div class="row g-3">
-            <div class="col-12 col-lg-4">
-              ${renderArtworkCheckboxDropdown("field", "Missing Type", availableFields, artworkSelectedFields, "Any")}
-            </div>
-            <div class="col-12 col-lg-4">
-              ${renderArtworkCheckboxDropdown("system", "System", availableSystems, artworkSelectedSystems.length ? artworkSelectedSystems : availableSystems.map((item) => item.value), "All systems", true)}
-            </div>
-            <div class="col-12 col-lg-4">
-              ${renderArtworkCheckboxDropdown("status", "ROM Status", [
-                { value: "any", label: "Any" },
-                { value: "exists", label: "Exists" },
-                { value: "missing", label: "Missing" },
-              ], [artworkRomStatus || "any"], "Any")}
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="row g-3 artwork-results-row">
-        <div class="col-12 col-xl-7">
-          <div class="card log-card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-              <span>Artwork & Metadata</span>
-              <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" value="${escapeHtml(artworkFilterQuery)}" placeholder="Filter all results">
-            </div>
-            <div class="card-header d-flex justify-content-between align-items-center gap-2">
-              <button id="artworkPrevBtn" class="btn btn-sm btn-outline-primary" type="button" ${pageOffset <= 0 ? "disabled" : ""}>Previous</button>
-              <span class="text-muted small">Search and dropdown filters apply before paging.</span>
-              <button id="artworkNextBtn" class="btn btn-sm btn-outline-primary" type="button" ${!payload.has_more ? "disabled" : ""}>Next</button>
-            </div>
-            <div class="card-body p-0">
-              <div class="table-responsive" style="max-height: 620px;">
-                <table class="table table-sm table-hover align-middle mb-0 bff-stack">
-                  <thead class="table-light">
-                    <tr>
-                      <th>System</th>
-                      <th>ROM</th>
-                      <th>Missing</th>
-                    </tr>
-                  </thead>
-                  <tbody id="artworkRows">${artworkMissingRowsHtml(roms)}</tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-	        </div>
-	        <div class="col-12 col-xl-5">
-	          <div class="card log-card">
-	            <div class="card-body">
-	              <div id="selectedArtworkRom" class="text-muted">Select a ROM to view gamelist details and search LaunchBox.</div>
-	            </div>
-	          </div>
-	        </div>
-      </div>
-    `;
-    window.missingArtworkRoms = roms;
-    const applyArtworkFilters = () => {
-      let selectedFields = selectedArtworkCheckboxValues(".artwork-field-filter");
-      if (selectedFields.includes("show_all")) selectedFields = ["show_all"];
-      else if (selectedFields.includes("any") || !selectedFields.length) selectedFields = ["any"];
-      const selectedSystems = selectedArtworkCheckboxValues(".artwork-system-filter");
-      const allSystems = availableSystems.map((item) => item.value);
-      const normalizedSystems = selectedSystems.length === allSystems.length ? [] : (selectedSystems.length ? selectedSystems : ["__none__"]);
-      artworkSelectedFields = selectedFields;
-      artworkSelectedSystems = normalizedSystems;
-      artworkCurrentOffset = 0;
-      refreshArtworkResults(false);
-    };
-    const applyRomStatusFilter = () => {
-      const checked = selectedArtworkCheckboxValues(".artwork-status-filter");
-      let nextStatus = checked.find((value) => value !== "any") || "any";
-      artworkRomStatus = ["any", "exists", "missing"].includes(nextStatus) ? nextStatus : "any";
-      document.querySelectorAll(".artwork-status-filter").forEach((node) => {
-        node.checked = node.value === artworkRomStatus;
-      });
-      artworkCurrentOffset = 0;
-      refreshArtworkResults(false);
-    };
-    document.querySelectorAll(".artwork-status-filter").forEach((node) => {
-      node.addEventListener("change", () => {
-        if (!node.checked && selectedArtworkCheckboxValues(".artwork-status-filter").length === 0) {
-          const anyNode = document.querySelector('.artwork-status-filter[value="any"]');
-          if (anyNode) anyNode.checked = true;
-        }
-        if (node.checked) {
-          document.querySelectorAll(".artwork-status-filter").forEach((item) => {
-            if (item !== node) item.checked = false;
-          });
-        }
-        applyRomStatusFilter();
-      });
-    });
-    const removeMissingBtn = document.getElementById("removeMissingGamelistBtn");
-    if (removeMissingBtn) {
-      removeMissingBtn.disabled = total <= 0;
-      removeMissingBtn.addEventListener("click", removeMissingGamelistEntriesForCurrentFilters);
-    }
-    document.querySelectorAll(".artwork-field-filter").forEach((node) => {
-      node.addEventListener("change", () => {
-        if ((node.value === "any" || node.value === "show_all") && node.checked) {
-          document.querySelectorAll(".artwork-field-filter").forEach((item) => {
-            if (item !== node) item.checked = false;
-          });
-        } else if (node.value !== "any" && node.value !== "show_all" && node.checked) {
-          const anyNode = document.querySelector('.artwork-field-filter[value="any"]');
-          if (anyNode) anyNode.checked = false;
-          const showAllNode = document.querySelector('.artwork-field-filter[value="show_all"]');
-          if (showAllNode) showAllNode.checked = false;
-        }
-        applyArtworkFilters();
-      });
-    });
-    document.querySelectorAll(".artwork-system-filter").forEach((node) => {
-      node.addEventListener("change", applyArtworkFilters);
-    });
-    setupArtworkDropdownTools("system", applyArtworkFilters);
-    const prevBtn = document.getElementById("artworkPrevBtn");
-    const nextBtn = document.getElementById("artworkNextBtn");
-    if (prevBtn) {
-      prevBtn.addEventListener("click", async () => {
-        artworkCurrentOffset = Math.max(0, artworkCurrentOffset - ARTWORK_PAGE_SIZE);
-        await refreshArtworkResults(false);
-      });
-    }
-    if (nextBtn) {
-      nextBtn.addEventListener("click", async () => {
-        artworkCurrentOffset = artworkCurrentOffset + ARTWORK_PAGE_SIZE;
-        await refreshArtworkResults(false);
-      });
-    }
-    const filter = document.getElementById("artworkFilter");
-    if (filter) {
-      filter.addEventListener("input", () => {
-        artworkFilterQuery = (filter.value || "").trim();
-        if (artworkFilterDebounceTimer) window.clearTimeout(artworkFilterDebounceTimer);
-        artworkFilterDebounceTimer = window.setTimeout(() => {
-          artworkCurrentOffset = 0;
-          refreshArtworkResults(false);
-        }, 300);
-      });
-    }
-  } catch (err) {
-    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
-    showToast(`Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    content.innerHTML = `
-      ${renderArtworkTabBar("metadata")}
-      <div class="alert alert-danger">Failed to load artwork data: ${escapeHtml(err.message || "unknown error")}</div>
-    `;
-  }
-}
-const LAUNCHBOX_METADATA_FIELDS = [
-  "name", "desc", "genre", "developer", "publisher", "releasedate",
-  "players", "rating", "favorite", "hidden", "kidgame", "adult",
-  "image", "thumbnail", "marquee", "fanart", "boxart", "video",
-  "platform", "esrb", "overview", "playmode", "regional", "favorites"
-];
 function artworkImageUploadHtml(rom, field) {
   const isVideo = field === "video";
   const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : null;
@@ -9943,19 +8654,6 @@ function artworkMarqueeCropperHtml(rom) {
   if (!buttons) return `<div class="text-muted small">Add or import an image, fanart, boxart, or thumbnail first.</div>`;
   return `<div class="marquee-source-grid">${buttons}</div>`;
 }
-function artworkMetadataEditFields(rom) {
-  const details = rom.gamelist || {};
-  const metaFields = ["name","desc","genre","developer","publisher","releasedate","players","rating"];
-  return metaFields.map(field => `
-    <div class="mb-2">
-      <label class="form-label text-muted mb-1">${escapeHtml(field === "desc" ? "Description" : field)}</label>
-      ${field === "desc"
-        ? `<textarea class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" rows="3">${escapeHtml(artworkGamelistEditValue(details[field]))}</textarea>`
-        : `<input class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" value="${escapeHtml(artworkGamelistEditValue(details[field]))}">`
-      }
-    </div>
-  `).join("");
-}
 function googleImageSearchUrl(rom) {
   const query = `${artworkRomSearchTitle(rom)} ${rom.system || ""} images`.trim();
   return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
@@ -9985,17 +8683,6 @@ function artworkExternalLinksHtml(rom) {
       <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(mobyGamesSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Open MobyGames search"><i class="bi bi-box-arrow-up-right me-1"></i>MobyGames</a>
     </div>
   `;
-}
-// Update URL when a rom is selected in artwork page
-function setArtworkSelectedRomHash(index) {
-  const rom = (window.missingArtworkRoms || [])[index];
-  if (!rom) return;
-  const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
-  params.set("selected", String(index));
-  const newHash = `#admin/artwork?${params.toString()}`;
-  if (window.location.hash !== newHash) {
-    history.replaceState(null, "", newHash);
-  }
 }
 // Upload image for a given field
 function bindArtworkEditButtons(rom, index) {
@@ -10055,13 +8742,8 @@ async function uploadArtworkImage(rom, field, btnEl) {
     if (result.gamelist) rom.gamelist = result.gamelist;
     if (result.missing) rom.missing = result.missing;
     if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
-    refreshArtworkTableRows();
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
-    // This same upload flow is shared by the Artwork admin page and the ROM
-    // Details page -- refresh whichever one is actually showing this rom.
-    if (document.getElementById("selectedArtworkRom")) {
-      await selectArtworkRom(window.selectedArtworkRomIndex, "edit");
-    } else if (rom.system && rom.unique_id) {
+    if (rom.system && rom.unique_id) {
       await renderRomMediaPage(rom.system, rom.unique_id);
     }
   } catch (err) {
@@ -10245,10 +8927,11 @@ function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
       rom.gamelist = result.gamelist || rom.gamelist || {};
       rom.missing = result.missing || rom.missing || [];
       rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
-      refreshArtworkTableRows();
       showToast(`Saved marquee for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
       close();
-      await selectArtworkRom(rowIndex, "edit");
+      if (rom.system && rom.unique_id) {
+        await renderRomMediaPage(rom.system, rom.unique_id);
+      }
     } catch (err) {
       showToast(`Marquee crop failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
       saveBtn.disabled = false;
@@ -10266,432 +8949,6 @@ function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
     close();
   };
   image.src = sourceUrl;
-}
-async function selectArtworkRom(index, activeTab = "matches") {
-  const roms = window.missingArtworkRoms || [];
-  const rom = roms[index];
-  if (!rom) return;
-  document.querySelectorAll("#artworkRows tr").forEach((row) => row.classList.remove("artwork-selected-row"));
-  const selectedRow = document.getElementById(`artwork-row-${index}`);
-  if (selectedRow) selectedRow.classList.add("artwork-selected-row");
-  window.selectedArtworkRomIndex = index;
-  // Update URL for bookmarking
-  setArtworkSelectedRomHash(index);
-  const selected = document.getElementById("selectedArtworkRom");
-  // Render tabbed panel with Matches (default) and Edit tabs
-  selected.innerHTML = `
-    <ul class="nav nav-tabs meta-panel-tabs mb-2" id="metaPanelTabs" role="tablist">
-      <li class="nav-item" role="presentation">
-        <button class="nav-link active" id="matches-tab" data-bs-toggle="tab" data-bs-target="#matches-panel" type="button" role="tab" aria-controls="matches-panel" aria-selected="true">Matches</button>
-      </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="edit-tab" data-bs-toggle="tab" data-bs-target="#edit-panel" type="button" role="tab" aria-controls="edit-panel" aria-selected="false">Edit</button>
-      </li>
-    </ul>
-    <div class="tab-content meta-panel-content">
-      <div class="tab-pane fade show active compact-edit" id="matches-panel" role="tabpanel" aria-labelledby="matches-tab">
-        ${artworkGamelistDetailsHtml(rom)}
-        <div class="border-top mt-3 pt-3">
-          ${artworkExternalLinksHtml(rom)}
-        </div>
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="artworkMatchOverrideExisting">
-          <label class="form-check-label small" for="artworkMatchOverrideExisting">Override existing data (re-imports all gamelist metadata)</label>
-        </div>
-        <div class="border-top mt-3 pt-3">
-          <div class="fw-semibold mb-2">LaunchBox Matches</div>
-          <div id="launchboxMatches" class="mt-2"></div>
-        </div>
-        <div class="border-top mt-3 pt-3">
-          <div class="mb-2">
-            <div class="fw-semibold">TheGamesDB Matches</div>
-            <div class="text-muted small" id="theGamesDBImageQuery"></div>
-          </div>
-          <div id="theGamesDBImageMatches" class="mt-2"></div>
-        </div>
-      </div>
-      <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
-        <div class="mb-2">
-          <div><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
-          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger mt-2" type="button" onclick="removeArtworkGamelistEntry(${index})"><i class="bi bi-trash me-1"></i>Remove from gamelist</button>` : ""}
-        </div>
-        <div class="mb-2">
-          <div class="compact-edit-section-title">Metadata</div>
-          ${artworkGamelistEditFormHtml(rom)}
-        </div>
-        <div class="mb-2">
-          <div class="compact-edit-section-title">Artwork Uploads</div>
-          ${artworkEditableImageFields(rom)}
-        </div>
-        <div class="mb-2">
-          <div class="compact-edit-section-title">Marquee Cropper</div>
-          ${artworkMarqueeCropperHtml(rom)}
-        </div>
-      </div>
-    </div>
-  `;
-  // Initialize Bootstrap tabs
-  const tabEls = document.querySelectorAll('#metaPanelTabs .nav-link');
-  tabEls.forEach(el => {
-    el.addEventListener('shown.bs.tab', () => { /* no-op */ });
-  });
-  bindArtworkEditButtons(rom, index);
-  // Switch to matches tab by default
-  const tabToShow = activeTab === "edit"
-    ? document.getElementById("edit-tab")
-    : document.getElementById("matches-tab");
-  if (tabToShow) tabToShow.click();
-  // Search LaunchBox for matches - query fresh from DOM since it was just created
-  const matchesEl = document.getElementById("launchboxMatches");
-  if (!matchesEl) return;
-  setLoading(true, "Searching LaunchBox matches...");
-  try {
-    const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(artworkRomSearchTitle(rom))}`);
-    const matches = data.matches || [];
-    if (data.launchbox_unavailable) {
-      matchesEl.innerHTML = `<div class="text-muted">LaunchBox could not be reached from this Drone. You can still use the external LaunchBox link or TheGamesDB matches below.</div>`;
-    } else {
-      const platformNote = data.launchbox_platform
-        ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
-        : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
-      matchesEl.innerHTML = platformNote + (matches.length ? `
-        <div class="list-group">
-          ${matches.map((match) => `
-            <button type="button" class="list-group-item list-group-item-action launchbox-match-btn" data-launchbox-game-key="${escapeHtml(String(match.game_key || ""))}">
-              <div class="d-flex gap-3 align-items-center">
-                ${match.thumbnail_url ? `<img src="${match.thumbnail_url}" alt="" style="width: 56px; height: 56px; object-fit: cover; background:#111;">` : `<div style="width:56px;height:56px;background:#111;"></div>`}
-                <div>
-                  <div class="fw-semibold">${escapeHtml(match.name || "")}</div>
-                  <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
-                </div>
-              </div>
-            </button>
-          `).join("")}
-        </div>
-      ` : `<div class="text-muted">No LaunchBox matches found.</div>`);
-      matchesEl.querySelectorAll(".launchbox-match-btn").forEach((button) => {
-        button.addEventListener("click", () => {
-          applyLaunchboxArtwork(
-            index,
-            rom.system || "",
-            rom.unique_id || "",
-            rom.rom_path || "",
-            button.getAttribute("data-launchbox-game-key") || ""
-          );
-        });
-      });
-    }
-  } catch (err) {
-    showToast(`LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    matchesEl.innerHTML = `<div class="text-muted">LaunchBox matches could not be loaded.</div>`;
-  } finally {
-    setLoading(false);
-  }
-  await searchTheGamesDBImagesForRom(index, false);
-}
-async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
-  const rom = (window.missingArtworkRoms || [])[index];
-  const matchesEl = document.getElementById("theGamesDBImageMatches");
-  if (!rom || !matchesEl) return;
-  if (matchesEl.getAttribute("data-loaded") === "1" && !forceRefresh) return;
-  const queryEl = document.getElementById("theGamesDBImageQuery");
-  matchesEl.innerHTML = "";
-  setLoading(true, "Searching TheGamesDB matches...");
-  try {
-    const data = await api(`/admin/artwork/thegamesdb/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(artworkRomSearchTitle(rom))}`);
-    const matches = (data.matches || []).slice(0, 5);
-    if (queryEl) queryEl.textContent = data.query || "";
-    matchesEl.setAttribute("data-loaded", "1");
-    matchesEl.innerHTML = matches.length ? `
-      <div class="text-muted small mb-2">Imports artwork and fills empty metadata from the selected TheGamesDB page. Marquee uses clear logo first, then banner.</div>
-      <div class="list-group">
-        ${matches.map((match) => `
-          <button type="button" class="list-group-item list-group-item-action thegamesdb-match-btn" data-thegamesdb-game-id="${escapeHtml(String(match.game_id || ""))}">
-            <div class="d-flex gap-3 align-items-center">
-              ${match.thumbnail_url ? `<img class="match-thumb" src="${escapeHtml(match.thumbnail_url)}" alt="">` : `<div class="match-thumb-placeholder"></div>`}
-              <div>
-                <div class="fw-semibold">${escapeHtml(match.name || match.title || "")}</div>
-                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
-              </div>
-            </div>
-          </button>
-        `).join("")}
-      </div>
-    ` : `<div class="text-muted">No TheGamesDB matches found.</div>`;
-    matchesEl.querySelectorAll(".thegamesdb-match-btn").forEach((button) => {
-      button.addEventListener("click", () => {
-        applyTheGamesDBArtwork(index, button.getAttribute("data-thegamesdb-game-id") || "", button);
-      });
-    });
-  } catch (err) {
-    showToast(`TheGamesDB search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    matchesEl.innerHTML = `<div class="text-muted">TheGamesDB matches could not be loaded.</div>`;
-  } finally {
-    setLoading(false);
-  }
-}
-async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
-  const rom = (window.missingArtworkRoms || [])[rowIndex];
-  if (!rom || !gameId) return;
-  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
-  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
-  const originalHtml = button ? button.innerHTML : "";
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
-  }
-  setLoading(true, "Downloading TheGamesDB artwork and metadata...");
-  try {
-    const result = await apiPost("/admin/artwork/thegamesdb/apply", {
-      system: rom.system || "",
-      rom_id: rom.unique_id || "",
-      rom_path: rom.rom_path || "",
-      game_id: gameId,
-      override_existing: overrideExisting,
-      import_metadata: true,
-    });
-    rom.existing = result.existing || rom.existing || {};
-    rom.gamelist = result.gamelist || rom.gamelist || {};
-    rom.missing = result.missing || rom.missing || [];
-    rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
-    refreshArtworkTableRows();
-    const updated = result.updated || [];
-    const artCount = updated.filter((item) => item.path).length;
-    const metaCount = Number(result.metadata_imported || 0);
-    showToast(`Imported ${artCount} artwork field${artCount === 1 ? "" : "s"}${metaCount ? ` and ${metaCount} metadata field${metaCount === 1 ? "" : "s"}` : ""} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
-    const row = document.getElementById(`artwork-row-${rowIndex}`);
-    if (row) {
-      if (!rom.missing.length) {
-        row.remove();
-      } else {
-        const missingCell = row.children[2];
-        if (missingCell) missingCell.innerHTML = rom.missing.map((item) => `<span class="badge text-bg-danger me-1">${escapeHtml(item)}</span>`).join("");
-      }
-    }
-    await selectArtworkRom(rowIndex, "matches");
-  } catch (err) {
-    showToast(`TheGamesDB import failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = originalHtml;
-    }
-  }
-}
-async function searchMobyGamesImagesForRom(index, forceRefresh = false) {
-  const rom = (window.missingArtworkRoms || [])[index];
-  const matchesEl = document.getElementById("mobyGamesImageMatches");
-  if (!rom || !matchesEl) return;
-  if (matchesEl.getAttribute("data-loaded") === "1" && !forceRefresh) return;
-  const queryEl = document.getElementById("mobyGamesImageQuery");
-  matchesEl.innerHTML = "";
-  setLoading(true, "Searching MobyGames matches...");
-  try {
-    const data = await api(`/admin/artwork/mobygames/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
-    const matches = (data.matches || []).slice(0, 5);
-    if (queryEl) {
-      const platform = data.mobygames_platform ? ` · ${data.mobygames_platform}` : "";
-      queryEl.textContent = `${data.query || ""}${platform}`;
-    }
-    matchesEl.setAttribute("data-loaded", "1");
-    if (data.configured === false || data.message) {
-      matchesEl.innerHTML = `<div class="text-muted">${escapeHtml(data.message || "MobyGames scraper is not available right now.")}</div>`;
-      return;
-    }
-    matchesEl.innerHTML = matches.length ? `
-      <div class="text-muted small mb-2">Imports MobyGames cover scans, screenshots, and available metadata from the selected match.</div>
-      <div class="list-group">
-        ${matches.map((match) => `
-          <button type="button" class="list-group-item list-group-item-action mobygames-match-btn" data-mobygames-game-id="${escapeHtml(String(match.game_id || ""))}">
-            <div class="d-flex gap-3 align-items-center">
-              ${match.thumbnail_url ? `<img class="match-thumb" src="${escapeHtml(match.thumbnail_url)}" alt="">` : `<div class="match-thumb-placeholder"></div>`}
-              <div>
-                <div class="fw-semibold">${escapeHtml(match.name || match.title || "")}</div>
-                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
-              </div>
-            </div>
-          </button>
-        `).join("")}
-      </div>
-    ` : `<div class="text-muted">No MobyGames matches found.</div>`;
-    matchesEl.querySelectorAll(".mobygames-match-btn").forEach((button) => {
-      button.addEventListener("click", () => {
-        applyMobyGamesArtwork(index, button.getAttribute("data-mobygames-game-id") || "", button);
-      });
-    });
-  } catch (err) {
-    showToast(`MobyGames search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    matchesEl.innerHTML = `<div class="text-muted">MobyGames matches could not be loaded.</div>`;
-  } finally {
-    setLoading(false);
-  }
-}
-async function applyMobyGamesArtwork(rowIndex, gameId, button) {
-  const rom = (window.missingArtworkRoms || [])[rowIndex];
-  if (!rom || !gameId) return;
-  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
-  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
-  const originalHtml = button ? button.innerHTML : "";
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
-  }
-  setLoading(true, "Downloading MobyGames artwork and metadata...");
-  try {
-    const result = await apiPost("/admin/artwork/mobygames/apply", {
-      system: rom.system || "",
-      rom_id: rom.unique_id || "",
-      rom_path: rom.rom_path || "",
-      game_id: gameId,
-      override_existing: overrideExisting,
-      import_metadata: true,
-    });
-    rom.existing = result.existing || rom.existing || {};
-    rom.gamelist = result.gamelist || rom.gamelist || {};
-    rom.missing = result.missing || rom.missing || [];
-    rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
-    refreshArtworkTableRows();
-    const updated = result.updated || [];
-    const artCount = updated.filter((item) => item.path).length;
-    const metaCount = Number(result.metadata_imported || 0);
-    showToast(`Imported ${artCount} artwork field${artCount === 1 ? "" : "s"}${metaCount ? ` and ${metaCount} metadata field${metaCount === 1 ? "" : "s"}` : ""} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
-    await selectArtworkRom(rowIndex, "matches");
-  } catch (err) {
-    showToast(`MobyGames import failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = originalHtml;
-    }
-  }
-}
-async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
-  // Check override existing checkbox
-  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
-  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
-  setLoading(true, "Downloading artwork and metadata...");
-  try {
-    const result = await apiPost("/admin/artwork/launchbox/apply", {
-      system,
-      rom_id: romId,
-      rom_path: romPath,
-      game_key: gameKey,
-      override_existing: overrideExisting,
-      import_metadata: true,
-    });
-    const updated = result.updated || [];
-    const artCount = updated.filter((item) => item.path).length;
-    const metaCount = Number(result.metadata_imported || 0);
-    let successMsg = `Updated ${artCount} artwork field${artCount === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.`;
-    if (metaCount) {
-      successMsg += ` Also imported ${metaCount} metadata field${metaCount === 1 ? "" : "s"}.`;
-    }
-    showToast(successMsg, "success");
-    const rom = (window.missingArtworkRoms || [])[rowIndex];
-    if (rom) {
-      const updatedFields = new Set(updated.map((item) => item.field));
-      rom.existing = result.existing || rom.existing || {};
-      rom.gamelist = result.gamelist || rom.gamelist || {};
-      rom.missing = (rom.missing || []).filter((field) => !updatedFields.has(field));
-      if (Array.isArray(result.missing)) rom.missing = result.missing;
-      rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
-      refreshArtworkTableRows();
-      const row = document.getElementById(`artwork-row-${rowIndex}`);
-      if (row) {
-        if (!rom.missing.length) {
-          row.remove();
-        } else {
-          const missingCell = row.children[2];
-          if (missingCell) {
-            missingCell.innerHTML = rom.missing.map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("");
-          }
-        }
-      }
-    }
-  } catch (err) {
-    showToast(`Artwork update failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function saveSelectedArtworkGamelist() {
-  const index = Number(window.selectedArtworkRomIndex);
-  const rom = (window.missingArtworkRoms || [])[index];
-  if (!rom) return;
-  const fields = {};
-  document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
-    const field = node.getAttribute("data-gamelist-field");
-    if (field) fields[field] = node.value || "";
-  });
-  setLoading(true, "Saving gamelist data...");
-  try {
-    const result = await apiPost("/admin/artwork/gamelist/update", {
-      system: rom.system,
-      rom_path: rom.rom_path,
-      fields,
-    });
-    rom.has_gamelist_entry = true;
-    rom.gamelist = result.gamelist || {};
-    rom.existing = result.existing || rom.existing || {};
-    rom.missing = result.missing || rom.missing || [];
-    rom.title = result.title || rom.title || rom.name;
-    rom.name = rom.title || rom.name;
-    rom.search_title = result.search_title || rom.title || rom.name || rom.search_title || "";
-    await selectArtworkRom(index, "edit");
-    const rows = document.getElementById("artworkRows");
-    if (rows) rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
-    showToast(`Saved gamelist data for ${escapeHtml(rom.title || rom.name || "ROM")}.`, "success");
-  } catch (err) {
-    showToast(`Gamelist update failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function removeArtworkGamelistEntry(index) {
-  const rom = (window.missingArtworkRoms || [])[index];
-  if (!rom) return;
-  const label = rom.title || rom.name || rom.rom_path || "this ROM";
-  if (!window.confirm(`Remove "${label}" from gamelist.xml? The ROM file will not be deleted.`)) return;
-  setLoading(true, "Removing gamelist entry...");
-  try {
-    await apiPost("/admin/artwork/gamelist/remove", { system: rom.system, rom_path: rom.rom_path });
-    const row = document.getElementById(`artwork-row-${index}`);
-    if (row) row.remove();
-    window.missingArtworkRoms[index] = null;
-    showToast(`Removed ${escapeHtml(label)} from gamelist.xml.`, "success");
-  } catch (err) {
-    showToast(`Remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function removeMissingGamelistEntriesForCurrentFilters() {
-  const confirmed = window.confirm(
-    "Remove all gamelist.xml entries matching the current filters where the ROM file is missing on disk? ROM files are not deleted."
-  );
-  if (!confirmed) return;
-  setLoading(true, "Removing missing-ROM gamelist entries...");
-  try {
-    const result = await apiPost("/admin/artwork/gamelist/remove-missing", {
-      confirm: "DELETE_MISSING_GAMELIST_ENTRIES",
-      include_filesystem: artworkIncludeFilesystem,
-      fields: artworkSelectedFields || ["any"],
-      systems: artworkSelectedSystems || [],
-      q: artworkFilterQuery || "",
-    });
-    showToast(`Removed ${Number(result.removed_count || 0)} missing-ROM gamelist entr${Number(result.removed_count || 0) === 1 ? "y" : "ies"}.`, "success");
-    artworkCurrentOffset = 0;
-    await refreshArtworkResults(true);
-    if (result.failed_count) {
-      showToast(`Skipped ${Number(result.failed_count || 0)} entr${Number(result.failed_count || 0) === 1 ? "y" : "ies"} because their gamelist.xml could not be written.`, "warning", 8000);
-    }
-  } catch (err) {
-    showToast(`Bulk remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
 }
 let localPeerAssetContext = {
   peerId: "",
@@ -14622,13 +12879,6 @@ async function renderAdminControlsPage() {
     setLoading(false);
   }
 }
-async function loadThemePage(offset = 0) {
-  const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"] : (themeFilterSelectedSystems || []);
-  const systemsParam = encodeURIComponent(selected.join(","));
-  const url = `/theme/images?limit=${THEME_GALLERY_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(themeFilterQuery || "")}&systems=${systemsParam}`;
-  const data = await api(url);
-  renderThemeGallery(data);
-}
 function _sysInfoBadge(innerHtml, hash, title, style = "") {
   return `<button type="button" class="badge sysinfo-badge-btn" style="${style}" onclick="setHash('${hash}')" title="${escapeHtml(title)}">${innerHtml}</button>`;
 }
@@ -14773,19 +13023,12 @@ async function router(retryDepth = 0) {
     if (hash !== "#admin/smtp") {
       stopSmtpAutoRefresh();
     }
-    if (hash !== "#admin/movies") {
-      stopMovieBulkScrapeAutoRefresh();
-    }
-    if (hash !== "#admin/music") {
-      stopMusicBulkScrapeAutoRefresh();
-    }
     if (!hash.startsWith("#admin/integrations/streamdeck") && typeof stopStreamDeckAutoRefresh === "function") {
       stopStreamDeckAutoRefresh();
     }
     if (hash !== "#admin/integrations/media-keys" && typeof stopMediaKeysAutoRefresh === "function") {
       stopMediaKeysAutoRefresh();
     }
-    document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
     // parallel duplicate set -- the class name predates this page but the
@@ -14816,8 +13059,6 @@ async function router(retryDepth = 0) {
       // click away (or #home/#help directly) for anyone who wants it.
       await redirectRouterHash("#movies");
       return;
-    } else if (hash === "#theme") {
-      await renderThemeGalleryPage();
     } else if (hash === "#home" || hash === "#help") {
       await renderHelpPage();
     } else if (hash.startsWith("#systems")) {
@@ -14904,25 +13145,6 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderAdminControlsPage();
-    } else if (hash.startsWith("#admin/artwork")) {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "", romStatus: "any" };
-      await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q, parsed.romStatus);
-    } else if (hash === "#admin/movies") {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      await renderAdminMoviesArtworkPage();
-    } else if (hash === "#admin/music") {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      await renderAdminMusicArtworkPage();
     } else if (hash === "#admin/downloads") {
       if (!adminEnabled) {
         setHash("");

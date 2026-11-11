@@ -340,31 +340,7 @@
       border-color: var(--admin-accent-hot);
       color: #fff;
     }
-    .app-checkbox-dropdown {
-      position: relative;
-    }
-    .app-checkbox-dropdown .dropdown-toggle {
-      min-height: 2.45rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.65rem;
-      color: #c8d7ee;
-      background: rgba(21, 31, 50, 0.9);
-      border-color: var(--admin-border);
-      font-weight: 800;
-      box-shadow: none;
-    }
-    .app-checkbox-dropdown .dropdown-toggle:hover,
-    .app-checkbox-dropdown .dropdown-toggle:focus,
-    .app-checkbox-dropdown .dropdown-toggle[aria-expanded="true"] {
-      color: #fff;
-      background: rgba(0, 194, 255, 0.12);
-      border-color: var(--admin-sidebar-accent);
-      box-shadow: 0 0 0 0.18rem rgba(0, 194, 255, 0.12);
-    }
-    .dropdown-menu,
-    .app-checkbox-menu {
+    .dropdown-menu {
       background: rgba(21, 31, 50, 0.97);
       border: 1px solid var(--admin-border);
       color: var(--admin-text);
@@ -372,16 +348,8 @@
       box-shadow: 0 0.7rem 1.8rem rgba(0, 0, 0, 0.28);
       backdrop-filter: blur(10px);
     }
-    .app-checkbox-menu {
-      width: 100%;
-      min-width: 260px;
-      max-width: 360px;
-      padding: 0.6rem;
-      z-index: 6000;
-    }
     .dropdown-item,
-    .app-dropdown-check,
-    .app-checkbox-menu .form-check-label {
+    .app-dropdown-check {
       color: var(--admin-text);
     }
     .dropdown-item:hover,
@@ -424,21 +392,6 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
       min-height: 3em;
-    }
-    .filter-dropdown-menu {
-      width: 100%;
-      min-width: 260px;
-      max-width: 360px;
-      padding: 0.6rem;
-      z-index: 6000;
-    }
-    .filter-options-scroll {
-      max-height: 220px;
-      overflow-y: auto;
-      border: 1px solid var(--admin-border);
-      border-radius: 8px;
-      padding: 0.5rem;
-      background: rgba(11, 16, 32, 0.28);
     }
     .admin-tile,
     .admin-tile .card-title,
@@ -1240,68 +1193,6 @@
     #systemInfoBar button.badge.sysinfo-badge-btn:active {
       transform: translateY(1px);
     }
-    .artwork-page .topbar {
-      display: none !important;
-    }
-    .artwork-page .app-shell {
-      background: rgba(21, 31, 50, 0.72);
-      min-height: calc(100vh - 2rem);
-    }
-    .artwork-page .log-card,
-    .artwork-page .admin-tile {
-      background: rgba(21, 31, 50, 0.72);
-      backdrop-filter: blur(12px);
-    }
-    .artwork-page .log-card .card-header {
-      background: rgba(31, 42, 68, 0.72);
-    }
-    .artwork-page .artwork-filter-panel {
-      overflow: visible;
-      position: relative;
-      z-index: 40;
-    }
-    .artwork-page .artwork-results-row {
-      position: relative;
-      z-index: 1;
-    }
-    .artwork-page .filter-dropdown-menu {
-      background: rgba(21, 31, 50, 0.94);
-      z-index: 6000;
-    }
-    .artwork-page .dropdown {
-      position: relative;
-      z-index: 6001;
-    }
-    .artwork-page .table,
-    .artwork-page .table td,
-    .artwork-page .table th {
-      background-color: transparent;
-      color: var(--admin-text);
-      --bs-table-color: var(--admin-text);
-      --bs-table-hover-color: #ffffff;
-      --bs-table-hover-bg: rgba(0, 194, 255, 0.1);
-    }
-    .artwork-page .table-light th {
-      background-color: rgba(31, 42, 68, 0.72);
-      color: #ffffff;
-      --bs-table-color: #ffffff;
-    }
-    .artwork-page tr.artwork-selected-row td {
-      background-color: rgba(0, 194, 255, 0.18) !important;
-      color: #ffffff;
-    }
-    .gamelist-details {
-      max-height: 330px;
-      overflow-y: auto;
-    }
-    .gamelist-details dt {
-      color: var(--admin-muted);
-      font-size: 0.74rem;
-      text-transform: uppercase;
-    }
-    .gamelist-details dd {
-      overflow-wrap: anywhere;
-    }
     /* First-time-load onboarding tour (intro.js-style spotlight walkthrough) */
     .tour-backdrop {
       position: fixed;
@@ -1820,26 +1711,7 @@
       background: rgba(0,0,0,0.8);
     }
 
-    /* Metadata panel tabs */
-    .meta-panel-tabs .nav-link {
-      font-size: 0.85rem;
-      padding: 0.4rem 0.8rem;
-    }
-    .meta-panel-tabs .nav-link.active {
-      font-weight: 700;
-    }
-    .meta-panel-content {
-      min-height: 100px;
-    }
     /* Compact edit fields */
-    .compact-edit-section-title {
-      color: var(--admin-muted);
-      font-size: 0.68rem;
-      font-weight: 800;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      margin-bottom: 0.35rem;
-    }
     .gamelist-edit-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2035,8 +1907,7 @@
     }
 
     /* Netflix-style movie/systems explorer: a full-bleed content area
-       (movie-explorer-active is toggled on <body> by the router, same
-       mechanism as .artwork-page) that still leaves the app's own navbar
+       (movie-explorer-active is toggled on <body> by the router) that still leaves the app's own navbar
        (.sidebar, despite the name -- see index.html) visible/usable so
        Browse being the default page doesn't strand anyone; only the small
        system-info badge row goes away, same as every other Movies-tab view. */
@@ -2203,17 +2074,17 @@
         overflow-y: visible;
       }
       .movie-explorer-sidebar-search { max-width: none; }
-      /* Compact mobile filters: collapsed behind the topbar "Filters" button
-         so the grid is visible without scrolling past the lists. */
-      .movie-explorer-sidebar:not(.filters-open) { display: none; }
-      .movie-explorer-sidebar.filters-open {
-        gap: 0.75rem;
-        padding: 0.6rem;
-        border: 1px solid var(--admin-border);
-        border-radius: 0.5rem;
-        max-height: 50vh;
-        overflow-y: auto;
-      }
+      /* Mobile filters open in a modal from the topbar "Filters" button
+         (openExplorerFiltersModal moves the sidebar into it), so the in-page
+         sidebar is hidden and the grid is visible without scrolling. */
+      .movie-explorer-body > .movie-explorer-sidebar { display: none; }
+    }
+    .explorer-filters-modal .movie-explorer-sidebar {
+      position: static;
+      width: 100%;
+      max-height: none;
+      overflow: visible;
+      gap: 1rem;
     }
     .explorer-filters-toggle { display: none; }
     @media (max-width: 768px) {

@@ -3,12 +3,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app.storage.music_scrape_job_items as music_scrape_job_items
-import app.storage.music_scrape_jobs as music_scrape_jobs
 import app.storage.music_store as music_store
 from app.common.settings import Settings
 from app.music import metadata_manager
-from app.music.musicbrainz_client import MusicBrainzNotFoundError, MusicBrainzUnavailableError
+from app.music.musicbrainz_client import MusicBrainzUnavailableError
 
 
 def _build_settings(root: Path) -> Settings:
@@ -46,27 +44,12 @@ _ALBUM_RELEASE = {
         {"disc_number": 1, "track_number": 2, "title": "Track Two", "recording_mbid": "rec-2", "length_ms": 200000},
     ],
 }
-_SINGLE_TRACK_RELEASE = {
-    "release_mbid": "release-2",
-    "title": "Single",
-    "artist": "Solo Singer",
-    "artist_mbid": "artist-2",
-    "date": "2010-01-01",
-    "genres": [],
-    "release_group_mbid": "rg-2",
-    "tracks": [
-        {"disc_number": 1, "track_number": 1, "title": "The Only Song", "recording_mbid": "rec-9", "length_ms": 210000},
-    ],
-}
-
-
 class FakeMusicBrainzClient:
     def __init__(
-        self, *, release_search_results=None, recording_search_results=None, releases=None,
+        self, *, release_search_results=None, releases=None,
         raise_on_lookup=None, artist_lookups=None,
     ):
         self._release_search_results = release_search_results or []
-        self._recording_search_results = recording_search_results or []
         self._releases = releases or {}
         self._raise_on_lookup = raise_on_lookup or {}
         self._artist_lookups = artist_lookups or {}
@@ -75,9 +58,6 @@ class FakeMusicBrainzClient:
 
     def search_release(self, query, limit=10):
         return self._release_search_results
-
-    def search_recording(self, query, limit=10):
-        return self._recording_search_results
 
     def release_lookup(self, release_mbid):
         self.lookup_calls.append(release_mbid)
@@ -241,41 +221,6 @@ class ArtistArtTests(unittest.TestCase):
                 result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=FakeCoverArtClient())
             self.assertFalse(result["has_artist_art"])
 
-    def test_artist_art_is_fetched_once_per_bulk_run_across_multiple_groups_by_the_same_artist(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Sample Artist/Album One/01 - Track One.mp3")
-            _write_track(root, "Sample Artist/Album Two/01 - Other Track.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-
-            release_a = dict(_ALBUM_RELEASE, release_mbid="release-a", title="Album One")
-            release_b = dict(_ALBUM_RELEASE, release_mbid="release-b", title="Album Two")
-
-            class _ByQueryClient(FakeMusicBrainzClient):
-                def search_release(self, query, limit=10):
-                    if "Album One" in query:
-                        return [{"release_mbid": "release-a"}]
-                    if "Album Two" in query:
-                        return [{"release_mbid": "release-b"}]
-                    return []
-
-            client = _ByQueryClient(
-                releases={"release-a": release_a, "release-b": release_b},
-                artist_lookups={"artist-1": {"artist_mbid": "artist-1", "image_commons_url": "https://commons.wikimedia.org/wiki/File:X.jpg"}},
-            )
-            with mock.patch("app.music.metadata_manager._wikimedia_client.resolve_image_url", return_value="https://upload.wikimedia.org/x.jpg"):
-                groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-                self.assertEqual(len(groups), 2)
-                job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-                metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["matched_count"], 2)
-            # Cached across both groups -- one artist, one lookup for the run.
-            self.assertEqual(client.artist_lookup_calls, ["artist-1"])
-
 
 class DeleteTests(unittest.TestCase):
     def test_delete_metadata_is_idempotent_and_removes_artwork(self):
@@ -366,273 +311,6 @@ class SearchAlbumDefaultQueryTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             outcome = metadata_manager.search_album_default_query(settings, "Nobody", "Nothing", client=FakeMusicBrainzClient())
             self.assertEqual(outcome["results"], [])
-
-
-class SelectReleaseCandidateTests(unittest.TestCase):
-    def test_prefers_a_candidate_whose_track_count_covers_the_local_group(self):
-        results = [
-            {"release_mbid": "broadcast-1", "track_count": 1},
-            {"release_mbid": "full-album", "track_count": 11},
-        ]
-        chosen = metadata_manager._select_release_candidate(results, 11)
-        self.assertEqual(chosen["release_mbid"], "full-album")
-
-    def test_falls_back_to_the_first_result_when_no_candidate_is_plausible(self):
-        results = [{"release_mbid": "release-a", "track_count": 1}, {"release_mbid": "release-b", "track_count": 2}]
-        chosen = metadata_manager._select_release_candidate(results, 11)
-        self.assertEqual(chosen["release_mbid"], "release-a")
-
-    def test_falls_back_to_the_first_result_when_every_track_count_is_unknown(self):
-        results = [{"release_mbid": "release-a", "track_count": None}, {"release_mbid": "release-b", "track_count": None}]
-        chosen = metadata_manager._select_release_candidate(results, 11)
-        self.assertEqual(chosen["release_mbid"], "release-a")
-
-    def test_skips_past_an_unknown_track_count_to_find_a_plausible_later_candidate(self):
-        results = [{"release_mbid": "release-a", "track_count": None}, {"release_mbid": "release-b", "track_count": 11}]
-        chosen = metadata_manager._select_release_candidate(results, 11)
-        self.assertEqual(chosen["release_mbid"], "release-b")
-
-    def test_a_single_result_is_always_returned_regardless_of_track_count(self):
-        results = [{"release_mbid": "only-one", "track_count": 1}]
-        chosen = metadata_manager._select_release_candidate(results, 11)
-        self.assertEqual(chosen["release_mbid"], "only-one")
-
-
-class GroupBulkCandidatesTests(unittest.TestCase):
-    def test_groups_by_artist_and_album_separates_singles_and_orphans(self):
-        rows = [
-            {"entry_key": "a", "file_path": "Band/Album/01 - A.mp3", "track_name": "01 - A.mp3"},
-            {"entry_key": "b", "file_path": "Band/Album/02 - B.mp3", "track_name": "02 - B.mp3"},
-            {"entry_key": "c", "file_path": "Band/Single.mp3", "track_name": "Single.mp3"},
-            {"entry_key": "d", "file_path": "Orphan.mp3", "track_name": "Orphan.mp3"},
-        ]
-        groups, singles, orphans = metadata_manager._group_bulk_candidates(rows)
-        self.assertEqual(len(groups), 1)
-        self.assertEqual(len(groups[0]["rows"]), 2)
-        self.assertEqual(groups[0]["artist"], "Band")
-        self.assertEqual(groups[0]["album"], "Album")
-        self.assertEqual([r["entry_key"] for r in singles], ["c"])
-        self.assertEqual([r["entry_key"] for r in orphans], ["d"])
-
-
-class BulkScrapeJobTests(unittest.TestCase):
-    def test_full_album_matches_every_track_with_one_release_lookup(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
-            _write_track(root, "Sample Artist/Sample Album/02 - Track Two.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-
-            client = FakeMusicBrainzClient(
-                release_search_results=[{"release_mbid": "release-1", "title": "Sample Album"}],
-                releases={"release-1": _ALBUM_RELEASE},
-            )
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "complete")
-            self.assertEqual(status["matched_count"], 2)
-            self.assertEqual(status["failed_count"], 0)
-            # One release lookup serves both tracks -- the whole point of
-            # grouping by (artist, album) instead of iterating per track.
-            self.assertEqual(client.lookup_calls, ["release-1"])
-            for row in rows:
-                metadata = music_store.get_music_metadata(settings.music_root, row["entry_key"])
-                self.assertEqual(metadata["title"], "")
-
-    def test_not_found_release_search_result_skips_the_group_not_the_whole_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Band/Album/01 - A.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-
-            client = FakeMusicBrainzClient(release_search_results=[])  # no results at all
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "complete")
-            self.assertEqual(status["skipped_count"], 1)
-
-    def test_unavailable_error_mid_run_marks_remaining_failed_and_stops(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Band A/Album A/01 - A.mp3")
-            _write_track(root, "Band B/Album B/01 - B.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            self.assertEqual(len(groups), 2)
-
-            client = FakeMusicBrainzClient(
-                release_search_results=[{"release_mbid": "release-1"}],
-                raise_on_lookup={"release-1": MusicBrainzUnavailableError("rate limited")},
-            )
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "complete")
-            self.assertEqual(status["failed_count"], 2)
-            failed_items = music_scrape_job_items.list_by_status(settings, "failed")
-            self.assertEqual(failed_items["total"], 2)
-
-    def test_a_multi_track_group_matched_to_a_single_track_release_no_longer_corrupts_titles(self):
-        # The real live bug this album-only redesign eliminates entirely: an
-        # 11-track local compilation folder's top MusicBrainz search hit was
-        # a "Broadcast" release with exactly one track (a DJ radio set) --
-        # every one of the 11 distinct local files used to silently receive
-        # that one track's identical scraped *title*. Track titles are never
-        # scraped at all anymore -- even a "wrong" release pick only ever
-        # affects the shared album art/genres, never any track's title.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/Dope Smugglaz - Double Double Dutch.mp3")
-            _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/Dope Smugglaz - The World.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-
-            client = FakeMusicBrainzClient(
-                release_search_results=[{"release_mbid": "release-2", "track_count": 1}],
-                releases={"release-2": _SINGLE_TRACK_RELEASE},
-            )
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["matched_count"], 2)
-            self.assertEqual(status["failed_count"], 0)
-            metas = [music_store.get_music_metadata(settings.music_root, row["entry_key"]) for row in rows]
-            for metadata in metas:
-                self.assertEqual(metadata["title"], "")
-            self.assertEqual(metas[0]["art_relative_path"], metas[1]["art_relative_path"])
-
-    def test_prefers_a_track_count_matching_candidate_over_the_top_search_hit(self):
-        # Given a *choice* of candidates, prefer the one whose track_count
-        # actually fits the local group instead of blindly trusting the top
-        # search result -- avoids using a single-track release's cover art
-        # for a real multi-track album when a better candidate exists.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/01 - Track One.mp3")
-            _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/02 - Track Two.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-
-            client = FakeMusicBrainzClient(
-                release_search_results=[
-                    {"release_mbid": "release-2", "track_count": 1},  # the wrong, top-ranked hit
-                    {"release_mbid": "release-1", "track_count": 2},  # the real album
-                ],
-                releases={"release-1": _ALBUM_RELEASE, "release-2": _SINGLE_TRACK_RELEASE},
-            )
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["matched_count"], 2)
-            self.assertEqual(client.lookup_calls, ["release-1"])
-
-    def test_stop_requested_before_the_job_starts_processing_anything(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            music_scrape_jobs.request_stop(settings, job["id"])
-
-            client = FakeMusicBrainzClient(
-                release_search_results=[{"release_mbid": "release-1"}], releases={"release-1": _ALBUM_RELEASE},
-            )
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "stopped")
-            self.assertEqual(status["processed"], 0)
-            self.assertEqual(status["matched_count"], 0)
-            self.assertEqual(client.lookup_calls, [])
-
-    def test_stop_requested_during_groups_halts_before_singles(self):
-        # The groups loop and the singles loop are two separate `for`
-        # statements in _run_bulk_scrape_job -- this exercises the second
-        # loop's own stop-check, not just the first's.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Band A/Album A/01 - A.mp3")
-            _write_track(root, "Band B/Single Track.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            self.assertEqual(len(groups), 1)
-            self.assertEqual(len(singles), 1)
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-
-            class _StopAfterGroupClient(FakeMusicBrainzClient):
-                def release_lookup(self, release_mbid):
-                    result = super().release_lookup(release_mbid)
-                    music_scrape_jobs.request_stop(settings, job["id"])
-                    return result
-
-            client = _StopAfterGroupClient(
-                release_search_results=[{"release_mbid": "release-1"}], releases={"release-1": _ALBUM_RELEASE},
-            )
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "stopped")
-            # The group was matched before the stop took effect; the single,
-            # reached only by the second loop, was never attempted.
-            self.assertEqual(status["matched_count"], 1)
-            self.assertEqual(status["skipped_count"], 0)
-            self.assertEqual(status["failed_count"], 0)
-
-    def test_release_not_found_only_fails_that_group(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Band A/Album A/01 - A.mp3")
-            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            rows = music_store.list_music(settings.music_root)
-            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
-            groups.sort(key=lambda g: g["artist"])  # deterministic order: "Band A" then "Sample Artist"
-
-            call_count = {"n": 0}
-
-            class _SequencedClient(FakeMusicBrainzClient):
-                def search_release(self, query, limit=10):
-                    call_count["n"] += 1
-                    if call_count["n"] == 1:
-                        return [{"release_mbid": "missing-release"}]
-                    return [{"release_mbid": "release-1"}]
-
-            client = _SequencedClient(
-                releases={"release-1": _ALBUM_RELEASE},
-                raise_on_lookup={"missing-release": MusicBrainzNotFoundError("no such release")},
-            )
-            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
-            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
-
-            status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["status"], "complete")
-            self.assertEqual(status["matched_count"], 1)
-            self.assertEqual(status["failed_count"], 1)
 
 
 if __name__ == "__main__":

@@ -370,6 +370,16 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_rom_genres_system_genre ON rom_genres(system COLLATE NOCASE, genre COLLATE NOCASE)"
     )
+    # One row per (rom, artwork field whose gamelist tag is empty) -- backs the
+    # Systems Browse page's "Missing artwork" filter. Same lifecycle as
+    # rom_genres: written in _persist_rows from the "missing_artwork" list
+    # _database_rom_metadata_fields carries through from the scan, and only
+    # ever queried through an EXISTS against rom_cache_entries, so a stale row
+    # is harmless.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS rom_missing_artwork (entry_key TEXT NOT NULL, field TEXT NOT NULL)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_missing_artwork_entry_key ON rom_missing_artwork(entry_key, field)")
     connection.execute(
         "CREATE TABLE IF NOT EXISTS bios_cache_entries ("
         "entry_key TEXT PRIMARY KEY, file_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, unique_id TEXT, absolute_path TEXT, "
@@ -699,6 +709,10 @@ def _persist_rows(
             row = RomCacheRow.from_payload(str(key), value)
             _upsert_rom_row(connection, row)
             _sync_rom_genres(connection, str(key), row.system, str(value.get("genre") or ""))
+            # Only a fresh gamelist parse carries the list; a row reloaded from
+            # SQLite (e.g. re-persisted after hashing) keeps what's indexed.
+            if isinstance(value.get("missing_artwork"), list):
+                _sync_rom_missing_artwork(connection, str(key), value["missing_artwork"])
         elif asset_type == "bios":
             row = BiosCacheRow.from_payload(str(key), value)
             _upsert_bios_row(connection, row)
@@ -721,6 +735,7 @@ def _persist_rows(
         connection.execute(f"DELETE FROM {table} WHERE entry_key = ?", (key_text,))
         if asset_type == "rom":
             connection.execute("DELETE FROM rom_genres WHERE entry_key = ?", (key_text,))
+            connection.execute("DELETE FROM rom_missing_artwork WHERE entry_key = ?", (key_text,))
         if queue_changes:
             _queue_change(connection, asset_type, key_text, "delete")
 
@@ -733,6 +748,29 @@ def _sync_rom_genres(connection: sqlite3.Connection, entry_key: str, system: str
             "INSERT INTO rom_genres (entry_key, system, genre) VALUES (?, ?, ?)",
             [(entry_key, system, genre) for genre in genres],
         )
+
+
+def _sync_rom_missing_artwork(connection: sqlite3.Connection, entry_key: str, fields: list) -> None:
+    connection.execute("DELETE FROM rom_missing_artwork WHERE entry_key = ?", (entry_key,))
+    cleaned = sorted({str(field).strip().lower() for field in fields if str(field or "").strip()})
+    if cleaned:
+        connection.executemany(
+            "INSERT INTO rom_missing_artwork (entry_key, field) VALUES (?, ?)",
+            [(entry_key, field) for field in cleaned],
+        )
+
+
+def _missing_artwork_clause(fields: Optional[Iterable[str]]) -> Tuple[str, list]:
+    """EXISTS clause matching ROMs missing *any* of ``fields`` (empty = no filter)."""
+    cleaned = sorted({str(field).strip().lower() for field in (fields or []) if str(field or "").strip()})
+    if not cleaned:
+        return "", []
+    placeholders = ",".join("?" for _ in cleaned)
+    return (
+        "EXISTS (SELECT 1 FROM rom_missing_artwork WHERE rom_missing_artwork.entry_key = rom_cache_entries.entry_key "
+        f"AND rom_missing_artwork.field IN ({placeholders}))",
+        cleaned,
+    )
 
 
 def _upsert_rom_row(connection: sqlite3.Connection, row: RomCacheRow) -> None:
@@ -1601,6 +1639,7 @@ def list_rom_cache_page(
     query: str = "",
     limit: int = 500,
     offset: int = 0,
+    missing_artwork: Optional[Iterable[str]] = None,
 ) -> Optional[dict]:
     """Return a deterministic ROM page and total directly from SQLite.
 
@@ -1611,6 +1650,9 @@ def list_rom_cache_page(
     ``genre`` is an exact (case-insensitive) match against the normalized
     rom_genres table -- see its schema comment -- not a substring match
     against the raw comma-joined field, so it stays index-backed at scale.
+
+    ``missing_artwork`` keeps only ROMs missing any of those artwork fields
+    (rom_missing_artwork).
     """
     safe_limit, safe_offset = _page_bounds(limit, offset, maximum=5000)
     selected_systems = _normalized_filters(systems)
@@ -1631,6 +1673,10 @@ def list_rom_cache_page(
             "OR rom_cache_entries.fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
         )
         parameters.extend([pattern, pattern, pattern, pattern])
+    missing_clause, missing_parameters = _missing_artwork_clause(missing_artwork)
+    if missing_clause:
+        where_parts.append(missing_clause)
+        parameters.extend(missing_parameters)
     join = ""
     if normalized_genre:
         join = " JOIN rom_genres ON rom_genres.entry_key = rom_cache_entries.entry_key"
@@ -1698,8 +1744,9 @@ def list_rom_genre_counts(
     *,
     systems: Optional[Iterable[str]] = None,
     query: str = "",
+    missing_artwork: Optional[Iterable[str]] = None,
 ) -> list[dict]:
-    """Genre -> matching-ROM-count, scoped by the same system/search filters as
+    """Genre -> matching-ROM-count, scoped by the same system/search/missing-artwork filters as
     list_rom_cache_page (so switching the System filter or typing a search
     updates the Category facet's counts to match, mirroring the Movies
     Explorer sidebar's per-facet counting convention). Sorted most-to-least
@@ -1724,6 +1771,10 @@ def list_rom_genre_counts(
             "OR rom_cache_entries.fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
         )
         parameters.extend([pattern, pattern, pattern, pattern])
+    missing_clause, missing_parameters = _missing_artwork_clause(missing_artwork)
+    if missing_clause:
+        where_parts.append(missing_clause)
+        parameters.extend(missing_parameters)
     where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
     try:
         with _open_rom_metadata_cache(settings) as connection:

@@ -40,23 +40,17 @@ SCRAPER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-# A bulk scrape can fire thousands of requests in a short span (the search
-# ladder alone can issue up to 4 per movie -- see filename_parser.py); a 429
-# there used to be treated exactly like a revoked API key ("stop the whole
-# job, mark every remaining candidate failed") by metadata_manager's bulk
-# job, which is almost certainly why a real 2,667-movie run once came back
-# "1,054 matched, 1,576 failed" -- a contiguous block of failures starting
-# right where TMDb started throttling, not 1,576 genuinely unmatchable
-# movies. Retrying a 429 with backoff here (honoring Retry-After when TMDb
-# sends one) turns that transient condition back into what it actually is.
+# A burst of searches (the default-query ladder alone can issue up to 4 per
+# movie -- see filename_parser.py) can trip TMDb's rate limiting. Retrying a
+# 429 with backoff here (honoring Retry-After when TMDb sends one) treats that
+# as the transient condition it is rather than a rejected API key.
 TMDB_MAX_429_RETRIES = 3
 TMDB_RETRY_BASE_DELAY_SECONDS = 1.0
 # A server-sent Retry-After is honored (see _retry_delay_seconds), but never
 # past this cap -- the identical uncapped-sleep bug was caught live on the
 # MusicBrainz client (see MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS's comment): a
-# large Retry-After would otherwise block _run_bulk_scrape_job's background
-# thread synchronously for however long the server asked, deaf to Stop for
-# the whole duration.
+# large Retry-After would otherwise block the caller synchronously for however
+# long the server asked.
 TMDB_MAX_RETRY_DELAY_SECONDS = 60.0
 
 
@@ -65,29 +59,13 @@ class TmdbUnavailableError(RuntimeError):
 
 
 class TmdbNotFoundError(TmdbUnavailableError):
-    """A specific TMDb id (movie/show/season/episode) doesn't exist -- unlike
-    TmdbUnavailableError's other cases (invalid API key, unreachable,
-    rate-limited), which mean every subsequent call will fail the same way,
-    this is scoped to one lookup: the id was valid a moment ago (usually just
-    returned by a search call), but the specific resource it points at
-    doesn't exist. Most commonly a locally-numbered TV episode or season that
-    doesn't match TMDb's own numbering -- a season finale split into a
-    different number of parts than TMDb's, a "Season 0" specials folder TMDb
-    has no matching season for, etc. -- real libraries are full of these.
+    """A specific TMDb id doesn't exist -- unlike TmdbUnavailableError's
+    other cases (invalid API key, unreachable, rate-limited), which mean every
+    subsequent call will fail the same way, this is scoped to one lookup.
 
     Subclasses TmdbUnavailableError so any existing ``except
     TmdbUnavailableError`` catch (e.g. the per-movie manual scrape's HTTP 502
-    mapping) still catches this unchanged; only the bulk scrape job's
-    per-candidate loop needs to tell the two apart, so a single 404 fails
-    just that one candidate instead of aborting the whole run. Real incident
-    this fixed: two consecutive bulk runs against a ~1,250-movie library each
-    reported roughly "2 matched / 88 skipped / 1156 failed" in under 15
-    seconds -- 1,151 of those "failures" shared one identical reason string
-    ("TMDb has no movie with that id"), because a single 404 partway through
-    the run (a mis-numbered episode) used to abort the whole job and stamp
-    every untouched remaining candidate -- including obviously-unrelated
-    movies and Featurettes-folder extras -- with that one error, rather than
-    just failing the one candidate that actually hit it."""
+    mapping) still catches this unchanged."""
 
 
 def tmdb_image_url(path: Optional[str], size: str) -> Optional[str]:
@@ -256,34 +234,6 @@ class TmdbClient:
             )
         return output[: max(1, min(int(limit), 20))]
 
-    def search_tv(self, query: str, limit: int = 10, *, year: Optional[str] = None) -> List[dict]:
-        """Same shape as ``search`` but against ``/search/tv`` -- TMDb's TV
-        equivalent of ``primary_release_year`` is ``first_air_date_year``."""
-        normalized_query = str(query or "").strip()
-        if not normalized_query:
-            return []
-        params = {"query": normalized_query, "include_adult": "false"}
-        if year:
-            params["first_air_date_year"] = str(year)
-        payload = self._get_json("/search/tv", params)
-        results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list):
-            return []
-        output = []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            output.append(
-                {
-                    "tmdb_id": item.get("id"),
-                    "title": item.get("name") or item.get("original_name") or "",
-                    "release_date": item.get("first_air_date") or None,
-                    "overview": item.get("overview") or "",
-                    "thumbnail_url": tmdb_image_url(item.get("poster_path"), TMDB_POSTER_THUMB_SIZE),
-                }
-            )
-        return output[: max(1, min(int(limit), 20))]
-
     def details(self, tmdb_id) -> dict:
         safe_id = _digits_only(tmdb_id)
         if not safe_id:
@@ -312,78 +262,6 @@ class TmdbClient:
             "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
             "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
             "youtube_trailer_key": _pick_best_trailer_key(payload.get("videos")),
-        }
-
-    def tv_details(self, tv_id) -> dict:
-        """Show-level details -- poster/backdrop/genres/cast are all
-        show-level in TMDb's data model (there's no per-episode poster, only
-        a per-episode "still" screenshot -- see ``tv_episode_details``), so
-        this is fetched once per show and reused across every episode file
-        that show has on disk."""
-        safe_id = _digits_only(tv_id)
-        if not safe_id:
-            raise ValueError("tv_id is required")
-        payload = self._get_json(f"/tv/{safe_id}", {"append_to_response": "credits,videos"})
-        genres = [genre.get("name") for genre in (payload.get("genres") or []) if isinstance(genre, dict) and genre.get("name")]
-        credits_payload = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
-        cast = []
-        for member in (credits_payload.get("cast") or [])[:TMDB_CAST_LIMIT]:
-            if not isinstance(member, dict) or not member.get("name"):
-                continue
-            cast.append({"name": member.get("name"), "character": member.get("character") or ""})
-        return {
-            "tmdb_id": payload.get("id"),
-            "title": payload.get("name") or payload.get("original_name") or "",
-            "overview": payload.get("overview") or "",
-            "tagline": payload.get("tagline") or "",
-            "genres": genres,
-            "cast": cast,
-            "release_date": payload.get("first_air_date") or None,
-            "rating": payload.get("vote_average"),
-            "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
-            "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
-            "youtube_trailer_key": _pick_best_trailer_key(payload.get("videos")),
-        }
-
-    def tv_season_details(self, tv_id, season_number) -> dict:
-        """Season-level details: TMDb gives each season its own poster
-        (often a distinct image from the show's own poster -- see
-        ``metadata_manager.apply_tv_episode``, which prefers this over the
-        show poster) and occasionally its own overview, but *not* its own
-        backdrop -- there's no ``backdrop_path`` on a TMDb season object, so
-        that stays show-level. Raises ``TmdbUnavailableError`` (404 mapped
-        the same way ``tv_episode_details`` does) if the show has no such
-        season."""
-        safe_tv_id = _digits_only(tv_id)
-        safe_season = _digits_only(season_number)
-        if not safe_tv_id or not safe_season:
-            raise ValueError("tv_id and season_number are required")
-        payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}")
-        return {
-            "title": payload.get("name") or "",
-            "overview": payload.get("overview") or "",
-            "air_date": payload.get("air_date") or None,
-            "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
-        }
-
-    def tv_episode_details(self, tv_id, season_number, episode_number) -> dict:
-        """Episode-level details: title, overview, air date, rating, and a
-        "still" (a screenshot from the episode -- the closest TMDb has to
-        per-episode artwork). Raises ``TmdbUnavailableError`` (404 mapped the
-        same way ``details`` does) if the show has no such season/episode,
-        e.g. a locally-numbered episode that doesn't match TMDb's numbering."""
-        safe_tv_id = _digits_only(tv_id)
-        safe_season = _digits_only(season_number)
-        safe_episode = _digits_only(episode_number)
-        if not safe_tv_id or not safe_season or not safe_episode:
-            raise ValueError("tv_id, season_number, and episode_number are required")
-        payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}/episode/{safe_episode}")
-        return {
-            "title": payload.get("name") or "",
-            "overview": payload.get("overview") or "",
-            "air_date": payload.get("air_date") or None,
-            "rating": payload.get("vote_average"),
-            "still_url": tmdb_image_url(payload.get("still_path"), TMDB_BACKDROP_SIZE),
         }
 
     def download_image(self, url: str) -> Tuple[bytes, str]:

@@ -14,12 +14,14 @@ try:
     from ..common.http_cache import valid_segment
     from ..device.device_control import _resolve_es_systems_effective, _resolve_theme_dir
     from ..roms.browser_play import ROMSET_SENSITIVE_SYSTEMS, SYSTEM_CORE_MAP
+    from ..roms.gamelist import ARTWORK_FIELDS
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
     from .route_config import api_url
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from device.device_control import _resolve_es_systems_effective, _resolve_theme_dir  # type: ignore
     from roms.browser_play import ROMSET_SENSITIVE_SYSTEMS, SYSTEM_CORE_MAP  # type: ignore
+    from roms.gamelist import ARTWORK_FIELDS  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -187,105 +189,6 @@ class HandlersContentMixin:
     def _handle_theme_logos(self) -> None:
         self._send_json(200, self._build_theme_logo_candidates(), cache_key="json:/theme/logos")
 
-    def _build_theme_image_catalog(
-        self,
-        limit: int = 500,
-        offset: int = 0,
-        query: Optional[str] = None,
-        system_filter: Optional[str] = None,
-        system_filters: Optional[List[str]] = None,
-    ) -> dict:
-        theme_dir = _resolve_theme_dir(self.settings)
-        if not theme_dir:
-            return {"enabled": False, "theme_name": None, "count": 0, "images": []}
-
-        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"}
-        images_all: List[dict] = []
-        checked = 0
-        for path in theme_dir.rglob("*"):
-            checked += 1
-            if checked > 200000:
-                break
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in allowed_suffixes:
-                continue
-            rel = path.relative_to(theme_dir).as_posix()
-            folder = Path(rel).parent.as_posix()
-            image_url = self._fake_theme_asset_url(rel) if self.settings.use_fake_data else api_url(f"/theme/assets/{quote(rel, safe='/')}")
-            images_all.append(
-                {
-                    "path": rel,
-                    "folder": "." if folder == "." else folder,
-                    "name": Path(rel).name,
-                    "url": image_url,
-                }
-            )
-
-        images_all.sort(key=lambda item: item["path"].lower())
-        systems_all = sorted(
-            {
-                (item["folder"].split("/")[0] if item["folder"] != "." else "_root").lower()
-                for item in images_all
-            }
-        )
-        if query:
-            q = query.strip().lower()
-            images_all = [item for item in images_all if q in item["path"].lower()]
-        selected_systems: List[str] = []
-        if system_filters:
-            selected_systems = [s.strip().lower() for s in system_filters if s and s.strip()]
-        elif system_filter:
-            selected_systems = [system_filter.strip().lower()]
-
-        if "__none__" in selected_systems:
-            images_all = []
-        elif selected_systems:
-            selected_set = set(selected_systems)
-            images_all = [
-                item
-                for item in images_all
-                if ((item["folder"].split("/")[0] if item["folder"] != "." else "_root").lower() in selected_set)
-            ]
-
-        total = len(images_all)
-        offset = max(0, offset)
-        limit = max(1, min(limit, 5000))
-        images = images_all[offset : offset + limit]
-        return {
-            "enabled": True,
-            "theme_name": theme_dir.name,
-            "systems": systems_all,
-            "count": total,
-            "offset": offset,
-            "limit": limit,
-            "returned": len(images),
-            "has_more": (offset + len(images)) < total,
-            "images": images,
-        }
-
-    def _handle_theme_images(
-        self,
-        limit: int,
-        offset: int,
-        query: Optional[str],
-        system_filter: Optional[str],
-        system_filters: Optional[List[str]] = None,
-    ) -> None:
-        payload = self._build_theme_image_catalog(
-            limit=limit,
-            offset=offset,
-            query=query,
-            system_filter=system_filter,
-            system_filters=system_filters,
-        )
-        systems_key = ",".join(sorted([s.lower() for s in (system_filters or [])]))
-        cache_key = (
-            f"json:/theme/images?limit={limit}&offset={offset}&q={(query or '').lower()}"
-            f"&system={(system_filter or '').lower()}&systems={systems_key}"
-        )
-        self._send_json(200, payload, cache_key=cache_key)
-
     def _handle_theme_asset(self, relative_path: str) -> None:
         if self.settings.use_fake_data:
             lowered = relative_path.lower()
@@ -417,6 +320,7 @@ class HandlersContentMixin:
         genre: Optional[str] = None,
         query: Optional[str] = None,
         browser_playable: bool = False,
+        missing_art: Optional[List[str]] = None,
     ) -> None:
         """The Systems Browse page's card grid -- games across every system by
         default (``system`` narrows to one), paginated (default/max page
@@ -432,12 +336,18 @@ class HandlersContentMixin:
         in Browser" button) -- intersected with an explicit ``system``, or
         standing in for "every system" on its own, so pagination/counts stay
         correct instead of the frontend fetching a page and re-filtering it
-        down client-side (which would desync from ``count``/``has_more``)."""
+        down client-side (which would desync from ``count``/``has_more``).
+
+        ``missing_art`` (artwork field names, e.g. ``image``/``marquee``) keeps
+        only games whose gamelist entry is missing any of them; unknown names
+        are ignored."""
         safe_limit = max(1, min(int(limit or 200), 5000))
         safe_offset = max(0, int(offset or 0))
         system_value = str(system or "").strip()
         genre_value = str(genre or "").strip()
         query_value = str(query or "").strip()
+        requested_art = {str(field or "").strip().lower() for field in (missing_art or [])}
+        missing_artwork = [field for field in ARTWORK_FIELDS if field in requested_art]
         if browser_playable:
             playable_systems = sorted(SYSTEM_CORE_MAP.keys())
             if system_value:
@@ -448,6 +358,7 @@ class HandlersContentMixin:
             systems_filter = [system_value] if system_value else None
         page = self.repository.list_rom_browse_page(
             systems=systems_filter, genre=genre_value, query=query_value, limit=safe_limit, offset=safe_offset,
+            missing_artwork=missing_artwork,
         )
         if page is None:
             self._send_json(200, {
@@ -460,7 +371,9 @@ class HandlersContentMixin:
             for item in roms:
                 item["is_downloadable"] = False
         total = int(page.get("total") or 0)
-        genres = self.repository.list_rom_genre_facets(systems=systems_filter, query=query_value)
+        genres = self.repository.list_rom_genre_facets(
+            systems=systems_filter, query=query_value, missing_artwork=missing_artwork,
+        )
         self._send_json(
             200,
             {

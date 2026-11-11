@@ -451,8 +451,8 @@ class HandlersMusicMixin:
         album) folder (``_album_group_entry_keys``) -- an uploaded album
         cover is exactly as "album-level" as a MusicBrainz-scraped one,
         which is also just one release-level image saved into every track's
-        own metadata row (see ``metadata_manager._apply_matched_track``'s
-        ``cover_bytes_cache``). Saved once, at a fixed filename under the
+        own metadata row (see ``metadata_manager._apply_release_to_group``).
+        Saved once, at a fixed filename under the
         album's own ``images/`` folder (not per-track-stem-named, unlike
         scraped art, since this genuinely is one file shared by every track
         rather than N independently-downloaded copies) -- every group
@@ -578,48 +578,3 @@ class HandlersMusicMixin:
         entry_keys = self._album_group_entry_keys(entry_key)
         result = _music_metadata.delete_album_metadata(self.settings, entry_keys)
         self._send_json(200, result)
-
-    # ------------------------------------------------------- bulk scrape
-
-    def _handle_admin_music_scrape_bulk_status(self) -> None:
-        self._send_json(200, {"job": _music_metadata.get_bulk_scrape_status(self.settings)})
-
-    def _handle_admin_music_scrape_bulk_start(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        result = _music_metadata.start_bulk_scrape(self.settings, rescan_all=bool(payload.get("rescan_all")))
-        status_code = 409 if result.get("status") == "already_running" else (
-            502 if result.get("status") == "error" else 200
-        )
-        self._send_json(status_code, result)
-
-    def _handle_admin_music_scrape_bulk_stop(self) -> None:
-        result = _music_metadata.stop_bulk_scrape(self.settings)
-        self._send_json(200, result)
-
-    _BULK_ITEM_STATUSES = {"matched", "skipped", "failed"}
-
-    def _handle_admin_music_scrape_bulk_items(self, status: str, limit: Optional[int], offset: int) -> None:
-        if status not in self._BULK_ITEM_STATUSES:
-            self._send_json(400, {"error": "status must be one of matched, skipped, failed"})
-            return
-        page = _music_metadata.get_bulk_scrape_items(
-            self.settings, status, limit=int(limit) if limit is not None else 200, offset=offset
-        )
-        self._send_json(200, page)
-
-    def _handle_admin_music_scrape_bulk_retry(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        entry_keys = payload.get("entry_keys")
-        status = payload.get("status")
-        if not entry_keys and status not in self._BULK_ITEM_STATUSES:
-            self._send_json(400, {"error": "either entry_keys or a status (matched, skipped, failed) is required"})
-            return
-        result = _music_metadata.retry_bulk_scrape_items(
-            self.settings,
-            status=status if not entry_keys else None,
-            entry_keys=entry_keys if isinstance(entry_keys, list) else None,
-        )
-        status_code = 409 if result.get("status") == "already_running" else (
-            502 if result.get("status") == "error" else 200
-        )
-        self._send_json(status_code, result)

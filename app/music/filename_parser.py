@@ -47,7 +47,7 @@ _DISC_FOLDER_RE = re.compile(r"^(?:cd|disc|disk)\s*\.?\s*(\d{1,2})$", re.IGNOREC
 # where every ATB release was collapsed into one fake "ATB / Album" bucket
 # and every compilation into one fake "ATB / Compilation" bucket -- tracks
 # from genuinely different real albums that happened to share a track title
-# then looked like duplicates within that one merged group, and the bulk
+# then looked like duplicates within that one merged group, and the
 # scraper searched MusicBrainz for a release literally titled "Album"/
 # "Compilation" and could never find a real match. The vocabulary below
 # mirrors MusicBrainz's own release-group primary/secondary type list, since
@@ -193,7 +193,7 @@ def search_candidates(artist: str, album: str, track_title: str) -> List[Tuple[s
     turn, most-specific first -- mirrors ``movies.filename_parser
     .search_candidates``'s "ordered ladder, try each, stop at first hit"
     contract. ``query_type`` is ``"release"`` (artist+album -- what the
-    bulk-scrape job uses, since a release lookup returns a whole tracklist in
+    album scraper uses, since a release lookup returns a whole tracklist in
     one call) or ``"recording"`` (a single-track fallback, for files with no
     resolvable album -- the "singles"/orphan case). The cleaned album name
     (see ``_clean_album_name``) is tried before the raw folder name.

@@ -77,8 +77,9 @@ ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_H
 # fields on an already-fully-scanned, unchanged-gamelist.xml library -- without this
 # bump they'd never backfill (Systems Browse's Category facet stayed permanently
 # empty, and its card grid's guessed image filenames kept missing real ones, on any
-# device that wasn't otherwise due for a rescan).
-ROM_CLASSIFIER_VERSION = 3
+# device that wasn't otherwise due for a rescan). v4: missing_artwork (indexed into
+# rom_missing_artwork for Systems Browse's "Missing artwork" filter) -- same backfill reason.
+ROM_CLASSIFIER_VERSION = 4
 # ROM_METADATA_HASH_ROMS_ENABLED stays the single source in drone_api (tests patch it there
 # + rom_metadata_state reads it); lazy-imported inside _hash_rom_metadata_batches below.
 

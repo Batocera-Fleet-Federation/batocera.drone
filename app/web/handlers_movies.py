@@ -394,8 +394,8 @@ class HandlersMoviesMixin:
         """A custom ``query`` (the user typed something into the search box)
         is searched verbatim, one plain TMDb call, respecting exactly what
         they asked for. With no custom query (the box's default state),
-        this instead runs the same candidate ladder the bulk scraper already
-        trusts (``search_movie_default_query`` -- title cleaned of scene
+        this instead runs a candidate ladder
+        (``search_movie_default_query`` -- title cleaned of scene
         tags, year-filtered first) rather than a single dumb guess, so a
         first-time search finds the right movie without the human needing to
         rename the file or hand-clean the query first."""
@@ -487,48 +487,3 @@ class HandlersMoviesMixin:
             if result.get("deleted"):
                 deleted += 1
         self._send_json(200, {"deleted": deleted, "requested": len(entry_keys)})
-
-    # ------------------------------------------------------- bulk scrape
-
-    def _handle_admin_movie_scrape_bulk_status(self) -> None:
-        self._send_json(200, {"job": _movies_metadata.get_bulk_scrape_status(self.settings)})
-
-    def _handle_admin_movie_scrape_bulk_start(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        result = _movies_metadata.start_bulk_scrape(self.settings, rescan_all=bool(payload.get("rescan_all")))
-        status_code = 409 if result.get("status") == "already_running" else (
-            502 if result.get("status") == "error" else 200
-        )
-        self._send_json(status_code, result)
-
-    def _handle_admin_movie_scrape_bulk_stop(self) -> None:
-        result = _movies_metadata.stop_bulk_scrape(self.settings)
-        self._send_json(200, result)
-
-    _BULK_ITEM_STATUSES = {"matched", "skipped", "failed"}
-
-    def _handle_admin_movie_scrape_bulk_items(self, status: str, limit: Optional[int], offset: int) -> None:
-        if status not in self._BULK_ITEM_STATUSES:
-            self._send_json(400, {"error": "status must be one of matched, skipped, failed"})
-            return
-        page = _movies_metadata.get_bulk_scrape_items(
-            self.settings, status, limit=int(limit) if limit is not None else 200, offset=offset
-        )
-        self._send_json(200, page)
-
-    def _handle_admin_movie_scrape_bulk_retry(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        entry_keys = payload.get("entry_keys")
-        status = payload.get("status")
-        if not entry_keys and status not in self._BULK_ITEM_STATUSES:
-            self._send_json(400, {"error": "either entry_keys or a status (matched, skipped, failed) is required"})
-            return
-        result = _movies_metadata.retry_bulk_scrape_items(
-            self.settings,
-            status=status if not entry_keys else None,
-            entry_keys=entry_keys if isinstance(entry_keys, list) else None,
-        )
-        status_code = 409 if result.get("status") == "already_running" else (
-            502 if result.get("status") == "error" else 200
-        )
-        self._send_json(status_code, result)

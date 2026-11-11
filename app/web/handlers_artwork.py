@@ -1,8 +1,8 @@
 """RomRequestHandler admin artwork/scraper handlers, as a mixin.
 
 Extracted from ``drone_api.py``. Missing-artwork listing, LaunchBox / TheGamesDB /
-MobyGames artwork search+apply, artwork upload, and gamelist entry remove/update/
-remove-missing. Composed onto ``RomRequestHandler`` (methods stay ``self``-bound; ROM
+MobyGames artwork search+apply, artwork upload, and gamelist entry remove/update.
+Composed onto ``RomRequestHandler`` (methods stay ``self``-bound; ROM
 lookups go through ``self.repository``).
 """
 
@@ -492,55 +492,6 @@ class HandlersArtworkMixin:
         if not isinstance(fields, dict):
             raise ValueError("fields must be an object")
         result = self.repository.update_gamelist_entry(system, rom_path, fields)
-        self._send_json(200, result)
-
-    def _handle_admin_gamelist_remove_missing(self, payload: dict) -> None:
-        confirm = str(payload.get("confirm") or "").strip()
-        if confirm != "DELETE_MISSING_GAMELIST_ENTRIES":
-            raise ValueError("confirm must be DELETE_MISSING_GAMELIST_ENTRIES")
-        include_filesystem = bool(payload.get("include_filesystem"))
-        art_fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
-        system_filters = payload.get("systems") if isinstance(payload.get("systems"), list) else []
-        query = str(payload.get("q") or "")
-
-        items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=False)
-        normalized_art_fields = {str(field or "").strip().lower() for field in art_fields if str(field or "").strip()}
-        if "any" in normalized_art_fields:
-            normalized_art_fields = set()
-        normalized_art_fields = {field for field in normalized_art_fields if field in ARTWORK_FIELDS}
-        normalized_systems = {str(system or "").strip().lower() for system in system_filters if str(system or "").strip()}
-        normalized_query = query.strip().lower()
-
-        filtered = []
-        for item in items:
-            candidate = dict(item)
-            candidate["rom_exists"] = self.repository._rom_path_exists(
-                str(candidate.get("system") or ""),
-                str(candidate.get("rom_path") or candidate.get("rom_name") or ""),
-            )
-            if candidate["rom_exists"]:
-                continue
-            if normalized_art_fields and not normalized_art_fields.intersection({str(field).lower() for field in (candidate.get("missing") or [])}):
-                continue
-            if normalized_systems and str(candidate.get("system") or "").strip().lower() not in normalized_systems:
-                continue
-            if normalized_query:
-                haystack = " ".join(
-                    [
-                        str(candidate.get("system") or ""),
-                        str(candidate.get("name") or ""),
-                        str(candidate.get("title") or ""),
-                        str(candidate.get("rom_name") or ""),
-                        str(candidate.get("rom_path") or ""),
-                        " ".join(str(field) for field in (candidate.get("missing") or [])),
-                    ]
-                ).lower()
-                if normalized_query not in haystack:
-                    continue
-            filtered.append(candidate)
-
-        result = self.repository.remove_gamelist_entries(filtered)
-        result["matched_count"] = len(filtered)
         self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:

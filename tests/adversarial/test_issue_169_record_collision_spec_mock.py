@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from app.common import identity_provisioning
-from app.storage import audit_store, mail_queue_store, music_scrape_job_items, saves_store, update_history_store
+from app.storage import audit_store, mail_queue_store, saves_store, update_history_store
 from app.storage.state_store import DATABASE_FILENAME
 
 
@@ -138,9 +138,6 @@ class StoreEntryPointSpecRootTests(_CwdSandbox):
             SimpleNamespace(userdata_root=root), version="4.0.0"
         ),
         "mail_queue.ready": lambda root: mail_queue_store.ready(SimpleNamespace(userdata_root=root)),
-        "music_scrape_job_items.list_by_status": lambda root: music_scrape_job_items.list_by_status(
-            SimpleNamespace(userdata_root=root), "pending"
-        ),
         "audit_store.list_unsent_events": lambda root: audit_store.list_unsent_events(
             SimpleNamespace(userdata_root=root), ["vpn_connected"]
         ),

@@ -1,6 +1,6 @@
 ---
 name: drone-movies-feature
-description: Use this when designing, reviewing, debugging, or modifying the Drone Movies feature — the movies_cache_entries/movies_metadata_entries SQLite schema, filesystem scanning (movies_store.py), show/season/episode grouping (movies/filename_parser.py), TMDb scraping (movies/tmdb_client.py + movies/metadata_manager.py, including the bulk-scrape background job), genres, in-browser video playback (Range-stream /movies/{key}/stream), Chromecast/AirPlay casting (movies/cast_stream.py), or the Movies Explorer/show-detail frontend in drone.js. Also the reference template when building a parallel media-asset feature (e.g. Music) that's meant to mirror this one.
+description: Use this when designing, reviewing, debugging, or modifying the Drone Movies feature — the movies_cache_entries/movies_metadata_entries SQLite schema, filesystem scanning (movies_store.py), show/season/episode grouping (movies/filename_parser.py), TMDb scraping (movies/tmdb_client.py + movies/metadata_manager.py, per-movie manual search/apply), genres, in-browser video playback (Range-stream /movies/{key}/stream), Chromecast/AirPlay casting (movies/cast_stream.py), or the Movies Explorer/show-detail frontend in drone.js. Also the reference template when building a parallel media-asset feature (e.g. Music) that's meant to mirror this one.
 ---
 
 # Drone Movies Feature Skill
@@ -55,10 +55,6 @@ computed from the file path at read time, never stored relationally (see
   convention shared with `rom_cache_entries`/`bios_cache_entries` (see
   `drone-db-management`'s explicit carve-out for "loosely-structured scraped
   metadata that isn't core relational state").
-- `movie_scrape_jobs.py` / `movie_scrape_job_items.py` — one-row bulk-job
-  progress (`status/total/processed/current_movie/matched_count/
-  skipped_count/failed_count`) + per-candidate outcome, wiped and rebuilt
-  each bulk run.
 - `movie_cast_tokens.py` — opaque random token → entry_key, 12h TTL, for the
   unauthenticated Chromecast-receiver fetch (see "Casting" below).
 
@@ -127,52 +123,19 @@ TMDb (themoviedb.org), stdlib `urllib` only. **Requires a user-supplied API
 key** (unlike the keyless ROM scrapers) — stored in the shared `app_state`
 SQLite table under a `movies_scraper.json` namespace, sanitized before ever
 reaching the browser (`get_settings` returns only `has_api_key: bool`).
-`search`/`search_tv`, `details`/`tv_details`/`tv_season_details`/
-`tv_episode_details` (poster, backdrop, overview, tagline, genres, cast[:20],
-rating, runtime, YouTube trailer key), `download_image`.
+`search`, `details` (poster, backdrop, overview, tagline, genres, cast[:20],
+rating, runtime, YouTube trailer key), `download_image`. Scraping is
+per-movie only (search → pick a match → apply, from the movie's own details
+page). The former Admin > Artwork "Movies" tab, its bulk-scrape background
+job (`movie_scrape_jobs`/`movie_scrape_job_items`) and the TV-episode/season
+scraping that only that job used were removed; any existing
+`movie_scrape_jobs`/`movie_scrape_job_items` tables in an old state DB are
+simply left unused.
 
-**Two distinct error types, and the distinction is load-bearing**:
-`TmdbNotFoundError(TmdbUnavailableError)` for a single 404 (one candidate has
-no match — skip it, keep the bulk job going) vs. `TmdbUnavailableError` for a
-revoked key or exhausted rate-limit retries (abort the whole run). Getting
-this wrong is a real production incident that happened twice:
-1. A 429 with no retry/backoff used to cascade into "every remaining movie
-   fails" — fixed with `Retry-After`-aware backoff (`TMDB_MAX_429_RETRIES`)
-   plus a proactive per-call throttle (`_throttle_before_tmdb_call`) so a
-   large library doesn't trip rate-limiting in the first place.
-2. *Separately*, a plain 404 on one movie/show/season/episode lookup (a
-   locally-numbered TV episode/season that doesn't match TMDb's own
-   numbering — e.g. a "Season 0" specials folder) used to raise the same
-   `TmdbUnavailableError` and **also** mass-fail every untouched remaining
-   candidate. A real ~1,250-movie library reproduced this exactly: two
-   consecutive runs each reported "2 matched / 88 skipped / 1156 failed" in
-   under 15 seconds, with ~1,151 of those "failures" sharing one identical
-   reason string. Fixed by giving 404 its own subclass so it can be caught
-   *before* the generic `TmdbUnavailableError` clause (subclass-before-parent
-   ordering matters) and fail only that one candidate.
-
-**Bulk scraping is a one-shot background job, not a forever-loop poller**
-(unlike VPN self-heal or the SMTP digest) — the closest precedent is Config
-Backups. State lives in a SQLite row (`movie_scrape_jobs.any_running()`),
-guarded against a genuine two-thread race (two POSTs landing on different
-handler threads before either has inserted its "running" row) by an
-*additional* module-level `threading.Lock()` — the SQLite row alone survives
-a process restart but doesn't close that same-process race window.
-`threading.Thread(daemon=True)`, no pool, no cancel. Stops early only when
-TMDb itself becomes unavailable (bad key, network down); a single
-no-match/empty-query movie does not stop the run. "Rescan all" (unchecked
-by default) controls the candidate set: unchecked queues only movies with no
-poster yet.
-
-**TV episodes get show-level caching**: the resolved TMDb show id and
-show-details payload are cached *per bulk-job run*, keyed by show title, so a
-season with a dozen episode files costs one TV search + one show-details
-fetch total, not one of each per episode. Season-level data
-(`tv_season_details`) is fetched too and **its poster is preferred over the
-show poster** for what gets downloaded as the episode's own artwork (TMDb has
-no season-level backdrop, so backdrops stay show-level) — this is what
-actually makes the show-detail page's season switcher change the artwork,
-not just re-list episodes.
+**Two error types**: `TmdbNotFoundError(TmdbUnavailableError)` for a single
+404 vs. `TmdbUnavailableError` for a revoked key, unreachable TMDb, or
+exhausted rate-limit retries. A 429 is retried with `Retry-After`-aware
+backoff (`TMDB_MAX_429_RETRIES`, capped at `TMDB_MAX_RETRY_DELAY_SECONDS`).
 
 **Artwork placement**: `<movie's own folder>/images/<safe-stem>-tmdb-
 <field>.jpg` — sibling to the specific file, not one shared root folder.
@@ -305,7 +268,6 @@ copy-pasted render-function shape), not by a real abstraction.
 | GET | `/admin/movies/{key}/scrape/search?q=` | manual search |
 | POST | `/admin/movies/{key}/scrape/apply` | apply a match (`tmdb_id` or `tmdb_url`) |
 | POST | `/admin/movies/{key}/scrape/delete` | remove scraped metadata (idempotent) |
-| GET/POST | `/admin/movies/scrape/bulk[/items][/retry]` | bulk job status/start/items/retry |
 | GET | `/admin/movies/duplicates?kind=&genre=&q=` | duplicate detection (`app/movies/movie_duplicates.py`) |
 | POST | `/admin/movies/delete` | batch delete |
 | GET | `/peer/movies/...` | inter-drone P2P transfer (mTLS-gated) |
@@ -321,9 +283,6 @@ chain, not a declarative table — actual handler logic lives in
 - Using the show/season grouping key from scraped data instead of the
   filename/folder-parsed value — splits a partially-scraped show into two
   cards.
-- Treating a single-candidate TMDb 404 the same as a revoked-key/
-  rate-limit-exhausted failure — mass-fails an entire bulk run over one
-  unmatchable title.
 - Building a cast URL from the browser's `Host` header instead of the local
   socket address — looks like it connects, never plays.
 - Reverting the movie-file allowlist to a denylist — lets sidecar/scraper
@@ -334,7 +293,6 @@ chain, not a declarative table — actual handler logic lives in
 When building a new feature meant to mirror this one (e.g. Music), reuse this
 shape directly: flat cache-entries + metadata-entries tables with a JSON
 `extra_json` blob for scraped fields, folder/filename-derived grouping key
-that's independent of and takes priority over scraped display names, a
-SQLite-row-backed one-shot bulk-scrape job (not a forever poller), and
+that's independent of and takes priority over scraped display names, and
 Range-aware authenticated streaming as the primary playback path with casting
 treated as optional, separate, and genuinely complex.

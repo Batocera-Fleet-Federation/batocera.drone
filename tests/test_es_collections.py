@@ -616,7 +616,7 @@ class AdminControlsPageSplitTests(unittest.TestCase):
     def test_router_dispatches_controls_hash(self) -> None:
         self.assertIn('hash === "#admin/controls"', self.js)
         router_start = self.js.index('hash === "#admin/system-info"')
-        router_end = self.js.index('hash.startsWith("#admin/artwork")', router_start)
+        router_end = self.js.index('hash === "#admin/downloads"', router_start)
         router_section = self.js[router_start:router_end]
         self.assertIn("await renderAdminSystemInfoPage();", router_section)
         self.assertIn("await renderAdminControlsPage();", router_section)
