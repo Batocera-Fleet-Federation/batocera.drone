@@ -549,14 +549,14 @@ class EsCollectionsUiContentTests(unittest.TestCase):
         render_end = js.index("async function loadEsCollections()")
         self.assertIn("syncScreensaverControls(state.screensaver_minutes)", js[render_start:render_end])
 
-    def test_system_info_page_wires_music_volume_and_collections(self) -> None:
+    def test_controls_keep_music_volume_without_collections_editor(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 
         self.assertIn('id="musicVolumeSlider"', js)
         self.assertIn('apiPost("/admin/system-info/music-volume"', js)
 
-        self.assertIn('id="esCollectionsBody"', js)
+        self.assertNotIn('id="esCollectionsBody"', js)
         self.assertIn('id="esCollectionsSaveBtn"', js)
         self.assertIn("function renderEsCollectionsCard(state)", js)
         self.assertIn("function collectEsCollectionsPayload()", js)
@@ -575,8 +575,8 @@ class EsCollectionsUiContentTests(unittest.TestCase):
 
 class AdminControlsPageSplitTests(unittest.TestCase):
     """System Info and Controls are separate pages: screen mode, volume, music
-    volume, screensaver, collections, and asset cache all live on Controls;
-    System Info keeps only health + details (with GPU added)."""
+    volume and screensaver live on Controls; asset cache lives on Debug;
+    System Info keeps health + details (with GPU added) and asset cache."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -636,7 +636,6 @@ class AdminControlsPageSplitTests(unittest.TestCase):
             "Music Volume</span>",
             "Screensaver</span>",
             "Game Collections",
-            "Asset Cache</span>",
         ):
             self.assertNotIn(marker, body, f"{marker!r} should have moved off System Info")
 
@@ -649,11 +648,11 @@ class AdminControlsPageSplitTests(unittest.TestCase):
             'id="systemVolumeSlider"',
             'id="musicVolumeSlider"',
             'id="screensaverSlider"',
-            'id="esCollectionsBody"',
-            'id="systemInfoAssetCacheBody"',
         ):
             self.assertIn(marker, body)
 
+        for marker in ("Tailnet", "Game Collections", "systemInfoAssetCacheBody", "esCollectionsSearchInput"):
+            self.assertNotIn(marker, body)
         self.assertNotIn("System Health", body)
         self.assertNotIn("System Details", body)
 
@@ -667,19 +666,21 @@ class AdminControlsPageSplitTests(unittest.TestCase):
         self.assertIn("if (!adminEnabled) return;", click_body)
         self.assertIn('setHash("#admin/controls");', click_body)
 
-    def test_asset_cache_refresh_hooks_check_controls_hash(self) -> None:
+    def test_asset_cache_refresh_hooks_check_debug_hash(self) -> None:
         purge_start = self.js.index("async function purgeAssetCache()")
         purge_end = self.js.index("async function clearPendingAssetChanges()")
         clear_start = purge_end
         clear_end = self.js.index("function renderAssetCachePanel(")
         for section in (self.js[purge_start:purge_end], self.js[clear_start:clear_end]):
-            self.assertIn('window.location.hash === "#admin/controls"', section)
-            self.assertNotIn('window.location.hash === "#admin/system-info"', section)
+            self.assertIn('window.location.hash === "#admin/system-info"', section)
+            self.assertNotIn('window.location.hash === "#admin/controls"', section)
 
     def test_controls_async_rendering_stops_after_navigation(self) -> None:
         body = self._function_body("renderAdminControlsPage")
         self.assertIn('if (window.location.hash !== "#admin/controls") return;', body)
-        self.assertIn('if (!cacheBody || window.location.hash !== "#admin/controls") return;', body)
+        body = self._function_body("renderAdminSystemInfoPage")
+        self.assertIn('id="systemInfoAssetCacheBody"', body)
+        self.assertIn('if (!cacheBody || window.location.hash !== "#admin/system-info") return;', body)
         self.assertIn('document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener', body)
 
 
@@ -697,14 +698,13 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
 
     def test_controls_page_wraps_simple_controls_in_a_tile_grid(self) -> None:
         start = self.js.index("async function renderAdminControlsPage(")
-        end = self.js.index("Game Collections", start)
+        end = self.js.index("async function loadDroneVersion", start)
         body = self.js[start:end]
         self.assertIn("row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3", body)
-        # Five tiles: the four device controls plus Tailnet (install/update
-        # Tailscale, which belongs with the page's other maintenance actions).
-        self.assertEqual(body.count('class="col">'), 5)
-        self.assertEqual(body.count("control-tile"), 5)
-        for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver", "Tailnet</span>"):
+        # Four device controls remain after removing Tailnet.
+        self.assertEqual(body.count('class="col">'), 4)
+        self.assertEqual(body.count("control-tile"), 4)
+        for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver"):
             self.assertIn(marker, body)
         # Screen Mode, Music Volume, and Screensaver restart EmulationStation;
         # System Volume never restarts (OS-level ALSA).
