@@ -323,12 +323,12 @@ navbar link, `transfersMenuBtn`) lives under the **Transfers** tab
 (`renderTransfersPage()` → `#admin/transfers`, still its own route/page, just
 reached via this tab bar instead of a separate navbar item now).
 
-Gotcha: the Transfers live refresh (`startTransfersAutoRefresh`, 3s poll of
-`/admin/downloads` + `/admin/uploads`) must start *before* awaiting
-`renderIntegrationTransfersPanel`, because that panel awaits the peer overview probe
-(`loadSwarmOverview`). Starting it after the await freezes the queue at its first
-snapshot, so queued/downloading rows stop appearing. Pinned by
-`tests/test_issue_126_transfers_loading_uat.py`.
+Transfers is a monitoring page (#695): do not mount the peer asset browser/request
+panel or fetch inventories/peer overview here. Start live refresh before awaiting
+the initial queue load. Rows show the initiating (downloading) Drone, downloader,
+and uploader; unknown peer identities remain Unknown. On phones rows show compact
+status/file/progress summaries. Click or keyboard-activate a row for the full details
+modal; queue action buttons keep their own behavior.
 
 The Transfers poll asks for `GET /admin/downloads?compact=1&queued_limit=500`
 (`TRANSFERS_POLL_PATH`): `compact` drops the duplicate `downloads` list and
