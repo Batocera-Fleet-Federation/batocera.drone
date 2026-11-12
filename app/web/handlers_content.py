@@ -335,6 +335,7 @@ class HandlersContentMixin:
         query: Optional[str] = None,
         browser_playable: bool = False,
         missing_art: Optional[List[str]] = None,
+        players: str = "", trait: str = "",
     ) -> None:
         """The Systems Browse page's card grid -- games across every system by
         default (``system`` narrows to one), paginated (default/max page
@@ -363,12 +364,12 @@ class HandlersContentMixin:
         systems_filter, missing_artwork = _rom_explorer_filters(system_value, browser_playable, missing_art)
         page = self.repository.list_rom_browse_page(
             systems=systems_filter, genre=genre_value, query=query_value, limit=safe_limit, offset=safe_offset,
-            missing_artwork=missing_artwork,
+            missing_artwork=missing_artwork, players=players, trait=trait,
         )
         if page is None:
             self._send_json(200, {
                 "roms": [], "count": 0, "offset": safe_offset, "limit": safe_limit,
-                "returned": 0, "has_more": False, "genres": [],
+                "returned": 0, "has_more": False, "genres": [], "traits": [],
             })
             return
         roms = page.get("items") or []
@@ -377,7 +378,7 @@ class HandlersContentMixin:
                 item["is_downloadable"] = False
         total = int(page.get("total") or 0)
         genres = self.repository.list_rom_genre_facets(
-            systems=systems_filter, query=query_value, missing_artwork=missing_artwork,
+            systems=systems_filter, query=query_value, missing_artwork=missing_artwork, players=players, trait=trait,
         )
         self._send_json(
             200,
@@ -389,6 +390,7 @@ class HandlersContentMixin:
                 "returned": len(roms),
                 "has_more": (safe_offset + len(roms)) < total,
                 "genres": genres,
+                "traits": self.repository.list_rom_trait_facets(systems=systems_filter, query=query_value, missing_artwork=missing_artwork, genre=genre_value),
             },
         )
 
@@ -396,6 +398,7 @@ class HandlersContentMixin:
         self, system: Optional[str] = None, genre: Optional[str] = None,
         query: Optional[str] = None, browser_playable: bool = False,
         missing_art: Optional[List[str]] = None,
+        players: str = "", trait: str = "",
     ) -> None:
         """Duplicate groups with the same validated scope as the ROM grid."""
         system_value = str(system or "").strip()
@@ -403,10 +406,10 @@ class HandlersContentMixin:
         query_value = str(query or "").strip()
         systems_filter, missing_artwork = _rom_explorer_filters(system_value, browser_playable, missing_art)
         groups = self.repository.find_duplicate_roms(
-            systems=systems_filter, genre=genre_value, query=query_value, missing_artwork=missing_artwork,
+            systems=systems_filter, genre=genre_value, query=query_value, missing_artwork=missing_artwork, players=players, trait=trait,
         )
         genres = self.repository.list_rom_genre_facets(
-            systems=systems_filter, query=query_value, missing_artwork=missing_artwork,
+            systems=systems_filter, query=query_value, missing_artwork=missing_artwork, players=players, trait=trait,
         )
         self._send_json(200, {"groups": groups, "count": sum(len(group["items"]) for group in groups), "genres": genres})
 

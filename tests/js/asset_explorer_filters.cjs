@@ -35,6 +35,7 @@ const FormData = global.FormData;
 const run = eval('(function(){' +
   slice('const SYSTEMS_EXPLORE_PAGE_SIZE', '// Movies Browse (own top-level page') +
   slice('function systemsExploreHash(', 'function renderSystemsExploreSidebarShell(') +
+  slice('function addSystemsExploreTraitParams(', '// BIOS rows have no artwork') +
   slice('async function setSystemsExploreSystem(', 'function renderSystemsExploreGrid(') +
   slice('const artworkAssetVersions', 'function artworkEditableImageFields(') +
   slice('function bindArtworkEditButtons(', 'function openMarqueeCropper(') + `
@@ -47,6 +48,20 @@ return async function test() {
   renderSystemsExploreGrid = () => {};
   renderSystemsExploreMoreButton = () => {};
   systemsExploreBrowserPlayMap = {snes: 'snes'};
+  nodes.set('systems-explore-traits-list', node());
+  await setSystemsExploreTraitFilter('players', '4');
+  await setSystemsExploreTraitFilter('trait', 'lightgun');
+  let traitParams = new URLSearchParams(calls.at(-1).split('?')[1]);
+  assert.equal(traitParams.get('players'), '4'); assert.equal(traitParams.get('trait'), 'lightgun');
+  let traitHash = parseSystemsExploreHash(systemsExploreHash());
+  assert.equal(traitHash.players, '4'); assert.equal(traitHash.trait, 'lightgun');
+  renderSystemsExploreTraitsList();
+  assert(nodes.get('systems-explore-traits-list').innerHTML.includes('form-select'));
+  renderSystemsExploreActiveFilters();
+  assert(nodes.get('systems-explore-active-filters').innerHTML.includes('Light gun'));
+  await removeSystemsExploreFilter('players'); await removeSystemsExploreFilter('trait');
+  assert(!new URLSearchParams(calls.at(-1).split('?')[1]).has('trait'));
+  assert.equal(parseSystemsExploreHash('#systems/explore?players=bad&trait=<bad>').trait, '');
   systemsExploreSelectedSystem = 'snes'; systemsExploreSelectedGenre = 'Action';
   systemsExploreSearchQuery = '<img src=x onerror=alert(1)> & Sonic';
   systemsExploreMissingArt = ['image', 'video']; systemsExploreBrowserPlayOnly = true; systemsExploreDuplicatesMode = true;

@@ -137,6 +137,9 @@ const SYSTEMS_EXPLORE_ARTWORK_TYPES = [
   ["manual", "Manual"],
 ];
 let systemsExploreMissingArt = [];
+let systemsExplorePlayers = "";
+let systemsExploreTrait = "";
+const SYSTEMS_EXPLORE_TRAITS = [["lightgun", "Light gun"], ["wheel", "Wheel"], ["trackball", "Trackball"], ["spinner", "Spinner"], ["vertical", "Vertical arcade"]];
 // Movies Browse (own top-level page, see renderMovieExplorerPage) -- the
 // whole set loads once (movie libraries are far smaller than ROM sets) and
 // is grouped/filtered client-side.
@@ -4298,6 +4301,7 @@ function systemsExploreHash(system = systemsExploreSelectedSystem, genre = syste
   if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
   if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
   if (system !== SYSTEMS_EXPLORE_BIOS_KEY && systemsExploreDuplicatesMode) params.set("duplicates", "1");
+  if (system !== SYSTEMS_EXPLORE_BIOS_KEY) addSystemsExploreTraitParams(params);
   const qs = params.toString();
   return `#systems/explore${qs ? `?${qs}` : ""}`;
 }
@@ -4310,6 +4314,8 @@ function parseSystemsExploreHash(hash) {
     system: params.get("system") || "", genre: params.get("genre") || "",
     query: params.get("q") || "",
     missingArt: SYSTEMS_EXPLORE_ARTWORK_TYPES.map(([field]) => field).filter((field) => requestedArt.includes(field)),
+    players: ["2", "4"].includes(params.get("players")) ? params.get("players") : "",
+    trait: SYSTEMS_EXPLORE_TRAITS.some(([key]) => key === params.get("trait")) ? params.get("trait") : "",
     browserPlayable: params.get("browser_playable") === "1",
     duplicates: params.get("duplicates") === "1",
   };
@@ -4333,6 +4339,8 @@ async function renderSystemsExplorePage() {
   systemsExploreDuplicateGroups = [];
   systemsExploreBrowserPlayOnly = Boolean(parsed.browserPlayable);
   systemsExploreMissingArt = parsed.missingArt || [];
+  systemsExplorePlayers = parsed.players || "";
+  systemsExploreTrait = parsed.trait || "";
   setLoading(true, "Loading systems...");
   try {
     const [data, biosSummary, browserPlayInfo] = await Promise.all([
@@ -4406,6 +4414,10 @@ function renderSystemsExploreSidebarShell() {
       <div id="systems-explore-missing-art-list"></div>
     </div>
     <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Players and input</div>
+      <div id="systems-explore-traits-list"></div>
+    </div>
+    <div class="movie-explorer-sidebar-section">
       <div class="movie-explorer-sidebar-title">Game filters</div>
       <div class="form-check">
         <input class="form-check-input" type="checkbox" id="systemsExploreBrowserPlayFilter" onchange="toggleSystemsExploreBrowserPlayOnly()">
@@ -4421,6 +4433,32 @@ function renderSystemsExploreSidebarShell() {
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
   renderSystemsExploreMissingArtList();
+  renderSystemsExploreTraitsList();
+}
+function addSystemsExploreTraitParams(params) {
+  if (systemsExplorePlayers) params.set("players", systemsExplorePlayers);
+  if (systemsExploreTrait) params.set("trait", systemsExploreTrait);
+}
+function renderSystemsExploreTraitsList() {
+  const list = document.getElementById("systems-explore-traits-list");
+  if (!list) return;
+  const disabled = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY ? "disabled" : "";
+  const options = (items, selected) => items.map(([value, label]) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  list.innerHTML = `
+    <label for="systemsExplorePlayers" class="form-label small">Number of players</label>
+    <select id="systemsExplorePlayers" class="form-select form-select-sm mb-2" ${disabled} onchange="setSystemsExploreTraitFilter('players', this.value)">
+      ${options([["", "Any players"], ["2", "2+ players"], ["4", "4+ players"]], systemsExplorePlayers)}
+    </select>
+    <label for="systemsExploreTrait" class="form-label small">Input / orientation</label>
+    <select id="systemsExploreTrait" class="form-select form-select-sm" ${disabled} onchange="setSystemsExploreTraitFilter('trait', this.value)">
+      ${options([["", "Any input / orientation"], ...SYSTEMS_EXPLORE_TRAITS], systemsExploreTrait)}
+    </select>
+    <div class="small text-muted mt-1">Matches EmulationStation collections. Players must include the selected count. Input types require Batocera game resources.</div>`;
+}
+async function setSystemsExploreTraitFilter(key, value) {
+  if (key === "players") systemsExplorePlayers = ["2", "4"].includes(value) ? value : "";
+  if (key === "trait") systemsExploreTrait = SYSTEMS_EXPLORE_TRAITS.some(([name]) => name === value) ? value : "";
+  await refreshSystemsExploreFilters();
 }
 // BIOS rows have no artwork, so artwork filters are disabled for BIOS.
 function renderSystemsExploreMissingArtList() {
@@ -4556,6 +4594,8 @@ async function setSystemsExploreSystem(value) {
   if (value === SYSTEMS_EXPLORE_BIOS_KEY) {
     systemsExploreSelectedGenre = "";
     systemsExploreMissingArt = [];
+    systemsExplorePlayers = "";
+    systemsExploreTrait = "";
     systemsExploreBrowserPlayOnly = false;
     systemsExploreDuplicatesMode = false;
   }
@@ -4590,12 +4630,15 @@ function normalizeSystemsExploreFilters() {
   if (systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) {
     systemsExploreSelectedGenre = "";
     systemsExploreMissingArt = [];
+    systemsExplorePlayers = "";
+    systemsExploreTrait = "";
   }
 }
 function renderSystemsExploreFilterState() {
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
   renderSystemsExploreMissingArtList();
+  renderSystemsExploreTraitsList();
   const playable = document.getElementById("systemsExploreBrowserPlayFilter");
   const duplicates = document.getElementById("systemsExploreDuplicatesFilter");
   if (playable) playable.checked = systemsExploreBrowserPlayOnly;
@@ -4607,6 +4650,8 @@ function renderSystemsExploreActiveFilters() {
   if (!row) return;
   const filters = [];
   if (systemsExploreSelectedSystem) filters.push(["system", "", `System: ${systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY ? "BIOS" : systemsExploreSelectedSystem}`]);
+  if (systemsExplorePlayers) filters.push(["players", "", `${systemsExplorePlayers}+ players`]);
+  if (systemsExploreTrait) filters.push(["trait", "", SYSTEMS_EXPLORE_TRAITS.find(([key]) => key === systemsExploreTrait)?.[1] || systemsExploreTrait]);
   if (systemsExploreSelectedGenre) filters.push(["genre", "", `Category: ${systemsExploreSelectedGenre}`]);
   if (systemsExploreSearchQuery.trim()) filters.push(["q", "", `Search: ${systemsExploreSearchQuery.trim()}`]);
   SYSTEMS_EXPLORE_ARTWORK_TYPES.forEach(([field, label]) => {
@@ -4624,6 +4669,8 @@ function renderSystemsExploreActiveFilters() {
 async function removeSystemsExploreFilter(key, value = "") {
   if (key === "system") systemsExploreSelectedSystem = "";
   if (key === "genre") systemsExploreSelectedGenre = "";
+  if (key === "players") systemsExplorePlayers = "";
+  if (key === "trait") systemsExploreTrait = "";
   if (key === "q") {
     systemsExploreSearchQuery = "";
     const search = document.getElementById("systemsExploreSearch");
@@ -4676,6 +4723,7 @@ async function loadSystemsExploreDuplicates() {
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
     if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
     if (systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
+    addSystemsExploreTraitParams(params);
     const data = await api(`/admin/roms/duplicates?${params.toString()}`);
     if (requestId !== systemsExploreRequestId) return;
     systemsExploreDuplicateGroups = data.groups || [];
@@ -4732,6 +4780,7 @@ async function loadSystemsExploreRoms(opts = {}) {
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
     if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
     if (systemsExploreMissingArt.length) params.set("missing_art", systemsExploreMissingArt.join(","));
+    addSystemsExploreTraitParams(params);
     const data = await api(`/roms?${params.toString()}`);
     if (requestId !== systemsExploreRequestId) return;
     systemsExploreRoms = reset ? (data.roms || []) : [...systemsExploreRoms, ...(data.roms || [])];

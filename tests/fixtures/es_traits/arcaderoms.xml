@@ -1,0 +1,1 @@
+<roms><rom id="gunset" name="Gun game"/><rom id="knownset" name="Known unflagged game"/><rom id="verticalset" name="Vertical game" vert="true"/><rom id="horizontal" name="Horizontal game" vert="false"/><rom id="bios" bios="true" vert="true"/></roms>

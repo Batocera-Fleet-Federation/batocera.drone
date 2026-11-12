@@ -340,3 +340,14 @@ XML parsing — this codebase's own live-device investigations are what
 produced those fixtures' shape, and keeping them realistic is what catches
 real bugs (e.g. the `;` vs `,` separator mismatch would have been caught
 immediately by a fixture with both key types present).
+
+## Read-only game collection classification
+
+Assets → Games now mirrors ES player/input collection membership through
+`app/roms/es_game_traits.py`. It reads installed resources only; it does not
+modify ES settings or require an ES restart. Players come from gamelist
+metadata; gun/wheel/trackball/spinner come from `gamesdb.xml` markers,
+vertical arcade sets from `arcaderoms.xml`. Never infer these from genre.
+The ROM scanner refreshes traits when resource mtimes or effective system
+platforms change, even for unchanged gamelists. See `drone-games-feature`
+for the indexed filters and ES filename-normalization quirk.

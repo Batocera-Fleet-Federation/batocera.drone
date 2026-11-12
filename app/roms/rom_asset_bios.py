@@ -22,6 +22,7 @@ try:
         list_bios_cache_page,
         list_rom_cache_page,
         list_rom_genre_counts,
+        list_rom_trait_counts,
         list_rom_rows_by_system,
         list_rom_systems_page as list_rom_systems_cache_page,
         rom_cache_ready,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         list_bios_cache_page,
         list_rom_cache_page,
         list_rom_genre_counts,
+        list_rom_trait_counts,
         list_rom_rows_by_system,
         list_rom_systems_page as list_rom_systems_cache_page,
         rom_cache_ready,
@@ -126,6 +128,7 @@ class RomAssetBiosMixin:
         limit: int = 200,
         offset: int = 0,
         missing_artwork=None,
+        players="", trait="",
     ) -> Optional[dict]:
         """The Systems Browse page's card grid: a plain SQLite-cache page,
         across every system by default. Deliberately skips
@@ -143,7 +146,7 @@ class RomAssetBiosMixin:
             return None
         page = list_rom_cache_page(
             self.settings, systems=systems, genre=genre, query=query, limit=limit, offset=offset,
-            missing_artwork=missing_artwork,
+            missing_artwork=missing_artwork, players=players, trait=trait,
         )
         if page is None:
             return None
@@ -176,10 +179,15 @@ class RomAssetBiosMixin:
             offset=offset,
         )
 
-    def list_rom_genre_facets(self, *, systems=None, query: str = "", missing_artwork=None) -> List[dict]:
+    def list_rom_genre_facets(self, *, systems=None, query: str = "", missing_artwork=None, players="", trait="") -> List[dict]:
         if self.settings is None:
             return []
-        return list_rom_genre_counts(self.settings, systems=systems, query=query, missing_artwork=missing_artwork)
+        return list_rom_genre_counts(self.settings, systems=systems, query=query, missing_artwork=missing_artwork, players=players, trait=trait)
+
+    def list_rom_trait_facets(self, **filters):
+        if self.settings is None:
+            return []
+        return list_rom_trait_counts(self.settings, **filters)
 
     def list_bios_page(
         self,
