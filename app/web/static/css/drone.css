@@ -1163,36 +1163,6 @@
         min-height: 360px;
       }
     }
-    #systemInfoBar {
-      font-size: 0.85rem;
-      color: var(--admin-muted);
-    }
-    #systemInfoBar .badge {
-      background: rgba(0, 194, 255, 0.12);
-      color: #d7f4ff;
-      border: 1px solid rgba(0, 194, 255, 0.26);
-      font-weight: 500;
-      padding: 0.38rem 0.58rem;
-    }
-    #systemInfoBar button.badge.sysinfo-badge-btn {
-      cursor: pointer;
-      font: inherit;
-      font-weight: 500;
-      appearance: none;
-      -webkit-appearance: none;
-      transition: filter 0.15s ease, transform 0.1s ease;
-    }
-    #systemInfoBar button.badge.sysinfo-badge-btn:hover,
-    #systemInfoBar button.badge.sysinfo-badge-btn:focus-visible {
-      filter: brightness(1.25);
-    }
-    #systemInfoBar button.badge.sysinfo-badge-btn:focus-visible {
-      outline: 2px solid var(--admin-sidebar-accent);
-      outline-offset: 2px;
-    }
-    #systemInfoBar button.badge.sysinfo-badge-btn:active {
-      transform: translateY(1px);
-    }
     /* First-time-load onboarding tour (intro.js-style spotlight walkthrough) */
     .tour-backdrop {
       position: fixed;
@@ -1923,25 +1893,7 @@
       color: var(--admin-text);
     }
 
-    /* Netflix-style movie/systems explorer: a full-bleed content area
-       (movie-explorer-active is toggled on <body> by the router) that still leaves the app's own navbar
-       (.sidebar, despite the name -- see index.html) visible/usable so
-       Browse being the default page doesn't strand anyone; only the small
-       system-info badge row goes away, same as every other Movies-tab view. */
-    body.movie-explorer-active #systemInfoBar {
-      /* #systemInfoBar carries Bootstrap's d-flex utility class
-         (display: flex !important in the template) -- without !important
-         here too, this rule loses the cascade and the bar stays visible. */
-      display: none !important;
-    }
-    /* Any Movies-tab view (tree list, single-movie detail page, and the
-       explorer covered above) drops the system info chip row -- it's just
-       CPU/version/email badges that crowd a "just show me the movie" page
-       and aren't specific to what's on screen; the sidebar/nav stay put
-       since, unlike the full-bleed explorer, these pages keep normal chrome. */
-    body.movies-page-active #systemInfoBar {
-      display: none !important;  /* see the !important note above */
-    }
+    /* Full-bleed movie/systems explorer keeps the app navbar visible. */
     body.movie-explorer-active .app-shell {
       padding: 0;
       background: transparent;
@@ -2260,8 +2212,7 @@
        wraps to two rows on above.
        !important is required: .layout-shell also carries Bootstrap's
        py-3/py-lg-4 utility classes, which Bootstrap itself ships as
-       `padding-bottom: ... !important` -- same reason the
-       body.movie-explorer-active #systemInfoBar rule above needs it. */
+       `padding-bottom: ... !important`. */
     body.music-player-bar-active .layout-shell {
       padding-bottom: 4.75rem !important;
     }
