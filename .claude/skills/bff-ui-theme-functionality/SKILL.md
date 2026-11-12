@@ -53,3 +53,10 @@ Search the new markup for `<table`, `modal-content`, and `accordion`. Each
 table must include `themed-table`, each modal-content `themed-modal`, each
 accordion `themed-accordion`. If a screenshot shows a white grid or white
 dialog with light text, the theme contract was skipped.
+
+## Header layout
+
+Keep page content directly inside the app shell, without a system-status badge
+row or reserved space above it. Batocera version, machine identity, pairing, VPN,
+email, and network-share status belong on their dedicated pages. The app version
+beside the brand and notification unread count remain separate navigation elements.

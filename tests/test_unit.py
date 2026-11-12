@@ -2810,7 +2810,7 @@ class SettingsTests(unittest.TestCase):
         ]
         controls_source = js_source[
             js_source.index("async function renderAdminControlsPage()"):
-            js_source.index("function _sysInfoBadge(")
+            js_source.index("async function loadDroneVersion(")
         ]
 
         self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
@@ -2850,7 +2850,7 @@ class SettingsTests(unittest.TestCase):
         js_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         controls_source = js_source[
             js_source.index("async function renderAdminControlsPage()"):
-            js_source.index("function _sysInfoBadge(")
+            js_source.index("async function loadDroneVersion(")
         ]
         self.assertIn('id="esCollectionsSearchInput"', controls_source)
         self.assertIn('id="esCollectionsNoMatches"', controls_source)
@@ -3044,8 +3044,8 @@ class SettingsTests(unittest.TestCase):
         api_routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
         drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/web/handlers_diagnostics.py").read_text(encoding="utf-8")
 
-        self.assertIn("loadSystemInfoBar();", js_source)
-        self.assertNotIn("await loadSystemInfoBar();", js_source)
+        self.assertIn("loadDroneVersion();", js_source)
+        self.assertNotIn("await loadDroneVersion();", js_source)
         self.assertIn('getSystemsData(),\n      api("/bios?limit=1&offset=0")', js_source)
         self.assertNotIn("getSystemsData(),\n        refreshRandomThemeLogo(),", js_source)
         self.assertIn('api("/admin/system-info?speed=1", { timeoutMs: 0 })', js_source)
@@ -7785,13 +7785,15 @@ class SwarmPageTests(unittest.TestCase):
         self.assertNotIn("setHash('#admin/swarm')", menu_body)
         self.assertNotIn(">Swarm<", menu_body)
 
-    def test_system_info_bar_uses_cheap_paired_count(self) -> None:
-        bar_start = self.js.index("async function loadSystemInfoBar()")
-        bar_end = self.js.index("async function router(", bar_start)
-        body = self.js[bar_start:bar_end]
-        self.assertIn('api("/admin/local-network/status")', body)
-        self.assertIn("Paired: ${pairedCount}", body)
-        self.assertNotIn('api("/admin/swarm/overview")', body)
+    def test_header_has_no_system_status_badge_row(self) -> None:
+        template = Path("app/web/templates/index.html").read_text(encoding="utf-8")
+        self.assertNotIn('systemInfoBar', template)
+        self.assertNotIn('systemInfoBar', self.js)
+        self.assertNotIn('_sysInfoBadge', self.js)
+        start = self.js.index("async function loadDroneVersion()")
+        body = self.js[start:self.js.index("// Silently updates", start)]
+        for endpoint in ("/admin/local-network/status", "/admin/vpn", "/admin/smtp", "/admin/network-shares"):
+            self.assertNotIn(endpoint, body)
 
     def test_swarm_page_caches_drones_by_id_for_the_tailnet_modal(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
@@ -8416,14 +8418,6 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn(".reference-roms-table {", self.css)
         self.assertIn(".reference-roms-row-selected", self.css)
 
-    def test_referencing_pill_shown_next_to_email_pill(self) -> None:
-        bar_start = self.js.index("async function loadSystemInfoBar()")
-        bar_end = self.js.index("async function router(", bar_start)
-        body = self.js[bar_start:bar_end]
-        email_index = body.index("Email: ${emailOn")
-        share_index = body.index("Referencing: ${shares.length}")
-        self.assertTrue(email_index < share_index)
-        self.assertIn('api("/admin/network-shares")', body)
 
 
 class TailnetServiceTests(unittest.TestCase):
