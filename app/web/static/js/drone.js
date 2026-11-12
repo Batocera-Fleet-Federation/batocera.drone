@@ -6132,7 +6132,9 @@ function openTransferDetails(row) {
     "Gamelist": row.gamelist_update ? JSON.stringify(row.gamelist_update) : "",
     "Transfer ID": row.job_id || row.upload_id || row.id || "", "Transport": row.transport || "",
     "Asset type": row.asset_type || "", "Queue position": row.queue_position || "",
-    "Fingerprint": row.rom_fingerprint || "" };
+    "Fingerprint": row.rom_fingerprint || "",
+    "Sync ID": row.sync_id || "", "Source action ID": row.source_action_id || "",
+    "File type": row.file_type || "", "Entry type": row.entry_type || "" };
   modal.innerHTML = `<div class="modal-dialog modal-dialog-scrollable"><div class="modal-content">
     <div class="modal-header"><h5 class="modal-title" id="transferDetailsTitle">Transfer details</h5>
     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
