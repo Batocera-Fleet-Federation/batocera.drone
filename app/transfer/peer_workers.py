@@ -240,7 +240,7 @@ def _start_local_network_generation(settings: Settings) -> None:
                     continue
                 started = time.monotonic()
                 try:
-                    _, address = _peer_get_json_for_peer(
+                    health, address = _peer_get_json_for_peer(
                         peer,
                         "/v1/api/peer/health",
                         settings,
@@ -250,6 +250,10 @@ def _start_local_network_generation(settings: Settings) -> None:
                     result["target_address"] = address
                     result["status"] = "pass"
                     result["latency_ms"] = int((time.monotonic() - started) * 1000)
+                    # The reply arrived over the pinned mTLS channel, so its hostname is
+                    # the peer's own current name (a rename shows up within one interval).
+                    if isinstance(health, dict):
+                        _local_network.refresh_paired_peer_name(settings, peer_id, health.get("name"))
                 except Exception as error:
                     result["failure_reason"] = str(error)
                 checks.append(result)

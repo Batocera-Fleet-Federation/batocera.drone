@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import socket
 import sqlite3
@@ -409,6 +410,32 @@ def _without_cleartext_overrides(peer: dict) -> dict:
         if key in cleaned and value and not value.lower().startswith("https://"):
             del cleaned[key]
     return cleaned
+
+
+_PEER_DISPLAY_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}")
+
+
+def clean_peer_display_name(value: Any) -> str:
+    """Return a hostname-shaped display name from a paired peer's health reply, or ""."""
+    text = str(value or "").strip()
+    return text if _PEER_DISPLAY_NAME_RE.fullmatch(text) else ""
+
+
+def refresh_paired_peer_name(settings: Any, peer_id: str, name: str) -> bool:
+    """Persist a peer's current hostname after an mTLS-authenticated health check.
+
+    Only an existing paired record is touched; nothing else (address, pin, or
+    last_seen) changes. Returns True when the stored name was rewritten.
+    """
+    cleaned = clean_peer_display_name(name)
+    peer_id = str(peer_id or "").strip()
+    peers = _load_peer_map(settings, "local_paired_peers")
+    current = peers.get(peer_id)
+    if not cleaned or current is None or current.get("name") == cleaned:
+        return False
+    peers[peer_id] = {**current, "name": cleaned, "hostname": cleaned}
+    _save_peer_map(settings, "local_paired_peers", peers)
+    return True
 
 
 def save_paired_peer(settings: Any, peer: dict) -> dict:
