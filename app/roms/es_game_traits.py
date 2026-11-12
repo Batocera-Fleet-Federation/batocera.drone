@@ -83,7 +83,7 @@ def _resources(signature):
                 name = rom.get('id', '')
                 if name:
                     known_arcade.add(name)
-                if (name and rom.get('name') is not None and rom.get('vert') == 'true'
+                if (name and rom.get('vert') == 'true'
                         and rom.get('device') != 'true' and rom.get('bios') != 'true'):
                     vertical.add(name)
     return games, vertical, known_arcade
@@ -110,8 +110,9 @@ class GameTraits:
             traits.update(self.games.get('arcade', {}).get(stem, ()))
             if stem in self.vertical:
                 traits.add('vertical')
-            if stem in self.known_arcade or traits:
-                return sorted(traits)
+            # Arcade platforms use exact set-name lookup only; never fall back
+            # to ES's normalized substring matching.
+            return sorted(traits)
         name = indexed_name(stem)
         for game_id, flags in self.games.get(system, {}).items():
             if game_id in name:

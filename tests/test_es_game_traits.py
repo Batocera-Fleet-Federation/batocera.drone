@@ -59,7 +59,7 @@ class EsGameTraitsTests(unittest.TestCase):
             ('mame', 'verticalset.zip', ['vertical']),
             ('snes', 'verticalset.zip', []),
             ('fbneo', 'knownset.zip', []),  # known unflagged arcade must not fall back
-            ('fbneo', 'Unknown Deluxe.zip', ['wheel']),
+            ('fbneo', 'Unknown Deluxe.zip', []),  # arcade platforms never use substring matching
             ('mame', 'bios.zip', []), ('snes', 'default.zip', []),
         ]:
             with self.subTest(system=system, name=name):
