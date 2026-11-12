@@ -2852,8 +2852,8 @@ class SettingsTests(unittest.TestCase):
             js_source.index("async function renderAdminControlsPage()"):
             js_source.index("async function loadDroneVersion(")
         ]
-        self.assertIn('id="esCollectionsSearchInput"', controls_source)
-        self.assertIn('id="esCollectionsNoMatches"', controls_source)
+        self.assertNotIn('id="esCollectionsSearchInput"', controls_source)
+        self.assertNotIn('id="esCollectionsNoMatches"', controls_source)
         self.assertIn("function filterEsCollections(", js_source)
         self.assertIn("function wireEsCollectionsSearch(", js_source)
         # Every place that (re)builds the collections body must reapply the
@@ -9608,14 +9608,12 @@ class TailscaleInstallUiTests(unittest.TestCase):
         cls.handlers = root.joinpath("app/web/handlers_network.py").read_text(encoding="utf-8")
         cls.routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
 
-    def test_controls_page_has_a_tailnet_tile_with_an_install_button(self) -> None:
+    def test_controls_page_does_not_offer_tailnet_management(self) -> None:
         start = self.js.index("async function renderAdminControlsPage()")
-        body = self.js[start:start + 12000]
-        self.assertIn('api("/admin/tailnet/status")', body)
-        self.assertIn("renderTailnetControlBadge(tailnet)", body)
-        self.assertIn("installTailscale(this,", body)
-        # The tile must never take the Controls page down with it.
-        self.assertIn(".catch(() => ({ installed: false, unavailable: true }))", body)
+        body = self.js[start:self.js.index("async function loadDroneVersion()", start)]
+        self.assertNotIn('api("/admin/tailnet/status")', body)
+        self.assertNotIn("Tailnet", body)
+        self.assertNotIn("installTailscale(this,", body)
 
     def test_swarm_tailnet_card_offers_install_instead_of_a_shell_command(self) -> None:
         start = self.js.index("function renderSwarmTailnetCard(")
