@@ -2431,13 +2431,15 @@
   table.bff-stack.transfer-table tr { display: grid; grid-template-columns: auto 1fr; gap: 0 .5rem; padding: .4rem .6rem; }
   table.bff-stack.transfer-table td { padding: .15rem 0; min-width: 0; }
   table.bff-stack.transfer-table td::before { display: none; }
+  /* Participant columns (Initiated by / Downloading / Uploading) stay hidden;
+     the phone summary keeps File, System, Progress and Speed (#703). */
+  table.bff-stack.transfer-table td:nth-child(3),
   table.bff-stack.transfer-table td:nth-child(4),
-  table.bff-stack.transfer-table td:nth-child(5),
-  table.bff-stack.transfer-table td:nth-child(6),
-  table.bff-stack.transfer-table td:nth-child(8) { display: none; }
-  table.bff-stack.transfer-table td:nth-child(3) { display: none; }
-  table.bff-stack.transfer-table td:nth-child(7) { grid-column: 1 / -1; justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
-  table.bff-stack.transfer-table td:nth-child(9) { grid-column: 1 / -1; justify-content: flex-start; }
+  table.bff-stack.transfer-table td:nth-child(5) { display: none; }
+  table.bff-stack.transfer-table td:nth-child(6) { grid-column: 1 / -1; justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
+  table.bff-stack.transfer-table td:nth-child(7),
+  table.bff-stack.transfer-table td:nth-child(8),
+  table.bff-stack.transfer-table td:nth-child(9) { grid-column: 1 / -1; justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
   /* Controls (cancel/pause/resume/retry) must stay reachable on phones: the
      Actions cell is a full-width button row, never hidden. */
   table.bff-stack.transfer-table td.download-actions { grid-column: 1 / -1; justify-content: flex-start; text-align: left; width: 100%; white-space: normal; }
