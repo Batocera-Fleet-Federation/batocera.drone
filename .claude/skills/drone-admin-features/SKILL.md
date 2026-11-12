@@ -119,12 +119,13 @@ entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
 
 - **System Info** — `renderAdminSystemInfoPage` (`drone.js`, `GET
   /admin/system-info?speed=1`): runtime/CPU/memory/disk health, network fields,
-  the **Drone/PixeN self-update buttons** (`updateDroneApp()`/`runPixenUpdate()`,
-  routes `/admin/system/update-drone` and `/admin/system/run-pixen-update`), and
-  the **Restart EmulationStation** button (`restartEmulationStation()`, `POST
-  /admin/system/restart-emulationstation` → `batocera-es-swissknife --restart`,
-  backed by `device/device_control.py`'s `_restart_emulationstation()`). Backend:
-  `handlers_diagnostics.py` (+ `handlers_system.py` for the restart route). Also
+  and PixN installation details. Maintenance actions live on **Controls**:
+  Drone update, automatic updates, and Restart EmulationStation
+  (`/admin/system/update-drone`, `/admin/system/auto-update`, and
+  `/admin/system/restart-emulationstation`). RGS Download Manager and Run PixN
+  Update are intentionally absent from the UI (#694); Controls must not fetch
+  RGS status. Their backend routes remain available for future work. Backend:
+  `handlers_diagnostics.py` (+ `handlers_system.py` for maintenance routes). Also
   hosts an **Asset Cache** card: `renderAssetCachePanel(payload, false)` fed by
   `GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
   `purgeAssetCache()`/`clearPendingAssetChanges()` check

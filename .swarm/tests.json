@@ -5282,6 +5282,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_694_controls_rgs_pixn_removal_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-694-controls-rgs-pixn-removal-uat",
+      "name": "Issue #694: Controls page renders without the RGS Download Manager card or Run PixN Update button",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/drone.js",
+          "tests/adversarial/test_issue_694_controls_rgs_pixn_removal_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
