@@ -6109,13 +6109,55 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
     }).join("")}</tbody></table></div>`;
 }
 
+// Asset transfers are pulls: the downloading Drone initiates the request.
+function transferParticipants(row) {
+  const upload = row._direction === "upload";
+  const local = (upload ? uploadPayload : transferPayload).target_drone_id || "This Drone";
+  const downloading = upload ? (row.peer_device_id || "Unknown") : (row.target_drone_id || local);
+  const uploading = upload ? local : (row.source_drone_id || "Unknown");
+  return { "Initiated by": row.initiated_by || row.requested_by || downloading,
+    "Downloading": downloading, "Uploading": uploading };
+}
+
+function openTransferDetails(row) {
+  document.getElementById("transferDetailsModal")?.remove();
+  const modal = document.createElement("div");
+  modal.id = "transferDetailsModal";
+  modal.className = "modal fade";
+  modal.tabIndex = -1;
+  modal.setAttribute("aria-labelledby", "transferDetailsTitle");
+  const fields = { ...transferParticipants(row),
+    "Direction": row._direction || "download", "Status": row.status || "uploading",
+    "File": row.file_path || row.relative_path || row.rom_name || row.file_name || "Unknown",
+    "System": row.system || "", "Progress": `${Number(row.percentage || 0).toFixed(1)}%`,
+    "Transferred": formatBytes(row.downloaded_bytes || row.bytes_transferred),
+    "Size": formatBytes(row.total_bytes || row.file_size),
+    "Speed": `${formatBytes(row.transfer_speed_bps)}/s`,
+    "Created": row.created_at || "", "Started": row.started_at || row.download_started_at || "",
+    "Completed": row.completed_at || "", "Error": row.error_message || row.failure_reason || "",
+    "Gamelist": row.gamelist_update ? JSON.stringify(row.gamelist_update) : "",
+    "Transfer ID": row.job_id || row.upload_id || row.id || "", "Transport": row.transport || "",
+    "Asset type": row.asset_type || "", "Queue position": row.queue_position || "",
+    "Fingerprint": row.rom_fingerprint || "" };
+  modal.innerHTML = `<div class="modal-dialog modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title" id="transferDetailsTitle">Transfer details</h5>
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body"><dl>${Object.entries(fields).filter(([, value]) => value !== "").map(([label, value]) =>
+      `<dt>${escapeHtml(label)}</dt><dd class="text-break">${escapeHtml(String(value))}</dd>`).join("")}</dl></div>
+    <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>
+    </div></div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener("hidden.bs.modal", () => modal.remove(), { once: true });
+  window.bootstrap.Modal.getOrCreateInstance(modal).show();
+}
+
 function renderTransferRows(rows, options = {}) {
   if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No transfers in this group.")}</div>`;
   const showActions = options.showActions !== false;
   const assetTableText = options.assetTableText === true;
   const tableClass = assetTableText ? "download-table local-assets-table" : "download-table";
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table ${tableClass} bff-stack">
-    <thead><tr><th></th><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${showActions ? '<th class="download-actions">Actions</th>' : ""}</tr></thead>
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table ${tableClass} bff-stack transfer-table">
+    <thead><tr><th></th><th>Status</th><th>Initiated by</th><th>Downloading</th><th>Uploading</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${showActions ? '<th class="download-actions">Actions</th>' : ""}</tr></thead>
     <tbody>${rows.map(row => {
       const isUpload = row._direction === "upload";
       const pct = Number(row.percentage || 0);
@@ -6123,7 +6165,6 @@ function renderTransferRows(rows, options = {}) {
       const statusClass = status === "failed" ? "danger" : status === "completed" ? "success" : status === "cancelled" ? "secondary" : status === "downloading" ? "info" : status === "paused" ? "warning" : status === "pending" ? "dark" : "primary";
       const filePath = row.file_path || row.relative_path || row.rom_name || row.file_name || "";
       const errorText = row.error_message || row.failure_reason || "";
-      const peerLabel = isUpload ? (row.peer_device_id || "unknown peer") : (row.source_drone_id || "n/a");
       const directionIcon = isUpload
         ? `<i class="bi bi-cloud-arrow-up text-info" title="Upload -- serving to a peer"></i>`
         : `<i class="bi bi-cloud-arrow-down text-primary" title="Download -- pulling from a peer"></i>`;
@@ -6153,10 +6194,10 @@ function renderTransferRows(rows, options = {}) {
         ].filter(Boolean).join(" ");
       }
       const rowKey = `${row._direction || "download"}:${row.job_id || row.upload_id || row.id || row.sync_id || filePath}`;
-      return `<tr data-transfer-key="${escapeHtml(rowKey)}">
+      return `<tr tabindex="0" aria-label="View transfer details" data-transfer-details="${escapeHtml(JSON.stringify(row))}" data-transfer-key="${escapeHtml(rowKey)}">
         <td>${directionIcon}</td>
         <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
-        <td class="small mono">${escapeHtml(peerLabel)}</td>
+        ${Object.values(transferParticipants(row)).map(value => `<td class="small mono transfer-participant">${escapeHtml(String(value))}</td>`).join("")}
         ${assetTableText
           ? `<td title="${escapeHtml(errorText || row.rom_fingerprint || "")}"><strong>${escapeHtml(filePath)}</strong></td>
         <td>${escapeHtml(row.system || "")}</td>
@@ -6312,6 +6353,7 @@ function updateTransfersLive(target, downloads, uploads) {
     region.querySelectorAll("[data-transfer-key]").forEach(row => {
       const nextRow = nextRows.get(row.dataset.transferKey);
       if (!nextRow) return;
+      row.dataset.transferDetails = nextRow.dataset.transferDetails;
       Array.from(row.cells).forEach((cell, index) => {
         const nextCell = nextRow.cells[index];
         if (nextCell && !cell.contains(document.activeElement) && cell.innerHTML !== nextCell.innerHTML) {
@@ -10510,7 +10552,6 @@ async function referenceRomsWaitForSettled(wantOn) {
 
 async function renderIntegrationTransfersPanel(target) {
   target.innerHTML = `
-    <div id="localTransferRequestPanel"></div>
     <div class="card log-card mt-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
@@ -10534,10 +10575,22 @@ async function renderIntegrationTransfersPanel(target) {
     }
   });
 
-  await Promise.allSettled([
-    renderLocalTransferRequestPanel(document.getElementById("localTransferRequestPanel")),
-    loadTransfers(),
-  ]);
+  const body = document.getElementById("transfersBody");
+  function showDetails(event) {
+    if (event.target.closest("button, a, input, select")) return;
+    const row = event.target.closest("[data-transfer-details]");
+    if (row) openTransferDetails(JSON.parse(row.dataset.transferDetails));
+  }
+  body.addEventListener("click", showDetails);
+  body.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      if (event.target.matches("[data-transfer-details]")) {
+        event.preventDefault();
+        showDetails(event);
+      }
+    }
+  });
+  await loadTransfers();
 }
 
 
