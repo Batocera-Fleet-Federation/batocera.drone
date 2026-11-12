@@ -79,7 +79,8 @@ ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_H
 # empty, and its card grid's guessed image filenames kept missing real ones, on any
 # device that wasn't otherwise due for a rescan). v4: missing_artwork (indexed into
 # rom_missing_artwork for Systems Browse's "Missing artwork" filter) -- same backfill reason.
-ROM_CLASSIFIER_VERSION = 4
+# v5: ES players and input/orientation collections, plus a resource signature gate.
+ROM_CLASSIFIER_VERSION = 5
 # ROM_METADATA_HASH_ROMS_ENABLED stays the single source in drone_api (tests patch it there
 # + rom_metadata_state reads it); lazy-imported inside _hash_rom_metadata_batches below.
 
@@ -173,7 +174,12 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     # gamelist.xml changed (the MD5 gate below would otherwise carry stale rows
     # forward forever). The stored version is only stamped after a COMPLETE pass, so
     # an interrupted re-index resumes on the next poll.
-    classifier_stale = str(cache.get("rom_classifier_version") or "") != str(ROM_CLASSIFIER_VERSION)
+    try:
+        from .es_game_traits import GameTraits
+    except ImportError:  # pragma: no cover - flat execution
+        from roms.es_game_traits import GameTraits
+    game_traits = GameTraits(settings)
+    classifier_stale = cache.get("es_traits_version") != game_traits.version or str(cache.get("rom_classifier_version") or "") != str(ROM_CLASSIFIER_VERSION)
     if classifier_stale:
         print(
             f"ROM metadata classifier version changed: stored={cache.get('rom_classifier_version')!r} "
@@ -252,6 +258,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
                 previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
                 base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
+                base_entry["traits"] = game_traits.classify(system_name, file_path)
                 previous_fingerprint = (previous.get("rom_fingerprint") or previous.get("fingerprint")) if previous else None
                 reuse_fingerprint = None
                 if previous and previous.get("file_size") == stat_size and previous_fingerprint:
@@ -408,6 +415,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["scan_in_progress"] = False
     # Stamp the classifier version only on a completed pass (see classifier_stale above).
     cache["rom_classifier_version"] = ROM_CLASSIFIER_VERSION
+    cache["es_traits_version"] = game_traits.version
     _drone_log("Asset metadata poll phase=cache_write")
     cache_write_started = time.monotonic()
     rom_updates = {

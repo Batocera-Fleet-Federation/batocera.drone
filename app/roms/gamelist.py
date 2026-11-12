@@ -107,11 +107,13 @@ def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, a
     #    artwork" filter.
     existing = rom.get("existing") or {}
     genre = _first_metadata_value((rom.get("gamelist") or {}).get("genre"))
+    players = _first_metadata_value((rom.get("gamelist") or {}).get("players"))
     image_relative_path = _first_metadata_value(existing.get("image"))
     missing_artwork = [field for field in ARTWORK_FIELDS if not str(existing.get(field) or "").strip()]
     return {
         **{k: v for k, v in rom.items() if k not in {"fingerprint", "rom_fingerprint", "gamelist", "existing", "name", "title", "rom_name"}},
         "genre": genre,
+        "players": players,
         "image_relative_path": image_relative_path,
         "missing_artwork": missing_artwork,
         "system": system_name,
