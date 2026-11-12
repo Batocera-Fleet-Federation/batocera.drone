@@ -234,7 +234,7 @@ let tailnetDiscoveryPromise = null;
 // This Drone's own configured peer ROM references (NFS-preferred, SMB fallback),
 // keyed by peer_id -- populated by renderSwarmPage(), read by
 // renderSwarmDroneCard() so each peer's row can show whether it's currently
-// referenced and by the system-info pill in loadSystemInfoBar().
+// referenced.
 let swarmNetworkSharesByPeer = {};
 let vpnTimer = null;
 let vpnInFlight = false;
@@ -250,7 +250,7 @@ let emulatorConfigSelectionRequestId = 0;
 let emulatorConfigTreeExpanded = new Set();
 let systemsCache = null;
 let systemRomCache = {};
-let systemInfoLoaded = false;
+let droneVersionLoaded = false;
 let adminEnabled = true;
 let loadingToastEl = null;
 let currentUsername = "";
@@ -5250,11 +5250,6 @@ const ONBOARDING_TOUR_STEPS = [
     body: "Torrents, VPN, Email, Automation, and diagnostic tools all live here.",
   },
   {
-    selector: "#systemInfoBar",
-    title: "At a glance",
-    body: "Batocera version, machine ID, fleet connections, VPN, and email status. Tap any badge to jump straight to that page.",
-  },
-  {
     selector: ".help-security-band",
     title: "Security, explained",
     body: "Tap any highlighted term on this page any time to see a plain-language explanation and a place to read more.",
@@ -5398,8 +5393,7 @@ function maybeAutoStartOnboardingTour() {
   let dismissed = false;
   try { dismissed = localStorage.getItem(ONBOARDING_TOUR_STORAGE_KEY) === "1"; } catch (_) { dismissed = true; }
   if (dismissed || onboardingTourState) return;
-  // Badges/nav visibility settle asynchronously on boot; give them a moment
-  // so the tour doesn't measure an empty #systemInfoBar and skip that step.
+  // Navigation visibility settles asynchronously on boot; give it a moment.
   setTimeout(() => {
     if (!onboardingTourState && (window.location.hash === "" || window.location.hash === "#" || window.location.hash === "#home" || window.location.hash === "#help")) {
       startOnboardingTour();
@@ -13004,84 +12998,19 @@ async function renderAdminControlsPage() {
     setLoading(false);
   }
 }
-function _sysInfoBadge(innerHtml, hash, title, style = "") {
-  return `<button type="button" class="badge sysinfo-badge-btn" style="${style}" onclick="setHash('${hash}')" title="${escapeHtml(title)}">${innerHtml}</button>`;
-}
-async function loadSystemInfoBar() {
-  if (systemInfoLoaded) return;
-  const bar = document.getElementById("systemInfoBar");
-  const machineNav = document.getElementById("machineIdNav");
-  if (!bar) return;
-  if (!adminEnabled) {
-    bar.innerHTML = "";
-    if (machineNav) machineNav.textContent = "Machine ID unavailable";
-    systemInfoLoaded = true;
-    return;
-  }
+async function loadDroneVersion() {
+  if (droneVersionLoaded || !adminEnabled) return;
   try {
     const payload = await api("/admin/system-info");
-    const fields = payload.fields || {};
-    const lines = payload.lines || [];
-    const version = fields.batocera_version;
-    const droneAppVersion = fields.drone_app_version || payload.drone_app_version || "";
-    const machineId = fields.machine_id || "";
-    const chips = [];
-    if (droneVersionBadge && droneAppVersion) {
-      droneVersionBadge.textContent = droneAppVersion;
+    const version = (payload.fields || {}).drone_app_version || payload.drone_app_version || "";
+    if (droneVersionBadge && version) {
+      droneVersionBadge.textContent = version;
       droneVersionBadge.classList.remove("d-none");
     }
-    if (version) chips.push(_sysInfoBadge(`Batocera: ${escapeHtml(version)}`, "#admin/system-info", "Open System Info"));
-    if (machineId) chips.push(_sysInfoBadge(`Machine ID: ${escapeHtml(machineId)}`, "#admin/system-info", "Open System Info"));
-    try {
-      const network = await api("/admin/local-network/status");
-      const pairedCount = Number(network.paired_count || 0);
-      chips.push(_sysInfoBadge(`Paired: ${pairedCount}`, "#admin/swarm", "Open Swarm", "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"));
-    } catch (_) {
-      // Paired-device status is best-effort context, not core system info.
-    }
-    try {
-      const vpn = await api("/admin/vpn");
-      const vpnConnected = vpn.status === "connected";
-      const vpnStyle = vpnConnected
-        ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
-        : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
-      chips.push(_sysInfoBadge(`<i class="bi bi-shield-lock me-1"></i>VPN: ${vpnConnected ? "Connected" : "Disconnected"}`, "#admin/vpn", "Open VPN", vpnStyle));
-    } catch (_) {
-      // VPN status is best-effort context, not core system info.
-    }
-    try {
-      const smtp = await api("/admin/smtp");
-      const emailOn = !!smtp.smtp_enabled;
-      const emailStyle = emailOn
-        ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
-        : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
-      chips.push(_sysInfoBadge(`<i class="bi bi-envelope me-1"></i>Email: ${emailOn ? "On" : "Off"}`, "#admin/smtp", "Open Email", emailStyle));
-    } catch (_) {
-      // SMTP status is best-effort context, not core system info.
-    }
-    try {
-      const networkShares = await api("/admin/network-shares");
-      const shares = networkShares.shares || [];
-      if (shares.length) {
-        const allHealthy = shares.every((share) => share.status === "mounted");
-        const shareStyle = allHealthy
-          ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
-          : "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)";
-        chips.push(_sysInfoBadge(`<i class="bi bi-hdd-network me-1"></i>Referencing: ${shares.length}`, "#admin/swarm", "Open Swarm", shareStyle));
-      }
-    } catch (_) {
-      // Network share status is best-effort context, not core system info.
-    }
-    if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
-    if (!chips.length && lines.length) {
-      chips.push(`<span class="badge">${escapeHtml(lines[0])}</span>`);
-    }
-    bar.innerHTML = chips.join("");
   } catch (_) {
-    bar.innerHTML = `<span class="badge">System Info Unavailable</span>`;
-    if (machineNav) machineNav.textContent = "Machine ID unavailable";
+    // App version is optional branding; page content remains available.
   } finally {
-    systemInfoLoaded = true;
+    droneVersionLoaded = true;
   }
 }
 // Silently updates the URL and re-renders for it immediately, in the same
@@ -13510,7 +13439,7 @@ async function startApp() {
   }
   applyAdminVisibility();
   setupStackTables();
-  loadSystemInfoBar();
+  loadDroneVersion();
   // Render immediately so UI/menu works even if theme discovery is slow.
   await router();
   try {
@@ -13684,8 +13613,6 @@ function renderLoginPage() {
   document.querySelector(".nav-actions")?.classList.add("d-none");
   document.getElementById("logoutBtn")?.classList.add("d-none");
   document.getElementById("accountSettingsBtn")?.classList.add("d-none");
-  const systemInfoBar = document.getElementById("systemInfoBar");
-  if (systemInfoBar) systemInfoBar.innerHTML = "";
   titleNode.textContent = "";
   subtitleNode.textContent = "";
   content.innerHTML = `
