@@ -299,6 +299,9 @@ class HandlersPeerMixin:
             {
                 "status": "ok",
                 "drone_id": self.settings.device_id,
+                # Current hostname, so a renamed Drone is relabelled by its peers
+                # on the next health check (see peer_workers health loop).
+                "name": socket.gethostname(),
                 "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                 "mtls": bool(self.settings.drone_mtls_enabled or _local_network.is_local_mode(self.settings)),
                 "network_mode": _network_mode(self.settings),
