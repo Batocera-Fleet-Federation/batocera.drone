@@ -274,7 +274,7 @@ now-deleted Edge relay modules from this repo.
 
 ## How the networking fits together
 
-To pull an asset: the user picks a paired peer (or the swarm/transfers page picks
+To pull an asset: the user picks a paired peer (or an asset page picks
 one implicitly for a single known source) → `DownloadManager` enqueues the job →
 `TransportSelector` tries LAN/tailnet-direct, then direct-public, reusing
 cert-pinned mTLS `/peer/*` on both tiers. There is no relay of any kind — if a peer

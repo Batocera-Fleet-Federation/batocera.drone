@@ -2472,3 +2472,20 @@
       .sd-deck { gap: 0.4rem; padding: 0.5rem; }
       .sd-key-meta { display: none; }
     }
+
+/* Transfer summaries stay short on phones; the row opens full details. */
+.transfer-table tr[data-transfer-key] { cursor: pointer; }
+.transfer-table tr[data-transfer-key]:focus-visible { outline: 2px solid var(--bs-primary); }
+@media (max-width: 767.98px) {
+  table.bff-stack.transfer-table tr { display: grid; grid-template-columns: auto 1fr; gap: 0 .5rem; padding: .4rem .6rem; }
+  table.bff-stack.transfer-table td { padding: .15rem 0; min-width: 0; }
+  table.bff-stack.transfer-table td::before { display: none; }
+  table.bff-stack.transfer-table td:nth-child(4),
+  table.bff-stack.transfer-table td:nth-child(5),
+  table.bff-stack.transfer-table td:nth-child(6),
+  table.bff-stack.transfer-table td:nth-child(8),
+  table.bff-stack.transfer-table td:nth-child(10) { display: none; }
+  table.bff-stack.transfer-table td:nth-child(3) { display: none; }
+  table.bff-stack.transfer-table td:nth-child(7) { grid-column: 1 / -1; justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
+  table.bff-stack.transfer-table td:nth-child(9) { grid-column: 1 / -1; justify-content: flex-start; }
+}
