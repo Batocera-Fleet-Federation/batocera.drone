@@ -2434,9 +2434,12 @@
   table.bff-stack.transfer-table td:nth-child(4),
   table.bff-stack.transfer-table td:nth-child(5),
   table.bff-stack.transfer-table td:nth-child(6),
-  table.bff-stack.transfer-table td:nth-child(8),
-  table.bff-stack.transfer-table td:nth-child(10) { display: none; }
+  table.bff-stack.transfer-table td:nth-child(8) { display: none; }
   table.bff-stack.transfer-table td:nth-child(3) { display: none; }
   table.bff-stack.transfer-table td:nth-child(7) { grid-column: 1 / -1; justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
   table.bff-stack.transfer-table td:nth-child(9) { grid-column: 1 / -1; justify-content: flex-start; }
+  /* Controls (cancel/pause/resume/retry) must stay reachable on phones: the
+     Actions cell is a full-width button row, never hidden. */
+  table.bff-stack.transfer-table td.download-actions { grid-column: 1 / -1; justify-content: flex-start; text-align: left; width: 100%; white-space: normal; }
+  table.bff-stack.transfer-table td.download-actions .btn { margin: 0.15rem 0.3rem 0.15rem 0; }
 }
