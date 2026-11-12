@@ -8526,7 +8526,7 @@ async function purgeAssetCache() {
   try {
     const result = await apiPost("/admin/asset-cache/purge", {});
     showToast(result.message || "Asset cache purge queued.", "success");
-    if (window.location.hash === "#admin/controls" && typeof window.refreshSystemInfoAssetCache === "function") {
+    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
       await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
@@ -8547,7 +8547,7 @@ async function clearPendingAssetChanges() {
   try {
     const result = await apiPost("/admin/asset-cache/clear-pending", {});
     showToast(result.message || "Pending asset changes cleared.", "success");
-    if (window.location.hash === "#admin/controls" && typeof window.refreshSystemInfoAssetCache === "function") {
+    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
       await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
@@ -9552,8 +9552,7 @@ function openTailnetPeerModal(peerId) {
   }
 }
 
-// Shared by the Controls page tile and the Swarm page's Tailnet card. Both
-// hit the same endpoint, which runs the same bundled app/install_tailscale.sh
+// The Swarm page Tailnet card uses the same bundled app/install_tailscale.sh
 // the installer and the self-update hook run -- one install path on the
 // device, so there is never a "which one did I use?" question.
 async function installTailscale(button, mode = "ensure") {
@@ -9577,7 +9576,6 @@ async function installTailscale(button, mode = "ensure") {
     tailnetDiscoveryCachedAt = 0;
     // Repaint whichever page asked, so the new state is visible immediately.
     if (window.location.hash === "#admin/swarm") await renderSwarmPage();
-    else if (window.location.hash === "#admin/controls") await renderAdminControlsPage();
     return status;
   } catch (err) {
     showToast(`Tailscale install failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -12595,6 +12593,7 @@ async function renderAdminSystemInfoPage() {
       return detail(label, location || "n/a");
     }).join("");
 
+    if (window.location.hash !== "#admin/system-info") return;
     content.innerHTML = `
       ${renderDebugTabBar("system-info")}
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
@@ -12697,7 +12696,40 @@ async function renderAdminSystemInfoPage() {
           ${renderUpdateHistorySection(updateHistory)}
         </div>
       </div>
+      <div class="card log-card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
+          <div class="d-flex gap-2">
+            <button id="systemInfoAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+            <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
+          </div>
+        </div>
+        <div class="card-body" id="systemInfoAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
+      </div>
     `;
+    // Navigation can remove the Debug DOM while its API requests are still
+    // completing. Do not start another request or render into the next page.
+    if (window.location.hash !== "#admin/system-info") return;
+
+    async function loadAssetCache() {
+      const cachePayload = await api("/admin/asset-cache");
+      const cacheBody = document.getElementById("systemInfoAssetCacheBody");
+      if (!cacheBody || window.location.hash !== "#admin/system-info") return;
+      cacheBody.innerHTML = renderAssetCachePanel(cachePayload, false);
+    }
+    window.refreshSystemInfoAssetCache = loadAssetCache;
+    document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener("click", async () => {
+      try {
+        await loadAssetCache();
+      } catch (err) {
+        showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      }
+    });
+    try {
+      await loadAssetCache();
+    } catch (err) {
+      showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    }
   } catch (err) {
     showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
@@ -12708,43 +12740,16 @@ async function renderAdminSystemInfoPage() {
   }
 }
 
-// The Controls page's Tailnet tile. Install/update lives here, beside the
-// page's other maintenance actions; enrolling with an auth key stays on the
-// Swarm page, where the full explanation and the key field already are.
-function renderTailnetControlBadge(tailnet) {
-  const state = tailnet || {};
-  if (state.unavailable) return '<span class="badge text-bg-secondary">Unknown</span>';
-  if (!state.installed) return '<span class="badge text-bg-secondary">Not installed</span>';
-  if (state.enrolled) return '<span class="badge text-bg-success">Connected</span>';
-  return '<span class="badge text-bg-warning text-dark">Not connected</span>';
-}
-
-function renderTailnetControlSummary(tailnet) {
-  const state = tailnet || {};
-  if (state.unavailable) return "Could not read the tailnet status on this Drone.";
-  const version = (state.install && state.install.version) || state.version || "";
-  if (!state.installed) {
-    return "Reach this Drone -- and let it reach Drones in other homes -- from anywhere, with no port forwarding.";
-  }
-  const versionNote = version ? `Tailscale <code>${escapeHtml(version)}</code>` : "Tailscale";
-  if (state.enrolled) {
-    return `${versionNote} is connected${state.tailnet_ip ? ` at <code>${escapeHtml(state.tailnet_ip)}</code>` : ""}.`;
-  }
-  return `${versionNote} is installed but this Drone hasn't joined a tailnet yet. Use Connect to paste an auth key.`;
-}
-
 async function renderAdminControlsPage() {
   titleNode.textContent = "Controls";
-  subtitleNode.textContent = "Screen mode, volume, screensaver, and EmulationStation configuration";
+  subtitleNode.textContent = "Screen mode, volume, screensaver, and Drone maintenance";
   setLoading(true, "Loading controls...");
   try {
-    const [payload, autoUpdate, tailnet] = await Promise.all([
+    const [payload, autoUpdate] = await Promise.all([
       api("/admin/system-info"),
       api("/admin/system/auto-update"),
-      // Never fatal: the Tailnet tile degrades to "unknown" rather than
-      // taking the whole Controls page down with it.
-      api("/admin/tailnet/status").catch(() => ({ installed: false, unavailable: true })),
     ]);
+    if (window.location.hash !== "#admin/controls") return;
     const fields = payload.fields || {};
     const rawVolume = payload.audio_volume ?? fields.audio_volume;
     const reportedVolume = Number(rawVolume);
@@ -12825,52 +12830,6 @@ async function renderAdminControlsPage() {
             </div>
           </div>
         </div>
-        <div class="col">
-          <div class="card control-tile h-100">
-            <div class="card-header d-flex justify-content-between align-items-center gap-2">
-              <span><i class="bi bi-globe2 me-2"></i>Tailnet</span>
-              ${renderTailnetControlBadge(tailnet)}
-            </div>
-            <div class="card-body d-flex flex-column">
-              <div class="small text-muted mb-2">${renderTailnetControlSummary(tailnet)}</div>
-              <div class="mt-auto d-flex flex-wrap gap-2">
-                <button class="btn btn-sm ${tailnet.installed ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="installTailscale(this, '${tailnet.installed ? "update" : "ensure"}')">
-                  <i class="bi bi-${tailnet.installed ? "arrow-up-circle" : "download"} me-1"></i>${tailnet.installed ? "Update" : "Install"} Tailscale
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" type="button" onclick="setHash('#admin/swarm')" title="Connect this Drone to your tailnet with an auth key"><i class="bi bi-link-45deg me-1"></i>Connect</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-collection-play me-2"></i>Game Collections &amp; Systems</span>
-          <button id="esCollectionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-        </div>
-        <div class="small text-muted px-3 pt-3">Which systems appear, which are grouped together, and which automatic/custom collections are enabled. Saving restarts EmulationStation.</div>
-        <div class="px-3 pt-2">
-          <input type="search" class="form-control form-control-sm" id="esCollectionsSearchInput" placeholder="Filter systems and collections...">
-          <div class="small text-muted mt-2 d-none" id="esCollectionsNoMatches">No systems or collections match that search.</div>
-        </div>
-        <div class="es-collections-scroll" id="esCollectionsScroll">
-          <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
-        </div>
-        <div class="es-collections-toggle">
-          <button type="button" class="es-collections-toggle-btn" id="esCollectionsToggleBtn" aria-expanded="false" aria-controls="esCollectionsScroll">
-            <i class="bi bi-chevron-down"></i> <span class="es-collections-toggle-label">Show more</span>
-          </button>
-        </div>
-      </div>
-      <div class="card log-card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
-          <div class="d-flex gap-2">
-            <button id="systemInfoAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-            <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
-          </div>
-        </div>
-        <div class="card-body" id="systemInfoAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
       </div>
     `;
 
@@ -12942,53 +12901,12 @@ async function renderAdminControlsPage() {
 
     loadScreenMode();
 
-    const esCollectionsToggleBtn = document.getElementById("esCollectionsToggleBtn");
-    const esCollectionsScroll = document.getElementById("esCollectionsScroll");
-    esCollectionsToggleBtn?.addEventListener("click", () => {
-      const expanded = esCollectionsScroll.classList.toggle("expanded");
-      esCollectionsToggleBtn.classList.toggle("expanded", expanded);
-      esCollectionsToggleBtn.setAttribute("aria-expanded", String(expanded));
-      esCollectionsToggleBtn.querySelector(".es-collections-toggle-label").textContent = expanded ? "Show less" : "Show more";
-      if (!expanded) esCollectionsScroll.scrollIntoView({block: "nearest"});
-    });
-
-    document.getElementById("esCollectionsRefreshBtn")?.addEventListener("click", async () => {
-      try {
-        await loadEsCollections();
-      } catch (err) {
-        showToast(`Failed to load collections: ${escapeHtml(err.message || "unknown error")}`, "danger");
-      }
-    });
     try {
       await loadEsCollections();
     } catch (err) {
-      const collectionsBody = document.getElementById("esCollectionsBody");
-      if (collectionsBody) collectionsBody.innerHTML = '<div class="empty-state">Unable to load collections.</div>';
+      showToast(`Failed to load music volume and screensaver: ${escapeHtml(err.message || "unknown error")}`, "danger");
     }
 
-    // Navigation can remove the Controls DOM while its API requests are still
-    // completing. Do not start another request or render into the next page.
-    if (window.location.hash !== "#admin/controls") return;
-
-    async function loadAssetCache() {
-      const cachePayload = await api("/admin/asset-cache");
-      const cacheBody = document.getElementById("systemInfoAssetCacheBody");
-      if (!cacheBody || window.location.hash !== "#admin/controls") return;
-      cacheBody.innerHTML = renderAssetCachePanel(cachePayload, false);
-    }
-    window.refreshSystemInfoAssetCache = loadAssetCache;
-    document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener("click", async () => {
-      try {
-        await loadAssetCache();
-      } catch (err) {
-        showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
-      }
-    });
-    try {
-      await loadAssetCache();
-    } catch (err) {
-      showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    }
   } catch (err) {
     showToast(`Failed to load controls: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `

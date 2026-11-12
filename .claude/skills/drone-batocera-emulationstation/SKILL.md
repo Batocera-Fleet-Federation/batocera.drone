@@ -187,8 +187,11 @@ next field:
    `EsCollectionsState` and `EsCollectionsUpdateRequest`, and to
    `tests/test_openapi_contract.py` if you added a new path (not needed for a
    field on an existing path).
-7. **UI**: `app/web/static/js/drone.js` (a control on the System Info page,
-   POSTing to `/admin/es-collections` with just the one changed field — the
+7. **UI**: Controls exposes music volume and screensaver in
+   `app/web/static/js/drone.js`. The Game Collections & Systems editor was removed
+   in #699; manage those settings in EmulationStation. The retained helpers
+   and API support partial updates
+   (POSTing to `/admin/es-collections` with just the one changed field — the
    endpoint accepts partial updates). There is no way to drive a paired peer's
    own ES settings from this Drone's UI at all — that used to go through the
    Swarm page's remote-management proxy, which was removed; changing a peer's

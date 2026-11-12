@@ -120,7 +120,8 @@ entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
 - **System Info** — `renderAdminSystemInfoPage` (`drone.js`, `GET
   /admin/system-info?speed=1`): runtime/CPU/memory/disk health, network fields,
   and PixN installation details. Maintenance actions live on **Controls**:
-  Drone update, automatic updates, and Restart EmulationStation
+  screen mode, system/music volume, screensaver, Drone update, automatic updates,
+  and Restart EmulationStation
   (`/admin/system/update-drone`, `/admin/system/auto-update`, and
   `/admin/system/restart-emulationstation`). RGS Download Manager and Run PixN
   Update are intentionally absent from the UI (#694); Controls must not fetch
@@ -131,6 +132,9 @@ entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
   `purgeAssetCache()`/`clearPendingAssetChanges()` check
   `window.location.hash === "#admin/system-info"` before calling that refresh hook
   (falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
+  Controls no longer includes Tailnet or Game Collections & Systems (#699).
+  Manage collections/systems in EmulationStation and Tailnet on Swarm. Controls
+  still reads `/admin/es-collections` to initialize music volume and screensaver.
 - **System Logs** — `GET /admin/logs/{source}?lines=200` (~60 supported
   emulator/EmulationStation/Drone log sources), sidebar + main viewer UI. Gameplay
   logs (`/admin/gameplay-logs`) were folded into this tab's scope rather than
