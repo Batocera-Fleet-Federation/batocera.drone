@@ -5314,6 +5314,76 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_695_transfer_modal_all_info_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-695-transfer-modal-all-info-uat",
+      "name": "Issue #695: transfer details modal lists every populated field of a clicked row",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/drone.js",
+          "app/transfer/download_manager.py",
+          "app/transfer/upload_tracker.py",
+          "tests/adversarial/issue_695_transfer_ui.py",
+          "tests/adversarial/test_issue_695_transfer_modal_all_info_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_695_transfer_roles_and_activation_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-695-transfer-roles-and-activation-uat",
+      "name": "Issue #695: Transfers shows initiator/downloader/uploader, row click opens details, no asset request UI",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/drone.js",
+          "app/transfer/download_manager.py",
+          "app/transfer/upload_tracker.py",
+          "tests/adversarial/issue_695_transfer_ui.py",
+          "tests/adversarial/test_issue_695_transfer_roles_and_activation_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
