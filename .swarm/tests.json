@@ -5250,6 +5250,38 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-690-collection-membership-uat",
+      "name": "Issue #690: exact arcade and vertical marker membership through scanner and browse API",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_690_collection_membership_uat.py",
+        "-v"
+      ],
+      "timeoutSeconds": 180,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_690_collection_membership_uat.py",
+          "app/roms/es_game_traits.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1

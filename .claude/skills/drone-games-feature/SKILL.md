@@ -78,7 +78,7 @@ schema philosophy this follows.
 - `_poll_rom_metadata_once` (~L609) — drives the whole cycle, then syncs
   saves and Movies (see `drone-movies-feature`'s scan-wiring section — this
   is the same function that call chains into `sync_movies_cache`).
-- `ROM_CLASSIFIER_VERSION = 3` (~L79) — a manual version bump forces a full
+- `ROM_CLASSIFIER_VERSION = 5` (~L79) — a manual version bump forces a full
   reindex when field-derivation rules change; not tied to schema migrations.
 
 Fingerprint: `app/common/fingerprint.py`'s `sample-fp-v1`
@@ -263,3 +263,28 @@ When comparing Games to Movies (e.g. while building Music — see
 `drone-music-feature`), Games is the **less feature-complete** precedent for
 scraping (no in-browser scraper card, no API-key management) — prefer Movies
 as the template for a new scraper-capable media feature, not Games.
+
+## ES collection filters (issue #690)
+
+The local Assets → Games explorer supports `players=2|4` and
+`trait=lightgun|wheel|trackball|spinner|vertical` on `/roms` and duplicate
+queries. Player membership means the selected number falls inside ES's
+parsed range, not merely that the maximum exceeds it (`4+` excludes 2).
+`players`, `players_min`, `players_max`, and input `traits` survive SQLite
+round trips in `extra_json`; indexed `rom_traits(entry_key, system, trait)`
+rows include `2players` and `4players` for SQL filtering and facet counts.
+
+`roms/es_game_traits.py` reads the installed `gamesdb.xml` and
+`arcaderoms.xml` under `/usr/share/emulationstation/resources`, caching by
+path/mtime/size. Missing or malformed resources yield no corresponding
+traits. Classification uses effective ES system platforms, exact arcade
+set stems (known unflagged sets never fall back), and ES's normalized
+substring matching for other systems, including digits inside brackets.
+Genres do not determine input traits. The scanner's `es_traits_version`
+includes both resource signatures and effective platform definitions, so
+resource upgrades and system overlays bypass the unchanged-gamelist gate.
+Classifier version 5 backfills existing libraries. The shared sidebar is
+moved into the mobile Filters modal, so its controls work in both views.
+These filters apply to the local explorer; federated peer browsing is unchanged.
+Tests: `tests/test_es_game_traits.py`, fixture XML in `tests/fixtures/es_traits/`,
+and `tests/js/asset_explorer_filters.cjs`.

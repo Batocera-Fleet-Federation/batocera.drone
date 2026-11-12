@@ -1,0 +1,5 @@
+<systems>
+  <system id="arcade"><game id="gunset"><gun/></game><game id="wheels"><wheel/></game><game id="balls"><trackball/><spinner/></game></system>
+  <system id="snes, nes"><game id="tinstar"><gun/></game><game id="racer"><wheel/></game><game id="marble"><trackball/></game><game id="arkanoid"><spinner/></game><game id="default"><gun/></game><game id="revision2"><spinner/></game></system>
+  <system id="fbneo"><game id="knownset"><gun/></game><game id="unknown"><wheel/></game></system>
+</systems>

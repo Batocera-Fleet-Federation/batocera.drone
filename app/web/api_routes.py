@@ -297,6 +297,8 @@ class ApiRoutesMixin:
                 except Exception:
                     offset = 0
                 self._handle_rom_browse(
+                    players=query_params.get("players", [""])[0],
+                    trait=query_params.get("trait", [""])[0],
                     limit=limit,
                     offset=offset,
                     system=query_params.get("system", [None])[0],
@@ -645,6 +647,8 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "roms" and parts[2] == "duplicates":
                 self._handle_admin_rom_duplicates(
+                    players=query_params.get("players", [""])[0],
+                    trait=query_params.get("trait", [""])[0],
                     system=query_params.get("system", [None])[0],
                     genre=query_params.get("genre", [None])[0],
                     query=query_params.get("q", [None])[0],

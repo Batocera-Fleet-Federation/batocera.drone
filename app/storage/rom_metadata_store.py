@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple
 
 try:
+    from ..roms.es_game_traits import parse_players_range, TRAITS, PLAYER_TRAITS
     from .state_store import database_path as _state_database_path
     from .state_store import open_database as _open_state_database
 except ImportError:
+    from roms.es_game_traits import parse_players_range, TRAITS, PLAYER_TRAITS
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import open_database as _open_state_database  # type: ignore
 
@@ -90,6 +92,9 @@ class RomCacheRow:
             for key in ("transfer_unit_path", "marker_relative_path", "image_relative_path")
             if str(payload.get(key) or "").strip()
         }
+        for key in ("players", "traits", "players_min", "players_max"):
+            if key in payload:
+                extra[key] = payload[key]
         # rom_name is the gamelist <name> (the game's display name) -- that is the
         # canonical "name" for this entry. (Previously this was overridden to the
         # filename stem when a gamelist was present, discarding the real title.)
@@ -365,6 +370,13 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS rom_genres (entry_key TEXT NOT NULL, system TEXT NOT NULL, genre TEXT NOT NULL)"
     )
+    # ES collection memberships are derived at scan time and refreshed together
+    # with their owning ROM. The primary key prevents duplicate facet counts.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS rom_traits (entry_key TEXT NOT NULL, "
+        "system TEXT NOT NULL, trait TEXT NOT NULL, PRIMARY KEY(entry_key, trait))"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_traits_trait_system ON rom_traits(trait, system COLLATE NOCASE, entry_key)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_genres_entry_key ON rom_genres(entry_key)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_genres_genre ON rom_genres(genre COLLATE NOCASE)")
     connection.execute(
@@ -706,8 +718,18 @@ def _persist_rows(
         if not isinstance(value, dict):
             continue
         if asset_type == "rom":
+            if "players" in value:
+                value = dict(value)
+                value["players_min"], value["players_max"] = parse_players_range(value["players"])
             row = RomCacheRow.from_payload(str(key), value)
             _upsert_rom_row(connection, row)
+            if "traits" in value or "players" in value:
+                flags = {t for t in value.get("traits", []) if t in TRAITS}
+                low, high = parse_players_range(value.get("players"))
+                flags.update(t for t in PLAYER_TRAITS if low <= int(t[0]) <= high)
+                connection.execute("DELETE FROM rom_traits WHERE entry_key = ?", (str(key),))
+                connection.executemany("INSERT INTO rom_traits VALUES (?, ?, ?)",
+                                       [(str(key), row.system, t) for t in sorted(flags)])
             _sync_rom_genres(connection, str(key), row.system, str(value.get("genre") or ""))
             # Only a fresh gamelist parse carries the list; a row reloaded from
             # SQLite (e.g. re-persisted after hashing) keeps what's indexed.
@@ -735,6 +757,7 @@ def _persist_rows(
         connection.execute(f"DELETE FROM {table} WHERE entry_key = ?", (key_text,))
         if asset_type == "rom":
             connection.execute("DELETE FROM rom_genres WHERE entry_key = ?", (key_text,))
+            connection.execute("DELETE FROM rom_traits WHERE entry_key = ?", (key_text,))
             connection.execute("DELETE FROM rom_missing_artwork WHERE entry_key = ?", (key_text,))
         if queue_changes:
             _queue_change(connection, asset_type, key_text, "delete")
@@ -1631,6 +1654,21 @@ def _rom_row_payload(values: tuple) -> dict:
     ).to_payload()
 
 
+def _game_traits_clause(players="", trait=""):
+    clauses, parameters = [], []
+    for value, allowed in ((str(players or ""), {"2", "4"}),
+                           (str(trait or ""), {"lightgun", "wheel", "trackball", "spinner", "vertical"})):
+        if not value:
+            continue
+        if value not in allowed:
+            clauses.append("0")
+            continue
+        flag = value + "players" if value in {"2", "4"} else value
+        clauses.append("EXISTS (SELECT 1 FROM rom_traits WHERE rom_traits.entry_key = rom_cache_entries.entry_key AND rom_traits.trait = ?)")
+        parameters.append(flag)
+    return clauses, parameters
+
+
 def list_rom_cache_page(
     settings: Any,
     *,
@@ -1640,6 +1678,8 @@ def list_rom_cache_page(
     limit: int = 500,
     offset: int = 0,
     missing_artwork: Optional[Iterable[str]] = None,
+    players: str = "",
+    trait: str = "",
 ) -> Optional[dict]:
     """Return a deterministic ROM page and total directly from SQLite.
 
@@ -1658,8 +1698,7 @@ def list_rom_cache_page(
     selected_systems = _normalized_filters(systems)
     normalized_query = str(query or "").strip()
     normalized_genre = str(genre or "").strip()
-    where_parts: list[str] = []
-    parameters: list[Any] = []
+    where_parts, parameters = _game_traits_clause(players, trait)
     if selected_systems:
         placeholders = ",".join("?" for _ in selected_systems)
         where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
@@ -1745,6 +1784,8 @@ def list_rom_genre_counts(
     systems: Optional[Iterable[str]] = None,
     query: str = "",
     missing_artwork: Optional[Iterable[str]] = None,
+    players: str = "",
+    trait: str = "",
 ) -> list[dict]:
     """Genre -> matching-ROM-count, scoped by the same system/search/missing-artwork filters as
     list_rom_cache_page (so switching the System filter or typing a search
@@ -1756,8 +1797,7 @@ def list_rom_genre_counts(
     isn't ready yet."""
     selected_systems = _normalized_filters(systems)
     normalized_query = str(query or "").strip()
-    where_parts: list[str] = []
-    parameters: list[Any] = []
+    where_parts, parameters = _game_traits_clause(players, trait)
     if selected_systems:
         placeholders = ",".join("?" for _ in selected_systems)
         where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
@@ -1788,6 +1828,47 @@ def list_rom_genre_counts(
             ).fetchall()
     except sqlite3.Error as error:
         print(f"ROM genre count query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return []
+    return [{"name": str(row[0]), "count": int(row[1])} for row in rows]
+
+
+def list_rom_trait_counts(settings, *, systems=None, query="", missing_artwork=None, genre=""):
+    """ES collection counts, scoped by system/search/category/artwork in one query."""
+    selected_systems = _normalized_filters(systems)
+    normalized_query = str(query or "").strip()
+    where_parts, parameters = _game_traits_clause()
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            "(rom_cache_entries.rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.unique_id COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern, pattern])
+    missing_clause, missing_parameters = _missing_artwork_clause(missing_artwork)
+    if missing_clause:
+        where_parts.append(missing_clause)
+        parameters.extend(missing_parameters)
+    if str(genre or "").strip():
+        where_parts.append("EXISTS (SELECT 1 FROM rom_genres WHERE rom_genres.entry_key = rom_cache_entries.entry_key AND rom_genres.genre COLLATE NOCASE = ?)")
+        parameters.append(str(genre).strip())
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return []
+            rows = connection.execute(
+                "SELECT rom_traits.trait, COUNT(*) FROM rom_traits "
+                "JOIN rom_cache_entries ON rom_cache_entries.entry_key = rom_traits.entry_key"
+                f"{where} GROUP BY rom_traits.trait ORDER BY rom_traits.trait", parameters,
+            ).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM trait count query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
         return []
     return [{"name": str(row[0]), "count": int(row[1])} for row in rows]
 
