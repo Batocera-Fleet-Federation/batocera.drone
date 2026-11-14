@@ -6,17 +6,21 @@ paths. All filesystem access is relative to no-follow directory descriptors.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
+import http.client
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import stat
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode, urlparse
@@ -25,18 +29,20 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Requ
 
 try:
     from . import local_network
-    from .peer_connectivity import PeerIdentityHold, _peer_address_candidates, _peer_trust_cafile, _drone_client_ssl_context, _read_capped
+    from .peer_connectivity import PeerIdentityHold, _drone_client_ssl_context, _more_diagnostic_error, _peer_address_candidates, _peer_trust_cafile, _read_capped
     from .drone_network import _certificate_pem_fingerprint
     from ..device.game_activity import find_running_emulatorlauncher
 except ImportError:  # pragma: no cover - flat execution
     from transfer import local_network  # type: ignore
-    from transfer.peer_connectivity import PeerIdentityHold, _peer_address_candidates, _peer_trust_cafile, _drone_client_ssl_context, _read_capped  # type: ignore
+    from transfer.peer_connectivity import PeerIdentityHold, _drone_client_ssl_context, _more_diagnostic_error, _peer_address_candidates, _peer_trust_cafile, _read_capped  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
     from device.game_activity import find_running_emulatorlauncher  # type: ignore
 
 MAX_FILES = 2048
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_SCAN = 20000
+# The peer hashes every candidate file before answering, so allow more than a ping.
+DISCOVERY_TIMEOUT = 25
 SAVE_SUFFIX = re.compile(r"\.(?:srm|sav|save|eep|fla|nv|nvm|rtc|dat|bin|gci|dsv|mcr|mcd|sra|srm|fs|st\d*|state\d*(?:\.auto)?|state\.auto|ss\d*|ppst|p2s|ml\d*|zst\d*|rts|s\d+)$", re.I)
 STATE_SUFFIX = re.compile(r"\.(?:state\d*(?:\.auto)?|state\.auto|st\d*|ss\d*|ppst|p2s|zst\d*|s\d+)$", re.I)
 TITLE_ID = re.compile(r"(?<![0-9a-f])(010[0-9a-f]{13})(?![0-9a-f])", re.I)
@@ -151,6 +157,9 @@ def source_game(repository, system, rom_path, fingerprint=''):
             return item
     except FileNotFoundError:
         pass
+    except SaveError as error:
+        if error.status != 404:
+            raise
     if fingerprint:
         try:
             _, rows = repository.list_assets(system, 'roms')
@@ -158,7 +167,14 @@ def source_game(repository, system, rom_path, fingerprint=''):
             rows = []
         for row in rows[:MAX_SCAN]:
             if str(row.get('fingerprint') or row.get('rom_fingerprint') or '') == fingerprint:
-                item = game(repository, system, unique_id=row['unique_id'])
+                try:
+                    item = game(repository, system, unique_id=row['unique_id'])
+                except FileNotFoundError:
+                    continue
+                except SaveError as error:
+                    if error.status == 404:
+                        continue
+                    raise
                 if item['fingerprint'] == fingerprint:
                     return item
     if found:
@@ -218,8 +234,17 @@ def roots(settings, item):
     return result
 
 
-def _walk(root):
-    """Bounded, no-follow walk; yield regular files only, including relative names."""
+def _skip_unusable_root(error):
+    return isinstance(error, (FileNotFoundError, NotADirectoryError)) or getattr(error, 'errno', None) == errno.ELOOP
+
+
+def _walk(root, descend=None):
+    """Bounded, no-follow walk; yield regular files only, including relative names.
+
+    ``descend(parts)`` may veto entering a directory (given its relative parts), so
+    huge unrelated trees (a Switch NAND, emulator caches) are neither counted nor
+    read. Pruning never widens what can match; it only avoids needless I/O.
+    """
     count = 0
     try:
         with directory(root) as root_fd:
@@ -236,6 +261,8 @@ def _walk(root):
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     rel = prefix + name
                     if stat.S_ISDIR(info.st_mode):
+                        if descend is not None and not descend(tuple(rel.split('/'))):
+                            continue
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                         try:
                             yield from visit(child, rel + '/', depth + 1)
@@ -244,8 +271,10 @@ def _walk(root):
                     elif stat.S_ISREG(info.st_mode):
                         yield rel
             yield from visit(root_fd)
-    except FileNotFoundError:
-        return
+    except OSError as error:
+        if _skip_unusable_root(error):
+            return
+        raise
 
 
 def _named_group(item, rel):
@@ -289,23 +318,78 @@ def _ryujinx_slots(root, item):
                         slots[name] = data[8:24].hex()
                 except (OSError, SaveError):
                     continue
-    except FileNotFoundError:
-        pass
+    except OSError as error:
+        if not _skip_unusable_root(error):
+            raise
     return slots
+
+
+_SWITCH_SAVE_PREFIX = ('user', 'save', '0000000000000000')
+_SWITCH_NAND_DIRS = frozenset(('nand', 'bis'))
+_SWITCH_EMULATOR_DIRS = frozenset(('yuzu', 'eden', 'citron', 'suyu', 'ryujinx'))
+
+
+def _is_named(name, names):
+    """Whether a case-folding save volume could resolve ``name`` to one of ``names``.
+
+    APFS, exFAT, NTFS and vfat ignore case (NTFS upper-cases, so ``ı``/``ſ`` alias
+    ``I``/``S``), APFS ignores Unicode normalisation and exFAT/vfat drop trailing
+    dots. Compare every such spelling, never the raw string.
+    """
+    normal = unicodedata.normalize('NFKC', name).rstrip('. ')
+    return normal.casefold() in names or normal.upper().casefold() in names
+
+
+def _switch_generic_path(parts):
+    """Whether a generic (system/saves-*) Switch path avoids profile and emulator trees.
+
+    Only the dedicated Switch layouts remap NAND/bis profile and slot ids to this
+    machine, so no spelling of those directories may appear anywhere; the emulators'
+    own folders (mods, sdmc, keys) are never a generic save location either. The
+    scan and the import validator share this check so they cannot drift apart.
+    """
+    return not any(_is_named(part, _SWITCH_NAND_DIRS) for part in parts) and not (
+        parts and _is_named(parts[0], _SWITCH_EMULATOR_DIRS))
+
+
+def _descend_filter(item, layout, slots=None):
+    """Directory filter keeping scans away from trees the layout can never match."""
+    if item['system'] != 'switch':
+        return None
+    if layout == 'system' or layout.startswith('saves-'):
+        # Switch NAND/bis trees are only read through the dedicated layouts below.
+        return _switch_generic_path
+    if layout.startswith('ryujinx-'):
+        return lambda parts: parts[0] in (slots or ()) and (len(parts) == 1 or parts[1] == '0')
+    # NAND layouts: only user/save/0000000000000000/<profile>/<title_id>/** can match.
+    ids = set(item['ids'])
+
+    def allow_nand(parts):
+        if len(parts) <= len(_SWITCH_SAVE_PREFIX):
+            return parts == _SWITCH_SAVE_PREFIX[:len(parts)]
+        if len(parts) == 4:
+            return re.fullmatch(r'[0-9a-fA-F]{32}', parts[3]) is not None
+        if len(parts) == 5:
+            return parts[4].upper() in ids
+        return True
+
+    return allow_nand
 
 
 def inventory(settings, item, hashes=True):
     groups = {}
     for layout, root in roots(settings, item).items():
         slots = _ryujinx_slots(root, item) if layout.startswith('ryujinx-') else {}
-        for rel in _walk(root):
+        if layout.startswith('ryujinx-') and not slots:
+            continue
+        for rel in _walk(root, _descend_filter(item, layout, slots)):
             try:
                 rel_parts = relative(rel).parts
             except SaveError:
                 continue
             if layout == 'system' or layout.startswith('saves-'):
                 # Switch NAND slots need local-profile remapping by the dedicated layouts.
-                match = None if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in rel_parts) else _named_group(item, rel)
+                match = None if item['system'] == 'switch' and not _switch_generic_path(rel_parts) else _named_group(item, rel)
             elif slots:
                 slot, _, tail = rel.partition('/')
                 match = (slot + '/0', 'directory') if slot in slots and tail.startswith('0/') else None
@@ -385,17 +469,68 @@ def _open_peer(settings, peer, endpoint, timeout=15):
         opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context), _NoRedirect())
         try:
             return opener.open(Request(url, headers={'Accept': 'application/octet-stream', 'User-Agent': 'batocera-drone-game-saves/1.0'}), timeout=timeout)
-        except (HTTPError, PeerIdentityHold, ssl.SSLCertVerificationError):
+        except (HTTPError, PeerIdentityHold):
             raise
-        except (OSError, URLError) as error:
-            last_error = error
-    raise SaveError('The paired Drone is unavailable.', 502) from last_error
+        except (OSError, URLError, http.client.HTTPException) as error:
+            last_error = _more_diagnostic_error(last_error, error)
+    if last_error is not None:
+        raise last_error
+    raise SaveError('The paired Drone is unavailable.', 502)
+
+
+def _peer_error_message(error):
+    """The peer's own JSON ``error`` text (bounded, plain text), when it sent one."""
+    try:
+        data = json.loads(_read_capped(error, 4096))
+        message = data.get('error') if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - a body is a courtesy, never required
+        return ''
+    return ' '.join(message.split())[:200] if isinstance(message, str) else ''
+
+
+def _discovery_failure(error):
+    """Turn a failed inventory request into a specific, actionable SaveError."""
+    if isinstance(error, SaveError):
+        return error
+    if isinstance(error, PeerIdentityHold):
+        return SaveError('This Drone’s identity is being verified; swarm connections are paused.', 503)
+    if isinstance(error, HTTPError):
+        detail = _peer_error_message(error)
+        if error.code in (404, 405, 501):
+            if error.code == 404 and detail and detail.lower() != 'not found':
+                return SaveError(f'This Drone could not list its saves: {detail}', 502)
+            return SaveError('This Drone is online but its version does not support save sharing yet. Update it to the latest Drone release.', 502)
+        if error.code in (401, 403):
+            return SaveError('This Drone refused the request' + (f': {detail}' if detail else ' (check that the pairing is still approved on both Drones).'), 502)
+        return SaveError(f'This Drone could not list its saves: {detail or f"HTTP {error.code}"}.', 502)
+    if isinstance(error, URLError) and isinstance(error.reason, BaseException):
+        return _discovery_failure(error.reason)
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return SaveError('This Drone took too long to list its saves (it may be busy scanning large save folders). Try again.', 504)
+    if isinstance(error, ssl.SSLError):
+        return SaveError('The secure connection to this Drone failed. Its certificate may have changed; re-pair it in Swarm.', 502)
+    if isinstance(error, OSError):
+        return SaveError('Could not reach this Drone. It may be offline or unreachable from this machine.', 502)
+    if isinstance(error, (json.JSONDecodeError, ValueError, http.client.HTTPException)):
+        return SaveError('This Drone returned an unreadable save list. It may need an update.', 502)
+    return SaveError('Could not reach this Drone. It may be offline or unreachable from this machine.', 502)
 
 
 def discover(settings, item, peer_id):
     peer = tls_peer(settings, peer_id)
-    with _open_peer(settings, peer, '/v1/api/peer/game-saves?' + peer_query(item), timeout=5) as response:
-        payload = json.loads(_read_capped(response, 2 * 1024 * 1024))
+    try:
+        with _open_peer(settings, peer, '/v1/api/peer/game-saves?' + peer_query(item), timeout=DISCOVERY_TIMEOUT) as response:
+            payload = json.loads(_read_capped(response, 2 * 1024 * 1024))
+    except HTTPError as error:
+        try:
+            if error.code == 409:
+                # The peer has a *different* ROM under this name; its saves are not ours.
+                return {'saves': [], 'note': 'This Drone has a different version of this ROM, so its saves are not offered.'}
+            raise _discovery_failure(error) from error
+        finally:
+            error.close()
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        raise _discovery_failure(error) from error
     if not isinstance(payload, dict):
         raise SaveError('The Drone returned an invalid save inventory.', 502)
     source = _source_item(item, payload.get('game'))
@@ -427,7 +562,12 @@ def validate_group(settings, item, group):
     layout, path, kind = group.get('layout'), group.get('path'), group.get('kind')
     if not all(isinstance(value, str) for value in (layout, path, kind)) or layout not in roots(settings, item) or kind not in ('save', 'state', 'directory'):
         raise SaveError('Unsupported save layout.')
-    relative(path)
+    path_parts = relative(path).parts
+    generic = layout == 'system' or layout.startswith('saves-')
+    if generic and item['system'] == 'switch' and not _switch_generic_path(path_parts):
+        # Switch NAND/bis trees hold per-profile data; only the dedicated layouts
+        # remap them to the local profile/slot, so the generic layouts never may.
+        raise SaveError('Switch profile saves must use a Switch save layout.')
     if group['id'] != hashlib.sha256((layout + ':' + path).encode()).hexdigest():
         raise SaveError('Invalid save identity.')
     files = group.get('files')
@@ -446,10 +586,8 @@ def validate_group(settings, item, group):
                 raise SaveError('File is outside the save set.')
         elif rel != path and rel.lower() != (path + '.png').lower():
             raise SaveError('File is outside the save set.')
-        if layout == 'system' or layout.startswith('saves-'):
-            # Switch NAND/bis trees hold per-profile data; only the dedicated layouts
-            # remap them to the local profile/slot, so the generic layouts never may.
-            if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in relative(rel).parts):
+        if generic:
+            if item['system'] == 'switch' and not _switch_generic_path(relative(rel).parts):
                 raise SaveError('Switch profile saves must use a Switch save layout.')
             if _named_group(item, rel) != (path, kind):
                 raise SaveError('Save does not belong to this ROM.')
@@ -485,8 +623,10 @@ def _switch_root(settings, item, group):
                     usable = any(re.fullmatch(r'[0-9a-fA-F]{32}', name) for name in os.listdir(fd))
             if usable:
                 available.append(root)
-        except FileNotFoundError:
-            continue
+        except OSError as error:
+            if _skip_unusable_root(error):
+                continue
+            raise
     if requested in available:
         return requested
     if len(available) == 1:
@@ -568,7 +708,11 @@ def import_choice(settings, item, token, overwrite=False):
         validate_group(settings, source, group)
         root = roots(settings, item)[group['layout']]
         target_path = _target_path(item, source, group)
-        if item['system'] == 'switch' and group['layout'] != 'system':
+        if item['system'] == 'switch' and (group['layout'] == 'system' or group['layout'].startswith('saves-')):
+            # Rebasing onto local names must not steer a generic save into a profile tree.
+            if not _switch_generic_path(relative(target_path).parts):
+                raise SaveError('Switch profile saves must use a Switch save layout.')
+        elif item['system'] == 'switch':
             try:
                 root = _switch_root(settings, item, group)
                 target_path = _switch_destination(settings, item, group, root)

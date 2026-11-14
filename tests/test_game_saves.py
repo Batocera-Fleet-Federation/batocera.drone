@@ -204,6 +204,101 @@ class GameSavesTests(unittest.TestCase):
         self.assertEqual(saves.capabilities(item)['states'], 'unsupported')
         self.assertEqual(saves.inventory(self.settings, item)[0]['layout'], layout)
 
+    def test_switch_scan_ignores_huge_unrelated_nand_trees(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'ids': [title]}
+        root = saves.roots(self.settings, item)['eden-saves']
+        self.write('user/save/0000000000000000/' + 'A' * 32 + '/' + title + '/progress.bin', root=root)
+        # A real NAND holds far more unrelated entries than the scan limit allows.
+        for tree in (root / 'user' / 'Contents', root / 'system' / 'save'):
+            tree.mkdir(parents=True)
+        for index in range(8):
+            (root / 'user' / 'Contents' / f'nca{index}').write_bytes(b'x')
+        with mock.patch.object(saves, 'MAX_SCAN', 40):
+            for index in range(60):
+                (root / 'system' / 'save' / f'entry{index}').write_bytes(b'x')
+            # Emulator trees under the generic Switch root are never walked either.
+            shaders = self.settings.saves_root / 'switch' / 'ryujinx' / 'cache'
+            shaders.mkdir(parents=True)
+            for index in range(60):
+                (shaders / f'shader{index}').write_bytes(b'x')
+            # Unrelated Switch title saves and Ryujinx slots are pruned too.
+            other_nand = root / 'user' / 'save' / '0000000000000000' / ('A' * 32) / '0100F2C0115B6000'
+            other_nand.mkdir(parents=True)
+            for index in range(60):
+                (other_nand / f'other{index}.dat').write_bytes(b'x')
+            ryu_root = saves.roots(self.settings, item)['ryujinx-config']
+            other_slot = ryu_root / '0000000000000002' / '0'
+            other_slot.mkdir(parents=True)
+            (ryu_root / '0000000000000002' / 'ExtraData').write_bytes(int('0100F2C0115B6000', 16).to_bytes(8, 'little') + bytes(504))
+            for index in range(60):
+                (other_slot / f'blob{index}.dat').write_bytes(b'x')
+            groups = saves.inventory(self.settings, item)
+        self.assertEqual([g['layout'] for g in groups], ['eden-saves'])
+
+    def test_symlinked_switch_layout_root_is_skipped_not_fatal(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'ids': [title]}
+        eden_root = saves.roots(self.settings, item)['eden-config']
+        self.write('user/save/0000000000000000/' + 'A' * 32 + '/' + title + '/progress.bin', root=eden_root)
+        outside = self.root / 'outside-yuzu' / 'nand'
+        outside.mkdir(parents=True)
+        yuzu_saves = saves.roots(self.settings, item)['yuzu-saves']
+        yuzu_saves.parent.mkdir(parents=True)
+        yuzu_saves.symlink_to(outside)
+        self.assertEqual([g['layout'] for g in saves.inventory(self.settings, item)], ['eden-config'])
+        group = self.group('user/save/0000000000000000/' + 'B' * 32 + '/' + title, kind='directory', layout='eden-config')
+        self.assertTrue(self.apply(self.choose(group, item), item=item)['applied'])
+
+    def test_discovery_reports_why_a_peer_could_not_list_saves(self):
+        def failing(error):
+            with mock.patch.object(saves, 'tls_peer', return_value=self.peer), mock.patch.object(saves, '_open_peer', side_effect=error):
+                return saves.discover(self.settings, self.item, 'remote')
+
+        def http(code, body=b''):
+            return saves.HTTPError('https://peer/x', code, 'err', {}, io.BytesIO(body))
+
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(http(404, b'{"error": "not found"}'))
+        self.assertIn('does not support save sharing', str(caught.exception))
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(http(404, b'{"error": "ROM or save not found."}'))
+        self.assertNotIn('does not support save sharing', str(caught.exception))
+        self.assertIn('ROM or save not found', str(caught.exception))
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(http(500, b'{"error": "Save scan is too large"}'))
+        self.assertIn('Save scan is too large', str(caught.exception))
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(saves.URLError(TimeoutError()))
+        self.assertEqual(caught.exception.status, 504)
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(saves.URLError(saves.ssl.SSLError('bad cert')))
+        self.assertIn('certificate', str(caught.exception).lower())
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(saves.URLError(ConnectionRefusedError()))
+        self.assertIn('offline', str(caught.exception))
+        # A same-named but different ROM on the peer is "nothing to offer", not a failure.
+        result = failing(http(409, b'{"error": "different ROM"}'))
+        self.assertEqual(result['saves'], [])
+        self.assertIn('different version', result['note'])
+
+    def test_open_peer_preserves_tls_error_over_later_unreachable_candidate(self):
+        cert = self.root / 'peer.crt'
+        cert.write_text('pem')
+        with mock.patch.object(saves, 'tls_peer', return_value=self.peer), mock.patch.object(
+            saves, '_peer_trust_cafile', return_value=cert
+        ), mock.patch.object(saves, '_certificate_pem_fingerprint', return_value=self.peer['certificate_fingerprint']), mock.patch.object(
+            saves, '_peer_address_candidates', return_value=['https://10.0.0.1:443', 'https://10.0.0.2:443']
+        ), mock.patch.object(saves, '_drone_client_ssl_context', return_value=None), mock.patch.object(
+            saves, 'build_opener', return_value=SimpleNamespace(open=mock.Mock(side_effect=[
+                saves.URLError(saves.ssl.SSLError('unknown ca')),
+                saves.URLError(ConnectionRefusedError()),
+            ]))
+        ):
+            with self.assertRaises(saves.SaveError) as caught:
+                saves.discover(self.settings, self.item, 'remote')
+        self.assertIn('certificate', str(caught.exception).lower())
+
     def test_switch_rejects_foreign_title_and_ambiguous_profile(self):
         title = '01006A800016E000'
         item = {**self.item, 'system': 'switch', 'ids': [title]}
@@ -216,6 +311,44 @@ class GameSavesTests(unittest.TestCase):
             self.write('user/save/0000000000000000/' + uid + '/' + title + '/old', root=root)
         with self.assertRaises(saves.SaveError):
             self.apply(self.choose(group, item), item=item)
+
+    def test_switch_generic_layout_rejects_every_alias_of_profile_and_emulator_trees(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'rom': f'Smash [{title}].nsp', 'stem': f'Smash [{title}]',
+                'filename': f'Smash [{title}].nsp', 'ids': [title]}
+        profile = 'user/save/0000000000000000/' + 'A' * 32 + '/' + title
+        # Case, Unicode (NTFS upper-cases ı/ſ, APFS normalises) and exFAT/vfat trailing dots
+        # all resolve to the live tree on a folding save volume; emulator folders hold mods.
+        for path in ('NAND/' + profile, 'eden/nAnD/' + profile, 'nand./' + profile, 'nand /' + profile,
+                     'ＮＡＮＤ/' + profile, 'ryujinx/bıs/user/save/0000000000000009/' + title,
+                     'Ryujinx/biſ/user/save/0000000000000009/' + title, 'EDEN/load/' + title,
+                     'ryujinx/mods/contents/' + title):
+            with self.subTest(path=path):
+                with self.assertRaises(saves.SaveError):
+                    saves.validate_group(self.settings, item, self.group(path, kind='directory'))
+                with self.assertRaises(saves.SaveError):
+                    self.choose(self.group(path, kind='directory'), item)
+        # The generic scan never offers them either (a case-folding volume may still expose
+        # NAND through the dedicated layout), while a plain system-folder save still works.
+        self.write('switch/NAND/' + profile + '/progress.bin')
+        self.write('switch/eden/load/' + title + '/romfs.bin')
+        self.write(f'switch/Smash [{title}].sav')
+        generic = [g['path'] for g in saves.inventory(self.settings, item) if g['layout'] == 'system']
+        self.assertEqual(generic, [f'Smash [{title}].sav'])
+        self.assertTrue(self.apply(self.choose(self.group(f'Smash [{title}].sav'), item), item=item)['applied'])
+
+    def test_switch_rename_cannot_steer_a_generic_save_into_a_profile_tree(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'rom': 'nand.nsp', 'stem': 'nand', 'filename': 'nand.nsp', 'ids': [title]}
+        source = {**item, 'rom': 'Smash.nsp', 'stem': 'Smash', 'filename': 'Smash.nsp'}
+        group = self.group('Smash', kind='directory')
+        with mock.patch.object(saves, 'tls_peer', return_value=self.peer), mock.patch.object(
+            saves, '_open_peer', return_value=Response(json.dumps({'saves': [group], 'game': source}).encode())
+        ):
+            token = saves.discover(self.settings, item, 'remote')['saves'][0]['choice']
+        with self.assertRaises(saves.SaveError):
+            self.apply(token, item=item)
+        self.assertFalse((self.settings.saves_root / 'switch' / 'nand').exists())
 
     def test_renamed_remote_rom_save_is_installed_under_local_name(self):
         source = {**self.item, 'rom': 'Remote Mario.sfc', 'stem': 'Remote Mario', 'filename': 'Remote Mario.sfc'}
@@ -232,6 +365,20 @@ class GameSavesTests(unittest.TestCase):
         repo = SimpleNamespace(find_rom_by_path=mock.Mock(side_effect=FileNotFoundError),
                                list_assets=mock.Mock(side_effect=FileNotFoundError))
         source = saves.source_game(repo, 'snes', 'Mario.sfc', 'sample-fingerprint')
+        self.assertEqual(source['stem'], 'Mario')
+        self.write('snes/Mario.srm')
+        self.assertEqual(saves.inventory(self.settings, source)[0]['path'], 'Mario.srm')
+
+    def test_stale_rom_cache_entry_falls_back_to_orphaned_saves(self):
+        repo = SimpleNamespace(
+            get_system_dir=lambda _system: self.root / 'roms' / 'snes',
+            find_rom_by_path=mock.Mock(side_effect=FileNotFoundError),
+            list_assets=mock.Mock(return_value=(self.root / 'roms' / 'snes', [
+                {'unique_id': 'stale-1', 'relative_path': 'Deleted Mario.sfc', 'fingerprint': 'fp-1'}
+            ])),
+            find_rom_by_unique_id=mock.Mock(return_value={'relative_path': 'Deleted Mario.sfc'}),
+        )
+        source = saves.source_game(repo, 'snes', 'Mario.sfc', 'fp-1')
         self.assertEqual(source['stem'], 'Mario')
         self.write('snes/Mario.srm')
         self.assertEqual(saves.inventory(self.settings, source)[0]['path'], 'Mario.srm')

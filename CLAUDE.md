@@ -423,7 +423,13 @@ from save scanning. Imports refuse while emulatorlauncher is running. Missing
 saves mean unknown support, never proof that the system cannot save. State imports
 become available in the emulator, not injected into a running game. Switch and
 shared-memory-card limitations are documented in `docs/game-save-imports.md`.
-Tests: `tests/test_game_saves.py`.
+Discovery errors must stay specific (`_discovery_failure`: old peer, refusal, timeout,
+unreachable; a peer 409 = different ROM = empty list) — never collapse them into one
+"offline or need an update" message — and `_walk` takes a `descend` filter so Switch
+NAND/emulator trees are never scanned needlessly. A generic (`system`) Switch path must pass
+`_switch_generic_path` in the scan, in `validate_group` and on the rebased import target: it
+folds case/Unicode/trailing dots (save volumes may be APFS/exFAT/NTFS) so no `nand`/`bis`
+spelling or top-level emulator folder can skip profile remapping. Tests: `tests/test_game_saves.py`.
 
 ## Conventions
 

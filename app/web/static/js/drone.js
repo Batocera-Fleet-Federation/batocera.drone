@@ -4132,17 +4132,20 @@ async function loadRomSwarmSaves(system, uniqueId) {
     const data = await api(endpoint);
     if (!body.isConnected) return;
     const support = data.capabilities || {};
+    const unsupported = support.saves === "unsupported" || support.states === "unsupported";
+    const help = `${support.message || "Save support is unknown for this emulator."} Close the game before importing. Imported saves are installed immediately for the next launch; load a saved state from the emulator’s state menu. States require a compatible emulator/core version.`;
+    // Compact layout: one status/toggle line, an optional support note, one line per Drone.
     body.innerHTML = `
-      <p class="small text-muted">${escapeHtml(support.message || "Save support is unknown for this emulator.")}</p>
-      <p class="small">Game saves: ${escapeHtml(support.saves || "unknown")} · Saved states: ${escapeHtml(support.states || "unknown")}</p>
-      <p class="small text-muted">Close the game before importing. Imported saves are installed immediately for the next launch; load a saved state from the emulator’s state menu. States require a compatible emulator/core version.</p>
-      <div class="form-check form-switch mb-2">
-        <input class="form-check-input" type="checkbox" role="switch" id="romSaveOverwrite">
-        <label class="form-check-label" for="romSaveOverwrite">Overwrite existing local saves</label>
-        <div class="small text-muted">Off: keep existing saves separately as a backup, then apply the selected save. On: replace existing saves.</div>
+      <div class="d-flex flex-wrap align-items-center gap-3 small">
+        <span class="text-muted" title="${escapeHtml(help)}">Saves: ${escapeHtml(support.saves || "unknown")} · States: ${escapeHtml(support.states || "unknown")} <i class="bi bi-info-circle"></i></span>
+        <div class="form-check form-switch mb-0" title="Off: keep existing saves separately as a backup, then apply the selected save. On: replace existing saves.">
+          <input class="form-check-input" type="checkbox" role="switch" id="romSaveOverwrite">
+          <label class="form-check-label" for="romSaveOverwrite">Overwrite existing local saves</label>
+        </div>
       </div>
-      <div id="romSaveDrones"></div>
-      <div class="small mt-2" id="romSaveResult" role="status" aria-live="polite"></div>`;
+      ${unsupported ? `<div class="small text-muted mt-1">${escapeHtml(support.message || "")}</div>` : ""}
+      <div id="romSaveDrones" class="mt-1"></div>
+      <div class="small mt-1" id="romSaveResult" role="status" aria-live="polite"></div>`;
     const drones = body.querySelector("#romSaveDrones");
     if (!(data.drones || []).length) {
       drones.textContent = "No paired HTTPS Drones are available. Pair a Drone in Swarm to check its saves.";
@@ -4150,32 +4153,38 @@ async function loadRomSwarmSaves(system, uniqueId) {
     }
     (data.drones || []).forEach((drone) => {
       const section = document.createElement("div");
-      section.className = "border rounded p-2 mt-2";
+      section.className = "d-flex flex-wrap align-items-center gap-2 py-1";
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "btn btn-sm btn-outline-primary";
+      button.className = "btn btn-sm btn-outline-primary py-0 px-2";
       button.textContent = `Check saves on ${drone.name || drone.drone_id}`;
       const rows = document.createElement("div");
-      rows.className = "mt-2 small";
+      rows.className = "small";
       section.append(button, rows);
       drones.appendChild(section);
       button.addEventListener("click", async () => {
         button.disabled = true;
+        rows.className = "small text-muted";
         rows.textContent = "Checking this Drone…";
         try {
           const result = await api(`${endpoint}?drone=${encodeURIComponent(drone.drone_id)}`);
           if (!body.isConnected) return;
+          rows.className = "small";
           rows.replaceChildren();
-          if (!(result.saves || []).length) rows.textContent = "No saves or saved states for this ROM on this Drone.";
+          if (!(result.saves || []).length) {
+            rows.className = "small text-muted";
+            rows.textContent = result.note || "No saves or saved states for this ROM on this Drone.";
+          }
           (result.saves || []).forEach((save) => {
             const row = document.createElement("div");
-            row.className = "d-flex flex-wrap align-items-center gap-2 mt-2";
+            row.className = "d-flex flex-wrap align-items-center gap-2 py-1";
             const label = document.createElement("span");
-            const modified = save.modified_time ? new Date(save.modified_time * 1000).toLocaleString() : "";
-            label.textContent = `${save.kind === "state" ? "Saved state" : "Game save"}: ${save.name} (${save.layout}, ${save.file_count} file(s), ${formatBytes(save.file_size)}) ${modified}`;
+            const modified = save.modified_time ? ` · ${new Date(save.modified_time * 1000).toLocaleString()}` : "";
+            label.textContent = `${save.kind === "state" ? "Saved state" : "Game save"}: ${save.name} · ${save.file_count} file(s), ${formatBytes(save.file_size)}${modified}`;
+            label.title = save.layout || "";
             const download = document.createElement("button");
             download.type = "button";
-            download.className = "btn btn-sm btn-primary";
+            download.className = "btn btn-sm btn-primary py-0 px-2";
             download.textContent = "Download & apply";
             download.addEventListener("click", async () => {
               const overwrite = body.querySelector("#romSaveOverwrite").checked;
@@ -4201,6 +4210,7 @@ async function loadRomSwarmSaves(system, uniqueId) {
             rows.appendChild(row);
           });
         } catch (error) {
+          rows.className = "small text-danger";
           rows.textContent = error.message || "This Drone is unavailable or needs an update. Try again.";
         } finally {
           button.disabled = false;
@@ -4254,9 +4264,9 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
           ? `<div class="alert alert-warning py-2 px-3 small mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Arcade romset compatibility isn't guaranteed in the browser -- this file needs to exactly match the version the browser emulator core expects, which may differ from what runs on the device itself.</div>`
           : ""
       }
-      <div class="card log-card mb-3">
-        <div class="card-header">Saves &amp; Saved States from the Swarm</div>
-        <div class="card-body" id="romSwarmSaves">Loading save support…</div>
+      <div class="card log-card mb-2">
+        <div class="card-header py-1 small">Saves &amp; Saved States from the Swarm</div>
+        <div class="card-body py-2" id="romSwarmSaves">Loading save support…</div>
       </div>
       <div class="card log-card mb-3">
         <div class="card-body">
