@@ -15,10 +15,12 @@ import subprocess
 from pathlib import Path
 
 try:
+    from ..common.install_paths import drone_install_root
     from ..common.settings import Settings
     from ..storage.state_store import load_payload, save_payload
     from . import network_es_overlay
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.install_paths import drone_install_root  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import load_payload, save_payload  # type: ignore
     from device import network_es_overlay  # type: ignore
@@ -39,8 +41,28 @@ def _share_root(settings: Settings) -> Path:
 def _export_root() -> Path:
     override = os.environ.get("DRONE_NFS_EXPORT_ROOT", "").strip()
     if override:
-        return Path(override)
-    return Path("/var/run/drone-nfs-export")
+        return Path(override).resolve()
+    # The historical exporter's default tree (<install root>/nfs-export).
+    return drone_install_root() / "nfs-export"
+
+
+def _mounted_descendants(root: Path) -> list[Path]:
+    """Bind mounts under the old export tree, deepest first."""
+    base = os.path.abspath(os.path.normpath(str(root)))
+    prefix = base.rstrip(os.sep) + os.sep
+    found: set[str] = set()
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        mount_point = fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+        if mount_point == base or mount_point.startswith(prefix):
+            found.add(mount_point)
+    return [Path(item) for item in sorted(found, key=lambda value: len(Path(value).parts), reverse=True)]
 
 
 def _unmount_path(mount_point: Path, umount_bin: str) -> bool:
@@ -196,7 +218,8 @@ def cleanup_legacy_network_references(settings: Settings) -> None:
                     except Exception:
                         pass
 
-        for child in (export_root / "roms", export_root / "bios"):
+        mounted = _mounted_descendants(export_root)
+        for child in mounted or [export_root / "roms", export_root / "bios"]:
             _unmount_path(child, umount_bin)
 
         save_payload(database, _NFS_EXPORT_STATE_FILE, {"schema_version": 1, "peers": {}})

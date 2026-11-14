@@ -256,6 +256,23 @@ class SwarmScreen(Screen):
         next_key = keys[(index + delta) % len(keys)]
         self._queue_tab(next_key, labels[next_key])
 
+    def _step_sub_tab(self, delta: int) -> None:
+        """L2/R2: on Search Assets step Games / Movies & Shows / Music; past
+        either end (or on any other tab) step the Swarm sub-tabs instead, so
+        every Swarm tab stays reachable from the triggers."""
+        if self.tab == _TAB_SEARCH:
+            kinds = [key for key, _ in _SEARCH_KINDS]
+            labels = dict(_SEARCH_KINDS)
+            try:
+                index = kinds.index(self.asset_kind)
+            except ValueError:
+                index = 0
+            target = index + delta
+            if 0 <= target < len(kinds):
+                self._queue_search_kind(kinds[target], labels[kinds[target]])
+                return
+        self._step_tab(delta)
+
     # --- Overview ------------------------------------------------------
 
     def _reload_overview(self) -> None:
@@ -634,8 +651,9 @@ class SwarmScreen(Screen):
     def _queue_search_kind(self, kind: str, label: str) -> None:
         if self.asset_kind == kind and self.browse_items:
             return
-        self.asset_kind = kind
-        self.defer_action(f"Searching {label.lower()}...", self._reload_search)
+        if self.defer_action(f"Searching {label.lower()}...", self._reload_search):
+            self.asset_kind = kind
+            self.system_filter = ""
 
     def _download_item(self, item: dict) -> None:
         label = _item_display_title(item)
@@ -1360,9 +1378,9 @@ class SwarmScreen(Screen):
     def draw(self, navigator) -> None:
         if not imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id.value):
             if imgui.is_key_pressed(imgui.Key.gamepad_l2, False):
-                self._step_tab(-1)
+                self._step_sub_tab(-1)
             elif imgui.is_key_pressed(imgui.Key.gamepad_r2, False):
-                self._step_tab(1)
+                self._step_sub_tab(1)
 
         for key, label in _TABS:
             tab_button(label, active=self.tab == key, on_click=lambda k=key, value=label: self._queue_tab(k, value))

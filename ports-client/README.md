@@ -158,17 +158,17 @@ caught this, since same-frame-vs-next-frame timing isn't an exception.
 status frame appeared, but the following synchronous request still froze the
 spinner on that frame. `Screen.defer_action` now starts the blocking operation
 on a daemon worker and retains its loading label while it runs; the render loop
-continues normally and retires the worker after completion. Request Assets'
+continues normally and retires the worker after completion. Search Assets'
 individual download path uses this same mechanism rather than a special
 `_pending_request` branch.
 
 **The original spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
 `ImDrawList.add_polyline` against `imgui.get_time()`, no image asset, no
 animation-frame bookkeeping. The background-action change lets that time value
-advance continuously during Backups, Request Assets, page navigation, and all
+advance continuously during Backups, Search Assets, page navigation, and all
 other network-backed actions.
 
-**Request Assets: same false-negative-timeout bug, different endpoint.**
+**Search Assets: same false-negative-timeout bug, different endpoint.**
 Live investigation (`drone-live-debugging` skill) of a user report --
 "same api timeout error" downloading a game from a paired peer --
 found `127.0.0.1 - 500 internal error "/v1/api/admin/local-network/sync":

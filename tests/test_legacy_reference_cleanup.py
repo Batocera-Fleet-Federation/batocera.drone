@@ -115,5 +115,12 @@ class LegacyReferenceCleanupTests(unittest.TestCase):
             self.assertTrue(any(str(cmd[0]).endswith("exportfs") and "-u" in cmd for cmd in commands))
 
 
+    def test_default_export_root_is_the_historical_install_root_tree(self) -> None:
+        from app.common.install_paths import drone_install_root
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(legacy_reference_cleanup._export_root(), drone_install_root() / "nfs-export")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -324,6 +324,20 @@ class SwarmScreenTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in screen.browse_items], ["Zelda", "Metroid"])
         self.assertFalse(screen.has_more_pages)
 
+    def test_sub_tab_triggers_step_asset_kinds_then_overflow_to_swarm_tabs(self) -> None:
+        from ui.screens import swarm as swarm_module
+
+        screen = SwarmScreen(_FakeApiClient())
+        screen._loaded_tabs.update(key for key, _label in swarm_module._TABS)
+        screen.tab = swarm_module._TAB_SEARCH
+        screen.asset_kind = swarm_module._SEARCH_KIND_MUSIC
+        screen._step_sub_tab(1)  # past the last asset kind -> next Swarm tab
+        self.assertEqual(screen.tab, swarm_module._TAB_OVERVIEW)
+        screen.tab = swarm_module._TAB_SEARCH
+        screen._step_sub_tab(-1)
+        self.assertEqual(screen.asset_kind, swarm_module._SEARCH_KIND_MOVIES)
+        self.assertEqual(screen.tab, swarm_module._TAB_SEARCH)
+
     def test_request_item_runs_in_background_not_in_click_frame(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
