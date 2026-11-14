@@ -108,6 +108,10 @@ class ApiRoutesMixin:
                 self._handle_peer_health()
                 return
 
+            if parts in (["peer", "game-saves"], ["peer", "game-saves", "file"]):
+                self._handle_peer_game_saves(query_params, download=len(parts) == 3)
+                return
+
             if len(parts) == 3 and parts[0] == "peer" and parts[1] == "content-inventory":
                 self._handle_peer_content_inventory(parts[2], query_params)
                 return
@@ -212,6 +216,10 @@ class ApiRoutesMixin:
 
             if api_path == "/openapi.json":
                 self._handle_openapi_json()
+                return
+
+            if len(parts) == 5 and parts[0] == "systems" and parts[2] == "roms" and parts[4] == "saves":
+                self._handle_game_saves_get(parts[1], parts[3], query_params)
                 return
 
             if api_path == "/downloads":
@@ -835,6 +843,10 @@ class ApiRoutesMixin:
 
             if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) == 6 and parts[:2] == ["admin", "systems"] and parts[3] == "roms" and parts[5] == "saves":
+                self._handle_game_saves_import(parts[2], parts[4])
                 return
 
             if len(parts) >= 3 and parts[0] == "admin" and parts[1] == "multiplayer":

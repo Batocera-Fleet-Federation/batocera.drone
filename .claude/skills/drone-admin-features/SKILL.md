@@ -1148,3 +1148,19 @@ Email were),
 keep frontend route names symmetric with their backend route + handler, follow
 the live-refreshing tile pattern above for anything that polls, and keep
 destructive actions behind an explicit confirm step like the existing ones.
+
+## Per-ROM swarm saves (#726)
+
+The Assets ROM detail card uses `transfer/game_saves.py` and
+`web/handlers_game_saves.py`; see `docs/game-save-imports.md`. New `/peer/game-saves`
+manifest/file routes require paired mTLS even in development HTTP mode. Imports
+use a checked pairing pin, HTTPS only, no redirects or proxies, full-file SHA-256
+and length checks, bounded manifests, and no-follow filesystem access. Browser
+POSTs require a real session, enabled admin, same-origin JSON and an opaque
+expiring choice bound to this ROM/Drone/source. Do not trust browser file paths
+or install another Drone's Switch profile/slot number unchanged. With overwrite
+off, keep the previous save separately before applying the incoming set. Keep
+private `.drone-save-*` staging/backups out of save inventories. Preserve complete
+per-game directories and state thumbnails. Absence means unknown support;
+shared multi-game memory cards must not be offered as one game's save. Test save
+and profile handling with `tests/test_game_saves.py`.
