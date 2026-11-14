@@ -2960,9 +2960,12 @@ async function toggleMusicLike(entryKey, likedNow, button) {
 async function renderMusicDetailsPage(entryKey) {
   currentSystemContext = null;
   clearSystemTheme();
+  window.currentMusicDetail = null;
   setLoading(true, "Loading track...");
+  let loadedTrack = null;
   try {
     const track = await fetchMediaDetail("music", entryKey);
+    loadedTrack = track;
     window.currentMusicDetail = track;
     content.innerHTML = renderMusicDetailShell(track);
   } catch (err) {
@@ -2973,6 +2976,7 @@ async function renderMusicDetailsPage(entryKey) {
   } finally {
     setLoading(false);
   }
+  return loadedTrack;
 }
 function renderMusicDetailShell(track) {
   const meta = track.metadata || null;
@@ -3748,9 +3752,12 @@ function openMoviePlayerModal(entryKey, movieName) {
 async function renderMovieDetailsPage(entryKey) {
   currentSystemContext = null;
   clearSystemTheme();
+  window.currentMovieDetail = null;
   setLoading(true, "Loading movie...");
+  let loadedMovie = null;
   try {
     const movie = await fetchMediaDetail("movies", entryKey);
+    loadedMovie = movie;
     window.currentMovieDetail = movie;
     content.innerHTML = renderMovieDetailShell(movie);
     await renderMovieScraperCard(entryKey, movie);
@@ -3762,6 +3769,7 @@ async function renderMovieDetailsPage(entryKey) {
   } finally {
     setLoading(false);
   }
+  return loadedMovie;
 }
 function renderMovieDetailShell(movie) {
   const meta = movie.metadata || null;
@@ -12578,9 +12586,9 @@ async function router(retryDepth = 0) {
     } else if (hash.startsWith("#movies")) {
       const parsed = parseMoviesHash(hash);
       if (parsed && parsed.view === "detail") {
-        await renderMovieDetailsPage(parsed.entryKey);
+        const movieDetail = await renderMovieDetailsPage(parsed.entryKey);
         if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
-          DroneRemoteMedia.onRouteRendered(hash, window.currentMovieDetail || null).catch(() => {});
+          DroneRemoteMedia.onRouteRendered(hash, movieDetail).catch(() => {});
         }
       } else if (parsed && parsed.view === "show") {
         await renderShowDetailsPage(parsed.showTitle, parsed.seasonNumber);
@@ -12593,9 +12601,9 @@ async function router(retryDepth = 0) {
     } else if (hash.startsWith("#music")) {
       const parsed = parseMusicHash(hash);
       if (parsed && parsed.view === "detail") {
-        await renderMusicDetailsPage(parsed.entryKey);
+        const musicDetail = await renderMusicDetailsPage(parsed.entryKey);
         if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
-          DroneRemoteMedia.onRouteRendered(hash, window.currentMusicDetail || null).catch(() => {});
+          DroneRemoteMedia.onRouteRendered(hash, musicDetail).catch(() => {});
         }
       } else if (parsed && parsed.view === "artist") {
         await renderArtistDetailsPage(parsed.artist, parsed.album);
