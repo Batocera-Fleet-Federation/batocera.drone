@@ -36,13 +36,20 @@ by the requested name.
 
 Switch NAND saves for Eden/Yuzu/Citron/Suyu are grouped by title ID and source
 profile; the incoming set is mapped to the local emulator's profile. These
-layouts are inspected under `saves/switch/<emulator>/nand` and
-`system/configs/<emulator>/nand`. The ROM filename or metadata must identify its
+layouts are inspected under `saves/switch/<emulator>/nand`,
+`system/configs/<emulator>/nand` and `saves/<emulator>` — stock Batocera symlinks
+`configs/<emulator>/nand/user/save` to `saves/yuzu` (and Ryujinx's
+`bis/user/save` to `saves/Ryujinx`), and the scan never follows symlinks, so the
+link targets are scanned directly. The ROM filename or metadata must identify its
 16-character Switch title ID (for example `[01006A800016E000]` for Super Smash
-Bros. Ultimate). A local NAND profile must already exist and be unambiguous;
-Drone refuses to guess between multiple users. Ryujinx numbered saves are matched
-by the title ID in the 512-byte `ExtraData` record, then mapped to the existing
-local slot for that title; run the game once locally to create the slot. Source
+Bros. Ultimate). A local NAND profile must already exist and be unambiguous:
+emulators leave stub profiles behind, so when several exist the one that already
+holds non-hidden data for this title wins; otherwise Drone refuses to guess.
+The all-zero user (device saves) only maps onto itself. Ryujinx numbered saves are
+matched by the title ID in the 512-byte `ExtraData0` (older builds: `ExtraData`)
+record, skipping BCAT, temporary and cache save types (they share the title ID
+but hold no progress), then mapped to the existing local slot for that title;
+run the game once locally to create the slot. Source
 user IDs and slot numbers are never blindly installed as local users.
 
 Save support is reported as **unknown** when there is no positive evidence.

@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - flat execution
 MAX_FILES = 2048
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_SCAN = 20000
+_RYUJINX_SKIP_TYPES = (2, 4, 5)  # BCAT, Temporary, Cache: never game progress
 # The peer hashes every candidate file before answering, so allow more than a ping.
 DISCOVERY_TIMEOUT = 25
 SAVE_SUFFIX = re.compile(r"\.(?:srm|sav|save|eep|fla|nv|nvm|rtc|dat|bin|gci|dsv|mcr|mcd|sra|srm|fs|st\d*|state\d*(?:\.auto)?|state\.auto|ss\d*|ppst|p2s|ml\d*|zst\d*|rts|s\d+)$", re.I)
@@ -229,9 +230,18 @@ def roots(settings, item):
             # Batocera community builds use both layouts. nand is the only exposed subtree.
             result[emulator + '-saves'] = saves / 'switch' / emulator / 'nand'
             result[emulator + '-config'] = Path(settings.userdata_root).resolve() / 'system' / 'configs' / emulator / 'nand'
+            # Batocera symlinks <config>/nand/user/save to /userdata/saves/<emulator>; the
+            # no-follow walk never enters that link, so scan the real save tree directly.
+            result[emulator + '-userdata'] = saves / emulator
         result['ryujinx-saves'] = saves / 'switch' / 'ryujinx' / 'bis' / 'user' / 'save'
         result['ryujinx-config'] = Path(settings.userdata_root).resolve() / 'system' / 'configs' / 'Ryujinx' / 'bis' / 'user' / 'save'
+        result['ryujinx-userdata'] = saves / 'Ryujinx'
     return result
+
+
+def _save_prefix(layout):
+    """NAND roots hold user/save/0000000000000000; -userdata roots are user/save itself."""
+    return _SWITCH_SAVE_PREFIX[2:] if layout.endswith('-userdata') else _SWITCH_SAVE_PREFIX
 
 
 def _skip_unusable_root(error):
@@ -298,9 +308,11 @@ def _switch_group(item, layout, rel):
     if layout.startswith('ryujinx-'):
         # Ryujinx's numbered slot is identified by its ExtraData, never its slot number.
         return None
-    if len(parts) >= 6 and parts[:3] == ('user', 'save', '0000000000000000'):
-        if re.fullmatch(r'[0-9a-fA-F]{32}', parts[3]) and parts[4].upper() in item['ids']:
-            return '/'.join(parts[:5]), 'directory'
+    head = _save_prefix(layout)
+    n = len(head)
+    if len(parts) >= n + 3 and parts[:n] == head:
+        if re.fullmatch(r'[0-9a-fA-F]{32}', parts[n]) and parts[n + 1].upper() in item['ids']:
+            return '/'.join(parts[:n + 2]), 'directory'
     return None
 
 
@@ -311,13 +323,20 @@ def _ryujinx_slots(root, item):
             for name in os.listdir(fd)[:MAX_SCAN]:
                 if not re.fullmatch(r'[0-9a-fA-F]{16}', name):
                     continue
-                try:
-                    with read_file(root, name + '/ExtraData') as handle:
-                        data = handle.read(512)
-                    if len(data) == 512 and f'{int.from_bytes(data[:8], "little"):016X}' in item['ids']:
-                        slots[name] = data[8:24].hex()
-                except (OSError, SaveError):
-                    continue
+                data = b''
+                # Current Ryujinx writes ExtraData0/ExtraData1; older builds wrote ExtraData.
+                for extra in ('ExtraData0', 'ExtraData'):
+                    try:
+                        with read_file(root, name + '/' + extra) as handle:
+                            data = handle.read(512)
+                        break
+                    except (OSError, SaveError):
+                        continue
+                # SaveDataAttribute: program id, user id, static id, then type at 0x20.
+                # BCAT/temporary/cache slots share the title id but hold no progress.
+                if (len(data) == 512 and f'{int.from_bytes(data[:8], "little"):016X}' in item['ids']
+                        and data[0x20] not in _RYUJINX_SKIP_TYPES):
+                    slots[name] = data[8:24].hex()
     except OSError as error:
         if not _skip_unusable_root(error):
             raise
@@ -361,16 +380,19 @@ def _descend_filter(item, layout, slots=None):
         return _switch_generic_path
     if layout.startswith('ryujinx-'):
         return lambda parts: parts[0] in (slots or ()) and (len(parts) == 1 or parts[1] == '0')
-    # NAND layouts: only user/save/0000000000000000/<profile>/<title_id>/** can match.
+    # NAND layouts: only user/save/0000000000000000/<profile>/<title_id>/** can match
+    # (relative to user/save for the -userdata roots).
     ids = set(item['ids'])
+    head = _save_prefix(layout)
+    n = len(head)
 
     def allow_nand(parts):
-        if len(parts) <= len(_SWITCH_SAVE_PREFIX):
-            return parts == _SWITCH_SAVE_PREFIX[:len(parts)]
-        if len(parts) == 4:
-            return re.fullmatch(r'[0-9a-fA-F]{32}', parts[3]) is not None
-        if len(parts) == 5:
-            return parts[4].upper() in ids
+        if len(parts) <= n:
+            return parts == head[:len(parts)]
+        if len(parts) == n + 1:
+            return re.fullmatch(r'[0-9a-fA-F]{32}', parts[n]) is not None
+        if len(parts) == n + 2:
+            return parts[n + 1].upper() in ids
         return True
 
     return allow_nand
@@ -608,6 +630,7 @@ def validate_group(settings, item, group):
 
 
 def _switch_root(settings, item, group):
+    """Return (layout, root) of the local tree that receives this Switch save."""
     candidates = roots(settings, item)
     requested = candidates[group['layout']]
     ryujinx = group['layout'].startswith('ryujinx-')
@@ -619,35 +642,52 @@ def _switch_root(settings, item, group):
             if ryujinx:
                 usable = bool(_ryujinx_slots(root, item))
             else:
-                with directory(root, 'user/save/0000000000000000') as fd:
+                with directory(root, '/'.join(_save_prefix(layout))) as fd:
                     usable = any(re.fullmatch(r'[0-9a-fA-F]{32}', name) for name in os.listdir(fd))
             if usable:
-                available.append(root)
+                available.append((layout, root))
         except OSError as error:
             if _skip_unusable_root(error):
                 continue
             raise
-    if requested in available:
-        return requested
+    if (group['layout'], requested) in available:
+        return group['layout'], requested
     if len(available) == 1:
         return available[0]
     raise SaveError('Start this game once with the intended local Switch emulator and profile; the destination must be unambiguous.', 409)
 
 
-def _switch_destination(settings, item, group, root):
-    layout = group['layout']
+def _title_entry(root, profile, title):
+    """The profile's existing directory for this title, if it holds any save data."""
+    with directory(root, profile) as fd:
+        name = next((n for n in os.listdir(fd) if n.upper() == title), None)
+    if name is None:
+        return None
+    with directory(root, profile + '/' + name) as fd:
+        return name if any(not n.startswith('.') for n in os.listdir(fd)) else None
+
+
+def _switch_destination(settings, item, group, layout, root):
     if layout.startswith('ryujinx-'):
         slots = _ryujinx_slots(root, item)
         if len(slots) != 1:
             raise SaveError('Start this game once in Ryujinx with the intended local profile before importing its save.', 409)
         return next(iter(slots)) + '/0'
     path = relative(group['path'])
-    prefix = 'user/save/0000000000000000'
+    prefix = '/'.join(_save_prefix(layout))
     with directory(root, prefix) as fd:
         users = [name for name in os.listdir(fd) if re.fullmatch(r'[0-9a-fA-F]{32}', name)]
+    # The all-zero user holds device saves; account saves only map onto real profiles.
+    device = int(path.parent.name, 16) == 0
+    users = [u for u in users if (int(u, 16) == 0) == device]
+    title = path.name.upper()
+    if len(users) > 1:
+        # Emulators leave stub profiles behind; prefer the one that has played this title.
+        played = [u for u in users if _title_entry(root, prefix + '/' + u, title)]
+        if len(played) == 1:
+            users = played
     if len(users) != 1:
         raise SaveError('Start this game with the intended local Switch profile; importing requires one unambiguous local profile.', 409)
-    title = path.name.upper()
     with directory(root, prefix + '/' + users[0]) as fd:
         title = next((name for name in os.listdir(fd) if name.upper() == title), title)
     return prefix + '/' + users[0] + '/' + title
@@ -714,9 +754,11 @@ def import_choice(settings, item, token, overwrite=False):
                 raise SaveError('Switch profile saves must use a Switch save layout.')
         elif item['system'] == 'switch':
             try:
-                root = _switch_root(settings, item, group)
-                target_path = _switch_destination(settings, item, group, root)
-            except FileNotFoundError:
+                layout, root = _switch_root(settings, item, group)
+                target_path = _switch_destination(settings, item, group, layout, root)
+            except OSError as error:
+                if not _skip_unusable_root(error):
+                    raise
                 raise SaveError('Start this game once on the local Switch emulator before importing its save.', 409) from None
         # Private staging stays on the same filesystem and is excluded from inventories.
         with directory(root, create=True):

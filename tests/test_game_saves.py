@@ -13,6 +13,15 @@ from app.transfer import game_saves as saves
 from app.web.handlers_game_saves import HandlersGameSavesMixin
 
 
+def ryujinx_extra(title, kind=1):
+    """A Ryujinx SaveDataAttribute: program id, user id, static id, type at 0x20."""
+    data = bytearray(512)
+    data[:8] = int(title, 16).to_bytes(8, 'little')
+    data[8] = 1
+    data[0x20] = kind
+    return bytes(data)
+
+
 class Response(io.BytesIO):
     def __enter__(self):
         return self
@@ -388,13 +397,43 @@ class GameSavesTests(unittest.TestCase):
         item = {**self.item, 'system': 'switch', 'ids': [title]}
         root = saves.roots(self.settings, item)['ryujinx-config']
         slot = '0000000000000001'
-        self.write(slot + '/ExtraData', int(title, 16).to_bytes(8, 'little') + bytes(504), root=root)
+        self.write(slot + '/ExtraData', ryujinx_extra(title), root=root)
         self.write(slot + '/0/progress.bin', b'old', root=root)
         group = self.group('0000000000000009/0', kind='directory', layout='ryujinx-config')
         self.apply(self.choose(group, item), item=item)
         self.assertEqual((root / slot / '0/progress.bin').read_bytes(), b'new progress')
         self.assertFalse((root / '0000000000000009').exists())
         self.assertEqual(saves.inventory(self.settings, item)[0]['path'], slot + '/0')
+
+    def test_batocera_symlinked_switch_save_trees_are_found_and_imported(self):
+        # Batocera links <config>/nand/user/save -> /userdata/saves/yuzu (and Ryujinx's
+        # bis/user/save -> /userdata/saves/Ryujinx); the real trees must be scanned.
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'ids': [title]}
+        all_roots = saves.roots(self.settings, item)
+        tree = all_roots['yuzu-userdata']
+        user, stub = '7CA22C3B1408A6D1F5017EDD329970F0', 'D1F5017EDD329970F000000000000000'
+        self.write('0000000000000000/' + user + '/' + title + '/save_data/system.dat', b'old', root=tree)
+        self.write('0000000000000000/' + stub + '/' + title + '/.citron_save_size', b'x', root=tree)
+        self.write('0000000000000000/' + '0' * 32 + '/0100000000001000/x', b'x', root=tree)
+        nand_user = all_roots['yuzu-config'] / 'user'
+        nand_user.mkdir(parents=True)
+        (nand_user / 'save').symlink_to(tree)
+        ryu = all_roots['ryujinx-userdata']
+        self.write('0000000000000008/ExtraData0', ryujinx_extra(title), root=ryu)
+        self.write('0000000000000008/0/save.bin', b'ryu', root=ryu)
+        self.write('0000000000000009/ExtraData0', ryujinx_extra(title, kind=2), root=ryu)
+        self.write('0000000000000009/0/bcat.bin', b'bcat', root=ryu)
+        all_roots['ryujinx-config'].parent.mkdir(parents=True)
+        all_roots['ryujinx-config'].symlink_to(ryu)
+        found = {(g['layout'], g['path']) for g in saves.inventory(self.settings, item)}
+        self.assertEqual(found, {('yuzu-userdata', '0000000000000000/' + user + '/' + title),
+                                 ('ryujinx-userdata', '0000000000000008/0')})
+        # A save from a peer's config-style NAND lands in the played local profile.
+        group = self.group('user/save/0000000000000000/' + 'B' * 32 + '/' + title, kind='directory', layout='eden-config')
+        self.apply(self.choose(group, item), item=item)
+        self.assertEqual((tree / '0000000000000000' / user / title / 'progress.bin').read_bytes(), b'new progress')
+        self.assertFalse((tree / '0000000000000000' / stub / title / 'progress.bin').exists())
 
     def test_switch_source_storage_location_can_differ_from_local(self):
         title = '01006A800016E000'

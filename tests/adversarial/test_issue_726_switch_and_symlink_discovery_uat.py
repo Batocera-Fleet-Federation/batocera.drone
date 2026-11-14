@@ -82,7 +82,8 @@ class SwitchAndSymlinkDiscoveryUat(unittest.TestCase):
         (real_yuzu / "user" / "save" / "0000000000000000" / ("C" * 32) / SMASH_TITLE_ID / "s.bin").write_bytes(b"sym")
         yuzu_saves.symlink_to(real_yuzu)
 
-        # Remote peer export handler must succeed and only expose the real (non-symlink) layout.
+        # Remote peer export handler must succeed and never follow the symlinked layout;
+        # the link target is still a real configs/yuzu/nand root and is scanned as such.
         handler = HandlersGameSavesMixin()
         handler.settings = self.settings
         handler.repository = mock.Mock()
@@ -92,7 +93,7 @@ class SwitchAndSymlinkDiscoveryUat(unittest.TestCase):
         with mock.patch.object(saves, "source_game", return_value=self.item):
             handler._handle_peer_game_saves({"system": ["switch"], "rom": [self.item["rom"]]})
         self.assertEqual(sent["code"], 200, sent)
-        self.assertEqual([g["layout"] for g in sent["body"]["saves"]], ["eden-config"])
+        self.assertEqual(sorted(g["layout"] for g in sent["body"]["saves"]), ["eden-config", "yuzu-config"])
 
         # Local import into a second profile directory with yuzu-saves symlinked must also apply cleanly.
         save_file.unlink()
@@ -103,7 +104,7 @@ class SwitchAndSymlinkDiscoveryUat(unittest.TestCase):
         local_save.write_bytes(b"fresh-save")
 
         peer = {"drone_id": "batocera", "name": "BATOCERA", "certificate_fingerprint": "a" * 64}
-        group = sent["body"]["saves"][0]
+        group = next(g for g in sent["body"]["saves"] if g["layout"] == "eden-config")
         with mock.patch.object(saves, "tls_peer", return_value=peer), mock.patch.object(
             saves, "_open_peer", return_value=_BytesResponse(json.dumps({"saves": [group]}).encode("utf-8"))
         ):
