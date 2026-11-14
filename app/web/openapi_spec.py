@@ -330,6 +330,14 @@ def _schemas() -> Dict[str, Schema]:
     )
 
     return {
+        "GameSavesResponse": _object({
+            "capabilities": _object({"saves": _enum(["available", "unsupported", "unknown"]), "states": _enum(["available", "unsupported", "unknown"]), "message": _string()}),
+            "drones": _array(_object({"drone_id": _string(), "name": _string()})),
+            "saves": _array(_object({"choice": _string("Opaque selection, valid for ten minutes"), "name": _string(), "kind": _enum(["save", "state", "directory"]), "layout": _string(), "file_count": _integer(), "file_size": _integer(), "modified_time": _integer()})),
+        }),
+        "GameSaveImportRequest": _object({"choice": _string(), "overwrite": _boolean()}, required=("choice",)),
+        "GameSaveImportResponse": _object({"status": _string(), "applied": _boolean(), "file_count": _integer(), "backup_kept": _boolean()}),
+        "PeerGameSavesResponse": _object({"saves": _array(_object()), "game": _object(), "capabilities": _object()}),
         "ErrorResponse": _object({"error": _string("Human-readable error message")}, ("error",), description="Error response returned by API routes."),
         "OpenApiDocument": _object(description="OpenAPI 3 document."),
         "AuthSessionResponse": _object(
@@ -2558,6 +2566,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, parameters=[_query_param("compact", _boolean(), "Omit the duplicate `downloads` list"), _query_param("queued_limit", _integer(), "Return at most this many queued rows (queued_total keeps the full count)")], tags=["admin", "downloads"])},
             **_integration_paths(),
             **_multiplayer_paths(),
+            **_game_save_paths(),
             "/admin/downloads/{job_id}/cancel": {
                 "post": _operation("Cancel a download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
@@ -3171,3 +3180,18 @@ def _artwork_search_params() -> Iterable[Schema]:
         _query_param("rom_path", _string(), "ROM path from gamelist metadata"),
         _query_param("q", _string(), "Manual search query"),
     ]
+
+
+def _game_save_paths() -> Dict[str, Schema]:
+    params = [_path_param("system"), _path_param("unique_id")]
+    query = [_query_param("system", _string()), _query_param("rom", _string()), _query_param("fingerprint", _string())]
+    return {
+        "/systems/{system}/roms/{unique_id}/saves": {
+            "get": _operation("Save support and paired Drones; check one Drone for this ROM’s existing saves", {"200": _json_response("GameSavesResponse")}, parameters=params + [_query_param("drone", _string())], tags=["saves"], error_codes=("400", "401", "403", "404", "429", "502", "503"))},
+        "/admin/systems/{system}/roms/{unique_id}/saves": {
+            "post": _operation("Download, verify and apply the selected save set", {"200": _json_response("GameSaveImportResponse")}, parameters=params, request_body=_json_request("GameSaveImportRequest"), tags=["admin", "saves"], description="Requires a real login, admin enabled, same-origin JSON. Overwrite defaults to false: preserve previous saves separately before installing the incoming set. Close the game before importing.", error_codes=("400", "401", "403", "404", "409", "415", "429", "502", "503"))},
+        "/peer/game-saves": {
+            "get": _operation("List existing save sets for a matching ROM", {"200": _json_response("PeerGameSavesResponse")}, parameters=query, security=[{"mutualTLS": []}], tags=["peer", "saves"])},
+        "/peer/game-saves/file": {
+            "get": _operation("Export one file of an existing ROM-scoped save set", {"200": _media_response("Save bytes", ["application/octet-stream"])}, parameters=query + [_query_param("save", _string()), _query_param("file", _integer())], security=[{"mutualTLS": []}], tags=["peer", "saves"])},
+    }

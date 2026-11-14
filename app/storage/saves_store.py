@@ -138,6 +138,7 @@ def _iter_save_files(saves_root: Path):
         return
     root = saves_root.resolve()
     for current_root, _dirs, file_names in os.walk(root):
+        _dirs[:] = [name for name in _dirs if not name.startswith(".drone-save-")]
         for name in sorted(file_names):
             file_path = (Path(current_root) / name)
             if file_path.suffix.lower() in _IGNORED_SUFFIXES:
