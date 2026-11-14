@@ -828,6 +828,12 @@
   }
 
   function renderOwner(kind, it, host, registry, localPage) {
+    if (localPage) {
+      // Local pages are already the authoritative owner. Exclude this Drone from the
+      // peer lookup and use the same key shape for any local row returned defensively.
+      it.is_local = true;
+      it.drone_name = "This Drone";
+    }
     registry.set(keyOf(it), it);
     host._owner = it;
     host.innerHTML = `${copyRow(kind, it)}${localPage ? '<div class="small text-muted">This page</div>' : ""}
@@ -852,7 +858,7 @@
       const copies = res.copies || [];
       if (copies.some((c) => c.is_local)) it.exists_locally = true;
       copies.forEach((c) => registry.set(keyOf(c), c));
-      const rows = copies.filter((r) => keyOf(r) !== keyOf(it));
+      const rows = copies.filter((r) => keyOf(r) !== keyOf(it) && !r.is_local);
       const down = (res.sources || []).filter((s) => !["ok", "cached"].includes(s.status));
       results.innerHTML = `${rows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">No other copies found.</div>'}
         ${down.length ? `<div class="small text-muted mt-2">Could not check: ${esc(down.map((s) => s.name).join(", "))}</div>` : ""}`;
