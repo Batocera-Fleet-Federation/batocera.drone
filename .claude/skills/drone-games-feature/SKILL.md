@@ -93,8 +93,7 @@ continuously-changing directory still eventually flushes
 `app/roms/rom_systems.py` (`RomSystemsSearchMixin`) — **there is no static
 systems allowlist**. `list_system_names` just iterates directories under
 `roms_root`, filtered only by `should_include_system` (a static method in
-`drone_api.py` excluding names ending `.old`/containing `.old.` — the
-network-share-referencing convention, see `drone-admin-features`). Any
+`drone_api.py` excluding names ending `.old`/containing `.old.`). Any
 subfolder of the ROMs root is effectively a recognized "system."
 
 ## gamelist.xml — `app/roms/gamelist.py`

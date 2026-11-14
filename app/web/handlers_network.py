@@ -20,7 +20,6 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
-    from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired
     from ..device.tailnet_service import (
         install_tailscale as _install_tailscale,
@@ -55,7 +54,6 @@ try:
     from .server_tls import load_peer_cert_everywhere, activate_peer_certificate
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
-    from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired  # type: ignore
     from device.tailnet_service import (  # type: ignore
         install_tailscale as _install_tailscale,
@@ -1161,9 +1159,6 @@ class HandlersNetworkMixin:
 
     def _handle_admin_local_peer_forget(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)
-        # Remove any source-side NFS authorization while the pairing record is
-        # still available. This never touches exports owned outside Drone.
-        _nfs_exports.revoke_peer(self.settings, peer_id)
         try:
             from ..transfer import swarm_membership as _swarm_membership
         except ImportError:  # pragma: no cover - direct script execution fallback
@@ -1175,7 +1170,7 @@ class HandlersNetworkMixin:
     def _handle_admin_leave_swarm(self) -> None:
         """Forget every currently paired peer -- exactly what the single
         Forget button does, just for all of them. Deliberately a loop over
-        the same per-peer path (NFS revoke, peer notify, cert cleanup,
+        the same per-peer path (peer notify, cert cleanup,
         membership-removal gossip) rather than a separate bulk code path, so
         it can never drift from what a single Forget click already does.
         This Drone's own identity/certificate is untouched; it can be paired
@@ -1189,7 +1184,6 @@ class HandlersNetworkMixin:
         for peer_id in peer_ids:
             if not peer_id:
                 continue
-            _nfs_exports.revoke_peer(self.settings, peer_id)
             try:
                 from ..transfer import swarm_membership as _swarm_membership
             except ImportError:  # pragma: no cover - direct script execution fallback

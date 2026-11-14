@@ -1,7 +1,3 @@
-// Reference ROMs (live NFS/SMB peer-library referencing) isn't reliable enough
-// yet for outside testers. The backend/route are untouched -- this only hides
-// the UI entry points. Flip back to true to restore them.
-const REFERENCE_ROMS_UI_ENABLED = false;
 const content = document.getElementById("content");
 const backBtn = document.getElementById("backBtn") || {
   classList: { add() {}, remove() {} },
@@ -231,11 +227,6 @@ let swarmOverviewPromise = null;
 let tailnetDiscoveryCache = null;
 let tailnetDiscoveryCachedAt = 0;
 let tailnetDiscoveryPromise = null;
-// This Drone's own configured peer ROM references (NFS-preferred, SMB fallback),
-// keyed by peer_id -- populated by renderSwarmPage(), read by
-// renderSwarmDroneCard() so each peer's row can show whether it's currently
-// referenced.
-let swarmNetworkSharesByPeer = {};
 let vpnTimer = null;
 let vpnInFlight = false;
 let smtpTimer = null;
@@ -5574,7 +5565,6 @@ function renderSwarmTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
     ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
-    ...(REFERENCE_ROMS_UI_ENABLED ? [["reference-roms", "Reference ROMs", "bi-hdd-network", "#admin/reference-roms"]] : []),
   ]);
 }
 
@@ -9374,28 +9364,6 @@ async function renderTransfersPage() {
   }
 }
 
-function _networkShareStatusBadge(share) {
-  const status = share.status;
-  const transport = String(share.protocol || "").toUpperCase();
-  const transportSuffix = transport ? ` via ${transport}` : "";
-  const style = status === "mounted"
-    ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
-    : status === "peer_unreachable" || status === "error"
-      ? "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)"
-      : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
-  const label = status === "mounted"
-    ? (share.bios_status === "syncing" || share.bios_status === "pending" ? `Referencing${transportSuffix} (BIOS syncing)` : `Referencing${transportSuffix}`)
-    : status === "detaching"
-      ? "Detaching..."
-      : status === "peer_unreachable"
-        ? "Referencing (unreachable)"
-        : status === "error"
-          ? (share.enabled === false ? "Detach needs retry" : "Referencing (error)")
-          : "Referencing...";
-  const fallback = share.transport_fallback_detail ? ` NFS fallback reason: ${share.transport_fallback_detail}` : "";
-  return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || `This Drone is referencing this peer's ROM library${transportSuffix}.${fallback}`)}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
-}
-
 // Peer rows start pending and update individually as their probes return, so
 // a Drone that moved networks never delays the table or the other rows.
 function swarmDroneCardId(droneId) {
@@ -9407,7 +9375,6 @@ function renderSwarmDroneCard(drone) {
   const droneToken = encodeURIComponent(String(drone.drone_id || "")).replace(/'/g, "%27");
   const counts = summary.counts || {};
   const systems = Array.isArray(summary.systems) ? summary.systems : [];
-  const share = swarmNetworkSharesByPeer[String(drone.drone_id || "")];
   const pending = !drone.is_self && (drone.pending === true || drone.online == null);
   const badge = drone.is_self
     ? '<span class="badge text-bg-info">This Drone</span>'
@@ -9431,27 +9398,15 @@ function renderSwarmDroneCard(drone) {
   if (lanUrl) {
     addressLines.push(`<div class="small text-truncate"><i class="bi bi-house me-1" aria-hidden="true"></i><span class="text-muted">${escapeHtml(lanUrl)}</span></div>`);
   }
-  if (share) {
-    const skippedCount = Number(share.skipped_count || 0);
-    const referencedCount = Number(share.system_count || 0);
-    const biosLinkCount = Number(share.bios_link_count || 0);
-    const countNote = referencedCount || biosLinkCount ? ` -- ${referencedCount} systems, ${biosLinkCount} BIOS links` : "";
-    const skippedNote = skippedCount ? `; ${skippedCount} local item${skippedCount === 1 ? "" : "s"} kept` : "";
-    addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(countNote + skippedNote)}</span></div>`);
-  }
   const inventoryAvailable = drone.online && drone.summary;
   const inventoryNote = pending ? "Checking inventory..."
     : drone.online && drone.summary_error ? `Online; inventory is delayed: ${drone.summary_error}`
     : drone.error ? `${drone.offline_hint ? `${drone.offline_hint} ` : ""}${drone.error}` : "";
   const inventoryCells = [counts.roms, counts.bios, counts.artwork, systems.length]
     .map(value => `<td class="text-end" data-swarm-count>${inventoryAvailable ? Number(value || 0) : "&mdash;"}</td>`).join("");
-  const networkShareButton = !REFERENCE_ROMS_UI_ENABLED ? "" : share
-    ? `<button type="button" class="btn btn-sm btn-outline-secondary" title="Manage Reference" aria-label="Manage Reference" onclick="setHash('#admin/reference-roms/${droneToken}')"><i class="bi bi-hdd-network" aria-hidden="true"></i></button>`
-    : `<button type="button" class="btn btn-sm btn-outline-info" onclick="setHash('#admin/reference-roms/${droneToken}')" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference ROMs" : "Reference ROMs: requires a known LAN or Tailscale address"}" aria-label="Reference ROMs"><i class="bi bi-hdd-network" aria-hidden="true"></i></button>`;
   const actions = drone.is_self
     ? `<button type="button" class="btn btn-sm btn-outline-danger" title="Leave Swarm" aria-label="Leave Swarm" onclick="leaveSwarm()"><i class="bi bi-box-arrow-right" aria-hidden="true"></i></button>`
-    : `${networkShareButton}
-        <button type="button" class="btn btn-sm btn-outline-success" title="Download ROMs" aria-label="Download ROMs" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down" aria-hidden="true"></i></button>
+    : `<button type="button" class="btn btn-sm btn-outline-success" title="Download ROMs" aria-label="Download ROMs" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down" aria-hidden="true"></i></button>
         <button type="button" class="btn btn-sm btn-outline-danger" title="Forget Drone" aria-label="Forget Drone" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1" aria-hidden="true"></i>Forget</button>`;
   return `
     <tr id="${swarmDroneCardId(drone.drone_id)}">
@@ -10022,10 +9977,9 @@ async function renderSwarmPage() {
     // probe: false -- the overview returns stored peer state immediately and
     // each peer is probed separately below, so a Drone that has moved
     // networks or powered off can no longer hold up the whole page.
-    const [discovery, overview, networkShares] = await Promise.all([
+    const [discovery, overview] = await Promise.all([
       loadTailnetDiscovery(),
       loadSwarmOverview(false, { probe: false }),
-      api("/admin/network-shares").catch(() => ({ shares: [] })),
     ]);
     // The user may have scrolled on to another page while this was in flight.
     // Writing content.innerHTML now would wipe that page and yank them back.
@@ -10033,7 +9987,6 @@ async function renderSwarmPage() {
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
-    swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
     const rowsHtml = drones.map(renderSwarmDroneCard).join("") || '<tr><td colspan="8" class="text-muted">No Drones in this swarm.</td></tr>';
     const tailnetHtml = renderSwarmTailnetCard(tailnet);
     if (!document.getElementById("swarmPageShell")) {
@@ -10122,428 +10075,6 @@ async function renderSwarmPage() {
       content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
     }
   }
-}
-
-// Issue #35 / #57: the Reference ROMs page. Referencing shares whole *systems*
-// over a read-only network mount (NFS/SMB). Individual games cannot be linked,
-// so the grid lists systems. System, genre, and search filters still narrow
-// that list (a game-name search finds the system that contains the game) and
-// the chosen peer + systems persist server-side across OFF/ON toggles.
-let referenceRomsState = {
-  peerId: "",
-  peerName: "",
-  online: false,
-  selectedSystems: new Set(),
-  savedSystems: new Set(),
-  active: false,
-  activePeerId: "",
-  activeStatus: "",
-  availableSystems: [],
-  systemCounts: {},
-  genres: [],
-  filterSystem: "",
-  filterGenre: "",
-  query: "",
-  limit: 50,
-  offset: 0,
-  total: 0,
-  items: [],
-};
-
-function referenceRomsSetsEqual(a, b) {
-  if (a.size !== b.size) return false;
-  for (const value of a) if (!b.has(value)) return false;
-  return true;
-}
-
-function referenceRomsShell(bodyHtml) {
-  return `${renderSwarmTabBar("reference-roms")}
-    <div class="card log-card mb-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>Reference ROMs</span>
-      </div>
-      <div class="card-body" id="referenceRomsBody">${bodyHtml}</div>
-    </div>`;
-}
-
-async function renderReferenceRomsPage(peerId) {
-  currentSystemContext = null;
-  clearSystemTheme();
-  titleNode.textContent = "Reference ROMs";
-  subtitleNode.textContent = "Choose which systems to share from one paired machine's ROM library";
-  setLoading(true, "Loading Reference ROMs...");
-  try {
-    const [state, overview] = await Promise.all([
-      api("/admin/network-reference"),
-      loadSwarmOverview().catch(() => ({ drones: [] })),
-    ]);
-    const selection = state.selection || {};
-    const drones = Array.isArray(overview.drones) ? overview.drones : [];
-    const targetPeer = peerId || selection.active_peer_id || selection.peer_id || "";
-    const drone = drones.find((entry) => String(entry.drone_id || "") === targetPeer);
-    const savedForTarget = selection.peer_id === targetPeer ? (selection.selected_systems || []) : [];
-    referenceRomsState = {
-      ...referenceRomsState,
-      peerId: targetPeer,
-      peerName: (drone && (drone.name || drone.hostname)) || selection.peer_name || targetPeer,
-      online: !!(drone && drone.online),
-      selectedSystems: new Set(savedForTarget),
-      savedSystems: new Set(savedForTarget),
-      active: !!selection.active && selection.active_peer_id === targetPeer,
-      activePeerId: selection.active_peer_id || "",
-      activeStatus: (state.active_share && state.active_share.status) || "",
-      availableSystems: [],
-      systemCounts: {},
-      genres: [],
-      filterSystem: "",
-      filterGenre: "",
-      query: "",
-      offset: 0,
-      total: 0,
-      items: [],
-    };
-
-    if (!targetPeer) {
-      content.innerHTML = referenceRomsShell(
-        `<div class="themed-empty">Pick a machine to reference from the <a href="#admin/swarm">Swarm</a> page, then choose its systems here.</div>`,
-      );
-      return;
-    }
-    if (referenceRomsState.activePeerId && referenceRomsState.activePeerId !== targetPeer) {
-      const otherName = escapeHtml(selection.peer_name || referenceRomsState.activePeerId);
-      content.innerHTML = referenceRomsShell(
-        `<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>This Drone is already referencing <strong>${otherName}</strong>. Only one machine can be referenced at a time &mdash; stop that reference first from the <a href="#admin/reference-roms/${encodeURIComponent(referenceRomsState.activePeerId)}">Reference ROMs</a> page.</div>`,
-      );
-      return;
-    }
-
-    content.innerHTML = referenceRomsShell(referenceRomsBodyHtml());
-    wireReferenceRomsControls();
-    await loadReferencePeerSystems();
-    await loadReferenceRoms();
-  } catch (err) {
-    showToast(`Failed to load Reference ROMs: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    content.innerHTML = referenceRomsShell('<div class="themed-empty">Reference ROMs could not be loaded.</div>');
-  } finally {
-    setLoading(false);
-  }
-}
-
-function referenceRomsBodyHtml() {
-  const st = referenceRomsState;
-  const busy = ["enabling", "detaching", "pending"].includes(st.activeStatus);
-  return `
-    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
-      <div>
-        <div class="h5 mb-1"><i class="bi bi-hdd-network me-2"></i>${escapeHtml(st.peerName || st.peerId)}</div>
-        <div class="small text-muted">${st.online ? "Online" : "Offline"} &middot; referencing shares whole systems over a read-only network mount</div>
-      </div>
-      <div class="form-check form-switch fs-5">
-        <input class="form-check-input" type="checkbox" role="switch" id="referenceRomsToggle" ${st.active ? "checked" : ""} ${busy ? "disabled" : ""}>
-        <label class="form-check-label fs-6" for="referenceRomsToggle" id="referenceRomsToggleLabel">${st.active ? "Referencing ON" : "Referencing OFF"}</label>
-      </div>
-    </div>
-    <div id="referenceRomsSummary" class="mb-3"></div>
-    <div class="download-section mb-3">
-      <div class="download-section-title"><span><i class="bi bi-funnel me-2"></i>Find systems</span></div>
-      <div class="row g-2">
-      <div class="col-12 col-lg-3">
-        <label class="form-label small" for="referenceRomsSystem">System</label>
-        <select id="referenceRomsSystem" class="form-select form-select-sm"><option value="">All systems</option></select>
-      </div>
-      <div class="col-12 col-lg-3">
-        <label class="form-label small" for="referenceRomsGenre">Genre</label>
-        <select id="referenceRomsGenre" class="form-select form-select-sm"><option value="">All genres</option></select>
-      </div>
-      <div class="col-12 col-lg-4">
-        <label class="form-label small" for="referenceRomsQuery">Search</label>
-        <input id="referenceRomsQuery" class="form-control form-control-sm" placeholder="Search systems or games">
-      </div>
-      <div class="col-12 col-lg-2">
-        <label class="form-label small" for="referenceRomsPageSize">Per page</label>
-        <select id="referenceRomsPageSize" class="form-select form-select-sm"><option>50</option><option>100</option><option>200</option></select>
-      </div>
-      </div>
-    </div>
-    <div class="table-responsive">
-      <table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack reference-roms-table">
-        <colgroup>
-          <col style="width:40%"><col style="width:22%"><col style="width:20%"><col style="width:18%">
-        </colgroup>
-        <thead><tr>
-          <th>System</th>
-          <th>Status</th>
-          <th>Games</th>
-          <th class="download-actions">Actions</th>
-        </tr></thead>
-        <tbody id="referenceRomsRows"><tr><td colspan="4" class="text-muted">Loading systems...</td></tr></tbody>
-      </table>
-    </div>
-    <div id="referenceRomsPagination"></div>`;
-}
-
-function wireReferenceRomsControls() {
-  const systemSel = document.getElementById("referenceRomsSystem");
-  const genreSel = document.getElementById("referenceRomsGenre");
-  const query = document.getElementById("referenceRomsQuery");
-  const pageSize = document.getElementById("referenceRomsPageSize");
-  const toggle = document.getElementById("referenceRomsToggle");
-  if (systemSel) systemSel.addEventListener("change", () => { referenceRomsState.filterSystem = systemSel.value; referenceRomsState.offset = 0; loadReferenceRoms(); });
-  if (genreSel) genreSel.addEventListener("change", () => { referenceRomsState.filterGenre = genreSel.value; referenceRomsState.offset = 0; loadReferenceRoms(); });
-  if (pageSize) pageSize.addEventListener("change", () => { referenceRomsState.limit = Math.max(1, Number(pageSize.value) || 50); referenceRomsState.offset = 0; loadReferenceRoms(); });
-  if (query) {
-    let timer = null;
-    query.addEventListener("input", () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => { referenceRomsState.query = query.value.trim(); referenceRomsState.offset = 0; loadReferenceRoms(); }, 300);
-    });
-  }
-  if (toggle) toggle.addEventListener("change", () => toggleReferenceActive(toggle.checked));
-  renderReferenceRomsSummary();
-}
-
-async function loadReferencePeerSystems() {
-  try {
-    const summary = await api(`/admin/local-network/peers/${encodeURIComponent(referenceRomsState.peerId)}/assets?type=summary`);
-    referenceRomsState.availableSystems = Array.isArray(summary.systems) ? summary.systems : [];
-    referenceRomsState.systemCounts = summary.system_counts || {};
-    referenceRomsState.genres = Array.isArray(summary.genres) ? summary.genres : [];
-  } catch (err) {
-    showToast(`Could not load this machine's systems: ${escapeHtml(err.message || "unknown error")}`, "warning");
-  }
-  const systemSel = document.getElementById("referenceRomsSystem");
-  if (systemSel) {
-    systemSel.innerHTML = ['<option value="">All systems</option>']
-      .concat(referenceRomsState.availableSystems.map((name) => {
-        const count = Number(referenceRomsState.systemCounts[name] || 0);
-        return `<option value="${escapeHtml(name)}">${escapeHtml(name)}${count ? ` (${count})` : ""}</option>`;
-      }))
-      .join("");
-  }
-  const genreSel = document.getElementById("referenceRomsGenre");
-  if (genreSel) {
-    genreSel.innerHTML = ['<option value="">All genres</option>']
-      .concat(referenceRomsState.genres.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`))
-      .join("");
-  }
-  renderReferenceRomsSummary();
-}
-
-function referenceSystemRow(system, romCount) {
-  const fullCount = referenceRomsState.systemCounts[system];
-  return {
-    system,
-    rom_count: fullCount == null ? Number(romCount || 0) : Number(fullCount),
-  };
-}
-
-async function loadReferenceRoms() {
-  const rows = document.getElementById("referenceRomsRows");
-  if (rows) rows.innerHTML = '<tr><td colspan="4" class="text-muted">Loading systems...</td></tr>';
-  const st = referenceRomsState;
-  const params = new URLSearchParams({ type: "systems", limit: String(st.limit), offset: String(st.offset) });
-  if (st.filterSystem) params.set("system", st.filterSystem);
-  if (st.filterGenre) params.set("genre", st.filterGenre);
-  if (st.query) params.set("q", st.query);
-  try {
-    const page = await api(`/admin/local-network/peers/${encodeURIComponent(st.peerId)}/assets?${params.toString()}`);
-    // This Drone always answers with systems -- it folds an older peer's ROM
-    // inventory into systems itself -- so a game row can never be painted here.
-    if (String(page.asset_type || "") !== "systems" || !Array.isArray(page.items)) {
-      throw new Error("systems inventory unavailable");
-    }
-    st.items = page.items.map((item) => referenceSystemRow(String(item.system || item.name || ""), item.rom_count)).filter((item) => item.system);
-    st.total = Number(page.total || 0);
-    st.offset = Number(page.offset || 0);
-  } catch (err) {
-    if (rows) rows.innerHTML = `<tr><td colspan="4" class="text-danger">Could not load systems: ${escapeHtml(err.message || "unknown error")}</td></tr>`;
-    return;
-  }
-  renderReferenceRomsTable();
-  renderReferenceRomsPagination();
-  renderReferenceRomsSummary();
-}
-
-function renderReferenceRomsTable() {
-  const rows = document.getElementById("referenceRomsRows");
-  if (!rows) return;
-  const st = referenceRomsState;
-  if (!st.items.length) {
-    rows.innerHTML = '<tr><td colspan="4" class="text-muted">No systems match these filters.</td></tr>';
-    return;
-  }
-  rows.innerHTML = st.items.map((item) => {
-    const system = String(item.system || "");
-    const count = Number(item.rom_count || 0);
-    const selected = st.selectedSystems.has(system);
-    const status = selected
-      ? (st.active
-        ? '<span class="badge text-bg-success"><i class="bi bi-link-45deg me-1"></i>Referenced</span>'
-        : '<span class="badge text-bg-info"><i class="bi bi-check2 me-1"></i>Selected</span>')
-      : '<span class="badge text-bg-secondary">Not selected</span>';
-    const selectTitle = selected ? `Stop referencing the ${system} system` : `Reference the ${system} system`;
-    const gamesLabel = count.toLocaleString();
-    return `<tr class="${selected ? "reference-roms-row-selected" : ""}">
-      <td class="download-file" title="${escapeHtml(system)}">${escapeHtml(system)}</td>
-      <td>${status}</td>
-      <td title="${escapeHtml(`${gamesLabel} games in ${system}`)}">${escapeHtml(gamesLabel)}</td>
-      <td class="download-actions">
-        <button class="btn btn-sm ${selected ? "btn-outline-warning" : "btn-outline-success"}" type="button"
-          title="${escapeHtml(selectTitle)}" aria-label="${escapeHtml(selectTitle)}" ${st.active ? "disabled" : ""}
-          onclick="toggleReferenceRomSystem(${jsAttr(system)})"><i class="bi ${selected ? "bi-dash-circle" : "bi-plus-circle"}"></i></button>
-      </td>
-    </tr>`;
-  }).join("");
-}
-
-function renderReferenceRomsPagination() {
-  const node = document.getElementById("referenceRomsPagination");
-  if (!node) return;
-  const st = referenceRomsState;
-  const limit = Math.max(1, st.limit);
-  if (!st.total) { node.innerHTML = ""; return; }
-  const totalPages = Math.max(1, Math.ceil(st.total / limit));
-  const page = Math.min(totalPages, Math.floor(st.offset / limit) + 1);
-  const showingFrom = st.offset + 1;
-  const showingTo = Math.min(st.total, st.offset + limit);
-  node.innerHTML = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-      <div class="text-muted small">Showing ${showingFrom}-${showingTo} of ${st.total}</div>
-      <div class="btn-group" role="group">
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} onclick="setReferenceRomsPage(${page - 1})">Previous</button>
-        <button class="btn btn-sm btn-outline-primary disabled" type="button">${page} / ${totalPages}</button>
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} onclick="setReferenceRomsPage(${page + 1})">Next</button>
-      </div>
-    </div>`;
-}
-
-function setReferenceRomsPage(page) {
-  referenceRomsState.offset = Math.max(0, (page - 1) * referenceRomsState.limit);
-  loadReferenceRoms();
-}
-
-function toggleReferenceRomSystem(system) {
-  if (!system || referenceRomsState.active) return;
-  const set = referenceRomsState.selectedSystems;
-  if (set.has(system)) set.delete(system); else set.add(system);
-  renderReferenceRomsTable();
-  renderReferenceRomsSummary();
-}
-
-function removeReferenceSystem(system) {
-  if (referenceRomsState.active) return;
-  referenceRomsState.selectedSystems.delete(system);
-  renderReferenceRomsTable();
-  renderReferenceRomsSummary();
-}
-
-function renderReferenceRomsSummary() {
-  const node = document.getElementById("referenceRomsSummary");
-  if (!node) return;
-  const st = referenceRomsState;
-  const dirty = !referenceRomsSetsEqual(st.selectedSystems, st.savedSystems);
-  const chips = [...st.selectedSystems].sort((a, b) => a.localeCompare(b)).map((name) => {
-    const count = Number(st.systemCounts[name] || 0);
-    return `<span class="badge text-bg-secondary me-1 mb-1">${escapeHtml(name)}${count ? ` &middot; ${count}` : ""}
-      ${st.active ? "" : `<i class="bi bi-x ms-1 pointer" onclick="removeReferenceSystem(${jsAttr(name)})"></i>`}</span>`;
-  }).join("");
-  const statusNote = st.active
-    ? `<span class="badge text-bg-success"><i class="bi bi-check-circle me-1"></i>Referencing ${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"}${st.activeStatus && st.activeStatus !== "mounted" ? ` (${escapeHtml(st.activeStatus)})` : ""}</span>`
-    : `<span class="text-muted small">${st.selectedSystems.size} system${st.selectedSystems.size === 1 ? "" : "s"} selected${dirty ? " &middot; unsaved changes" : ""}</span>`;
-  node.innerHTML = `
-    <div class="download-summary-grid mb-3">
-      <div class="download-summary-card"><i class="bi bi-collection"></i><div><strong>${st.availableSystems.length.toLocaleString()}</strong><span>Peer systems</span></div></div>
-      <div class="download-summary-card tone-info"><i class="bi bi-check2-square"></i><div><strong>${st.selectedSystems.size.toLocaleString()}</strong><span>Selected</span></div></div>
-      <div class="download-summary-card"><i class="bi bi-controller"></i><div><strong>${st.total.toLocaleString()}</strong><span>Matching systems</span></div></div>
-      <div class="download-summary-card ${st.active ? "tone-success" : ""}"><i class="bi ${st.active ? "bi-hdd-network" : "bi-pause-circle"}"></i><div><strong>${st.active ? "On" : "Off"}</strong><span>Referencing</span></div></div>
-    </div>
-    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-      ${statusNote}
-      <button class="btn btn-sm btn-primary ms-auto" id="referenceRomsSaveBtn" ${st.active || !dirty ? "disabled" : ""} onclick="saveReferenceSelection()"><i class="bi bi-save me-1"></i>Save Selection</button>
-    </div>
-    <div>${chips || '<span class="text-muted small">No systems selected yet &mdash; choose a system below.</span>'}</div>
-    ${st.active ? '<div class="small text-muted mt-1">Switch referencing OFF to change which systems are selected.</div>' : ""}`;
-}
-
-async function saveReferenceSelection() {
-  const st = referenceRomsState;
-  try {
-    setLoading(true, "Saving selection...");
-    const result = await apiPost("/admin/network-reference/selection", {
-      peer_id: st.peerId,
-      peer_name: st.peerName,
-      selected_systems: [...st.selectedSystems],
-    });
-    const selection = result.selection || {};
-    st.savedSystems = new Set(selection.selected_systems || [...st.selectedSystems]);
-    showToast("Reference selection saved", "success");
-    renderReferenceRomsSummary();
-  } catch (err) {
-    showToast(`Could not save selection: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-
-async function toggleReferenceActive(wantOn) {
-  const st = referenceRomsState;
-  if (wantOn && st.selectedSystems.size === 0) {
-    showToast("Select at least one system before turning referencing on.", "warning");
-    await renderReferenceRomsPage(st.peerId);
-    return;
-  }
-  const confirmed = wantOn
-    ? window.confirm(
-        `Reference ${st.selectedSystems.size} system(s) from ${st.peerName}?\n\n` +
-        `Those systems are symlinked in and read live over a read-only network mount. ` +
-        `A system that already exists locally is renamed aside with an ".old" suffix ` +
-        `(never deleted) and restored when you switch referencing OFF. Missing BIOS ` +
-        `files those systems need are supplied from ${st.peerName} too.`,
-      )
-    : window.confirm(`Stop referencing ${st.peerName}? Local system folders that were renamed aside are restored. Your selection is kept for next time.`);
-  if (!confirmed) {
-    await renderReferenceRomsPage(st.peerId);
-    return;
-  }
-  try {
-    if (wantOn) {
-      setLoading(true, "Saving selection...");
-      await apiPost("/admin/network-reference/selection", {
-        peer_id: st.peerId,
-        peer_name: st.peerName,
-        selected_systems: [...st.selectedSystems],
-      });
-      setLoading(true, `Referencing ${st.peerName}...`);
-      await apiPost(`/admin/network-shares/${encodeURIComponent(st.peerId)}/enable`, {});
-    } else {
-      setLoading(true, `Stopping reference to ${st.peerName}...`);
-      await apiPost(`/admin/network-shares/${encodeURIComponent(st.peerId)}/disable`, {});
-    }
-    await referenceRomsWaitForSettled(wantOn);
-    showToast(wantOn ? `Now referencing ${escapeHtml(st.peerName)}` : `Stopped referencing ${escapeHtml(st.peerName)}`, "success");
-    showToast("EmulationStation is refreshing its game list in the background.", "info", 8000);
-  } catch (err) {
-    showToast(`Reference toggle failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-    await renderReferenceRomsPage(st.peerId);
-  }
-}
-
-async function referenceRomsWaitForSettled(wantOn) {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const state = await api("/admin/network-reference");
-    const selection = state.selection || {};
-    const share = state.active_share;
-    if (wantOn) {
-      if (selection.active && share && share.status === "mounted") return;
-      if (share && share.status === "error") throw new Error(share.status_detail || "reference failed");
-    } else {
-      if (!selection.active) return;
-      if (share && share.status === "error") throw new Error(share.status_detail || "detach failed");
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  throw new Error("still working in the background; check this page again shortly");
 }
 
 async function renderIntegrationTransfersPanel(target) {
@@ -13154,12 +12685,6 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderSwarmPage();
-    } else if (hash === "#admin/reference-roms" || hash.startsWith("#admin/reference-roms/")) {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      await renderReferenceRomsPage(decodeURIComponent(hash.split("/")[2] || ""));
     } else if (hash === "#admin/integrations") {
       if (!adminEnabled) {
         setHash("");

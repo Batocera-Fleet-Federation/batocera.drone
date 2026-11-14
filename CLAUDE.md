@@ -93,7 +93,7 @@ find files nested under a subpackage. Every `except ImportError` fallback must f
 - `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
   bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
   **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/identity/
-  es_collections/network_share/theme), **plus `static/` + `templates/`**
+  es_collections/theme), **plus `static/` + `templates/`**
 - `multiplayer/` — unified multiplayer over the swarm (see the Multiplayer section below):
   `models` (states/mechanisms/validators), `store` (versioned sessions, replay window),
   `config_guard` (journaled temporary emulator settings), `adapters/` (RetroArch, Dolphin,
@@ -169,8 +169,8 @@ let a peer tell when a re-sync is needed. Schema is created inline with `CREATE 
 IF NOT EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
 tables/columns idempotently. See `drone-db-management` skill.
 
-**Forever-loop pollers** (automation, outbound-mail worker, VPN/SMTP/tailnet revocation, VPN self-heal,
-network-share watchdog) are latched on once per process by `create_server()` and sleep with `time.sleep`, so
+**Forever-loop pollers** (automation, outbound-mail worker, VPN/SMTP/tailnet revocation, VPN self-heal)
+are latched on once per process by `create_server()` and sleep with `time.sleep`, so
 they are retired by generation, not by stop event: `create_server()` captures `runtime_state.poller_generation()`
 before starting each thread and passes that snapshot into the poller. The worker returns — before any I/O — the
 first time it wakes to a different generation. This prevents retirement between thread startup and generation

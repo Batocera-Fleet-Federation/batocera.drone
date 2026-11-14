@@ -75,8 +75,6 @@ const source = fs.readFileSync("app/web/static/js/drone.js", "utf8");
 const functions = source.slice(source.indexOf("function swarmDroneCardId("), source.indexOf("// Swap only the regions", source.indexOf("function swarmDroneCardId(")));
 const cssSafeId = value => value;
 const escapeHtml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
-const swarmNetworkSharesByPeer = {};
-const REFERENCE_ROMS_UI_ENABLED = true;
 eval(functions + `
 const peer = { drone_id: "peer", name: "<Drone>", online: true, reachable_url: "https://peer", summary: { counts: { roms: 12, bios: 3, artwork: 9 }, systems: ["nes", "snes"] } };
 const row = renderSwarmDroneCard(peer);

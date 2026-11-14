@@ -32,7 +32,6 @@ try:
     )
     from ..device import config_backup as _config_backup
     from ..device import notifications as _notifications
-    from ..device import nfs_export_manager as _nfs_exports
     from ..device import smtp_manager as _smtp
     from ..device import vpn_manager as _vpn
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
@@ -79,7 +78,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from device import config_backup as _config_backup  # type: ignore
     from device import notifications as _notifications  # type: ignore
-    from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device import smtp_manager as _smtp  # type: ignore
     from device import vpn_manager as _vpn  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
@@ -307,37 +305,6 @@ class HandlersPeerMixin:
                 "network_mode": _network_mode(self.settings),
             },
         )
-
-    def _handle_peer_nfs_authorize(self, payload: dict) -> None:
-        """Create or refresh this paired caller's read-only NFSv4 export."""
-        if not self._peer_request_authorized():
-            return
-        peer_id = self._peer_requester_device_id()
-        if not peer_id:
-            self._send_json(403, {"error": "paired client identity could not be resolved"})
-            return
-        observed_address = self.client_address[0] if self.client_address else ""
-        try:
-            result = _nfs_exports.authorize_peer(self.settings, peer_id, observed_address)
-        except ValueError as error:
-            self._send_json(403, {"error": str(error)})
-            return
-        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-            self._send_json(503, {"error": str(error)})
-            return
-        self._send_json(200, result)
-
-    def _handle_peer_nfs_revoke(self, payload: dict) -> None:
-        """Remove the paired caller's NFS authorization, best effort."""
-        if not self._peer_request_authorized():
-            return
-        peer_id = self._peer_requester_device_id()
-        if not peer_id:
-            self._send_json(403, {"error": "paired client identity could not be resolved"})
-            return
-        result = _nfs_exports.revoke_peer(self.settings, peer_id)
-        status_code = 500 if result.get("status") == "error" else 200
-        self._send_json(status_code, result)
 
     def _handle_peer_inventory(self, asset_type: str, query_params: dict, require_authorization: bool = True) -> None:
         if require_authorization and not self._peer_request_authorized():

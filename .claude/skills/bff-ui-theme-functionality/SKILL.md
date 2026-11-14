@@ -58,5 +58,5 @@ dialog with light text, the theme contract was skipped.
 
 Keep page content directly inside the app shell, without a system-status badge
 row or reserved space above it. Batocera version, machine identity, pairing, VPN,
-email, and network-share status belong on their dedicated pages. The app version
+and email status belong on their dedicated pages. The app version
 beside the brand and notification unread count remain separate navigation elements.

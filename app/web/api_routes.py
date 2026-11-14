@@ -176,6 +176,10 @@ class ApiRoutesMixin:
                 self._handle_peer_multiplayer(parts[2:], {}, query_params, "GET")
                 return
 
+            if parts and parts[0] == "peer":
+                self._send_json(404, {"error": "not found"})
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -689,14 +693,6 @@ class ApiRoutesMixin:
                 self._handle_admin_swarm_peer_probe(parts[3])
                 return
 
-            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-shares":
-                self._handle_admin_network_shares_list()
-                return
-
-            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-reference":
-                self._handle_admin_network_reference_get()
-                return
-
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "status":
                 self._handle_admin_tailnet_status()
                 return
@@ -786,15 +782,6 @@ class ApiRoutesMixin:
                 self._handle_peer_membership(payload)
                 return
 
-            if len(parts) == 4 and parts[:3] == ["peer", "network-share", "nfs"]:
-                payload = self._read_json_body()
-                if parts[3] == "authorize":
-                    self._handle_peer_nfs_authorize(payload)
-                    return
-                if parts[3] == "revoke":
-                    self._handle_peer_nfs_revoke(payload)
-                    return
-
             if len(parts) == 3 and parts == ["peer", "smtp", "notifications"]:
                 payload = self._read_json_body()
                 self._handle_peer_smtp_notifications(payload)
@@ -808,6 +795,10 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "peer" and parts[1] == "multiplayer":
                 payload = self._read_json_body()
                 self._handle_peer_multiplayer(parts[2:], payload, {}, "POST")
+                return
+
+            if parts and parts[0] == "peer":
+                self._send_json(404, {"error": "not found"})
                 return
 
             # Public to the session gate, but gated by its own bearer token:
@@ -920,19 +911,6 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "invite":
                 self._handle_admin_tailnet_invite()
-                return
-
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "network-reference" and parts[2] == "selection":
-                payload = self._read_json_body()
-                self._handle_admin_network_reference_selection(payload)
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "enable":
-                self._handle_admin_network_share_enable(parts[2])
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "disable":
-                self._handle_admin_network_share_disable(parts[2])
                 return
 
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "pair":

@@ -43,7 +43,7 @@ class TransfersLoadingToastUatTests(unittest.TestCase):
 
     def test_swarm_page_clears_any_leftover_loading_toast_on_entry(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
-        page_body = self.js[page_start:self.js.index("// Issue #35", page_start)]
+        page_body = self.js[page_start:self.js.index("async function renderIntegrationTransfersPanel", page_start)]
         self.assertIn("setLoading(false);", page_body)
         self.assertNotIn('setLoading(true, "Loading swarm...")', page_body)
 

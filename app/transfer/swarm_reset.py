@@ -31,9 +31,6 @@ IDENTITY_BOUND_NAMESPACES = (
     "local_peer_checks",
     "tailnet_forgotten_peers",
     "swarm_membership",
-    "network_reference_selection.json",
-    "network_share_manager.json",
-    "nfs_export_manager.json",
     # This local API credential grants admin-level MCP access to its issuing Drone.
     "mcp",
 )
@@ -234,13 +231,6 @@ def revoke_inherited_access(settings: Any) -> None:
 
 def reset_swarm_identity_state(settings: Any) -> Dict[str, Any]:
     """Clear inherited swarm trust. Raises if the SQLite reset itself fails."""
-    try:
-        from ..device import nfs_export_manager
-    except ImportError:  # pragma: no cover - direct script execution fallback
-        from device import nfs_export_manager  # type: ignore
-    # Kernel exports survive a Drone process restart. Retain ownership records
-    # until every client is unexported and the Drone bind mounts are gone.
-    nfs_export_manager.revoke_exports_for_identity_change(settings)
     # Multiplayer sessions/invitations/allow-list/imported reports name the source Drone's peers
     # (and may hold emulator settings to put back). Best effort; the SQLite reset below is the gate.
     _guarded("multiplayer", lambda: _reset_multiplayer(settings))

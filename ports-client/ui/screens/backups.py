@@ -17,6 +17,7 @@ from client import endpoints
 from client.errors import DroneApiError
 
 from ..theme import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, WARNING_COLOR
+from ..widgets import button_hint_footer
 from .base import Screen
 
 _LIST_HEIGHT = 320.0
@@ -105,6 +106,8 @@ class BackupsScreen(Screen):
             self._draw_backup_row(backup)
         imgui.end_child()
 
+        button_hint_footer("A Select   B Back   L1/R1 Section")
+
     def _draw_backup_row(self, backup: dict) -> None:
         backup_id = backup.get("id")
         label = backup.get("name") or backup.get("file_name") or f"Backup #{backup_id}"
@@ -165,6 +168,7 @@ class BackupsScreen(Screen):
         _, self.apply_ack = imgui.checkbox("I understand this will overwrite files and cannot be undone.", self.apply_ack)
         imgui.spacing()
 
+        imgui.set_item_default_focus()
         cancel_pressed = imgui.button("Cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
         imgui.same_line()
         imgui.begin_disabled(not self.apply_ack)

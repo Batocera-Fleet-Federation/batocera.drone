@@ -15,6 +15,7 @@ from client.errors import DroneApiError
 
 from .. import assets
 from ..theme import ACCENT, ERROR_COLOR, MUTED_COLOR, hex_color
+from ..widgets import button_hint_footer
 from .base import Screen
 
 _LOGO_DISPLAY_WIDTH = 320.0
@@ -35,7 +36,7 @@ _BODY_PARAGRAPHS = (
     "computer on your network. Pair machines together on the Swarm page and "
     "they act as one fleet -- encrypted peer-to-peer transfers, live health, "
     "and remote access, with no central server and no port forwarding.",
-    "Downloads started from Request Assets are handled by the Drone service. "
+    "Downloads started from Search Assets are handled by the Drone service. "
     "You can close this app or return to EmulationStation while active and "
     "queued downloads continue in the background; reopen the app at any time "
     "to see their current progress.",
@@ -90,6 +91,8 @@ class AboutScreen(Screen):
             imgui.text_colored(ERROR_COLOR, self.error)
         else:
             imgui.text_colored(MUTED_COLOR, "(loading...)")
+
+        button_hint_footer("A Select   B Back   L1/R1 Section")
 
     def _draw_logo(self) -> None:
         # assets.logo_texture() lazily uploads a GPU texture on first call --

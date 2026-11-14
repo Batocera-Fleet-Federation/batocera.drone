@@ -137,7 +137,7 @@ Rules:
   Regression coverage: `tests/test_peer_health_worker_shutdown.py`. Tailnet tasks
   still use cooperative cancellation and are not covered by these two joins.
 - The other `create_server()` forever-loop pollers (automation, outbound mail, VPN/SMTP/tailnet
-  revocation, VPN self-heal, network-share watchdog) are not part of a LAN generation. They retire by
+  revocation, VPN self-heal) are not part of a LAN generation. They retire by
   `runtime_state` poller generation (`drone_api.retire_background_pollers()`, also called by `main()`): a poller
   returns before any I/O when it wakes to a newer generation. Harnesses that call `create_server` should call it
   next to `stop_local_network_workers()`, or a leftover poller writes into the next test's env-selected state DB

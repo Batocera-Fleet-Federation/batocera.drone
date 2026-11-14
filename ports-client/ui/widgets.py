@@ -1,9 +1,9 @@
 """Small widgets shared across screens: the active/inactive tab button used
 by AppShell's flat top nav (Swarm/VPN/Backups) and SwarmScreen's own internal
-tab row (Overview/Tailnet/Local Network/Reference ROMs/Request Assets), the
-search box used by Request Assets -- queries a peer's assets the same way
-the drone does -- and a loading spinner for the handful of blocking calls
-that can run long enough to be worth an explicit "still working" signal.
+tab row (Overview/Tailnet/Local Network/Search Assets), the search box used by
+Search Assets -- queries online paired Drones across systems and media types --
+a button-hint footer for TV/gamepad navigation, and a loading spinner for
+blocking calls.
 """
 
 import math
@@ -11,7 +11,7 @@ import math
 from imgui_bundle import imgui
 
 from . import virtual_keyboard
-from .theme import ACCENT, hex_color
+from .theme import ACCENT, MUTED, hex_color
 
 _ACTIVE_BUTTON_COLOR = imgui.ImVec4(0, 194 / 255, 1.0, 0.32)
 _ACTIVE_TEXT_COLOR = hex_color(ACCENT)
@@ -113,3 +113,12 @@ def loading_panel(text: str = "Loading...") -> None:
         # layout operation in a window.
         imgui.dummy(imgui.ImVec2(0.0, 0.0))
     imgui.end()
+
+
+def button_hint_footer(
+    hints: str = "A Select   B Back   L1/R1 Section",
+) -> None:
+    """Render a consistent gamepad button-hint footer bar across the bottom of a screen."""
+    imgui.spacing()
+    imgui.separator()
+    imgui.text_colored(hex_color(MUTED), str(hints))

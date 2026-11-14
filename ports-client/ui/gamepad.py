@@ -122,23 +122,35 @@ def poll_left_stick_nav(io) -> None:
     """Called once per frame (not per-event) -- ImGui's nav-repeat timer
     needs the *current* held value every frame, and SDL_CONTROLLERAXISMOTION
     only fires on change, so a stick held at constant deflection would emit
-    one event and then go silent. If multiple controllers are open, combine
-    by taking the max-magnitude value per axis so one idle second controller
-    can't fight the one actually being used.
+    one event and then go silent. Also polls L2/R2 trigger axes so sub-tab
+    switching works across controllers that report triggers as analog axes.
+    If multiple controllers are open, combine by taking the max-magnitude
+    value per axis so one idle second controller can't fight the one actually
+    being used.
     """
     if not _open_controllers:
         return
     x = 0.0
     y = 0.0
+    l2 = 0.0
+    r2 = 0.0
     for handle in _open_controllers.values():
         raw_x = sdl2.SDL_GameControllerGetAxis(handle, sdl2.SDL_CONTROLLER_AXIS_LEFTX)
         raw_y = sdl2.SDL_GameControllerGetAxis(handle, sdl2.SDL_CONTROLLER_AXIS_LEFTY)
+        raw_l2 = sdl2.SDL_GameControllerGetAxis(handle, sdl2.SDL_CONTROLLER_AXIS_TRIGGERLEFT)
+        raw_r2 = sdl2.SDL_GameControllerGetAxis(handle, sdl2.SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
         axis_x = _apply_deadzone(raw_x)
         axis_y = _apply_deadzone(raw_y)
+        axis_l2 = max(0.0, _apply_deadzone(raw_l2))
+        axis_r2 = max(0.0, _apply_deadzone(raw_r2))
         if abs(axis_x) > abs(x):
             x = axis_x
         if abs(axis_y) > abs(y):
             y = axis_y
+        if axis_l2 > l2:
+            l2 = axis_l2
+        if axis_r2 > r2:
+            r2 = axis_r2
 
     io.add_key_analog_event(imgui.Key.gamepad_l_stick_left, x < 0, max(0.0, -x))
     io.add_key_analog_event(imgui.Key.gamepad_l_stick_right, x > 0, max(0.0, x))
@@ -146,3 +158,5 @@ def poll_left_stick_nav(io) -> None:
     # magnitude for "pushed up" (negative Y).
     io.add_key_analog_event(imgui.Key.gamepad_l_stick_up, y < 0, max(0.0, -y))
     io.add_key_analog_event(imgui.Key.gamepad_l_stick_down, y > 0, max(0.0, y))
+    io.add_key_event(imgui.Key.gamepad_l2, l2 > 0.0)
+    io.add_key_event(imgui.Key.gamepad_r2, r2 > 0.0)

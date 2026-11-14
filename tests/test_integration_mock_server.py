@@ -533,50 +533,6 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(payload["items"]), 1)
         self.assertNotIn("absolute_path", payload["items"][0])
 
-    def test_peer_download_does_not_reexport_a_network_referenced_rom(self) -> None:
-        share_root = self._root / "system" / "drone-app" / "network-shares"
-        remote_system = share_root / "source-peer" / "roms" / "loop-system"
-        remote_system.mkdir(parents=True)
-        (remote_system / "Loop.zip").write_bytes(b"network-owned-rom")
-        (self._root / "roms" / "loop-system").symlink_to(remote_system, target_is_directory=True)
-
-        with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self._get_bytes("/v1/api/peer/roms/loop-system/Loop.zip")
-        self.assertEqual(error.exception.code, 404)
-
-    def test_peer_inventory_does_not_advertise_a_network_referenced_rom(self) -> None:
-        share_root = self._root / "system" / "drone-app" / "network-shares"
-        remote_system = share_root / "source-peer" / "roms" / "loop-system"
-        remote_system.mkdir(parents=True)
-        (remote_system / "Loop.zip").write_bytes(b"network-owned-rom")
-        (self._root / "roms" / "loop-system").symlink_to(remote_system, target_is_directory=True)
-        stale_page = {
-            "total": 1,
-            "limit": 200,
-            "offset": 0,
-            "items": [{"system": "loop-system", "relative_path": "Loop.zip"}],
-        }
-
-        with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root), \
-                mock.patch.object(RomRepository, "list_rom_assets_page", return_value=stale_page) as page:
-            payload = self._get_json("/v1/api/peer/inventory/roms?system=loop-system")
-        self.assertEqual(payload["total"], 0)
-        self.assertEqual(payload["items"], [])
-        page.assert_not_called()
-
-    def test_peer_download_does_not_reexport_a_network_referenced_bios(self) -> None:
-        share_root = self._root / "system" / "drone-app" / "network-shares"
-        remote_bios = share_root / "source-peer" / "bios"
-        remote_bios.mkdir(parents=True)
-        (remote_bios / "loop.bin").write_bytes(b"network-owned-bios")
-        (self._root / "bios" / "loop.bin").symlink_to(remote_bios / "loop.bin")
-
-        with mock.patch("app.roms.rom_asset_bios.network_reference_root", return_value=share_root):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self._get_bytes("/v1/api/peer/bios/loop.bin")
-        self.assertEqual(error.exception.code, 404)
-
     def test_peer_inventory_exposes_read_only_config_and_gameplay_records(self) -> None:
         configs = self._get_json("/v1/api/peer/inventory/emulator_configs?limit=5")
         self.assertEqual(configs["asset_type"], "emulator_configs")
