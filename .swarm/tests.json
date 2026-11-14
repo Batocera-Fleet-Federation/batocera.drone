@@ -5930,6 +5930,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-security-issue-726-switch-nand-layout-bypass",
+      "name": "Issue #726: Switch NAND/Ryujinx saves cannot bypass profile remapping via system layout",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_726_switch_nand_layout_bypass.py"
+      ],
+      "timeoutSeconds": 120,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "tests/adversarial/security/test_issue_726_switch_nand_layout_bypass.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
