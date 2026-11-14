@@ -147,6 +147,32 @@ class LegacyReferenceCleanupTests(unittest.TestCase):
                 peers = (load_payload(db, "nfs_export_manager.json", {}) or {}).get("peers")
                 self.assertEqual(peers, {"p": {"addresses": ["192.168.1.2"]}})
 
+    def test_missing_exportfs_keeps_ownership_record_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                "DRONE_NFS_EXPORT_ROOT": str(root / "nfs-export"),
+            }
+            with mock.patch.dict("os.environ", env, clear=True):
+                settings = Settings.from_env()
+                db = database_path(settings.userdata_root)
+                save_payload(db, "nfs_export_manager.json", {"peers": {"p": {"addresses": ["192.168.1.9"]}}})
+                with mock.patch.object(legacy_reference_cleanup, "_find_command", return_value=None):
+                    legacy_reference_cleanup._cleanup_nfs_exports(settings, db, "umount")
+                state = load_payload(db, "nfs_export_manager.json", {}) or {}
+                self.assertEqual(state.get("peers"), {"p": {"addresses": ["192.168.1.9"]}})
+                # Once exportfs is available the retained grant is revoked and cleared.
+                with mock.patch.object(legacy_reference_cleanup, "_find_command", return_value="/usr/sbin/exportfs"), \
+                        mock.patch.object(legacy_reference_cleanup, "_revoke_address", return_value=True) as revoke:
+                    legacy_reference_cleanup._cleanup_nfs_exports(settings, db, "umount")
+                revoke.assert_called_once()
+                state = load_payload(db, "nfs_export_manager.json", {}) or {}
+                self.assertEqual(state.get("peers"), {})
+
 
 if __name__ == "__main__":
     unittest.main()

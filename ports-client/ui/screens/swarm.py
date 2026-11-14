@@ -105,13 +105,33 @@ def _item_metadata_label(asset_kind: str, item: dict) -> str:
             return f"{artist} — {album}"
         return artist or album
     show = str(item.get("show_title") or item.get("series") or "").strip()
-    season = item.get("season")
-    episode = item.get("episode")
+    season = _episode_number(item.get("season"))
+    episode = _episode_number(item.get("episode"))
     if show and season is not None and episode is not None:
-        return f"{show} S{int(season):02d}E{int(episode):02d}"
+        return f"{show} S{season:02d}E{episode:02d}"
     if show and season is not None:
         return f"{show} Season {season}"
     return show
+
+
+def _episode_number(value) -> int | None:
+    """A small non-negative season/episode number, or None.
+
+    Paired peers supply this metadata, so anything that is not a plain count
+    (text, floats, bools, huge values) is ignored instead of breaking rendering.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not (text.isascii() and text.isdigit() and len(text) <= 4):
+            return None
+        number = int(text)
+    else:
+        return None
+    return number if 0 <= number <= 9999 else None
 
 
 def _format_bytes(value) -> str:
@@ -928,6 +948,9 @@ class SwarmScreen(Screen):
         except DroneApiError as error:
             self._download_poll_result = None
             self._download_poll_error = str(error)
+        except Exception as error:  # a background poll must never escape its thread
+            self._download_poll_result = None
+            self._download_poll_error = f"Download status unavailable: {error.__class__.__name__}"
 
     def _apply_download_snapshot(self, snapshot: dict) -> None:
         current_jobs = {
