@@ -857,10 +857,21 @@
       if (!host.isConnected || host._checkToken !== token) return;
       const copies = res.copies || [];
       if (copies.some((c) => c.is_local)) it.exists_locally = true;
-      copies.forEach((c) => registry.set(keyOf(c), c));
-      const rows = copies.filter((r) => keyOf(r) !== keyOf(it) && !r.is_local);
+      // The endpoint excludes the selected remote owner, but may return this Drone
+      // as another holder. Normalize the local identity for display and action routing;
+      // never suppress it just because its backend id differs from the browser's local id.
+      const local = copies.find((c) => c.is_local);
+      const rows = [];
+      if (local && !it.is_local) {
+        const here = { ...local, drone_id: local.drone_id || "this-drone", drone_name: "This Drone", is_local: true };
+        rows.push(here);
+      }
+      copies.filter((c) => !c.is_local).forEach((c) => rows.push(c));
+      const uniqueRows = [...new Map(rows.map((r) => [keyOf(r), r])).values()]
+        .filter((r) => !(r.drone_id && it.drone_id && r.drone_id === it.drone_id));
+      uniqueRows.forEach((r) => registry.set(keyOf(r), r));
       const down = (res.sources || []).filter((s) => !["ok", "cached"].includes(s.status));
-      results.innerHTML = `${rows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">No other copies found.</div>'}
+      results.innerHTML = `${uniqueRows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">No other copies found.</div>'}
         ${down.length ? `<div class="small text-muted mt-2">Could not check: ${esc(down.map((s) => s.name).join(", "))}</div>` : ""}`;
     } catch (err) {
       if (!host.isConnected || host._checkToken !== token) return;
