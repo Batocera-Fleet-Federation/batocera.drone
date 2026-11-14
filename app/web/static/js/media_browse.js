@@ -1002,7 +1002,12 @@
         if (!parsed || parsed.view !== "detail" || !parsed.entryKey) return;
         kind = hash.startsWith("#movies/") ? "movies" : "music";
         const remote = remoteKeyParts(parsed.entryKey);
-        const detail = detailData || await fetchMediaDetail(kind, parsed.entryKey);
+        // The movie/music router passes its already-loaded detail, including
+        // an explicit null when that fetch failed. Do not retry there: a
+        // failed detail route must not reuse stale state or issue a second
+        // request just to build the availability card.
+        if (arguments.length > 1 && !detailData) return;
+        const detail = arguments.length > 1 ? detailData : await fetchMediaDetail(kind, parsed.entryKey);
         item = { title: detail.display_title || detail.movie_name || detail.track_name, fingerprint: detail.fingerprint || "", artist: detail.artist || "" };
         if (remote) {
           // A page for another Drone's item: that Drone is the first row, then every other holder.
