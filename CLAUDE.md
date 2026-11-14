@@ -391,8 +391,7 @@ Drones that are **online** (`online` on `GET /media-browse/sources`, from the ba
 one appends its items. One selection is shared by all three pages, lives in memory only and resets when the user leaves
 the Assets routes; "This Drone" can be unchecked (`.rm-hide-local`); a picked Drone that goes offline is dropped
 (`media_browse.js` is a *layer* — a MutationObserver on `<body>` re-attaches a `display:contents` wrapper and the Drones
-section after the explorers re-render, including inside the mobile Filters modal; it never replaces their rendering) and local game/movie/track detail pages get an "Available on"
-card. Loading is async, **one request per Drone** (`GET /media-browse/sources`, then `/media-browse/{kind}?drones=<id>&exclude_local=1`),
+section after the explorers re-render, including inside the mobile Filters modal; it never replaces their rendering) and local game/movie/track detail pages get an "Available on" card with the owner shown immediately and a user-triggered “Check other Drones” lookup. Loading is async, **one request per Drone** (`GET /media-browse/sources`, then `/media-browse/{kind}?drones=<id>&exclude_local=1`),
 each Drone is fetched 20 items at a time and the next page loads only when the user scrolls to the end (`loadMore`); progress/problems show in the per-Drone chips beside the "On other Drones" divider (no toast; a failed chip click retries). Peer images are proxied through a bounded in-memory cache with a per-Drone concurrency cap (`_ArtworkCache`). `api()`/`apiPost()` already prepend `/v1/api` — pass `/media-browse/...`,
 never the full path (that exact mistake produced a "not found" in the UI).
 `web/handlers_media_browse.py` (`/v1/api/media-browse/...`, session-gated like `/movies`) fans out in
