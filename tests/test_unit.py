@@ -1897,6 +1897,47 @@ class SettingsTests(unittest.TestCase):
             resumed = manager.resume_job(job_id)
             self.assertEqual(resumed["status"], "queued")
 
+            # The resumed run must not inherit the cancel signal the pause used
+            # to stop the transfer -- it has to actually fetch again.
+            seen_events = []
+
+            def fetch(request, context):
+                seen_events.append(context.cancellation_event.is_set())
+                return {"status": "completed", "downloaded_bytes": 100}
+
+            with manager._lock:
+                manager._jobs[job_id]["status"] = "downloading"
+            with mock.patch.object(manager._selector, "fetch", side_effect=fetch):
+                manager._run_job(job_id)
+            self.assertEqual(seen_events, [False])
+            with manager._lock:
+                self.assertEqual(manager._jobs[job_id]["status"], "completed")
+
+    def test_download_manager_recent_keeps_latest_finished_job_enqueued_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            manager = self._make_download_manager(root)
+            rom = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Big.zip")
+            quick_ids = [
+                manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", f"Art{index}.zip")["job_id"]
+                for index in range(30)
+            ]
+            with manager._lock:
+                for index, job_id in enumerate(quick_ids):
+                    job = manager._jobs[job_id]
+                    job["status"] = "completed"
+                    job["completed_at"] = f"2026-11-14T15:58:{index:02d}+00:00"
+                big = manager._jobs[rom["job_id"]]
+                big["status"] = "cancelled"
+                big["completed_at"] = "2026-11-14T16:47:51+00:00"
+                manager._persist_state_locked()
+
+            recent = manager.snapshot()["recent"]
+            self.assertEqual(recent[0]["job_id"], rom["job_id"])
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                restored = DownloadManager(manager.settings, manager.repository)
+            self.assertIn(rom["job_id"], [job["job_id"] for job in restored.snapshot()["recent"]])
+
     def test_download_manager_pause_not_allowed_on_terminal_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = self._make_download_manager(Path(tmp) / "userdata")

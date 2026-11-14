@@ -209,6 +209,18 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
     )
 
 
+def _terminal_jobs_by_completion(jobs) -> list:
+    """Finished jobs, oldest completion first.
+
+    Jobs sit in enqueue order, so a long transfer enqueued (or restored after a
+    restart) ahead of many quick ones would otherwise be the first trimmed from
+    the bounded recent list the moment it finishes. The stable sort keeps
+    enqueue order among jobs that finished in the same second.
+    """
+    finished = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES]
+    return sorted(finished, key=lambda job: str(job.get("completed_at") or ""))
+
+
 def _peer_label(peer: dict) -> str:
     return str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "a paired peer")
 
@@ -339,11 +351,9 @@ class DownloadManager:
             for job in self._jobs.values()
             if job.get("status") not in DOWNLOAD_TERMINAL_STATUSES
         ]
-        recent = [
-            dict(job)
-            for job in self._jobs.values()
-            if job.get("status") in DOWNLOAD_TERMINAL_STATUSES
-        ][-DOWNLOAD_PERSISTED_RECENT_LIMIT:]
+        recent = _terminal_jobs_by_completion(
+            dict(job) for job in self._jobs.values()
+        )[-DOWNLOAD_PERSISTED_RECENT_LIMIT:]
         return pending + recent
 
     @contextmanager
@@ -938,6 +948,10 @@ class DownloadManager:
             job["status"] = "queued"
             job["pause_requested"] = False
             job["resume_reason"] = "Resumed by user"
+            # Pausing an in-flight download stops it by setting the job's cancel
+            # event; a fresh one keeps the resumed run from seeing that stale
+            # signal and landing 'cancelled' (deleting its .part) on first check.
+            self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
             self._persist_state_locked()
             snapshot = self._public_job_locked(job)
@@ -1045,7 +1059,7 @@ class DownloadManager:
         # state_bucket only allows active/queued/recent) -- each row's own
         # 'status' field still distinguishes them for display.
         queued = [job for job in jobs if job.get("status") in {"queued", "pending", "paused"}]
-        recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
+        recent = _terminal_jobs_by_completion(jobs)[-25:]
         estimate = self._queue_estimate(active, queued, recent, paused, self._concurrency)
         queued_total = len(queued)
         if queued_limit is not None:
