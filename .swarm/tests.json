@@ -5963,6 +5963,37 @@
       }
     },
     {
+      "id": "adversarial-security-issue-726-switch-nand-case-bypass",
+      "name": "Issue #726: Switch NAND/Ryujinx case variants cannot bypass profile remapping",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_726_switch_nand_case_bypass.py"
+      ],
+      "timeoutSeconds": 120,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "tests/adversarial/security/test_issue_726_switch_nand_case_bypass.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
       "command": [
         "python3",
         "-m",
