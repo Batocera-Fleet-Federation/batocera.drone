@@ -5450,6 +5450,205 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "id": "adversarial-issue-722-search-assets",
+      "name": "Issue #722: Search Assets searches all systems on all online Drones",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_search_assets_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/ui/screens/swarm.py",
+          "ports-client/README.md",
+          "tests/adversarial/test_issue_722_search_assets_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-media-browse-client",
+      "name": "Issue #722: media browse endpoint wrappers replace peer ROM calls",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_media_browse_client_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/client/endpoints.py",
+          "tests/adversarial/test_issue_722_media_browse_client_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-reference-roms-removed",
+      "name": "Issue #722: Reference ROMs and NFS share routes are removed",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_reference_roms_removed_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/web/api_routes.py",
+          "app/web/openapi_spec.py",
+          "app/web/mcp_tools.py",
+          "app/web/static/js/drone.js",
+          "app/web/static/css/drone.css",
+          "app/transfer/swarm_reset.py",
+          "tests/adversarial/test_issue_722_reference_roms_removed_uat.py",
+          "CLAUDE.md",
+          "app/common/runtime_state.py",
+          "docs/drone-identity.md",
+          "app/roms/rom_systems.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-upgrade-unmount",
+      "name": "Issue #722: upgrade unmounts live network-share references and removes NFS exports",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 180,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_upgrade_unmounts_references_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/drone_api.py",
+          "tests/adversarial/test_issue_722_upgrade_unmounts_references_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-gamepad-l2-r2",
+      "name": "Issue #722: L2/R2 switch Swarm and asset-type sub-tabs",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_gamepad_l2_r2_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/ui/gamepad.py",
+          "ports-client/ui/app.py",
+          "ports-client/ui/screens/swarm.py",
+          "tests/adversarial/test_issue_722_gamepad_l2_r2_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-tv-focus-footer",
+      "name": "Issue #722: button-hint footer, focus ring, and TV scale on every screen",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_tv_focus_footer_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/ui/theme.py",
+          "ports-client/ui/screens/swarm.py",
+          "tests/adversarial/test_issue_722_tv_focus_footer_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
