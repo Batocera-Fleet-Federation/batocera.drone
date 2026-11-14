@@ -5384,6 +5384,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_721_owner_row_not_duplicated_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-721-owner-row-not-duplicated-uat",
+      "name": "Issue #721: local Available-on check must not duplicate the owner row",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3",
+          "node"
+        ],
+        "files": [
+          "app/web/static/js/media_browse.js",
+          "tests/adversarial/issue_721_media_browse_harness.js",
+          "tests/adversarial/test_issue_721_owner_row_not_duplicated_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
