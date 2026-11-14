@@ -204,6 +204,52 @@ class GameSavesTests(unittest.TestCase):
         self.assertEqual(saves.capabilities(item)['states'], 'unsupported')
         self.assertEqual(saves.inventory(self.settings, item)[0]['layout'], layout)
 
+    def test_switch_scan_ignores_huge_unrelated_nand_trees(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'ids': [title]}
+        root = saves.roots(self.settings, item)['eden-saves']
+        self.write('user/save/0000000000000000/' + 'A' * 32 + '/' + title + '/progress.bin', root=root)
+        # A real NAND holds far more unrelated entries than the scan limit allows.
+        for tree in (root / 'user' / 'Contents', root / 'system' / 'save'):
+            tree.mkdir(parents=True)
+        for index in range(8):
+            (root / 'user' / 'Contents' / f'nca{index}').write_bytes(b'x')
+        with mock.patch.object(saves, 'MAX_SCAN', 40):
+            for index in range(60):
+                (root / 'system' / 'save' / f'entry{index}').write_bytes(b'x')
+            # Emulator trees under the generic Switch root are never walked either.
+            shaders = self.settings.saves_root / 'switch' / 'ryujinx' / 'cache'
+            shaders.mkdir(parents=True)
+            for index in range(60):
+                (shaders / f'shader{index}').write_bytes(b'x')
+            groups = saves.inventory(self.settings, item)
+        self.assertEqual([g['layout'] for g in groups], ['eden-saves'])
+
+    def test_discovery_reports_why_a_peer_could_not_list_saves(self):
+        def failing(error):
+            with mock.patch.object(saves, 'tls_peer', return_value=self.peer), mock.patch.object(saves, '_open_peer', side_effect=error):
+                return saves.discover(self.settings, self.item, 'remote')
+
+        def http(code, body=b''):
+            return saves.HTTPError('https://peer/x', code, 'err', {}, io.BytesIO(body))
+
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(http(404, b'{"error": "not found"}'))
+        self.assertIn('does not support save sharing', str(caught.exception))
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(http(500, b'{"error": "Save scan is too large"}'))
+        self.assertIn('Save scan is too large', str(caught.exception))
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(TimeoutError())
+        self.assertEqual(caught.exception.status, 504)
+        with self.assertRaises(saves.SaveError) as caught:
+            failing(ConnectionRefusedError())
+        self.assertIn('offline', str(caught.exception))
+        # A same-named but different ROM on the peer is "nothing to offer", not a failure.
+        result = failing(http(409, b'{"error": "different ROM"}'))
+        self.assertEqual(result['saves'], [])
+        self.assertIn('different version', result['note'])
+
     def test_switch_rejects_foreign_title_and_ambiguous_profile(self):
         title = '01006A800016E000'
         item = {**self.item, 'system': 'switch', 'ids': [title]}

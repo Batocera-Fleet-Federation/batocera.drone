@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import stat
 import tempfile
@@ -37,6 +38,8 @@ except ImportError:  # pragma: no cover - flat execution
 MAX_FILES = 2048
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_SCAN = 20000
+# The peer hashes every candidate file before answering, so allow more than a ping.
+DISCOVERY_TIMEOUT = 25
 SAVE_SUFFIX = re.compile(r"\.(?:srm|sav|save|eep|fla|nv|nvm|rtc|dat|bin|gci|dsv|mcr|mcd|sra|srm|fs|st\d*|state\d*(?:\.auto)?|state\.auto|ss\d*|ppst|p2s|ml\d*|zst\d*|rts|s\d+)$", re.I)
 STATE_SUFFIX = re.compile(r"\.(?:state\d*(?:\.auto)?|state\.auto|st\d*|ss\d*|ppst|p2s|zst\d*|s\d+)$", re.I)
 TITLE_ID = re.compile(r"(?<![0-9a-f])(010[0-9a-f]{13})(?![0-9a-f])", re.I)
@@ -218,8 +221,13 @@ def roots(settings, item):
     return result
 
 
-def _walk(root):
-    """Bounded, no-follow walk; yield regular files only, including relative names."""
+def _walk(root, descend=None):
+    """Bounded, no-follow walk; yield regular files only, including relative names.
+
+    ``descend(parts)`` may veto entering a directory (given its relative parts), so
+    huge unrelated trees (a Switch NAND, emulator caches) are neither counted nor
+    read. Pruning never widens what can match; it only avoids needless I/O.
+    """
     count = 0
     try:
         with directory(root) as root_fd:
@@ -236,6 +244,8 @@ def _walk(root):
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     rel = prefix + name
                     if stat.S_ISDIR(info.st_mode):
+                        if descend is not None and not descend(tuple(rel.split('/'))):
+                            continue
                         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                         try:
                             yield from visit(child, rel + '/', depth + 1)
@@ -294,11 +304,30 @@ def _ryujinx_slots(root, item):
     return slots
 
 
+_SWITCH_SAVE_PREFIX = ('user', 'save', '0000000000000000')
+_SWITCH_NAND_DIRS = frozenset(('nand', 'bis'))
+_SWITCH_EMULATOR_DIRS = frozenset(('yuzu', 'eden', 'citron', 'suyu', 'ryujinx'))
+
+
+def _descend_filter(item, layout):
+    """Directory filter keeping scans away from trees the layout can never match."""
+    if item['system'] != 'switch':
+        return None
+    if layout == 'system' or layout.startswith('saves-'):
+        # Switch NAND/bis trees are only read through the dedicated layouts below.
+        return lambda parts: parts[-1].lower() not in _SWITCH_NAND_DIRS and not (
+            len(parts) == 1 and parts[0].lower() in _SWITCH_EMULATOR_DIRS)
+    if layout.startswith('ryujinx-'):
+        return lambda parts: re.fullmatch(r'[0-9a-fA-F]{16}', parts[0]) is not None
+    # NAND layouts: only user/save/0000000000000000/** can match a Switch title.
+    return lambda parts: len(parts) >= len(_SWITCH_SAVE_PREFIX) or parts == _SWITCH_SAVE_PREFIX[:len(parts)]
+
+
 def inventory(settings, item, hashes=True):
     groups = {}
     for layout, root in roots(settings, item).items():
         slots = _ryujinx_slots(root, item) if layout.startswith('ryujinx-') else {}
-        for rel in _walk(root):
+        for rel in _walk(root, _descend_filter(item, layout)):
             try:
                 rel_parts = relative(rel).parts
             except SaveError:
@@ -392,10 +421,53 @@ def _open_peer(settings, peer, endpoint, timeout=15):
     raise SaveError('The paired Drone is unavailable.', 502) from last_error
 
 
+def _peer_error_message(error):
+    """The peer's own JSON ``error`` text (bounded, plain text), when it sent one."""
+    try:
+        data = json.loads(_read_capped(error, 4096))
+        message = data.get('error') if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - a body is a courtesy, never required
+        return ''
+    return ' '.join(message.split())[:200] if isinstance(message, str) else ''
+
+
+def _discovery_failure(error):
+    """Turn a failed inventory request into a specific, actionable SaveError."""
+    if isinstance(error, SaveError):
+        return error
+    if isinstance(error, PeerIdentityHold):
+        return SaveError('This Drone’s identity is being verified; swarm connections are paused.', 503)
+    if isinstance(error, HTTPError):
+        detail = _peer_error_message(error)
+        if error.code in (404, 405, 501):
+            return SaveError('This Drone is online but its version does not support save sharing yet. Update it to the latest Drone release.', 502)
+        if error.code in (401, 403):
+            return SaveError('This Drone refused the request' + (f': {detail}' if detail else ' (check that the pairing is still approved on both Drones).'), 502)
+        return SaveError(f'This Drone could not list its saves: {detail or f"HTTP {error.code}"}.', 502)
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return SaveError('This Drone took too long to list its saves (it may be busy scanning large save folders). Try again.', 504)
+    if isinstance(error, ssl.SSLError):
+        return SaveError('The secure connection to this Drone failed. Its certificate may have changed; re-pair it in Swarm.', 502)
+    if isinstance(error, json.JSONDecodeError) or isinstance(error, ValueError):
+        return SaveError('This Drone returned an unreadable save list. It may need an update.', 502)
+    return SaveError('Could not reach this Drone. It may be offline or unreachable from this machine.', 502)
+
+
 def discover(settings, item, peer_id):
     peer = tls_peer(settings, peer_id)
-    with _open_peer(settings, peer, '/v1/api/peer/game-saves?' + peer_query(item), timeout=5) as response:
-        payload = json.loads(_read_capped(response, 2 * 1024 * 1024))
+    try:
+        with _open_peer(settings, peer, '/v1/api/peer/game-saves?' + peer_query(item), timeout=DISCOVERY_TIMEOUT) as response:
+            payload = json.loads(_read_capped(response, 2 * 1024 * 1024))
+    except HTTPError as error:
+        try:
+            if error.code == 409:
+                # The peer has a *different* ROM under this name; its saves are not ours.
+                return {'saves': [], 'note': 'This Drone has a different version of this ROM, so its saves are not offered.'}
+            raise _discovery_failure(error) from error
+        finally:
+            error.close()
+    except (OSError, ValueError) as error:
+        raise _discovery_failure(error) from error
     if not isinstance(payload, dict):
         raise SaveError('The Drone returned an invalid save inventory.', 502)
     source = _source_item(item, payload.get('game'))

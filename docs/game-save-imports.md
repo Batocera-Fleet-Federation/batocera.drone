@@ -68,7 +68,17 @@ require HTTPS and client certificates, and reject proxies and redirects. Peer
 paths are validated against known save layouts and game associations. File I/O
 uses no-follow directory descriptors; symlinks and special files cannot redirect
 reads/writes. Transfers are bounded to 2,048 files and 1 GiB per set, inventories
-to 256 sets and 2 MiB, and filesystem scans to 20,000 entries per layout.
+to 256 sets and 2 MiB, and filesystem scans to 20,000 entries per layout. Switch
+scans are pruned to where a match can exist (a NAND layout only walks
+`user/save/0000000000000000`; the generic layout skips `nand`/`bis` and emulator
+folders), so a machine with a real Switch NAND is not rejected as "too large".
+
+Discovery waits up to 25 s (the peer hashes candidate files) and reports *why* it
+failed: an older peer without this endpoint ("does not support save sharing yet"),
+a refusal, a timeout, an unreadable list or an unreachable Drone. A peer that has
+a different ROM under the same name answers 409, which is shown as "nothing to
+offer", not an error. The ROM page chooser is deliberately compact: one status +
+overwrite line and one line per Drone.
 
 Layout references: [Batocera state support](https://wiki.batocera.org/emulationstation_savestates),
 [Switch save attributes](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/services/fs.h),

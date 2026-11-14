@@ -109,4 +109,5 @@ class HandlersGameSavesMixin:
         except FileNotFoundError:
             self._send_json(404, {'error': 'ROM or save not found.'})
         except (OSError, ValueError):
-            self._send_json(400, {'error': 'Could not read the requested save.'})
+            # Say where it failed, so the browsing Drone can show something actionable.
+            self._send_json(500 if not download else 400, {'error': 'Could not read the save folders on this Drone (permissions or storage).' if not download else 'Could not read the requested save.'})
