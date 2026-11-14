@@ -5649,6 +5649,134 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-issue-722-nfs-export-root",
+      "name": "Issue #722: upgrade revokes the NFS exports the Drone created",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_nfs_export_root_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/legacy_reference_cleanup.py",
+          "app/common/install_paths.py",
+          "tests/adversarial/test_issue_722_nfs_export_root_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-asset-type-triggers",
+      "name": "Issue #722: L2/R2 switches Search Assets type tabs",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 120,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_asset_type_triggers_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/ui/screens/swarm.py",
+          "ports-client/ui/gamepad.py",
+          "tests/adversarial/test_issue_722_asset_type_triggers_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-reference-uat-imports",
+      "name": "Issue #722: adversarial UATs that mention Reference ROMs still import",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 180,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_reference_uat_imports.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/test_issue_722_reference_uat_imports.py",
+          "tests/adversarial/test_issue_615_create_server_shutdown_race_uat.py",
+          "tests/adversarial/test_issue_615_main_finally_start_window_uat.py",
+          "tests/adversarial/test_issue_615_poller_capture_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-issue-722-readme-rename",
+      "name": "Issue #722: README names Search Assets",
+      "origin": "adversarial",
+      "enabled": true,
+      "disruptive": false,
+      "timeoutSeconds": 60,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_722_readme_rename_uat.py"
+      ],
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "ports-client/README.md",
+          "tests/adversarial/test_issue_722_readme_rename_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1

@@ -29,13 +29,15 @@ class _RemovedRouteHandler:
     """Enough of the live route mixin to dispatch one request."""
 
     def __init__(self, method: str, path: str, body: bytes) -> None:
+        # Issue #722 deletes app/web/handlers_network_share.py. Importing that
+        # mixin made these route checks crash before they could assert 404/410,
+        # and contradicted test_reference_modules_and_reset_entries_are_removed.
         from app.web.api_routes import ApiRoutesMixin
-        from app.web.handlers_network_share import HandlersNetworkShareMixin
         from app.web.handlers_peer import HandlersPeerMixin
 
         self.__class__ = type(
             "Handler",
-            (HandlersNetworkShareMixin, HandlersPeerMixin, ApiRoutesMixin, _RemovedRouteHandler),
+            (HandlersPeerMixin, ApiRoutesMixin, _RemovedRouteHandler),
             {},
         )
         self.path = path
