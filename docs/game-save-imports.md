@@ -72,6 +72,10 @@ to 256 sets and 2 MiB, and filesystem scans to 20,000 entries per layout. Switch
 scans are pruned to where a match can exist (a NAND layout only walks
 `user/save/0000000000000000`; the generic layout skips `nand`/`bis` and emulator
 folders), so a machine with a real Switch NAND is not rejected as "too large".
+Imports apply the same rule: a generic Switch save may not contain any spelling
+of `nand` or `bis` (case, Unicode and trailing-dot variants alias the real tree on
+case-folding volumes such as exFAT, NTFS and APFS) or start in an emulator folder,
+so profile and Ryujinx slot ids are always remapped to this machine.
 
 Discovery waits up to 25 s (the peer hashes candidate files) and reports *why* it
 failed: an older peer without this endpoint ("does not support save sharing yet"),

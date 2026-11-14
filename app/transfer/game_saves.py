@@ -20,6 +20,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode, urlparse
@@ -328,14 +329,36 @@ _SWITCH_NAND_DIRS = frozenset(('nand', 'bis'))
 _SWITCH_EMULATOR_DIRS = frozenset(('yuzu', 'eden', 'citron', 'suyu', 'ryujinx'))
 
 
+def _is_named(name, names):
+    """Whether a case-folding save volume could resolve ``name`` to one of ``names``.
+
+    APFS, exFAT, NTFS and vfat ignore case (NTFS upper-cases, so ``ı``/``ſ`` alias
+    ``I``/``S``), APFS ignores Unicode normalisation and exFAT/vfat drop trailing
+    dots. Compare every such spelling, never the raw string.
+    """
+    normal = unicodedata.normalize('NFKC', name).rstrip('. ')
+    return normal.casefold() in names or normal.upper().casefold() in names
+
+
+def _switch_generic_path(parts):
+    """Whether a generic (system/saves-*) Switch path avoids profile and emulator trees.
+
+    Only the dedicated Switch layouts remap NAND/bis profile and slot ids to this
+    machine, so no spelling of those directories may appear anywhere; the emulators'
+    own folders (mods, sdmc, keys) are never a generic save location either. The
+    scan and the import validator share this check so they cannot drift apart.
+    """
+    return not any(_is_named(part, _SWITCH_NAND_DIRS) for part in parts) and not (
+        parts and _is_named(parts[0], _SWITCH_EMULATOR_DIRS))
+
+
 def _descend_filter(item, layout, slots=None):
     """Directory filter keeping scans away from trees the layout can never match."""
     if item['system'] != 'switch':
         return None
     if layout == 'system' or layout.startswith('saves-'):
         # Switch NAND/bis trees are only read through the dedicated layouts below.
-        return lambda parts: parts[-1].lower() not in _SWITCH_NAND_DIRS and not (
-            len(parts) == 1 and parts[0].lower() in _SWITCH_EMULATOR_DIRS)
+        return _switch_generic_path
     if layout.startswith('ryujinx-'):
         return lambda parts: parts[0] in (slots or ()) and (len(parts) == 1 or parts[1] == '0')
     # NAND layouts: only user/save/0000000000000000/<profile>/<title_id>/** can match.
@@ -366,7 +389,7 @@ def inventory(settings, item, hashes=True):
                 continue
             if layout == 'system' or layout.startswith('saves-'):
                 # Switch NAND slots need local-profile remapping by the dedicated layouts.
-                match = None if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in rel_parts) else _named_group(item, rel)
+                match = None if item['system'] == 'switch' and not _switch_generic_path(rel_parts) else _named_group(item, rel)
             elif slots:
                 slot, _, tail = rel.partition('/')
                 match = (slot + '/0', 'directory') if slot in slots and tail.startswith('0/') else None
@@ -539,7 +562,12 @@ def validate_group(settings, item, group):
     layout, path, kind = group.get('layout'), group.get('path'), group.get('kind')
     if not all(isinstance(value, str) for value in (layout, path, kind)) or layout not in roots(settings, item) or kind not in ('save', 'state', 'directory'):
         raise SaveError('Unsupported save layout.')
-    relative(path)
+    path_parts = relative(path).parts
+    generic = layout == 'system' or layout.startswith('saves-')
+    if generic and item['system'] == 'switch' and not _switch_generic_path(path_parts):
+        # Switch NAND/bis trees hold per-profile data; only the dedicated layouts
+        # remap them to the local profile/slot, so the generic layouts never may.
+        raise SaveError('Switch profile saves must use a Switch save layout.')
     if group['id'] != hashlib.sha256((layout + ':' + path).encode()).hexdigest():
         raise SaveError('Invalid save identity.')
     files = group.get('files')
@@ -558,10 +586,8 @@ def validate_group(settings, item, group):
                 raise SaveError('File is outside the save set.')
         elif rel != path and rel.lower() != (path + '.png').lower():
             raise SaveError('File is outside the save set.')
-        if layout == 'system' or layout.startswith('saves-'):
-            # Switch NAND/bis trees hold per-profile data; only the dedicated layouts
-            # remap them to the local profile/slot, so the generic layouts never may.
-            if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in relative(rel).parts):
+        if generic:
+            if item['system'] == 'switch' and not _switch_generic_path(relative(rel).parts):
                 raise SaveError('Switch profile saves must use a Switch save layout.')
             if _named_group(item, rel) != (path, kind):
                 raise SaveError('Save does not belong to this ROM.')
@@ -682,7 +708,11 @@ def import_choice(settings, item, token, overwrite=False):
         validate_group(settings, source, group)
         root = roots(settings, item)[group['layout']]
         target_path = _target_path(item, source, group)
-        if item['system'] == 'switch' and group['layout'] != 'system':
+        if item['system'] == 'switch' and (group['layout'] == 'system' or group['layout'].startswith('saves-')):
+            # Rebasing onto local names must not steer a generic save into a profile tree.
+            if not _switch_generic_path(relative(target_path).parts):
+                raise SaveError('Switch profile saves must use a Switch save layout.')
+        elif item['system'] == 'switch':
             try:
                 root = _switch_root(settings, item, group)
                 target_path = _switch_destination(settings, item, group, root)

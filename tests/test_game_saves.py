@@ -312,6 +312,44 @@ class GameSavesTests(unittest.TestCase):
         with self.assertRaises(saves.SaveError):
             self.apply(self.choose(group, item), item=item)
 
+    def test_switch_generic_layout_rejects_every_alias_of_profile_and_emulator_trees(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'rom': f'Smash [{title}].nsp', 'stem': f'Smash [{title}]',
+                'filename': f'Smash [{title}].nsp', 'ids': [title]}
+        profile = 'user/save/0000000000000000/' + 'A' * 32 + '/' + title
+        # Case, Unicode (NTFS upper-cases ı/ſ, APFS normalises) and exFAT/vfat trailing dots
+        # all resolve to the live tree on a folding save volume; emulator folders hold mods.
+        for path in ('NAND/' + profile, 'eden/nAnD/' + profile, 'nand./' + profile, 'nand /' + profile,
+                     'ＮＡＮＤ/' + profile, 'ryujinx/bıs/user/save/0000000000000009/' + title,
+                     'Ryujinx/biſ/user/save/0000000000000009/' + title, 'EDEN/load/' + title,
+                     'ryujinx/mods/contents/' + title):
+            with self.subTest(path=path):
+                with self.assertRaises(saves.SaveError):
+                    saves.validate_group(self.settings, item, self.group(path, kind='directory'))
+                with self.assertRaises(saves.SaveError):
+                    self.choose(self.group(path, kind='directory'), item)
+        # The generic scan never offers them either (a case-folding volume may still expose
+        # NAND through the dedicated layout), while a plain system-folder save still works.
+        self.write('switch/NAND/' + profile + '/progress.bin')
+        self.write('switch/eden/load/' + title + '/romfs.bin')
+        self.write(f'switch/Smash [{title}].sav')
+        generic = [g['path'] for g in saves.inventory(self.settings, item) if g['layout'] == 'system']
+        self.assertEqual(generic, [f'Smash [{title}].sav'])
+        self.assertTrue(self.apply(self.choose(self.group(f'Smash [{title}].sav'), item), item=item)['applied'])
+
+    def test_switch_rename_cannot_steer_a_generic_save_into_a_profile_tree(self):
+        title = '01006A800016E000'
+        item = {**self.item, 'system': 'switch', 'rom': 'nand.nsp', 'stem': 'nand', 'filename': 'nand.nsp', 'ids': [title]}
+        source = {**item, 'rom': 'Smash.nsp', 'stem': 'Smash', 'filename': 'Smash.nsp'}
+        group = self.group('Smash', kind='directory')
+        with mock.patch.object(saves, 'tls_peer', return_value=self.peer), mock.patch.object(
+            saves, '_open_peer', return_value=Response(json.dumps({'saves': [group], 'game': source}).encode())
+        ):
+            token = saves.discover(self.settings, item, 'remote')['saves'][0]['choice']
+        with self.assertRaises(saves.SaveError):
+            self.apply(token, item=item)
+        self.assertFalse((self.settings.saves_root / 'switch' / 'nand').exists())
+
     def test_renamed_remote_rom_save_is_installed_under_local_name(self):
         source = {**self.item, 'rom': 'Remote Mario.sfc', 'stem': 'Remote Mario', 'filename': 'Remote Mario.sfc'}
         group = self.group('Remote Mario.srm')
