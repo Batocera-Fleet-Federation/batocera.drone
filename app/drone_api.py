@@ -1378,7 +1378,13 @@ except ImportError:
     from web.mcp_server import McpServerMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersMediaBrowseMixin, HandlersIntegrationsMixin, HandlersMultiplayerMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+try:
+    from .web.handlers_game_saves import HandlersGameSavesMixin
+except ImportError:  # pragma: no cover - flat execution
+    from web.handlers_game_saves import HandlersGameSavesMixin  # type: ignore
+
+
+class RomRequestHandler(HandlersGameSavesMixin, HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersMediaBrowseMixin, HandlersIntegrationsMixin, HandlersMultiplayerMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).

@@ -4124,6 +4124,94 @@ function romGamelistSummaryHtml(rom) {
     `;
   }).filter(Boolean).join("");
 }
+async function loadRomSwarmSaves(system, uniqueId) {
+  const body = document.getElementById("romSwarmSaves");
+  if (!body) return;
+  const endpoint = `/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(uniqueId)}/saves`;
+  try {
+    const data = await api(endpoint);
+    if (!body.isConnected) return;
+    const support = data.capabilities || {};
+    body.innerHTML = `
+      <p class="small text-muted">${escapeHtml(support.message || "Save support is unknown for this emulator.")}</p>
+      <p class="small">Game saves: ${escapeHtml(support.saves || "unknown")} · Saved states: ${escapeHtml(support.states || "unknown")}</p>
+      <p class="small text-muted">Close the game before importing. Imported saves are installed immediately for the next launch; load a saved state from the emulator’s state menu. States require a compatible emulator/core version.</p>
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" role="switch" id="romSaveOverwrite">
+        <label class="form-check-label" for="romSaveOverwrite">Overwrite existing local saves</label>
+        <div class="small text-muted">Off: keep existing saves separately as a backup, then apply the selected save. On: replace existing saves.</div>
+      </div>
+      <div id="romSaveDrones"></div>
+      <div class="small mt-2" id="romSaveResult" role="status" aria-live="polite"></div>`;
+    const drones = body.querySelector("#romSaveDrones");
+    if (!(data.drones || []).length) {
+      drones.textContent = "No paired HTTPS Drones are available. Pair a Drone in Swarm to check its saves.";
+      return;
+    }
+    (data.drones || []).forEach((drone) => {
+      const section = document.createElement("div");
+      section.className = "border rounded p-2 mt-2";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn btn-sm btn-outline-primary";
+      button.textContent = `Check saves on ${drone.name || drone.drone_id}`;
+      const rows = document.createElement("div");
+      rows.className = "mt-2 small";
+      section.append(button, rows);
+      drones.appendChild(section);
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        rows.textContent = "Checking this Drone…";
+        try {
+          const result = await api(`${endpoint}?drone=${encodeURIComponent(drone.drone_id)}`);
+          if (!body.isConnected) return;
+          rows.replaceChildren();
+          if (!(result.saves || []).length) rows.textContent = "No saves or saved states for this ROM on this Drone.";
+          (result.saves || []).forEach((save) => {
+            const row = document.createElement("div");
+            row.className = "d-flex flex-wrap align-items-center gap-2 mt-2";
+            const label = document.createElement("span");
+            const modified = save.modified_time ? new Date(save.modified_time * 1000).toLocaleString() : "";
+            label.textContent = `${save.kind === "state" ? "Saved state" : "Game save"}: ${save.name} (${save.layout}, ${save.file_count} file(s), ${formatBytes(save.file_size)}) ${modified}`;
+            const download = document.createElement("button");
+            download.type = "button";
+            download.className = "btn btn-sm btn-primary";
+            download.textContent = "Download & apply";
+            download.addEventListener("click", async () => {
+              const overwrite = body.querySelector("#romSaveOverwrite").checked;
+              if (overwrite && !window.confirm("Replace the existing local save with this Drone’s save?")) return;
+              const status = body.querySelector("#romSaveResult");
+              // Serialize imports from this card, including checks on other Drones.
+              const controls = [...body.querySelectorAll("button, input")];
+              controls.forEach((control) => { control.disabled = true; });
+              status.textContent = "Downloading and verifying the save…";
+              try {
+                const imported = await apiPost(`/admin/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(uniqueId)}/saves`, { choice: save.choice, overwrite });
+                if (body.isConnected) status.textContent = imported.backup_kept
+                  ? "Save applied. The previous local save was kept separately as a backup."
+                  : "Save applied. It is ready for the next game launch or state load.";
+                download.remove();
+              } catch (error) {
+                if (body.isConnected) status.textContent = error.message || "Save import failed.";
+              } finally {
+                controls.forEach((control) => { control.disabled = false; });
+              }
+            });
+            row.append(label, download);
+            rows.appendChild(row);
+          });
+        } catch (error) {
+          rows.textContent = error.message || "This Drone is unavailable or needs an update. Try again.";
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+  } catch (error) {
+    if (body.isConnected) body.textContent = `Could not load save support: ${error.message || "unknown error"}`;
+  }
+}
+
 async function renderRomMediaPage(system, uniqueId, page = 1) {
   currentSystemContext = system;
   backBtn.classList.remove("d-none");
@@ -4166,6 +4254,10 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
           ? `<div class="alert alert-warning py-2 px-3 small mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Arcade romset compatibility isn't guaranteed in the browser -- this file needs to exactly match the version the browser emulator core expects, which may differ from what runs on the device itself.</div>`
           : ""
       }
+      <div class="card log-card mb-3">
+        <div class="card-header">Saves &amp; Saved States from the Swarm</div>
+        <div class="card-body" id="romSwarmSaves">Loading save support…</div>
+      </div>
       <div class="card log-card mb-3">
         <div class="card-body">
           <div class="rom-media-hero">
@@ -4235,6 +4327,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
         </div>
       </div>
     `;
+    loadRomSwarmSaves(system, rom.unique_id);
     window.missingArtworkRoms = [rom];
     bindArtworkEditButtons(rom, 0);
     const videoPlayer = document.getElementById("romMediaVideoPlayer");

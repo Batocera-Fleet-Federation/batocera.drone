@@ -409,6 +409,22 @@ to or read from a peer. Peer pages are cached in-memory (`SourceCache`: fresh 12
 owns the persistent transfer toast (`DroneTransferToast.track(jobIds)`: progress bar, files n/m, speed, stays until
 done, survives reload via sessionStorage).
 
+## ROM save imports (#726)
+
+The local ROM detail page has a Saves & Saved States card. `transfer/game_saves.py`
+owns per-game matching, bounded manifests, pinned HTTPS exports/imports and atomic
+save-set application; `web/handlers_game_saves.py` owns session/admin and peer
+routes. No new DB schema is needed. Always validate peer layouts and game identity;
+never install a peer-supplied absolute path, Switch profile UUID or Ryujinx slot
+number. Full SHA-256 and size verification precede installation. The default mode
+keeps previous saves in a private `.drone-save-*/previous` backup before applying
+the incoming set; overwrite removes it after success. Exclude those directories
+from save scanning. Imports refuse while emulatorlauncher is running. Missing
+saves mean unknown support, never proof that the system cannot save. State imports
+become available in the emulator, not injected into a running game. Switch and
+shared-memory-card limitations are documented in `docs/game-save-imports.md`.
+Tests: `tests/test_game_saves.py`.
+
 ## Conventions
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a
