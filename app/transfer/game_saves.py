@@ -6,7 +6,9 @@ paths. All filesystem access is relative to no-follow directory descriptors.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -26,12 +28,12 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Requ
 
 try:
     from . import local_network
-    from .peer_connectivity import PeerIdentityHold, _peer_address_candidates, _peer_trust_cafile, _drone_client_ssl_context, _read_capped
+    from .peer_connectivity import PeerIdentityHold, _drone_client_ssl_context, _more_diagnostic_error, _peer_address_candidates, _peer_trust_cafile, _read_capped
     from .drone_network import _certificate_pem_fingerprint
     from ..device.game_activity import find_running_emulatorlauncher
 except ImportError:  # pragma: no cover - flat execution
     from transfer import local_network  # type: ignore
-    from transfer.peer_connectivity import PeerIdentityHold, _peer_address_candidates, _peer_trust_cafile, _drone_client_ssl_context, _read_capped  # type: ignore
+    from transfer.peer_connectivity import PeerIdentityHold, _drone_client_ssl_context, _more_diagnostic_error, _peer_address_candidates, _peer_trust_cafile, _read_capped  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
     from device.game_activity import find_running_emulatorlauncher  # type: ignore
 
@@ -154,6 +156,9 @@ def source_game(repository, system, rom_path, fingerprint=''):
             return item
     except FileNotFoundError:
         pass
+    except SaveError as error:
+        if error.status != 404:
+            raise
     if fingerprint:
         try:
             _, rows = repository.list_assets(system, 'roms')
@@ -161,7 +166,14 @@ def source_game(repository, system, rom_path, fingerprint=''):
             rows = []
         for row in rows[:MAX_SCAN]:
             if str(row.get('fingerprint') or row.get('rom_fingerprint') or '') == fingerprint:
-                item = game(repository, system, unique_id=row['unique_id'])
+                try:
+                    item = game(repository, system, unique_id=row['unique_id'])
+                except FileNotFoundError:
+                    continue
+                except SaveError as error:
+                    if error.status == 404:
+                        continue
+                    raise
                 if item['fingerprint'] == fingerprint:
                     return item
     if found:
@@ -221,6 +233,10 @@ def roots(settings, item):
     return result
 
 
+def _skip_unusable_root(error):
+    return isinstance(error, (FileNotFoundError, NotADirectoryError)) or getattr(error, 'errno', None) == errno.ELOOP
+
+
 def _walk(root, descend=None):
     """Bounded, no-follow walk; yield regular files only, including relative names.
 
@@ -254,8 +270,10 @@ def _walk(root, descend=None):
                     elif stat.S_ISREG(info.st_mode):
                         yield rel
             yield from visit(root_fd)
-    except FileNotFoundError:
-        return
+    except OSError as error:
+        if _skip_unusable_root(error):
+            return
+        raise
 
 
 def _named_group(item, rel):
@@ -299,8 +317,9 @@ def _ryujinx_slots(root, item):
                         slots[name] = data[8:24].hex()
                 except (OSError, SaveError):
                     continue
-    except FileNotFoundError:
-        pass
+    except OSError as error:
+        if not _skip_unusable_root(error):
+            raise
     return slots
 
 
@@ -309,7 +328,7 @@ _SWITCH_NAND_DIRS = frozenset(('nand', 'bis'))
 _SWITCH_EMULATOR_DIRS = frozenset(('yuzu', 'eden', 'citron', 'suyu', 'ryujinx'))
 
 
-def _descend_filter(item, layout):
+def _descend_filter(item, layout, slots=None):
     """Directory filter keeping scans away from trees the layout can never match."""
     if item['system'] != 'switch':
         return None
@@ -318,16 +337,29 @@ def _descend_filter(item, layout):
         return lambda parts: parts[-1].lower() not in _SWITCH_NAND_DIRS and not (
             len(parts) == 1 and parts[0].lower() in _SWITCH_EMULATOR_DIRS)
     if layout.startswith('ryujinx-'):
-        return lambda parts: re.fullmatch(r'[0-9a-fA-F]{16}', parts[0]) is not None
-    # NAND layouts: only user/save/0000000000000000/** can match a Switch title.
-    return lambda parts: len(parts) >= len(_SWITCH_SAVE_PREFIX) or parts == _SWITCH_SAVE_PREFIX[:len(parts)]
+        return lambda parts: parts[0] in (slots or ()) and (len(parts) == 1 or parts[1] == '0')
+    # NAND layouts: only user/save/0000000000000000/<profile>/<title_id>/** can match.
+    ids = set(item['ids'])
+
+    def allow_nand(parts):
+        if len(parts) <= len(_SWITCH_SAVE_PREFIX):
+            return parts == _SWITCH_SAVE_PREFIX[:len(parts)]
+        if len(parts) == 4:
+            return re.fullmatch(r'[0-9a-fA-F]{32}', parts[3]) is not None
+        if len(parts) == 5:
+            return parts[4].upper() in ids
+        return True
+
+    return allow_nand
 
 
 def inventory(settings, item, hashes=True):
     groups = {}
     for layout, root in roots(settings, item).items():
         slots = _ryujinx_slots(root, item) if layout.startswith('ryujinx-') else {}
-        for rel in _walk(root, _descend_filter(item, layout)):
+        if layout.startswith('ryujinx-') and not slots:
+            continue
+        for rel in _walk(root, _descend_filter(item, layout, slots)):
             try:
                 rel_parts = relative(rel).parts
             except SaveError:
@@ -414,11 +446,13 @@ def _open_peer(settings, peer, endpoint, timeout=15):
         opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context), _NoRedirect())
         try:
             return opener.open(Request(url, headers={'Accept': 'application/octet-stream', 'User-Agent': 'batocera-drone-game-saves/1.0'}), timeout=timeout)
-        except (HTTPError, PeerIdentityHold, ssl.SSLCertVerificationError):
+        except (HTTPError, PeerIdentityHold):
             raise
-        except (OSError, URLError) as error:
-            last_error = error
-    raise SaveError('The paired Drone is unavailable.', 502) from last_error
+        except (OSError, URLError, http.client.HTTPException) as error:
+            last_error = _more_diagnostic_error(last_error, error)
+    if last_error is not None:
+        raise last_error
+    raise SaveError('The paired Drone is unavailable.', 502)
 
 
 def _peer_error_message(error):
@@ -440,15 +474,21 @@ def _discovery_failure(error):
     if isinstance(error, HTTPError):
         detail = _peer_error_message(error)
         if error.code in (404, 405, 501):
+            if error.code == 404 and detail and detail.lower() != 'not found':
+                return SaveError(f'This Drone could not list its saves: {detail}', 502)
             return SaveError('This Drone is online but its version does not support save sharing yet. Update it to the latest Drone release.', 502)
         if error.code in (401, 403):
             return SaveError('This Drone refused the request' + (f': {detail}' if detail else ' (check that the pairing is still approved on both Drones).'), 502)
         return SaveError(f'This Drone could not list its saves: {detail or f"HTTP {error.code}"}.', 502)
+    if isinstance(error, URLError) and isinstance(error.reason, BaseException):
+        return _discovery_failure(error.reason)
     if isinstance(error, (TimeoutError, socket.timeout)):
         return SaveError('This Drone took too long to list its saves (it may be busy scanning large save folders). Try again.', 504)
     if isinstance(error, ssl.SSLError):
         return SaveError('The secure connection to this Drone failed. Its certificate may have changed; re-pair it in Swarm.', 502)
-    if isinstance(error, json.JSONDecodeError) or isinstance(error, ValueError):
+    if isinstance(error, OSError):
+        return SaveError('Could not reach this Drone. It may be offline or unreachable from this machine.', 502)
+    if isinstance(error, (json.JSONDecodeError, ValueError, http.client.HTTPException)):
         return SaveError('This Drone returned an unreadable save list. It may need an update.', 502)
     return SaveError('Could not reach this Drone. It may be offline or unreachable from this machine.', 502)
 
@@ -466,7 +506,7 @@ def discover(settings, item, peer_id):
             raise _discovery_failure(error) from error
         finally:
             error.close()
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         raise _discovery_failure(error) from error
     if not isinstance(payload, dict):
         raise SaveError('The Drone returned an invalid save inventory.', 502)
@@ -557,8 +597,10 @@ def _switch_root(settings, item, group):
                     usable = any(re.fullmatch(r'[0-9a-fA-F]{32}', name) for name in os.listdir(fd))
             if usable:
                 available.append(root)
-        except FileNotFoundError:
-            continue
+        except OSError as error:
+            if _skip_unusable_root(error):
+                continue
+            raise
     if requested in available:
         return requested
     if len(available) == 1:
