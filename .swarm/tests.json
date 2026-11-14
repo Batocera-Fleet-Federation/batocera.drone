@@ -5777,6 +5777,68 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_722_legacy_nfs_export_cleanup_retry.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-722-nfs-export-cleanup-retry",
+      "name": "Issue #722: failed legacy NFS export revocation stays retryable",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/legacy_reference_cleanup.py",
+          "tests/adversarial/security/test_issue_722_legacy_nfs_export_cleanup_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_722_legacy_share_mount_cleanup_retry.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-722-share-mount-cleanup-retry",
+      "name": "Issue #722: failed legacy share unmount stays retryable",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/legacy_reference_cleanup.py",
+          "tests/adversarial/security/test_issue_722_legacy_share_mount_cleanup_retry.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 120
     }
   ],
   "version": 1
