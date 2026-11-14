@@ -12,12 +12,10 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     from ..common.http_cache import valid_segment
-    from ..common.network_references import is_network_reference, network_reference_root
     from ..storage.rom_metadata_store import _read_sqlite_asset_systems, rom_cache_has_entries, search_rom_entries
     from .gamelist import _normalize_gamelist_rom_path, _text_or_empty
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
-    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from storage.rom_metadata_store import _read_sqlite_asset_systems, rom_cache_has_entries, search_rom_entries  # type: ignore
     from roms.gamelist import _normalize_gamelist_rom_path, _text_or_empty  # type: ignore
 
@@ -41,40 +39,16 @@ class RomSystemsSearchMixin:
         return system_dir
 
     def get_local_system_dir(self, system: str) -> Path:
-        """Resolve a system only when its bytes are owned by this Drone.
-
-        ``get_system_dir`` intentionally follows network-reference symlinks so
-        EmulationStation and the local browse UI can play streamed ROMs.  Peer
-        download endpoints must use this stricter variant: re-exporting a
-        referenced system can create a transfer loop (A downloads from B while
-        B reads the same bytes from an NFS reference back to A).
-
-        The ownership check is lexical and therefore remains safe when the
-        network mount is slow or unavailable.
-        """
-        system = valid_segment(system)
-        system_link = self.roms_root / system
-        if system_link.is_symlink() and is_network_reference(system_link, network_reference_root()):
-            raise FileNotFoundError(system)
+        """Resolve a local system directory."""
         return self.get_system_dir(system)
 
-    def list_system_names(self, *, include_network_references: bool = True) -> List[str]:
-        """List ROM systems without statting Drone-managed network targets.
-
-        Network references are valid native Batocera systems, but their target
-        type/liveness is owned by the network-share manager. Checking either
-        here turns a cheap directory listing into hundreds of network round trips.
-        """
+    def list_system_names(self) -> List[str]:
+        """List ROM systems in roms_root."""
         if not self.roms_root.exists():
             raise FileNotFoundError(str(self.roms_root))
         names = []
-        share_root = network_reference_root()
         for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
             if not self.should_include_system(entry.name):
-                continue
-            if entry.is_symlink() and is_network_reference(entry, share_root):
-                if include_network_references:
-                    names.append(entry.name)
                 continue
             if not (entry.is_dir() or entry.is_symlink()):
                 continue
@@ -84,8 +58,8 @@ class RomSystemsSearchMixin:
         return names
 
     def list_local_system_names(self) -> List[str]:
-        """List only systems whose metadata belongs in this Drone's cache."""
-        return self.list_system_names(include_network_references=False)
+        """List systems whose metadata belongs in this Drone's cache."""
+        return self.list_system_names()
 
     def list_cached_systems(self) -> List[dict]:
         """System counts from the SQLite cache only -- never walks the filesystem.

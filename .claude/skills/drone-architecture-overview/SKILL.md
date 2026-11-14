@@ -273,7 +273,7 @@ sharing" section docstrings cover the Tailscale-specific deviations inline.
 - **Transport tiers / LAN / tailnet detail** → `drone-edge-networking`
 - **VPN feature implementation depth** → `drone-vpn-management`
 - **SMTP/notifications feature implementation depth** → `drone-smtp-notifications`
-- **Admin UI, routes, Swarm page, network-share peer ROM referencing** → `drone-admin-features`
+- **Admin UI, routes, Swarm page** → `drone-admin-features`
 - **Dark-theme tables/modals/accordions (do not ship Bootstrap-white UI)** → `bff-ui-theme-functionality`
 - **Torrents/aria2c + magnet links implementation depth** → `drone-torrents-management`
 - **Clone detection / identity provisioning / hardware replacement** → `docs/drone-identity.md`

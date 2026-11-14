@@ -736,19 +736,11 @@ except ImportError:
 
 
 try:
-    from .device import network_share_manager as _network_share_manager
+    from .device import legacy_reference_cleanup as _legacy_reference_cleanup
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from device import network_share_manager as _network_share_manager  # type: ignore
-
-
-try:
-    from .device import nfs_export_manager as _nfs_export_manager
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from device import nfs_export_manager as _nfs_export_manager  # type: ignore
+    from device import legacy_reference_cleanup as _legacy_reference_cleanup  # type: ignore
 
 
 try:
@@ -947,9 +939,6 @@ _TORRENT_MANAGER = None
 _VPN_AUTO_CONNECT_ATTEMPTED = False
 _VPN_SHARING_POLLER_STARTED = False
 _VPN_SELF_HEAL_POLLER_STARTED = False
-_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = False
-_NETWORK_SHARE_WATCHDOG_STARTED = False
-_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = False
 _SMTP_BOOTSTRAP_ATTEMPTED = False
 _SMTP_SHARING_POLLER_STARTED = False
 _AUDIT_EMAIL_POLLER_STARTED = False
@@ -1198,14 +1187,6 @@ except ImportError:
 
 
 try:
-    from .web.handlers_network_share import HandlersNetworkShareMixin
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from web.handlers_network_share import HandlersNetworkShareMixin  # type: ignore
-
-
-try:
     from .web.handlers_content import HandlersContentMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1397,7 +1378,7 @@ except ImportError:
     from web.mcp_server import McpServerMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersMediaBrowseMixin, HandlersIntegrationsMixin, HandlersMultiplayerMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, HandlersMediaBrowseMixin, HandlersIntegrationsMixin, HandlersMultiplayerMixin, HandlersIdentityMixin, McpServerMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -2584,20 +2565,19 @@ def retire_background_pollers() -> None:
     whichever one a later server selects.
     """
     global _AUTOMATION_POLLER_STARTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED
-    global _NETWORK_SHARE_WATCHDOG_STARTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
+    global _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
     global _TAILNET_SHARING_POLLER_STARTED
     _retire_pollers()
     _AUTOMATION_POLLER_STARTED = False
     _VPN_SHARING_POLLER_STARTED = False
     _VPN_SELF_HEAL_POLLER_STARTED = False
-    _NETWORK_SHARE_WATCHDOG_STARTED = False
     _SMTP_SHARING_POLLER_STARTED = False
     _AUDIT_EMAIL_POLLER_STARTED = False
     _TAILNET_SHARING_POLLER_STARTED = False
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _STREAMDECK_SUPERVISOR_STARTED
     # Identity validation (main()) decides whether this Drone may take part in the swarm at
     # all. While it is unresolved nothing peer-facing starts: no discovery, pairing, mTLS
     # listener, sharing pollers, share replays or sync workers.
@@ -2671,23 +2651,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=_poller_start_args(_vpn_manager.run_self_heal_poller, settings), name="drone-vpn-self-heal", daemon=True).start()
-    if not _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED and swarm_enabled:
-        _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = True
-        # Recreate source-side bind mounts and exact-peer exports after a
-        # service or machine restart. This is independent of client mount
-        # replay and never delays the HTTP listeners from becoming available.
-        Thread(target=_nfs_export_manager.restore_exports, args=(settings,), name="drone-nfs-export-boot-replay", daemon=True).start()
-    if not _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED and swarm_enabled:
-        _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = True
-        # Backgrounded for the same reason as VPN's auto-connect above: mounting
-        # a peer's network filesystem can block for real time and must never delay the
-        # server accepting its first request.
-        Thread(target=_network_share_manager.maybe_reconnect_all_on_boot, args=(settings,), name="drone-network-share-boot-replay", daemon=True).start()
-    if not _NETWORK_SHARE_WATCHDOG_STARTED and swarm_enabled:
-        _NETWORK_SHARE_WATCHDOG_STARTED = True
-        # Backgrounded forever-loop: re-mounts a referenced peer's share if it
-        # drops, same shape as VPN's self-heal poller above.
-        Thread(target=_network_share_manager.run_watchdog_poller, args=_poller_start_args(_network_share_manager.run_watchdog_poller, settings), name="drone-network-share-watchdog", daemon=True).start()
+    _legacy_reference_cleanup.cleanup_legacy_network_references(settings)
     if not _SMTP_BOOTSTRAP_ATTEMPTED and swarm_enabled:
         _SMTP_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a

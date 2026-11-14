@@ -1,4 +1,4 @@
-"""Authenticated peer POST address failover used by NFS negotiation."""
+"""Authenticated peer POST address failover."""
 
 import io
 import tempfile
@@ -34,7 +34,7 @@ class PeerPostConnectivityTests(unittest.TestCase):
             ) as post_json, mock.patch.object(peer_connectivity, "_remember_successful_peer_route") as remember:
                 payload, address = peer_connectivity._peer_post_json_for_peer(
                     peer,
-                    "/v1/api/peer/network-share/nfs/authorize",
+                    "/v1/api/peer/membership",
                     {"protocol_version": 1},
                     settings,
                     peer_id="peer-1",
@@ -123,7 +123,7 @@ class PeerFileDownloadConnectivityTests(unittest.TestCase):
                 with self.assertRaises(URLError):
                     peer_connectivity._peer_post_json_for_peer(
                         peer,
-                        "/v1/api/peer/network-share/nfs/authorize",
+                        "/v1/api/peer/membership",
                         {},
                         settings,
                         peer_id="peer-1",

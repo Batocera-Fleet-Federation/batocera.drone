@@ -42,11 +42,9 @@ class LeaveSwarmHandlerTests(unittest.TestCase):
 
     def test_forgets_every_paired_peer_and_reports_the_count(self) -> None:
         with mock.patch.object(handlers_network._local_network, "paired_peers", return_value=self._peers("peer-a", "peer-b")), \
-                mock.patch.object(handlers_network._nfs_exports, "revoke_peer") as revoke, \
                 mock.patch("app.transfer.swarm_membership.publish_forget", return_value=True) as publish, \
                 mock.patch.object(handlers_network, "_local_peer_cert_cache_path", return_value=Path(self._tmp.name) / "nope.crt"):
             self.handler._handle_admin_leave_swarm()
-        self.assertEqual(revoke.call_count, 2)
         self.assertEqual(publish.call_count, 2)
         publish.assert_any_call(self.settings, "peer-a")
         publish.assert_any_call(self.settings, "peer-b")
@@ -65,7 +63,6 @@ class LeaveSwarmHandlerTests(unittest.TestCase):
         # publish_forget returning False (e.g. already gone) must not be
         # counted as a successful removal.
         with mock.patch.object(handlers_network._local_network, "paired_peers", return_value=self._peers("peer-a")), \
-                mock.patch.object(handlers_network._nfs_exports, "revoke_peer"), \
                 mock.patch("app.transfer.swarm_membership.publish_forget", return_value=False), \
                 mock.patch.object(handlers_network, "_local_peer_cert_cache_path", return_value=Path(self._tmp.name) / "nope.crt"):
             self.handler._handle_admin_leave_swarm()
@@ -76,7 +73,6 @@ class LeaveSwarmHandlerTests(unittest.TestCase):
         # No certificate/identity call of any kind -- leaving the swarm is
         # purely forgetting peers, not resetting who this Drone is.
         with mock.patch.object(handlers_network._local_network, "paired_peers", return_value=self._peers("peer-a")), \
-                mock.patch.object(handlers_network._nfs_exports, "revoke_peer"), \
                 mock.patch("app.transfer.swarm_membership.publish_forget", return_value=True), \
                 mock.patch.object(handlers_network, "_local_peer_cert_cache_path", return_value=Path(self._tmp.name) / "nope.crt"), \
                 mock.patch.object(handlers_network, "DroneCertificateManager") as cert_manager:

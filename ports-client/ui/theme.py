@@ -48,10 +48,20 @@ def apply_drone_theme() -> None:
     style.window_border_size = 1.0
     style.frame_border_size = 1.0
     # A little roomier than ImGui's cramped defaults -- closer to Bootstrap's
-    # own card/button padding, part of what makes the web UI not feel flat.
-    style.window_padding = imgui.ImVec2(14.0, 14.0)
-    style.frame_padding = imgui.ImVec2(10.0, 6.0)
-    style.item_spacing = imgui.ImVec2(10.0, 8.0)
+    # own card/button padding, scaled up for 720p/1080p TV readability.
+    if hasattr(style, "scale_all_sizes"):
+        style.scale_all_sizes(1.15)
+    if hasattr(style, "font_scale_main"):
+        style.font_scale_main = 1.15
+    try:
+        io = imgui.get_io()
+        if hasattr(io, "font_global_scale"):
+            io.font_global_scale = 1.15
+    except Exception:
+        pass
+    style.window_padding = imgui.ImVec2(16.0, 14.0)
+    style.frame_padding = imgui.ImVec2(12.0, 8.0)
+    style.item_spacing = imgui.ImVec2(12.0, 10.0)
 
     style.set_color_(Col.window_bg.value, _color(ADMIN_BG))
     style.set_color_(Col.child_bg.value, _color(ADMIN_SURFACE))
@@ -59,6 +69,12 @@ def apply_drone_theme() -> None:
     style.set_color_(Col.border.value, _color(ADMIN_BORDER))
     style.set_color_(Col.text.value, _color(TEXT))
     style.set_color_(Col.text_disabled.value, _color(MUTED))
+
+    for col_enum in (Col, getattr(imgui, "Col", Col)):
+        for nav_attr in ("nav_highlight", "nav_cursor"):
+            nav_col = getattr(col_enum, nav_attr, None)
+            if nav_col is not None:
+                style.set_color_(getattr(nav_col, "value", nav_col), _color(ACCENT))
 
     style.set_color_(Col.frame_bg.value, _color(ADMIN_SURFACE_MUTED))
     style.set_color_(Col.frame_bg_hovered.value, _color(ACCENT, 0.18))

@@ -34,8 +34,8 @@ _GAMELIST_WRITE_LOCK = Lock()
 _ES_LIFECYCLE_LOCK = Lock()
 
 
-# Forever-loop pollers (automation, outbound mail, VPN/SMTP/tailnet revocation, network-share
-# watchdog) cannot be interrupted mid-sleep, so they are retired by generation instead: each
+# Forever-loop pollers (automation, outbound mail, VPN/SMTP/tailnet revocation)
+# cannot be interrupted mid-sleep, so they are retired by generation instead: each
 # captures the generation when it starts and returns, before any I/O, the first time it wakes to
 # a different one. Without this a poller left behind by a closed server keeps resolving the
 # environment-selected state database on every tick and writes into whatever database a later

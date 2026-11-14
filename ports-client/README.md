@@ -3,8 +3,8 @@
 A native, controller-first app installed into Batocera's **Ports** menu that
 talks to the Drone running on the same machine. Scoped to swarm-related
 activities only: show the swarm, connect to it (Tailnet/Local Network),
-reference a peer's ROM/BIOS library, download ROMs and Movies from a peer,
-VPN, and Backups. See the architecture plan this was built from for the
+search and download Games, Movies & Shows, and Music across all online paired
+Drones, VPN, and Backups. See the architecture plan this was built from for the
 full rationale.
 
 **The browser UI is untouched.** This is a second, additive way to reach
@@ -25,11 +25,10 @@ HTTPS URL for the full web dashboard, sourced live from this drone's own
 `swarm/overview` self-entry rather than hardcoded), Swarm (Overview:
 read-only federation/peer list; Tailnet: join an existing swarm by pasting
 an auth key; Local Network: this drone's own pairing code + discover/pair
-with a nearby drone; Reference ROMs: mount a paired peer's ROM/BIOS library
-over the network instead of copying it, with Reference/Unreference per
-peer; Request Assets: pick a paired peer, browse their Systems+ROMs or
-Movies with a search box, pull an individual item, or Download All for the
-current system/filter with live queue progress), VPN (status,
+with a nearby drone; Search Assets: search Games across all systems,
+Movies & Shows, and Music across every online paired Drone at once, filter
+by System or Drone, hide locally owned items, pull individual items or
+Download All with live queue progress), VPN (status,
 Connect/Disconnect, credentials, sharing, and getting a config onto the
 device -- see "Full controller navigation" below), and Backups (list,
 Create, and Apply/restore -- see "Backup restore" below). Deliberately
@@ -37,24 +36,24 @@ Create, and Apply/restore -- see "Backup restore" below). Deliberately
 VPN config upload via a file-picker dialog (the two Get Config flows below
 cover this without one), Backups download/delete/email (nowhere on the
 console to save a downloaded file to, and delete/email are lower-value
-from a controller), Tailnet/Local Network peer *management* --
-rotate-auth-key, sharing toggles, pull-from-peer, forget/dismiss -- and
-Request Assets' Music (peer inventory has no music type at all).
+from a controller), and Tailnet/Local Network peer *management* --
+rotate-auth-key, sharing toggles, pull-from-peer, forget/dismiss.
 
-## Download progress, Download All, and global loading state (2026-08-13)
+## Search Assets, Download progress, Download All, and global loading state
 
-Request Assets now follows the actual background transfer queue after the
-initial sync POST. Each game/movie row moves through Queued, a determinate
+Search Assets uses the unified media-browse API (`GET /v1/api/media-browse/sources`
+and `GET /v1/api/media-browse/{roms|movies|music}`) to search Games across all
+systems, Movies & Shows, and Music on every online paired Drone at once, with
+cursor pagination and non-blocking per-Drone status notices (`offline`,
+`timeout`, `unsupported`). It follows the actual background transfer queue after the
+initial sync POST. Each game/movie/music row moves through Queued, a determinate
 percentage bar, Downloaded, or a terminal error; completed rows update in
-place. An aggregate progress bar covers Download All for the selected system
-or current movie/search filter. The bulk response returns the exact primary
-job IDs and job/path mapping it queued, so a fast transfer cannot disappear
-between pre/post queue snapshots. "Ignore existing games" defaults on and
-both hides locally downloaded ROMs and maps to the backend's non-overwrite
-behavior; turning it off exposes those rows, Download Again, and sends
-`overwrite_files=true`.
+place. An aggregate progress bar covers Download All for the current search
+and filters across all matching source Drones. "Hide items I have" maps to
+`exclude_local=1` and the backend's non-overwrite behavior; turning it off
+exposes locally present rows, Download Again, and sends `overwrite_files=true`.
 
-A Download Queue panel below Request Assets mirrors the web Drone's transfer
+A Download Queue panel below Search Assets mirrors the web Drone's transfer
 view: Active, Queued, and Recent counts plus a scrollable, clipped list with
 each asset's status, queue position, percentage, transferred/total bytes, and
 speed. `GET /admin/downloads` runs on a dedicated daemon polling thread every
@@ -159,17 +158,17 @@ caught this, since same-frame-vs-next-frame timing isn't an exception.
 status frame appeared, but the following synchronous request still froze the
 spinner on that frame. `Screen.defer_action` now starts the blocking operation
 on a daemon worker and retains its loading label while it runs; the render loop
-continues normally and retires the worker after completion. Request Assets'
+continues normally and retires the worker after completion. Search Assets'
 individual download path uses this same mechanism rather than a special
 `_pending_request` branch.
 
 **The original spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
 `ImDrawList.add_polyline` against `imgui.get_time()`, no image asset, no
 animation-frame bookkeeping. The background-action change lets that time value
-advance continuously during Backups, Request Assets, page navigation, and all
+advance continuously during Backups, Search Assets, page navigation, and all
 other network-backed actions.
 
-**Request Assets: same false-negative-timeout bug, different endpoint.**
+**Search Assets: same false-negative-timeout bug, different endpoint.**
 Live investigation (`drone-live-debugging` skill) of a user report --
 "same api timeout error" downloading a game from a paired peer --
 found `127.0.0.1 - 500 internal error "/v1/api/admin/local-network/sync":
@@ -484,18 +483,11 @@ GUI app's correctness isn't provable from code review alone:
   changing the code, and a clean 404 ("discovered peer not found") for
   pairing with an unknown peer id, all via `test_http_client_integration.py`.
   Real frames driven through the enroll form and the discover/pair flow too.
-- Reference ROMs (`GET /admin/network-shares`,
-  `POST /admin/network-shares/{id}/{enable,disable}`) and Request Assets
-  (`GET /admin/local-network/peers/{id}/assets?type={summary,roms,movies}`,
-  `POST /admin/local-network/{sync,sync-bulk}`, `GET /admin/downloads`) against the real server, including the
-  real error text for every "not a paired peer" / "paired peer not found"
-  case (no real second paired drone was available to test the success
-  path against, so those specific error branches are what's actually
-  verified end-to-end -- the success-path payload shapes came from reading
-  `network_share_manager.py`/`handlers_peer.py`/`handlers_network.py`
-  directly, not from a live two-drone pairing). Real frames driven through
-  the full Request Assets flow: peer picker -> Systems -> select system ->
-  ROM list -> Request -> Movies -> Request -> back to peer list.
+- Search Assets (`GET /media-browse/sources`,
+  `GET /media-browse/{roms,movies,music}`,
+  `POST /admin/local-network/{sync,sync-bulk}`, `GET /admin/downloads`) against the real server, including
+  all-systems game search, Movies & Shows, and Music across online paired Drones,
+  cursor pagination, per-Drone status notices, and bulk downloads across multiple source Drones.
 - **Gamepad nav infrastructure + virtual keyboard (2026-08-13):** confirmed
   live that `imgui.is_key_pressed` for a gamepad key genuinely does
   nothing until `io.backend_flags` has `HasGamepad` set -- a simulated

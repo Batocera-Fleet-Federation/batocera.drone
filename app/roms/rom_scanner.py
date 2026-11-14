@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     from ..common.logging_setup import _drone_log
-    from ..common.network_references import is_network_reference, network_reference_root
     from ..common.settings import Settings
     from ..common.http_errors import _format_http_error
     from ..device import notifications as _notifications
@@ -39,7 +38,6 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _drone_log  # type: ignore
-    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from common.settings import Settings  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
     from device import notifications as _notifications  # type: ignore
@@ -303,10 +301,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     deleted = previous_keys - set(next_entries.keys())
     try:
         bios_root = repository.get_bios_root()
-        share_root = network_reference_root()
         for bios_path in sorted(bios_root.rglob("*"), key=lambda item: str(item.relative_to(bios_root)).lower()):
-            if bios_path.is_symlink() and is_network_reference(bios_path, share_root):
-                continue
             if not bios_path.is_file():
                 continue
             relative_path = bios_path.relative_to(bios_root).as_posix()

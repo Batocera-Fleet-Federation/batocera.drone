@@ -9,49 +9,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from app.common import identity_provisioning as identity
-from app.common.auth import SessionStore
-from app.device import nfs_export_manager
-from app.storage.state_store import create_session, database_path, load_payload, save_payload
-from app.transfer import swarm_reset
 from tests.test_identity_provisioning import provider_for, settings_for
 from tests.test_hardware_identity import UUID_B, x86_tree
 
 
 class LiveResetBoundaries(unittest.TestCase):
-    def test_absent_kernel_export_allows_imaged_nfs_record_to_clear(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            settings = SimpleNamespace(userdata_root=Path(temporary))
-            db = database_path(settings.userdata_root)
-            save_payload(db, "nfs_export_manager.json", {"peers": {"peer": {"addresses": ["192.168.1.8"]}}})
-            with mock.patch.object(nfs_export_manager, "_unexport_client", return_value="not exported"), \
-                    mock.patch.object(nfs_export_manager, "_find_command", return_value="/usr/sbin/exportfs"), \
-                    mock.patch.object(nfs_export_manager, "_run", return_value=SimpleNamespace(returncode=0, stdout="")), \
-                    mock.patch.object(nfs_export_manager, "_cleanup_bind_mounts"), \
-                    mock.patch.object(swarm_reset, "_revoke_shared_credentials", return_value=[]):
-                swarm_reset.reset_swarm_identity_state(settings)
-            self.assertIsNone(load_payload(db, "nfs_export_manager.json", None))
-
-    def test_failed_nfs_revocation_keeps_records_and_blocks_reset(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            settings = SimpleNamespace(userdata_root=Path(temporary))
-            db = database_path(settings.userdata_root)
-            save_payload(db, "nfs_export_manager.json", {"peers": {"peer": {"addresses": ["192.168.1.8"]}}})
-            token = "old-session"
-            create_session(db, token, "admin", (datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
-            with mock.patch("app.device.nfs_export_manager._unexport_client", return_value="denied"), \
-                    mock.patch("app.device.nfs_export_manager._cleanup_bind_mounts"), \
-                    mock.patch.object(swarm_reset, "_revoke_shared_credentials", return_value=[]):
-                with self.assertRaisesRegex(RuntimeError, "could not revoke inherited NFS export"):
-                    swarm_reset.reset_swarm_identity_state(settings)
-            self.assertIn("peer", load_payload(db, "nfs_export_manager.json", {})["peers"])
-            self.assertEqual(SessionStore(db).validate(token), "admin")
-            with mock.patch("app.device.nfs_export_manager._unexport_client", return_value=None), \
-                    mock.patch("app.device.nfs_export_manager._cleanup_bind_mounts"), \
-                    mock.patch.object(swarm_reset, "_revoke_shared_credentials", return_value=[]):
-                swarm_reset.reset_swarm_identity_state(settings)
-            self.assertIsNone(load_payload(db, "nfs_export_manager.json", None))
-            self.assertIsNone(SessionStore(db).validate(token))
-
     def test_tailnet_preflight_requires_a_verified_ready_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
