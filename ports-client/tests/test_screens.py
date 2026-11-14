@@ -276,160 +276,58 @@ class SwarmScreenTests(unittest.TestCase):
         screen._pair_with("p1", "Arcade Cabinet")
         self.assertEqual(screen.lan_message, "incorrect pairing code")
 
-    # --- Reference ROMs --------------------------------------------------
+    # --- Search Assets -----------------------------------------------------
 
-    def test_reference_reload_merges_paired_peers_with_share_records(self) -> None:
+    def test_search_loads_sources_and_all_systems_roms(self) -> None:
         client = _FakeApiClient(get_responses={
-            "/admin/swarm/overview": {"drones": [
-                {"drone_id": "self", "is_self": True},
-                {"drone_id": "peer1", "name": "Arcade"},
-                {"drone_id": "peer2", "name": "Living Room"},
-            ]},
-            "/admin/network-shares": {"shares": [{"peer_id": "peer1", "enabled": True, "status": "mounted"}]},
+            "/media-browse/sources": {
+                "sources": [
+                    {"drone_id": "self", "name": "This Drone", "is_local": True, "online": True},
+                    {"drone_id": "peer1", "name": "Arcade", "is_local": False, "online": True},
+                ]
+            },
+            "/media-browse/roms": {
+                "items": [{"name": "Zelda", "system": "snes", "drone_id": "peer1", "drone_name": "Arcade"}],
+                "sources": [{"drone_id": "peer1", "name": "Arcade", "status": "ok"}],
+                "next_cursor": "cursor-2",
+                "has_more": True,
+            },
         })
         screen = SwarmScreen(client)
-        screen._reload_reference()
-        self.assertEqual(len(screen.reference_peers), 2)  # self excluded
-        peer1, share1 = screen.reference_peers[0]
-        self.assertEqual(peer1["drone_id"], "peer1")
-        self.assertEqual(share1["status"], "mounted")
-        peer2, share2 = screen.reference_peers[1]
-        self.assertEqual(peer2["drone_id"], "peer2")
-        self.assertIsNone(share2)
+        screen._reload_search()
+        self.assertEqual(len(screen.browse_items), 1)
+        self.assertEqual(screen.browse_items[0]["name"], "Zelda")
+        self.assertEqual(screen.available_systems, ["snes"])
+        self.assertEqual(screen.next_page_token, "cursor-2")
+        self.assertTrue(screen.has_more_pages)
 
-    def test_reference_reload_surfaces_error(self) -> None:
-        client = _FakeApiClient(get_error=DroneApiError("swarm unavailable"))
-        screen = SwarmScreen(client)
-        screen._reload_reference()
-        self.assertEqual(screen.reference_error, "swarm unavailable")
-
-    def test_enable_reference_posts_and_reloads(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/swarm/overview": {"drones": []}, "/admin/network-shares": {"shares": []}},
-            post_responses={"/admin/network-shares/peer1/enable": {"status": "mounted"}},
-        )
-        screen = SwarmScreen(client)
-        screen._enable_reference("peer1", "Arcade")
-        self.assertEqual(client.post_calls, [("/admin/network-shares/peer1/enable", None)])
-        self.assertIn("referencing Arcade", screen.reference_message)
-
-    def test_reference_button_opens_confirmation_without_calling_api(self) -> None:
-        client = _FakeApiClient()
-        screen = SwarmScreen(client)
-        screen._open_reference_confirmation("peer1", "Arcade")
-        self.assertEqual(screen.pending_reference_peer_id, "peer1")
-        self.assertEqual(screen.pending_reference_peer_name, "Arcade")
-        self.assertTrue(screen._reference_popup_just_opened)
-        self.assertEqual(client.post_calls, [])
-
-    def test_enable_reference_reports_backend_owned_background_operation(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/swarm/overview": {"drones": []}, "/admin/network-shares": {"shares": []}},
-            post_responses={"/admin/network-shares/peer1/enable": {"status": "enabling"}},
-        )
-        screen = SwarmScreen(client)
-        screen._enable_reference("peer1", "Arcade")
-        self.assertIn("continues if this client closes", screen.reference_message)
-
-    def test_disable_reference_posts_and_reloads(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/swarm/overview": {"drones": []}, "/admin/network-shares": {"shares": []}},
-            post_responses={"/admin/network-shares/peer1/disable": {"status": "detaching"}},
-        )
-        screen = SwarmScreen(client)
-        screen._disable_reference("peer1", "Arcade")
-        self.assertEqual(client.post_calls, [("/admin/network-shares/peer1/disable", None)])
-        self.assertIn("Unreferencing Arcade", screen.reference_message)
-
-    def test_enable_reference_failure_surfaces_message(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/swarm/overview": {"drones": []}, "/admin/network-shares": {"shares": []}},
-            post_error=DroneApiError("mount failed"),
-        )
-        screen = SwarmScreen(client)
-        screen._enable_reference("peer1", "Arcade")
-        self.assertEqual(screen.reference_message, "mount failed")
-
-    # --- Request Assets ----------------------------------------------------
-
-    def test_request_reload_peers_excludes_self(self) -> None:
+    def test_search_load_next_page_appends_items(self) -> None:
         client = _FakeApiClient(get_responses={
-            "/admin/swarm/overview": {"drones": [
-                {"drone_id": "self", "is_self": True}, {"drone_id": "peer1", "name": "Arcade"},
-            ]}
+            "/media-browse/roms": [
+                {
+                    "items": [{"name": "Zelda", "system": "snes", "drone_id": "peer1"}],
+                    "sources": [],
+                    "next_cursor": "cursor-2",
+                    "has_more": True,
+                },
+                {
+                    "items": [{"name": "Metroid", "system": "nes", "drone_id": "peer1"}],
+                    "sources": [],
+                    "next_cursor": "",
+                    "has_more": False,
+                },
+            ],
         })
         screen = SwarmScreen(client)
-        screen._reload_request_peers()
-        self.assertEqual(len(screen.request_peers), 1)
-        self.assertEqual(screen.request_peers[0]["drone_id"], "peer1")
-
-    def test_select_request_peer_loads_summary_and_resets_state(self) -> None:
-        client = _FakeApiClient(get_responses={
-            "/admin/local-network/peers/peer1/assets?type=summary": {"system_counts": {"snes": 3}}
-        })
-        screen = SwarmScreen(client)
-        screen.request_roms = [{"stale": True}]
-        screen._select_request_peer("peer1", "Arcade")
-        self.assertEqual(screen.request_peer_id, "peer1")
-        self.assertEqual(screen.request_peer_name, "Arcade")
-        self.assertEqual(screen.request_summary, {"snes": 3})
-        self.assertEqual(screen.request_roms, [])
-
-    def test_leave_request_peer_clears_selection(self) -> None:
-        client = _FakeApiClient()
-        screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._leave_request_peer()
-        self.assertIsNone(screen.request_peer_id)
-
-    def test_select_request_system_loads_roms(self) -> None:
-        client = _FakeApiClient(get_responses={
-            "/admin/local-network/peers/peer1/assets?type=roms&system=snes&limit=200&offset=0": {
-                "items": [{"name": "Zelda", "unique_id": "1"}], "total": 1,
-            }
-        })
-        screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._select_request_system("snes")
-        self.assertEqual(screen.request_roms, [{"name": "Zelda", "unique_id": "1"}])
-        self.assertEqual(screen.request_roms_total, 1)
-
-    def test_select_request_system_search_reloads_with_query(self) -> None:
-        client = _FakeApiClient(get_responses={
-            "/admin/local-network/peers/peer1/assets?type=roms&system=snes&limit=200&offset=0&q=zelda": {
-                "items": [{"name": "Zelda"}], "total": 1,
-            }
-        })
-        screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen.request_selected_system = "snes"
-        screen.request_roms_query = "zelda"
-        screen._reload_request_roms()
-        self.assertEqual(screen.request_roms, [{"name": "Zelda"}])
-
-    def test_select_request_kind_movies_loads_lazily_once(self) -> None:
-        client = _FakeApiClient(get_responses={
-            "/admin/local-network/peers/peer1/assets?type=movies&limit=200&offset=0": {
-                "items": [{"movie_name": "Alien"}]
-            }
-        })
-        screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._select_request_kind("movies")
-        self.assertEqual(screen.request_movies, [{"movie_name": "Alien"}])
-
-        client._get_responses["/admin/local-network/peers/peer1/assets?type=movies&limit=200&offset=0"] = {
-            "items": [{"movie_name": "changed"}]
-        }
-        screen._select_request_kind("systems")
-        screen._select_request_kind("movies")  # already loaded -- shouldn't refetch
-        self.assertEqual(screen.request_movies, [{"movie_name": "Alien"}])
+        screen._reload_search()
+        screen._load_next_page()
+        self.assertEqual([row["name"] for row in screen.browse_items], ["Zelda", "Metroid"])
+        self.assertFalse(screen.has_more_pages)
 
     def test_request_item_runs_in_background_not_in_click_frame(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._request_item("roms", {"name": "Zelda"}, "Zelda", system="snes")
+        screen._request_item("roms", {"name": "Zelda", "drone_id": "peer1"}, "Zelda", system="snes")
         self.assertEqual(client.post_calls, [])
         self.assertEqual(screen._pending_request_key, ("roms", "Zelda"))
         self.assertEqual(screen.deferred_action_label, "Starting download: Zelda...")
@@ -437,19 +335,20 @@ class SwarmScreenTests(unittest.TestCase):
         self.assertEqual(len(client.post_calls), 1)
         self.assertIsNone(screen._pending_request_key)
 
-    def test_ignore_existing_games_filters_downloaded_roms(self) -> None:
+    def test_hide_local_items_filters_downloaded_items(self) -> None:
         screen = SwarmScreen(_FakeApiClient())
-        screen.request_roms = [
+        screen.browse_items = [
             {"name": "Local", "exists_locally": True},
             {"name": "Remote", "exists_locally": False},
             {"name": "Just finished", "_downloaded": True},
         ]
+        screen.hide_local_items = True
         self.assertEqual(
-            [row["name"] for row in screen._visible_request_roms()],
+            [row["name"] for row in screen._visible_browse_items()],
             ["Remote"],
         )
-        screen.ignore_existing_games = False
-        self.assertEqual(len(screen._visible_request_roms()), 3)
+        screen.hide_local_items = False
+        self.assertEqual(len(screen._visible_browse_items()), 3)
 
     def test_download_poll_updates_queue_snapshot_asynchronously(self) -> None:
         client = _FakeApiClient(get_responses={
@@ -527,29 +426,43 @@ class SwarmScreenTests(unittest.TestCase):
     def test_do_request_item_roms_posts_expected_payload(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._do_request_item("roms", {"name": "Zelda"}, "Zelda", "snes")
+        screen._do_request_item("roms", {"name": "Zelda", "drone_id": "peer1"}, "Zelda", "snes")
         self.assertEqual(
             client.post_calls,
-            [("/admin/local-network/sync", {"peer_id": "peer1", "asset_type": "roms", "item": {"name": "Zelda"}, "system": "snes"})],
+            [(
+                "/admin/local-network/sync",
+                {
+                    "peer_id": "peer1",
+                    "asset_type": "roms",
+                    "item": {"name": "Zelda", "drone_id": "peer1"},
+                    "include_artwork": True,
+                    "system": "snes",
+                },
+            )],
         )
         self.assertEqual(screen.request_message, "Download started: Zelda.")
 
     def test_do_request_item_movies_omits_system(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._do_request_item("movies", {"movie_name": "Alien"}, "Alien", "")
+        screen._do_request_item("movies", {"movie_name": "Alien", "drone_id": "peer1"}, "Alien", "")
         self.assertEqual(
             client.post_calls,
-            [("/admin/local-network/sync", {"peer_id": "peer1", "asset_type": "movies", "item": {"movie_name": "Alien"}})],
+            [(
+                "/admin/local-network/sync",
+                {
+                    "peer_id": "peer1",
+                    "asset_type": "movies",
+                    "item": {"movie_name": "Alien", "drone_id": "peer1"},
+                    "include_artwork": True,
+                },
+            )],
         )
 
     def test_do_request_item_failure_surfaces_message(self) -> None:
         client = _FakeApiClient(post_error=DroneApiError("peer offline"))
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen._do_request_item("movies", {"movie_name": "Alien"}, "Alien", "")
+        screen._do_request_item("movies", {"movie_name": "Alien", "drone_id": "peer1"}, "Alien", "")
         self.assertEqual(screen.request_message, "peer offline")
 
     def test_ignore_existing_games_defaults_checked(self) -> None:
@@ -564,15 +477,15 @@ class SwarmScreenTests(unittest.TestCase):
             }
         })
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
         screen.ignore_existing_games = False
-        screen._do_request_item("roms", {"name": "Zelda"}, "Zelda", "snes")
+        screen.hide_local_items = False
+        screen._do_request_item("roms", {"name": "Zelda", "drone_id": "peer1"}, "Zelda", "snes")
         self.assertEqual(client.post_calls[0][1]["overwrite_files"], True)
 
     def test_download_progress_updates_row_and_marks_completion(self) -> None:
         screen = SwarmScreen(_FakeApiClient())
         row = {"name": "Zelda", "relative_path": "Zelda.zip"}
-        screen.request_roms = [row]
+        screen.browse_items = [row]
         key = ("roms", "Zelda.zip")
         screen._track_download(
             key,
@@ -600,9 +513,6 @@ class SwarmScreenTests(unittest.TestCase):
 
     def test_download_all_uses_bulk_endpoint_and_tracks_new_jobs(self) -> None:
         before = {"downloads": [{"job_id": "old-job", "source_drone_id": "peer1", "file_type": "ROM"}]}
-        # The new job is intentionally absent here: it completed quickly and
-        # aged out of the bounded recent queue before the bulk call returned.
-        # queued_jobs in the response still gives the client an exact mapping.
         after = {"downloads": [
             {"job_id": "old-job", "source_drone_id": "peer1", "file_type": "ROM"},
         ]}
@@ -619,8 +529,8 @@ class SwarmScreenTests(unittest.TestCase):
             }},
         )
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen.request_selected_system = "snes"
+        screen.browse_items = [{"name": "Zelda", "drone_id": "peer1", "system": "snes"}]
+        screen.system_filter = "snes"
         screen._download_all()
         self.assertEqual(
             client.post_calls,
@@ -639,9 +549,10 @@ class SwarmScreenTests(unittest.TestCase):
             post_responses={"/admin/local-network/sync-bulk": {"queued_assets": 0}},
         )
         screen = SwarmScreen(client)
-        screen.request_peer_id = "peer1"
-        screen.request_selected_system = "snes"
+        screen.browse_items = [{"name": "Zelda", "drone_id": "peer1", "system": "snes"}]
+        screen.system_filter = "snes"
         screen.ignore_existing_games = False
+        screen.hide_local_items = False
         screen._download_all()
         self.assertTrue(client.post_calls[0][1]["overwrite_files"])
 

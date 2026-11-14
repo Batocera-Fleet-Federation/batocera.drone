@@ -23,11 +23,8 @@ from client.endpoints import (
     local_network_pair,
     local_network_rotate_pairing_code,
     local_network_status,
-    network_share_enable,
-    network_shares,
-    peer_asset_summary,
-    peer_movies,
-    peer_roms,
+    media_browse_list,
+    media_browse_sources,
     request_asset,
     swarm_overview,
     tailnet_enroll,
@@ -208,43 +205,22 @@ class DroneApiClientIntegrationTests(unittest.TestCase):
             local_network_pair(client, "not-a-real-peer-id", "00000000")
         self.assertIn("discovered peer not found", str(ctx.exception))
 
-    def test_network_shares_list_starts_empty(self) -> None:
+    def test_media_browse_sources_round_trip(self) -> None:
         client = self._client()
         client.login(USERNAME, PASSWORD)
 
-        self.assertEqual(network_shares(client)["shares"], [])
+        result = media_browse_sources(client)
+        self.assertIn("sources", result)
+        self.assertIsInstance(result["sources"], list)
 
-    def test_network_share_enable_for_unpaired_peer_is_a_clean_error(self) -> None:
+    def test_media_browse_list_roms_movies_music_round_trip(self) -> None:
         client = self._client()
         client.login(USERNAME, PASSWORD)
 
-        with self.assertRaises(DroneApiError) as ctx:
-            network_share_enable(client, "not-a-real-peer-id")
-        self.assertIn("not a paired peer", str(ctx.exception))
-
-    def test_peer_asset_summary_for_unpaired_peer_is_a_clean_404(self) -> None:
-        client = self._client()
-        client.login(USERNAME, PASSWORD)
-
-        with self.assertRaises(DroneApiError) as ctx:
-            peer_asset_summary(client, "not-a-real-peer-id")
-        self.assertIn("paired peer not found", str(ctx.exception))
-
-    def test_peer_roms_for_unpaired_peer_is_a_clean_404(self) -> None:
-        client = self._client()
-        client.login(USERNAME, PASSWORD)
-
-        with self.assertRaises(DroneApiError) as ctx:
-            peer_roms(client, "not-a-real-peer-id", "snes")
-        self.assertIn("paired peer not found", str(ctx.exception))
-
-    def test_peer_movies_for_unpaired_peer_is_a_clean_404(self) -> None:
-        client = self._client()
-        client.login(USERNAME, PASSWORD)
-
-        with self.assertRaises(DroneApiError) as ctx:
-            peer_movies(client, "not-a-real-peer-id")
-        self.assertIn("paired peer not found", str(ctx.exception))
+        for kind in ("roms", "movies", "music"):
+            result = media_browse_list(client, kind, q="", exclude_local=True, limit=10)
+            self.assertIn("items", result)
+            self.assertIn("sources", result)
 
     def test_request_asset_for_unpaired_peer_is_a_clean_404(self) -> None:
         client = self._client()

@@ -1,14 +1,15 @@
 """Thin typed wrappers over specific Drone API endpoints.
 
 Scoped to swarm-related activities only: show the swarm, connect to it
-(Tailnet/Local Network), reference a peer's ROMs, download ROMs (and
-Movies, part of the same pull-from-peer feature) from a peer, VPN, and
-Backups. Local Assets browsing and the Debug/Automation admin tiles were
-deliberately removed (see ports-client/README.md) -- use the browser UI
-for those.
+(Tailnet/Local Network), search and download assets across paired Drones
+(Games, Movies & Shows, and Music), VPN, and Backups. Local Assets browsing
+and the Debug/Automation admin tiles were deliberately removed (see
+ports-client/README.md) -- use the browser UI for those.
 """
 
-from urllib.parse import quote
+from __future__ import annotations
+
+from urllib.parse import quote, urlencode
 
 from .http_client import DroneApiClient
 
@@ -66,51 +67,40 @@ def local_network_pair(client: DroneApiClient, peer_id: str, pairing_code: str) 
     return client.post(f"/admin/local-network/peers/{quote(peer_id, safe='')}/pair", {"pairing_code": pairing_code})
 
 
-# --- Reference ROMs (mount a paired peer's ROM/BIOS library via network share) ---
+# --- Search Assets (browse across online paired Drones and pull items) ------
 
-def network_shares(client: DroneApiClient) -> dict:
-    return client.get("/admin/network-shares")
-
-
-def network_share_enable(client: DroneApiClient, peer_id: str) -> dict:
-    return client.post(f"/admin/network-shares/{quote(peer_id, safe='')}/enable")
+_MEDIA_BROWSE_TIMEOUT_SECONDS = 40
 
 
-def network_share_disable(client: DroneApiClient, peer_id: str) -> dict:
-    return client.post(f"/admin/network-shares/{quote(peer_id, safe='')}/disable")
+def media_browse_sources(client: DroneApiClient) -> dict:
+    return client.get("/media-browse/sources")
 
 
-# --- Request Assets (browse a paired peer's inventory and pull an item) ---------
-# Peer inventory has no "music" type at all (only roms/bios/artwork/saves/movies/
-# config_backups/emulator_configs/gameplay -- see handlers_peer.py), and no
-# dedicated "systems" listing either -- system+count comes from "summary"'s
-# system_counts. The Request Assets screen is scoped to what the backend
-# actually supports: Systems+ROMs and Movies.
-
-_PEER_ASSET_BROWSE_TIMEOUT_SECONDS = 40
-
-def peer_asset_summary(client: DroneApiClient, peer_id: str) -> dict:
-    return client.get(
-        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=summary",
-        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
-    )
-
-
-def peer_roms(client: DroneApiClient, peer_id: str, system: str, *, limit: int = 200, offset: int = 0, query: str = "") -> dict:
-    q = f"&q={quote(query)}" if query else ""
-    return client.get(
-        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets"
-        f"?type=roms&system={quote(system, safe='')}&limit={int(limit)}&offset={int(offset)}{q}",
-        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
-    )
-
-
-def peer_movies(client: DroneApiClient, peer_id: str, *, limit: int = 200, offset: int = 0, query: str = "") -> dict:
-    q = f"&q={quote(query)}" if query else ""
-    return client.get(
-        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=movies&limit={int(limit)}&offset={int(offset)}{q}",
-        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
-    )
+def media_browse_list(
+    client: DroneApiClient,
+    kind: str,
+    *,
+    q: str = "",
+    system: str = "",
+    drones: str | list[str] | tuple[str, ...] | set[str] = "",
+    exclude_local: bool = False,
+    cursor: str = "",
+    limit: int = 50,
+) -> dict:
+    if isinstance(drones, (list, tuple, set)):
+        drones_value = ",".join(str(item).strip() for item in drones if str(item or "").strip())
+    else:
+        drones_value = str(drones or "").strip()
+    params = {
+        "q": str(q or ""),
+        "system": str(system or ""),
+        "drones": drones_value,
+        "exclude_local": "1" if exclude_local else "0",
+        "cursor": str(cursor or ""),
+        "limit": str(max(1, int(limit or 50))),
+    }
+    safe_kind = quote(str(kind or "roms").strip(), safe="")
+    return client.get(f"/media-browse/{safe_kind}?{urlencode(params)}")
 
 
 _REQUEST_ASSET_TIMEOUT_SECONDS = 30
@@ -124,6 +114,7 @@ def request_asset(
     *,
     system: str = "",
     ignore_existing: bool = True,
+    include_artwork: bool = True,
 ) -> dict:
     # This is a queue-only call (202, near-instant in principle -- the real
     # transfer runs later in the background over Drone-to-Drone P2P, not
@@ -133,7 +124,12 @@ def request_asset(
     # the transfer itself had already succeeded server-side by the time the
     # client gave up and reported "could not reach Drone". A longer budget
     # here is cheap insurance against that same false-negative.
-    body = {"peer_id": peer_id, "asset_type": asset_type, "item": item}
+    body = {
+        "peer_id": peer_id,
+        "asset_type": asset_type,
+        "item": item,
+        "include_artwork": bool(include_artwork),
+    }
     if not ignore_existing:
         body["overwrite_files"] = True
     if system:

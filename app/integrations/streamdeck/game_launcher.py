@@ -1,7 +1,7 @@
 """GameLauncher: start one library game through Batocera's normal launch path.
 
 Validation confines the ROM to ``<roms root>/<system>/`` (after resolving
-symlinks, so network-referenced systems still work) and rejects missing or
+symlinks) and rejects missing or
 escaping paths before anything is launched. The launch itself is delegated to
 EmulationStation's local API -- see ``emulationstation.py`` for why that, and
 not a direct ``emulatorlauncher``/emulator invocation, is Batocera's normal

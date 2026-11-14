@@ -253,12 +253,6 @@ def _build() -> List[dict]:
         lambda ctx, a: ctx.get("/admin/local-network/status"),
     ))
     tools.append(_tool(
-        "get_network_shares",
-        "Read the network (NFS) share configuration and referenced peers.",
-        _NO_ARGS,
-        lambda ctx, a: ctx.get("/admin/network-shares"),
-    ))
-    tools.append(_tool(
         "get_vpn",
         "Read VPN (OpenVPN) status: connected/disconnected, config, verified IP.",
         _NO_ARGS,

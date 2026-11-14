@@ -36,8 +36,6 @@ class DroneOpenApiContractTest(unittest.TestCase):
             ("/admin/automation", "get", "200", "AutomationStatusResponse"),
             ("/admin/local-network/sync", "post", "202", "LocalSyncResponse"),
             ("/peer/health", "get", "200", "PeerHealthResponse"),
-            ("/peer/network-share/nfs/authorize", "post", "200", "NfsExportAuthorizationResponse"),
-            ("/peer/network-share/nfs/revoke", "post", "200", "NfsExportRevokeResponse"),
             ("/peer/inventory/{asset_type}", "get", "200", "PeerInventoryEnvelope"),
             ("/peer/rom-manifest/{system}/{relative_path}", "get", "200", "PeerRomManifestResponse"),
         ]
@@ -176,8 +174,6 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/peer/pair",
             "/peer/membership",
             "/peer/health",
-            "/peer/network-share/nfs/authorize",
-            "/peer/network-share/nfs/revoke",
             "/peer/inventory/{asset_type}",
             "/peer/roms/{system}/{relative_path}",
             "/peer/rom-manifest/{system}/{relative_path}",

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 try:
-    from ..common.network_references import is_network_reference, network_reference_root
     from ..common.http_cache import valid_segment
     from ..storage.rom_metadata_store import (
         _load_rom_metadata_cache,
@@ -29,7 +28,6 @@ try:
     )
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from common.http_cache import valid_segment  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _load_rom_metadata_cache,
@@ -325,23 +323,14 @@ class RomAssetBiosMixin:
         return self.bios_root.resolve()
 
     def is_local_bios_path(self, relative_path: str) -> bool:
-        """Return whether a BIOS path is owned locally rather than referenced.
-
-        This check is deliberately lexical: following a symlink into an
-        unavailable network mount just to determine ownership could block the
-        peer API.  Parent checks also cover a future layout that references a
-        BIOS subdirectory instead of individual files.
-        """
+        """Return whether a BIOS path is a valid relative path inside bios_root."""
         relative = Path(str(relative_path or "").replace("\\", "/"))
         if relative.is_absolute() or not relative.parts or ".." in relative.parts:
             return False
         bios_root = self.get_bios_root()
         candidate = bios_root / relative
-        share_root = network_reference_root()
         current = candidate
         while current != bios_root:
-            if current.is_symlink() and is_network_reference(current, share_root):
-                return False
             parent = current.parent
             if parent == current or bios_root not in parent.parents and parent != bios_root:
                 return False
@@ -371,19 +360,11 @@ class RomAssetBiosMixin:
             ".7z",
         }
 
-        share_root = network_reference_root()
         for current_root, dirs, file_names in os.walk(bios_root):
             root_path = Path(current_root)
 
-            dirs[:] = [
-                name for name in dirs
-                if not ((root_path / name).is_symlink() and is_network_reference(root_path / name, share_root))
-            ]
-
             for file_name in file_names:
                 candidate = root_path / file_name
-                if candidate.is_symlink() and is_network_reference(candidate, share_root):
-                    continue
                 file_path = candidate.resolve()
                 if not file_path.is_file():
                     continue
@@ -419,18 +400,11 @@ class RomAssetBiosMixin:
     def find_bios_file_by_unique_id(self, unique_id: str) -> Path:
         unique_id = valid_segment(unique_id)
         bios_root = self.get_bios_root()
-        share_root = network_reference_root()
 
         for current_root, dirs, file_names in os.walk(bios_root):
             root_path = Path(current_root)
-            dirs[:] = [
-                name for name in dirs
-                if not ((root_path / name).is_symlink() and is_network_reference(root_path / name, share_root))
-            ]
             for file_name in file_names:
                 candidate = root_path / file_name
-                if candidate.is_symlink() and is_network_reference(candidate, share_root):
-                    continue
                 file_path = candidate.resolve()
                 if not file_path.is_file():
                     continue

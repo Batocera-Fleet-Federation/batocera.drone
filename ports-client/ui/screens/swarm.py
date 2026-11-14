@@ -1,18 +1,17 @@
 """Swarm: Overview (read-only federation list) / Tailnet (join an existing
 swarm over Tailscale) / Local Network (pair with a nearby drone over LAN) /
-Reference ROMs (mount a paired peer's library via network share) / Request
-Assets (browse a paired peer's inventory and pull individual items or the
-current filtered collection).
+Search Assets (search and download Games across all systems, Movies & Shows,
+and Music across every online paired Drone at once).
 
 Tailnet and Local Network only cover the "connect this drone" action, not
 ongoing peer management -- see client/endpoints.py's module comments for
 what's deliberately not wrapped (rotate-auth-key/sharing/pull-from-peer for
-Tailnet; forget/dismiss for Local Network) and why. Request Assets is
-scoped to what peer inventory actually supports -- Systems+ROMs and Movies,
-no Music (the backend has no "music" peer-inventory type at all, see
-client/endpoints.py). Download state comes from the local Drone's actual
-transfer queue rather than treating the initial queue request as completion.
+Tailnet; forget/dismiss for Local Network) and why. Search Assets queries the
+unified media-browse API across all online paired Drones and tracks downloads
+from the local Drone's transfer queue.
 """
+
+from __future__ import annotations
 
 import threading
 import time
@@ -25,33 +24,36 @@ from client.errors import DroneApiError
 
 from .. import virtual_keyboard, widgets
 from ..theme import ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR
-from ..widgets import search_box, tab_button
+from ..widgets import button_hint_footer, search_box, tab_button
 from .base import Screen
 
-_LIST_HEIGHT = 260.0
+_LIST_HEIGHT = 240.0
 _STATUS_COLUMN_X = 340.0
-_SYSTEMS_PANE_WIDTH = 280.0
 _DOWNLOAD_PROGRESS_WIDTH = 190.0
 _DOWNLOAD_POLL_SECONDS = 1.0
 _DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
-_REFERENCE_POPUP_NAME = "Reference Network ROMs"
+_BROWSE_PAGE_LIMIT = 50
+_DETAILS_POPUP_NAME = "Asset Details"
 
 _TAB_OVERVIEW = "overview"
 _TAB_TAILNET = "tailnet"
 _TAB_LAN = "lan"
-_TAB_REFERENCE = "reference"
-_TAB_REQUEST = "request"
+_TAB_SEARCH = "search"
 _TABS = (
     (_TAB_OVERVIEW, "Overview"),
     (_TAB_TAILNET, "Tailnet"),
     (_TAB_LAN, "Local Network"),
-    (_TAB_REFERENCE, "Reference ROMs"),
-    (_TAB_REQUEST, "Request Assets"),
+    (_TAB_SEARCH, "Search Assets"),
 )
 
-_REQUEST_KIND_SYSTEMS = "systems"
-_REQUEST_KIND_MOVIES = "movies"
-_REQUEST_KINDS = ((_REQUEST_KIND_SYSTEMS, "Systems"), (_REQUEST_KIND_MOVIES, "Movies"))
+_SEARCH_KIND_ROMS = "roms"
+_SEARCH_KIND_MOVIES = "movies"
+_SEARCH_KIND_MUSIC = "music"
+_SEARCH_KINDS = (
+    (_SEARCH_KIND_ROMS, "Games"),
+    (_SEARCH_KIND_MOVIES, "Movies & Shows"),
+    (_SEARCH_KIND_MUSIC, "Music"),
+)
 
 
 def _drone_status_text(drone: dict) -> str:
@@ -69,17 +71,47 @@ def _drone_status_text(drone: dict) -> str:
 
 
 def _request_item_key(item: dict) -> str:
-    """A stable-enough identifier for matching a rom/movie dict back to a
-    pending request across frames -- same fields _enqueue_local_asset itself
-    treats as identity server-side, just used here for UI matching only."""
+    """Stable identifier for matching a rom/movie/music dict back to a
+    pending request across frames."""
     return str(
         item.get("relative_path")
         or item.get("rom_path")
         or item.get("file_path")
         or item.get("movie_name")
+        or item.get("display_title")
         or item.get("name")
         or ""
     )
+
+
+def _item_display_title(item: dict) -> str:
+    return str(
+        item.get("display_title")
+        or item.get("name")
+        or item.get("rom_file")
+        or item.get("movie_name")
+        or item.get("file_path")
+        or "Unnamed asset"
+    )
+
+
+def _item_metadata_label(asset_kind: str, item: dict) -> str:
+    if asset_kind == _SEARCH_KIND_ROMS:
+        return str(item.get("system") or "")
+    if asset_kind == _SEARCH_KIND_MUSIC:
+        artist = str(item.get("artist") or "").strip()
+        album = str(item.get("album") or "").strip()
+        if artist and album:
+            return f"{artist} — {album}"
+        return artist or album
+    show = str(item.get("show_title") or item.get("series") or "").strip()
+    season = item.get("season")
+    episode = item.get("episode")
+    if show and season is not None and episode is not None:
+        return f"{show} S{int(season):02d}E{int(episode):02d}"
+    if show and season is not None:
+        return f"{show} Season {season}"
+    return show
 
 
 def _format_bytes(value) -> str:
@@ -117,6 +149,7 @@ def _download_job_label(job: dict) -> str:
     role = {
         "ROM": "Game",
         "MOVIE": "Movie",
+        "MUSIC": "Music",
         "BIOS": "BIOS",
         "SAVE": "Save",
         "CONFIG_BACKUP": "Config backup",
@@ -149,32 +182,25 @@ class SwarmScreen(Screen):
         self.lan_message = None
         self.pairing_code_inputs = {}
 
-        # Reference ROMs
-        self.reference_peers = []  # list of (peer_dict, share_dict_or_None)
-        self.reference_error = None
-        self.reference_message = None
-        self.pending_reference_peer_id = None
-        self.pending_reference_peer_name = ""
-        self._reference_popup_just_opened = False
-
-        # Request Assets
-        self.request_peers = []
-        self.request_peers_error = None
-        self.request_peer_id = None
-        self.request_peer_name = ""
-        self.request_kind = _REQUEST_KIND_SYSTEMS
-        self.request_summary = {}
-        self.request_summary_error = None
-        self.request_selected_system = None
-        self.request_roms = []
-        self.request_roms_total = 0
-        self.request_roms_error = None
-        self.request_roms_query = ""
-        self.request_movies = []
-        self.request_movies_error = None
-        self.request_movies_query = ""
-        self.request_message = None
+        # Search Assets
+        self.asset_kind = _SEARCH_KIND_ROMS
+        self.search_query = ""
+        self.system_filter = ""
+        self.drone_filter = ""
+        self.hide_local_items = False
         self.ignore_existing_games = True
+        self.browse_sources = []
+        self.browse_source_notices = []
+        self.browse_items = []
+        self.available_systems = []
+        self.next_page_token = ""
+        self.has_more_pages = False
+        self.browse_error = None
+        self.request_message = None
+        self.focused_row_index = 0
+        self.details_item = None
+        self._details_popup_just_opened = False
+        self.request_peer_id = None
         self.request_downloads = {}
         self.request_batch = None
         self.request_download_error = None
@@ -184,6 +210,14 @@ class SwarmScreen(Screen):
         self._download_poll_result = None
         self._download_poll_error = None
         self._pending_request_key = None
+
+    @property
+    def active_tab(self) -> str:
+        return self.tab
+
+    @active_tab.setter
+    def active_tab(self, value: str) -> None:
+        self.tab = value
 
     def on_enter(self) -> None:
         self._ensure_loaded(self.tab)
@@ -198,10 +232,8 @@ class SwarmScreen(Screen):
             self._reload_tailnet()
         elif tab == _TAB_LAN:
             self._reload_lan()
-        elif tab == _TAB_REFERENCE:
-            self._reload_reference()
         else:
-            self._reload_request_peers()
+            self._reload_search()
 
     def _select_tab(self, tab: str) -> None:
         self.tab = tab
@@ -214,13 +246,20 @@ class SwarmScreen(Screen):
         if self.defer_action(f"Loading {label}...", lambda: self._ensure_loaded(tab)):
             self.tab = tab
 
+    def _step_tab(self, delta: int) -> None:
+        keys = [key for key, _ in _TABS]
+        labels = {key: label for key, label in _TABS}
+        try:
+            index = keys.index(self.tab)
+        except ValueError:
+            index = 0
+        next_key = keys[(index + delta) % len(keys)]
+        self._queue_tab(next_key, labels[next_key])
+
     # --- Overview ------------------------------------------------------
 
     def _reload_overview(self) -> None:
         try:
-            # Stored state only. Probing every peer inside this call is what
-            # held the "Loading Swarm..." panel up -- and pinned scroll to the
-            # top -- until the slowest machine answered.
             result = endpoints.swarm_overview(self.api_client, probe=False)
             self.active = bool(result.get("active")) if isinstance(result, dict) else False
             self.drones = result.get("drones", []) if isinstance(result, dict) else []
@@ -296,25 +335,25 @@ class SwarmScreen(Screen):
         imgui.begin_child("drones_list", imgui.ImVec2(0, _LIST_HEIGHT), True)
         if not self.drones:
             imgui.text_disabled("No paired drones yet.")
-        for drone in self.drones:
-            self._draw_drone_row(drone)
+        for index, drone in enumerate(self.drones):
+            self._draw_drone_row(index, drone)
         imgui.end_child()
 
     @staticmethod
-    def _draw_drone_row(drone: dict) -> None:
+    def _draw_drone_row(index: int, drone: dict) -> None:
         name = drone.get("name") or drone.get("hostname") or drone.get("drone_id") or "unknown"
         if drone.get("is_self"):
             name = f"{name} (this drone)"
-        imgui.text(name)
+        imgui.selectable(f"{name}##drone_row_{index}", False)
 
         imgui.same_line(_STATUS_COLUMN_X)
         status = _drone_status_text(drone)
         if status == "Online":
-            imgui.text_colored(SUCCESS_COLOR, status)
+            imgui.text_colored(SUCCESS_COLOR, f"[{status}]")
         elif status == "Checking...":
-            imgui.text_disabled(status)
+            imgui.text_disabled(f"[{status}]")
         else:
-            imgui.text_colored(ERROR_COLOR, status)
+            imgui.text_colored(ERROR_COLOR, f"[{status}]")
 
         error = drone.get("error")
         if error:
@@ -363,14 +402,6 @@ class SwarmScreen(Screen):
         if not self.tailnet.get("installed"):
             imgui.text_colored(ERROR_COLOR, "Tailscale is not installed on this drone.")
             imgui.spacing()
-            # Matches drone.js's Swarm-page Tailnet card wording -- the
-            # installer vendors the static tailscale/tailscaled binaries
-            # under /userdata/system/tailscale, so a missing binary means
-            # that step never ran (or ran against an old Drone build from
-            # before this existed), not that Tailscale needs configuring
-            # here. There's no keyboard on a console to type the reinstall
-            # command with, so this just tells the owner what to do from
-            # another device rather than offering to run it in-app.
             imgui.text_wrapped(
                 "Re-run the Drone installer once from another device (it now sets "
                 "the mesh up automatically), then come back here to connect:"
@@ -503,264 +534,131 @@ class SwarmScreen(Screen):
             )
         imgui.separator()
 
-    # --- Reference ROMs ------------------------------------------------
+    # --- Search Assets --------------------------------------------------
 
-    def _reload_reference(self) -> None:
+    def _reload_search(self) -> None:
         try:
-            overview = endpoints.swarm_overview(self.api_client)
-            peers = [row for row in (overview.get("drones") or []) if not row.get("is_self")]
-            shares_result = endpoints.network_shares(self.api_client)
-            shares = shares_result.get("shares", []) if isinstance(shares_result, dict) else []
-            shares_by_peer = {str(row.get("peer_id")): row for row in shares}
-            self.reference_peers = [(peer, shares_by_peer.get(str(peer.get("drone_id")))) for peer in peers]
-            self.reference_error = None
-        except DroneApiError as error:
-            self.reference_error = str(error)
-
-    def _enable_reference(self, peer_id: str, name: str) -> None:
+            sources_payload = endpoints.media_browse_sources(self.api_client)
+            if isinstance(sources_payload, dict) and isinstance(sources_payload.get("sources"), list):
+                self.browse_sources = list(sources_payload["sources"])
+        except DroneApiError:
+            pass
         try:
-            result = endpoints.network_share_enable(self.api_client, peer_id)
-            status = str(result.get("status") or "") if isinstance(result, dict) else ""
-            if status in {"enabling", "pending"}:
-                self.reference_message = (
-                    f"Reference accepted for {name}. Drone is mounting it in the background; "
-                    "the operation continues if this client closes."
-                )
-            elif status == "mounted":
-                self.reference_message = f"Now referencing {name}."
-            else:
-                self.reference_message = str((result or {}).get("status_detail") or status or f"Could not reference {name}.")
+            system_arg = self.system_filter if self.asset_kind == _SEARCH_KIND_ROMS else ""
+            result = endpoints.media_browse_list(
+                self.api_client,
+                self.asset_kind,
+                q=self.search_query,
+                system=system_arg,
+                drones=self.drone_filter,
+                exclude_local=bool(self.hide_local_items),
+                limit=_BROWSE_PAGE_LIMIT,
+            )
+            self._apply_browse_page(result, append=False)
+            self.browse_error = None
         except DroneApiError as error:
-            self.reference_message = str(error)
-        self._reload_reference()
+            self.browse_error = str(error)
+            self.browse_items = []
+            self.next_page_token = ""
+            self.has_more_pages = False
 
-    def _open_reference_confirmation(self, peer_id: str, name: str) -> None:
-        self.pending_reference_peer_id = str(peer_id)
-        self.pending_reference_peer_name = str(name)
-        self._reference_popup_just_opened = True
-
-    def _disable_reference(self, peer_id: str, name: str) -> None:
-        try:
-            endpoints.network_share_disable(self.api_client, peer_id)
-            self.reference_message = f"Unreferencing {name}."
-        except DroneApiError as error:
-            self.reference_message = str(error)
-        self._reload_reference()
-
-    def _draw_reference(self) -> None:
-        if imgui.button("Refresh"):
-            self.defer_action("Refreshing ROM references...", self._reload_reference)
-        imgui.spacing()
-
-        if self.reference_error:
-            imgui.text_colored(ERROR_COLOR, self.reference_error)
+    def _load_next_page(self) -> None:
+        cursor = self.next_page_token
+        if not cursor:
             return
+        try:
+            system_arg = self.system_filter if self.asset_kind == _SEARCH_KIND_ROMS else ""
+            result = endpoints.media_browse_list(
+                self.api_client,
+                self.asset_kind,
+                q=self.search_query,
+                system=system_arg,
+                drones=self.drone_filter,
+                exclude_local=bool(self.hide_local_items),
+                cursor=cursor,
+                limit=_BROWSE_PAGE_LIMIT,
+            )
+            self._apply_browse_page(result, append=True)
+            self.browse_error = None
+        except DroneApiError as error:
+            self.browse_error = str(error)
 
-        imgui.text_wrapped(
-            "Reference a paired drone's ROM and BIOS library over the network "
-            "instead of copying it -- games appear here without using local storage."
-        )
-        imgui.spacing()
-
-        if not self.reference_peers:
-            imgui.text_disabled("No paired drones yet.")
-        for peer, share in self.reference_peers:
-            self._draw_reference_row(peer, share)
-
-        self._draw_reference_confirmation_popup()
-
-        if self.reference_message:
-            imgui.spacing()
-            imgui.text_disabled(self.reference_message)
-
-    def _draw_reference_row(self, peer: dict, share: dict) -> None:
-        peer_id = str(peer.get("drone_id") or "")
-        name = peer.get("name") or peer_id
-        imgui.text(name)
-
-        imgui.same_line(_STATUS_COLUMN_X)
-        enabled = bool(share.get("enabled")) if share else False
-        status = str(share.get("status") or "") if share else ""
-        if enabled and status == "mounted":
-            imgui.text_colored(SUCCESS_COLOR, "Referenced")
-        elif enabled:
-            imgui.text_colored(WARNING_COLOR, status or "pending")
+    def _apply_browse_page(self, result, *, append: bool = False) -> None:
+        if not isinstance(result, dict):
+            if not append:
+                self.browse_items = []
+                self.next_page_token = ""
+                self.has_more_pages = False
+            return
+        items = [dict(row) for row in (result.get("items") or []) if isinstance(row, dict)]
+        if append:
+            self.browse_items.extend(items)
         else:
-            imgui.text_disabled("Not referenced")
+            self.browse_items = items
+            self.focused_row_index = 0
+        self.next_page_token = str(result.get("next_cursor") or "")
+        self.has_more_pages = bool(result.get("has_more")) and bool(self.next_page_token)
 
-        imgui.same_line()
-        if enabled:
-            if imgui.button(f"Unreference##{peer_id}"):
-                self.defer_action(
-                    f"Unreferencing {name}...",
-                    lambda selected_peer=peer_id, selected_name=name: self._disable_reference(
-                        selected_peer, selected_name
-                    ),
-                )
-        else:
-            if imgui.button(f"Reference##{peer_id}"):
-                self._open_reference_confirmation(peer_id, name)
+        for row in items:
+            sys_name = str(row.get("system") or "").strip()
+            if sys_name and sys_name not in self.available_systems:
+                self.available_systems.append(sys_name)
+        self.available_systems.sort()
 
-        if share and share.get("status_detail"):
-            imgui.text_disabled(f"   {share['status_detail']}")
-        imgui.separator()
+        response_sources = [row for row in (result.get("sources") or []) if isinstance(row, dict)]
+        notices = []
+        seen_notice_ids = set()
+        for src in response_sources:
+            status = str(src.get("status") or "").strip().lower()
+            if status in {"offline", "timeout", "unsupported", "error"}:
+                name = str(src.get("name") or src.get("drone_name") or src.get("drone_id") or "Peer")
+                src_id = str(src.get("drone_id") or name)
+                if src_id not in seen_notice_ids:
+                    seen_notice_ids.add(src_id)
+                    notices.append(f"{name}: {status}")
+        for src in self.browse_sources:
+            if not isinstance(src, dict) or src.get("is_local"):
+                continue
+            src_id = str(src.get("drone_id") or "")
+            name = str(src.get("name") or src.get("drone_name") or src_id or "Peer")
+            status = str(src.get("status") or "").strip().lower()
+            if status in {"offline", "timeout", "unsupported", "error"} and src_id not in seen_notice_ids:
+                seen_notice_ids.add(src_id)
+                notices.append(f"{name}: {status}")
+            elif src.get("online") is False and src_id not in seen_notice_ids:
+                seen_notice_ids.add(src_id)
+                notices.append(f"{name}: offline")
+        if notices or not append:
+            self.browse_source_notices = notices
 
-    def _draw_reference_confirmation_popup(self) -> None:
-        if self._reference_popup_just_opened:
-            imgui.open_popup(_REFERENCE_POPUP_NAME)
-            self._reference_popup_just_opened = False
-
-        if self.pending_reference_peer_id is None:
+    def _queue_search_kind(self, kind: str, label: str) -> None:
+        if self.asset_kind == kind and self.browse_items:
             return
+        self.asset_kind = kind
+        self.defer_action(f"Searching {label.lower()}...", self._reload_search)
 
-        opened, _ = imgui.begin_popup_modal(
-            _REFERENCE_POPUP_NAME,
-            flags=imgui.WindowFlags_.always_auto_resize.value,
-        )
-        if not opened:
-            return
+    def _download_item(self, item: dict) -> None:
+        label = _item_display_title(item)
+        system = str(item.get("system") or "") if self.asset_kind == _SEARCH_KIND_ROMS else ""
+        peer_id = str(item.get("drone_id") or self.request_peer_id or "")
+        self._request_item(self.asset_kind, item, label, system=system, peer_id=peer_id)
 
-        name = self.pending_reference_peer_name or "this Drone"
-        imgui.text_colored(WARNING_COLOR, f"Reference {name}'s ROMs and BIOS?")
-        imgui.spacing()
-        imgui.text_wrapped(
-            f"Games and emulators will stream ROM bytes live from {name} over the network; "
-            "the ROMs are not downloaded to this machine."
-        )
-        imgui.text_wrapped(
-            "This does not delete local ROMs. If a ROM system already exists locally, "
-            "Drone renames it with an '.old' suffix and restores it when the reference "
-            "is disabled. Existing local BIOS files stay in place; the network supplies "
-            "only missing BIOS files."
-        )
-        imgui.spacing()
-
-        cancel_pressed = imgui.button("Cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
-        imgui.same_line()
-        confirm_pressed = imgui.button("Reference ROMs")
-
-        if cancel_pressed:
-            self.pending_reference_peer_id = None
-            self.pending_reference_peer_name = ""
-            imgui.close_current_popup()
-        elif confirm_pressed:
-            peer_id = self.pending_reference_peer_id
-            peer_name = self.pending_reference_peer_name
-            self.pending_reference_peer_id = None
-            self.pending_reference_peer_name = ""
-            imgui.close_current_popup()
-            self.defer_action(
-                f"Requesting reference to {peer_name}...",
-                lambda selected_peer=peer_id, selected_name=peer_name: self._enable_reference(
-                    selected_peer, selected_name
-                ),
-            )
-
-        imgui.end_popup()
-
-    # --- Request Assets --------------------------------------------------
-
-    def _reload_request_peers(self) -> None:
-        try:
-            overview = endpoints.swarm_overview(self.api_client)
-            self.request_peers = [row for row in (overview.get("drones") or []) if not row.get("is_self")]
-            self.request_peers_error = None
-        except DroneApiError as error:
-            self.request_peers_error = str(error)
-
-    def _select_request_peer(self, peer_id: str, name: str) -> None:
-        self.request_peer_id = peer_id
-        self.request_peer_name = name
-        self.request_kind = _REQUEST_KIND_SYSTEMS
-        self.request_selected_system = None
-        self.request_roms = []
-        self.request_roms_query = ""
-        self.request_movies = []
-        self.request_movies_query = ""
-        self.request_message = None
-        self.request_downloads = {}
-        self.request_batch = None
-        self._reload_request_summary()
-
-    def _queue_request_peer(self, peer_id: str, name: str) -> None:
-        if not self.defer_action(f"Loading assets from {name}...", self._reload_request_summary):
-            return
-        self.request_peer_id = peer_id
-        self.request_peer_name = name
-        self.request_kind = _REQUEST_KIND_SYSTEMS
-        self.request_selected_system = None
-        self.request_roms = []
-        self.request_roms_query = ""
-        self.request_movies = []
-        self.request_movies_query = ""
-        self.request_message = None
-        self.request_downloads = {}
-        self.request_batch = None
-
-    def _leave_request_peer(self) -> None:
-        self.request_peer_id = None
-
-    def _reload_request_summary(self) -> None:
-        try:
-            result = endpoints.peer_asset_summary(self.api_client, self.request_peer_id)
-            self.request_summary = result.get("system_counts", {}) if isinstance(result, dict) else {}
-            self.request_summary_error = None
-        except DroneApiError as error:
-            self.request_summary_error = str(error)
-
-    def _select_request_kind(self, kind: str) -> None:
-        self.request_kind = kind
-        if kind == _REQUEST_KIND_MOVIES and not self.request_movies and not self.request_movies_error:
-            self._reload_request_movies()
-
-    def _queue_request_kind(self, kind: str, label: str) -> None:
-        needs_load = kind == _REQUEST_KIND_MOVIES and not self.request_movies and not self.request_movies_error
-        if needs_load and not self.defer_action(
-            f"Loading {label.lower()}...", self._reload_request_movies
-        ):
-            return
-        self.request_kind = kind
-
-    def _select_request_system(self, system: str) -> None:
-        self.request_selected_system = system
-        self.request_roms_query = ""
-        self._reload_request_roms()
-
-    def _queue_request_system(self, system: str) -> None:
-        if not self.defer_action(f"Loading {system} games...", self._reload_request_roms):
-            return
-        self.request_selected_system = system
-        self.request_roms_query = ""
-
-    def _reload_request_roms(self) -> None:
-        try:
-            result = endpoints.peer_roms(
-                self.api_client, self.request_peer_id, self.request_selected_system,
-                limit=200, query=self.request_roms_query,
-            )
-            self.request_roms = result.get("items", []) if isinstance(result, dict) else []
-            self.request_roms_total = result.get("total", len(self.request_roms)) if isinstance(result, dict) else len(self.request_roms)
-            self.request_roms_error = None
-        except DroneApiError as error:
-            self.request_roms_error = str(error)
-            self.request_roms = []
-
-    def _reload_request_movies(self) -> None:
-        try:
-            result = endpoints.peer_movies(
-                self.api_client, self.request_peer_id, limit=200, query=self.request_movies_query
-            )
-            self.request_movies = result.get("items", []) if isinstance(result, dict) else []
-            self.request_movies_error = None
-        except DroneApiError as error:
-            self.request_movies_error = str(error)
-
-    def _request_item(self, asset_type: str, item: dict, label: str, *, system: str = "") -> None:
+    def _request_item(
+        self,
+        asset_type: str,
+        item: dict,
+        label: str,
+        *,
+        system: str = "",
+        peer_id: str = "",
+    ) -> None:
         key = (asset_type, _request_item_key(item))
+        resolved_peer = peer_id or str(item.get("drone_id") or self.request_peer_id or "")
+        resolved_system = system or (str(item.get("system") or "") if asset_type == _SEARCH_KIND_ROMS else "")
 
         def request_in_background() -> None:
             try:
-                self._do_request_item(asset_type, item, label, system)
+                self._do_request_item(asset_type, item, label, resolved_system, peer_id=resolved_peer)
             finally:
                 self._pending_request_key = None
 
@@ -768,15 +666,26 @@ class SwarmScreen(Screen):
             self._pending_request_key = key
             self.request_message = None
 
-    def _do_request_item(self, asset_type: str, item: dict, label: str, system: str) -> None:
+    def _do_request_item(
+        self,
+        asset_type: str,
+        item: dict,
+        label: str,
+        system: str = "",
+        *,
+        peer_id: str = "",
+    ) -> None:
+        target_peer = peer_id or str(item.get("drone_id") or self.request_peer_id or "")
+        resolved_system = system or (str(item.get("system") or "") if asset_type == _SEARCH_KIND_ROMS else "")
+        ignore_existing = bool(self.hide_local_items or self.ignore_existing_games)
         try:
             result = endpoints.request_asset(
                 self.api_client,
-                self.request_peer_id,
+                target_peer,
                 asset_type,
                 item,
-                system=system,
-                ignore_existing=self.ignore_existing_games,
+                system=resolved_system,
+                ignore_existing=ignore_existing,
             )
             jobs = result.get("jobs", []) if isinstance(result, dict) else []
             if not jobs and isinstance(result, dict) and isinstance(result.get("job"), dict):
@@ -797,58 +706,87 @@ class SwarmScreen(Screen):
                 self._mark_inventory_item_downloaded(key)
                 self.request_message = f"Already downloaded: {label}."
             else:
-                # Compatibility with older Drone releases that returned only
-                # {status: queued}; there is no job UUID to follow, but the
-                # request was still accepted successfully.
                 self.request_message = f"Download started: {label}."
             self._next_download_poll_at = 0.0
         except DroneApiError as error:
             self.request_message = str(error)
 
+    def _target_bulk_peer_ids(self) -> list[str]:
+        if self.drone_filter.strip():
+            return [pid.strip() for pid in self.drone_filter.split(",") if pid.strip()]
+        peer_ids = []
+        for item in self.browse_items:
+            if not isinstance(item, dict) or item.get("is_local"):
+                continue
+            pid = str(item.get("drone_id") or "").strip()
+            if pid and pid != "self" and pid not in peer_ids:
+                peer_ids.append(pid)
+        if peer_ids:
+            return peer_ids
+        for src in self.browse_sources:
+            if not isinstance(src, dict) or src.get("is_local") or src.get("online") is False:
+                continue
+            pid = str(src.get("drone_id") or "").strip()
+            if pid and pid != "self" and pid not in peer_ids:
+                peer_ids.append(pid)
+        if peer_ids:
+            return peer_ids
+        if self.request_peer_id:
+            return [str(self.request_peer_id)]
+        return []
+
     def _download_all(self) -> None:
-        asset_type = "roms" if self.request_kind == _REQUEST_KIND_SYSTEMS else "movies"
-        system = self.request_selected_system if asset_type == "roms" else ""
-        query = self.request_roms_query if asset_type == "roms" else self.request_movies_query
-        if asset_type == "roms" and not system:
-            self.request_message = "Select a system before downloading all games."
+        asset_type = self.asset_kind
+        system = self.system_filter if asset_type == _SEARCH_KIND_ROMS else ""
+        query = self.search_query
+        ignore_existing = bool(self.hide_local_items or self.ignore_existing_games)
+        peer_ids = self._target_bulk_peer_ids()
+        if not peer_ids:
+            self.request_message = "No online peer Drones available to download from."
             return
         try:
             before = endpoints.downloads(self.api_client)
             known_ids = {
                 str(job.get("job_id") or job.get("id") or "")
-                for job in (before.get("downloads") or [])
+                for job in (before.get("downloads") or [] if isinstance(before, dict) else [])
                 if isinstance(job, dict)
             }
-            result = endpoints.request_assets_bulk(
-                self.api_client,
-                self.request_peer_id,
-                asset_type,
-                system=system or "",
-                query=query,
-                ignore_existing=self.ignore_existing_games,
-            )
+            queued_job_ids = []
+            queued_job_rows = []
+            skipped = 0
+            queued = 0
+            for peer_id in peer_ids:
+                result = endpoints.request_assets_bulk(
+                    self.api_client,
+                    peer_id,
+                    asset_type,
+                    system=system or "",
+                    query=query,
+                    ignore_existing=ignore_existing,
+                )
+                if not isinstance(result, dict):
+                    continue
+                for value in result.get("queued_job_ids") or []:
+                    if str(value):
+                        queued_job_ids.append(str(value))
+                for row in result.get("queued_jobs") or []:
+                    if isinstance(row, dict):
+                        queued_job_rows.append(row)
+                skipped += int(result.get("skipped_existing") or 0)
+                queued += int(result.get("queued_assets") or 0)
+
             after = endpoints.downloads(self.api_client)
-            queued_job_ids = [
-                str(value)
-                for value in (result.get("queued_job_ids") or [])
-                if str(value)
-            ] if isinstance(result, dict) else []
+            after_downloads = after.get("downloads") or [] if isinstance(after, dict) else []
             after_by_id = {
                 str(job.get("job_id") or job.get("id") or ""): job
-                for job in (after.get("downloads") or [])
+                for job in after_downloads
                 if isinstance(job, dict) and (job.get("job_id") or job.get("id"))
             }
-            queued_job_rows = result.get("queued_jobs") or [] if isinstance(result, dict) else []
             if queued_job_rows:
                 new_jobs = []
                 for initial in queued_job_rows:
-                    if not isinstance(initial, dict):
-                        continue
                     job_id = str(initial.get("job_id") or initial.get("id") or "")
                     current = after_by_id.get(job_id)
-                    # A job missing from the first post-bulk snapshot already
-                    # completed and aged out of the queue's bounded recent
-                    # list while the server was still enumerating the batch.
                     new_jobs.append(
                         {**initial, **current}
                         if current
@@ -857,14 +795,14 @@ class SwarmScreen(Screen):
             else:
                 new_jobs = [
                     job
-                    for job in (after.get("downloads") or [])
+                    for job in after_downloads
                     if isinstance(job, dict)
                     and (
                         str(job.get("job_id") or job.get("id") or "") in queued_job_ids
                         if queued_job_ids
                         else str(job.get("job_id") or job.get("id") or "") not in known_ids
                     )
-                    and str(job.get("source_drone_id") or "") == str(self.request_peer_id or "")
+                    and str(job.get("source_drone_id") or "") in set(peer_ids)
                     and self._job_asset_type(job) == asset_type
                 ]
             primary_jobs = [job for job in new_jobs if str(job.get("file_type") or "").upper() != "ARTWORK"]
@@ -882,8 +820,8 @@ class SwarmScreen(Screen):
                 )
             batch_ids = queued_job_ids or discovered_ids
             completed_before_first_poll = [job_id for job_id in batch_ids if job_id not in discovered_ids]
-            skipped = int(result.get("skipped_existing") or 0) if isinstance(result, dict) else 0
-            queued = int(result.get("queued_assets") or len(primary_jobs)) if isinstance(result, dict) else len(primary_jobs)
+            if not queued and primary_jobs:
+                queued = len(primary_jobs)
             self.request_batch = {
                 "asset_type": asset_type,
                 "job_ids": batch_ids,
@@ -892,7 +830,7 @@ class SwarmScreen(Screen):
                 "skipped": skipped,
                 "status": "completed" if not batch_ids else "queued",
             }
-            noun = "game" if asset_type == "roms" else "movie"
+            noun = {"roms": "game", "movies": "movie", "music": "music"}.get(asset_type, "asset")
             self.request_message = f"Queued {queued} {noun} download(s); ignored {skipped} existing."
             if not batch_ids and skipped:
                 self._mark_visible_existing_items_downloaded()
@@ -903,10 +841,16 @@ class SwarmScreen(Screen):
     @staticmethod
     def _job_asset_type(job: dict) -> str:
         explicit = str(job.get("asset_type") or "").lower()
-        if explicit in {"roms", "movies"}:
+        if explicit in {"roms", "movies", "music"}:
             return explicit
         file_type = str(job.get("file_type") or "").lower()
-        return "movies" if file_type == "movie" else "roms" if file_type == "rom" else explicit
+        if file_type == "movie":
+            return "movies"
+        if file_type == "music":
+            return "music"
+        if file_type == "rom":
+            return "roms"
+        return explicit
 
     @staticmethod
     def _job_item_key(job: dict) -> str:
@@ -1034,15 +978,14 @@ class SwarmScreen(Screen):
         return min(100.0, max(0.0, downloaded * 100.0 / total)) if total > 0 else 0.0
 
     def _mark_inventory_item_downloaded(self, key) -> None:
-        asset_type, item_key = key
-        rows = self.request_roms if asset_type == "roms" else self.request_movies
-        for row in rows:
+        _asset_type, item_key = key
+        for row in self.browse_items:
             if _request_item_key(row) == item_key:
                 row["exists_locally"] = True
                 row["_downloaded"] = True
 
     def _mark_visible_existing_items_downloaded(self) -> None:
-        for row in self.request_roms:
+        for row in self.browse_items:
             if row.get("exists_locally"):
                 row["_downloaded"] = True
 
@@ -1080,81 +1023,9 @@ class SwarmScreen(Screen):
         )
         self._download_poll_thread.start()
 
-    def _draw_download_controls(self) -> None:
-        _changed, self.ignore_existing_games = imgui.checkbox(
-            "Ignore existing games", self.ignore_existing_games
-        )
-        imgui.same_line()
-        has_scope = self.request_kind == _REQUEST_KIND_MOVIES or self.request_selected_system is not None
-        can_download_all = has_scope and not self._has_active_downloads()
-        imgui.begin_disabled(not can_download_all)
-        if imgui.button("Download All"):
-            label = (
-                f"Preparing all {self.request_selected_system} downloads..."
-                if self.request_kind == _REQUEST_KIND_SYSTEMS
-                else "Preparing all movie downloads..."
-            )
-            self.defer_action(label, self._download_all)
-        imgui.end_disabled()
-        imgui.spacing()
-        if self.request_batch:
-            job_ids = self.request_batch.get("job_ids") or []
-            if not job_ids:
-                skipped = int(self.request_batch.get("skipped") or 0)
-                message = (
-                    f"No new downloads — ignored {skipped} existing asset(s)."
-                    if skipped
-                    else "No matching assets were available to download."
-                )
-                imgui.text_colored(SUCCESS_COLOR, message)
-                return
-            jobs = [self._job_from_tracking(job_id) for job_id in job_ids]
-            jobs = [job for job in jobs if job]
-            total = max(1, len(job_ids))
-            missing_done = len(self.request_batch.get("completed_missing_ids") or [])
-            progress = (
-                missing_done
-                + sum(
-                    1.0
-                    if str(job.get("status") or "") in _DOWNLOAD_TERMINAL_STATUSES
-                    else self._job_percentage(job) / 100.0
-                    for job in jobs
-                )
-            ) / total
-            terminal = missing_done + sum(
-                1 for job in jobs if str(job.get("status") or "") in _DOWNLOAD_TERMINAL_STATUSES
-            )
-            overlay = f"{terminal}/{len(job_ids)} complete"
-            width = min(520.0, imgui.get_content_region_avail().x)
-            imgui.progress_bar(progress, imgui.ImVec2(width, 0), overlay)
-        if self.request_download_error:
-            imgui.text_colored(WARNING_COLOR, f"Download status unavailable: {self.request_download_error}")
-
-    def _draw_download_state(self, asset_type: str, item: dict) -> bool:
-        key = (asset_type, _request_item_key(item))
-        tracked = self.request_downloads.get(key)
-        if tracked:
-            status = str(tracked.get("status") or "")
-            if status in {"completed", "skipped"}:
-                imgui.text_colored(SUCCESS_COLOR, tracked.get("message") or "Downloaded")
-            elif status in {"failed", "cancelled"}:
-                imgui.text_colored(ERROR_COLOR, tracked.get("message") or status.title())
-            else:
-                fraction = float(tracked.get("percentage") or 0.0) / 100.0
-                imgui.progress_bar(
-                    fraction,
-                    imgui.ImVec2(_DOWNLOAD_PROGRESS_WIDTH, 0),
-                    tracked.get("message") or status.title(),
-                )
-            return True
-        if item.get("exists_locally") or item.get("_downloaded"):
-            imgui.text_colored(SUCCESS_COLOR, "Downloaded")
-            return True
-        return False
-
-    def _visible_request_roms(self):
-        rows = list(self.request_roms)
-        if not self.ignore_existing_games:
+    def _visible_browse_items(self) -> list[dict]:
+        rows = list(self.browse_items)
+        if not self.hide_local_items:
             return rows
         return [
             row
@@ -1172,10 +1043,6 @@ class SwarmScreen(Screen):
                 if isinstance(job, dict)
             )
         if rows:
-            # The service groups its snapshot by status. Re-sort those groups
-            # so a newly created transfer is always the first row a user sees.
-            # Python's stable sort preserves the service order for legacy jobs
-            # that do not have a creation timestamp.
             rows.sort(key=lambda row: str(row[1].get("created_at") or ""), reverse=True)
             return rows
         rows = [
@@ -1211,9 +1078,7 @@ class SwarmScreen(Screen):
         rows = self._download_queue_rows()
         imgui.begin_child(
             "request_download_queue",
-            # A zero height tells ImGui to use all vertical space remaining
-            # below the Request Assets controls and inventory browser.
-            imgui.ImVec2(0, 0),
+            imgui.ImVec2(0, 140),
             True,
         )
         if not rows:
@@ -1270,174 +1135,235 @@ class SwarmScreen(Screen):
         imgui.text_disabled(detail)
         imgui.separator()
 
-    def _draw_request(self) -> None:
+    def _draw_download_state(self, asset_type: str, item: dict) -> bool:
+        key = (asset_type, _request_item_key(item))
+        tracked = self.request_downloads.get(key)
+        if tracked:
+            status = str(tracked.get("status") or "")
+            if status in {"completed", "skipped"}:
+                imgui.text_colored(SUCCESS_COLOR, tracked.get("message") or "Downloaded")
+            elif status in {"failed", "cancelled"}:
+                imgui.text_colored(ERROR_COLOR, tracked.get("message") or status.title())
+            else:
+                fraction = float(tracked.get("percentage") or 0.0) / 100.0
+                imgui.progress_bar(
+                    fraction,
+                    imgui.ImVec2(_DOWNLOAD_PROGRESS_WIDTH, 0),
+                    tracked.get("message") or status.title(),
+                )
+            return True
+        if item.get("exists_locally") or item.get("_downloaded"):
+            imgui.text_colored(SUCCESS_COLOR, "Downloaded")
+            return True
+        return False
+
+    def _draw_search(self) -> None:
         self._maybe_poll_downloads()
-        if self.request_peer_id is None:
-            self._draw_request_peer_picker()
-            self._draw_download_queue_panel()
-            return
 
-        if imgui.button("Back to peer list"):
-            self._leave_request_peer()
-            return
-        imgui.same_line()
-        imgui.text_disabled(f"Browsing: {self.request_peer_name}")
-        imgui.spacing()
-
-        for key, label in _REQUEST_KINDS:
+        for key, label in _SEARCH_KINDS:
             tab_button(
                 label,
-                active=self.request_kind == key,
-                on_click=lambda k=key, value=label: self._queue_request_kind(k, value),
+                active=self.asset_kind == key,
+                on_click=lambda k=key, value=label: self._queue_search_kind(k, value),
             )
             imgui.same_line()
         imgui.new_line()
         imgui.spacing()
 
-        if self.request_kind == _REQUEST_KIND_SYSTEMS:
-            self._draw_request_systems()
-        else:
-            self._draw_request_movies()
+        self.search_query, triggered = search_box("search_assets_query", self.search_query)
+        if triggered:
+            self.defer_action("Searching assets...", self._reload_search)
+
+        # Filter bar: System (for Games), Hide items I have, Drones, Download All
+        if self.asset_kind == _SEARCH_KIND_ROMS:
+            system_preview = self.system_filter if self.system_filter else "All systems"
+            imgui.set_next_item_width(180)
+            if imgui.begin_combo("System", system_preview):
+                _, selected_all = imgui.selectable("All systems", self.system_filter == "")
+                if selected_all and self.system_filter != "":
+                    self.system_filter = ""
+                    self.defer_action("Filtering by system...", self._reload_search)
+                for sys_name in self.available_systems:
+                    _, selected_sys = imgui.selectable(sys_name, self.system_filter == sys_name)
+                    if selected_sys and self.system_filter != sys_name:
+                        self.system_filter = sys_name
+                        self.defer_action("Filtering by system...", self._reload_search)
+                imgui.end_combo()
+            imgui.same_line()
+
+        changed_hide, new_hide = imgui.checkbox("Hide items I have", self.hide_local_items)
+        if changed_hide:
+            self.hide_local_items = new_hide
+            self.ignore_existing_games = new_hide
+            self.defer_action("Updating filter...", self._reload_search)
+
+        imgui.same_line()
+        drone_preview = "All online"
+        if self.drone_filter:
+            drone_preview = self.drone_filter
+            for src in self.browse_sources:
+                if isinstance(src, dict) and str(src.get("drone_id") or "") == self.drone_filter:
+                    drone_preview = str(src.get("name") or src.get("drone_name") or self.drone_filter)
+                    break
+        imgui.set_next_item_width(180)
+        if imgui.begin_combo("Drones", drone_preview):
+            _, selected_all_drones = imgui.selectable("All online", self.drone_filter == "")
+            if selected_all_drones and self.drone_filter != "":
+                self.drone_filter = ""
+                self.defer_action("Filtering by Drone...", self._reload_search)
+            for src in self.browse_sources:
+                if not isinstance(src, dict) or src.get("is_local"):
+                    continue
+                src_id = str(src.get("drone_id") or "")
+                src_name = str(src.get("name") or src.get("drone_name") or src_id)
+                if not src_id:
+                    continue
+                _, selected_drone = imgui.selectable(f"{src_name}##{src_id}", self.drone_filter == src_id)
+                if selected_drone and self.drone_filter != src_id:
+                    self.drone_filter = src_id
+                    self.defer_action("Filtering by Drone...", self._reload_search)
+            imgui.end_combo()
+
+        imgui.same_line()
+        can_download_all = bool(self._target_bulk_peer_ids()) and not self._has_active_downloads()
+        imgui.begin_disabled(not can_download_all)
+        if imgui.button("Download All"):
+            self.defer_action("Preparing bulk download...", self._download_all)
+        imgui.end_disabled()
+
+        for notice in self.browse_source_notices:
+            imgui.text_colored(WARNING_COLOR, f"Peer status: {notice}")
+
+        if self.browse_error:
+            imgui.text_colored(ERROR_COLOR, self.browse_error)
+
+        visible_items = self._visible_browse_items()
+        imgui.begin_child("search_assets_results", imgui.ImVec2(0, _LIST_HEIGHT), True)
+        if not visible_items:
+            imgui.text_disabled("No matching assets found across online paired Drones.")
+        for index, item in enumerate(visible_items):
+            self._draw_search_result_row(index, item)
+        if self.has_more_pages and self.next_page_token:
+            scroll_max = imgui.get_scroll_max_y()
+            near_bottom = scroll_max > 0 and imgui.get_scroll_y() >= scroll_max - 32.0
+            if imgui.button("Load More") or near_bottom:
+                self.defer_action("Loading more results...", self._load_next_page)
+        imgui.end_child()
+
+        if visible_items and 0 <= self.focused_row_index < len(visible_items):
+            focused_item = visible_items[self.focused_row_index]
+            if imgui.is_key_pressed(imgui.Key.gamepad_face_left, False):
+                self._download_item(focused_item)
+            if imgui.is_key_pressed(imgui.Key.gamepad_face_top, False):
+                self.details_item = focused_item
+                self._details_popup_just_opened = True
+
+        self._draw_details_popup()
 
         if self.request_message:
             imgui.spacing()
             imgui.text_disabled(self.request_message)
         self._draw_download_queue_panel()
 
-    def _draw_request_peer_picker(self) -> None:
-        if imgui.button("Refresh"):
-            self.defer_action("Refreshing peer list...", self._reload_request_peers)
-        imgui.spacing()
+    def _draw_search_result_row(self, index: int, item: dict) -> None:
+        title = _item_display_title(item)
+        meta = _item_metadata_label(self.asset_kind, item)
+        drone_name = str(item.get("drone_name") or item.get("drone_id") or "")
+        size_text = _format_bytes(item.get("file_size")) if item.get("file_size") else ""
 
-        if self.request_peers_error:
-            imgui.text_colored(ERROR_COLOR, self.request_peers_error)
-            return
+        parts = [title]
+        if meta:
+            parts.append(f"[{meta}]")
+        if drone_name:
+            parts.append(f"({drone_name})")
+        if size_text:
+            parts.append(size_text)
+        row_label = "   ".join(parts)
 
-        if not self.request_peers:
-            imgui.text_disabled("No paired drones yet.")
-        for peer in self.request_peers:
-            peer_id = str(peer.get("drone_id") or "")
-            name = peer.get("name") or peer_id
-            if imgui.button(f"Browse##{peer_id}"):
-                self._queue_request_peer(peer_id, name)
-            imgui.same_line()
-            imgui.text(name)
-            imgui.separator()
-
-    def _draw_request_systems(self) -> None:
-        if self.request_summary_error:
-            imgui.text_colored(ERROR_COLOR, self.request_summary_error)
-            return
-
-        clicked_system = None
-        imgui.begin_child("request_systems_list", imgui.ImVec2(_SYSTEMS_PANE_WIDTH, _LIST_HEIGHT), True)
-        for name, count in sorted(self.request_summary.items()):
-            label = f"{name} ({count})"
-            _, selected = imgui.selectable(label, self.request_selected_system == name)
-            if selected:
-                clicked_system = name
-        imgui.end_child()
+        _, clicked = imgui.selectable(
+            f"{row_label}##result_row_{index}",
+            self.focused_row_index == index,
+            imgui.SelectableFlags_.allow_overlap.value,
+        )
+        if imgui.is_item_focused() or clicked:
+            self.focused_row_index = index
 
         imgui.same_line()
-        imgui.begin_group()
-        self._draw_download_controls()
-        if self.request_selected_system is None:
-            imgui.text_disabled("Select a system to browse its games.")
-        else:
-            self.request_roms_query, triggered = search_box("request_roms_search", self.request_roms_query)
-            if triggered:
-                self.defer_action("Searching games...", self._reload_request_roms)
-
-            if self.request_roms_error:
-                imgui.text_colored(ERROR_COLOR, self.request_roms_error)
-            else:
-                visible_roms = self._visible_request_roms()
-                hidden_count = len(self.request_roms) - len(visible_roms)
-                summary = f"{self.request_selected_system} -- {self.request_roms_total} games"
-                if hidden_count:
-                    summary += f" ({hidden_count} downloaded hidden)"
-                imgui.text(summary)
-                imgui.begin_child("request_roms_list", imgui.ImVec2(0, _LIST_HEIGHT - 40), True)
-                if not visible_roms:
-                    imgui.text_disabled(
-                        "No games to download. Uncheck Ignore existing games to show downloaded ROMs."
-                    )
-                for index, rom in enumerate(visible_roms):
-                    self._draw_request_rom_row(index, rom)
-                imgui.end_child()
-        imgui.end_group()
-
-        if clicked_system is not None and clicked_system != self.request_selected_system:
-            self._queue_request_system(clicked_system)
-
-    def _draw_request_rom_row(self, index: int, rom: dict) -> None:
-        name = rom.get("name") or rom.get("rom_file") or ""
-        imgui.text(name)
-        imgui.same_line()
-        if self._draw_download_state("roms", rom):
-            if (rom.get("exists_locally") or rom.get("_downloaded")) and not self.ignore_existing_games:
+        if self._draw_download_state(self.asset_kind, item):
+            can_redownload = (
+                item.get("exists_locally") or item.get("_downloaded")
+            ) and not (self.hide_local_items or self.ignore_existing_games)
+            if can_redownload:
                 imgui.same_line()
-                if imgui.button(f"Download Again##request_rom_{index}"):
-                    self._request_item("roms", rom, name, system=self.request_selected_system)
-                    imgui.same_line()
-                    widgets.spinner()
-                    imgui.same_line()
-                    imgui.text_disabled("Starting...")
-        elif self._pending_request_key == ("roms", _request_item_key(rom)):
-            widgets.spinner()
-            imgui.same_line()
-            imgui.text_disabled("Downloading...")
-        elif imgui.button(f"Download##request_rom_{index}"):
-            self._request_item("roms", rom, name, system=self.request_selected_system)
-            imgui.same_line()
+                if imgui.button(f"Download Again##result_dl_{index}"):
+                    self._download_item(item)
+        elif self._pending_request_key == (self.asset_kind, _request_item_key(item)):
             widgets.spinner()
             imgui.same_line()
             imgui.text_disabled("Starting...")
+        elif imgui.button(f"Download##result_dl_{index}"):
+            self._download_item(item)
 
-    def _draw_request_movies(self) -> None:
-        self._draw_download_controls()
-        self.request_movies_query, triggered = search_box("request_movies_search", self.request_movies_query)
-        if triggered:
-            self.defer_action("Searching movies...", self._reload_request_movies)
+        imgui.same_line()
+        if imgui.button(f"Details##result_info_{index}"):
+            self.details_item = item
+            self._details_popup_just_opened = True
 
-        if self.request_movies_error:
-            imgui.text_colored(ERROR_COLOR, self.request_movies_error)
+    def _draw_details_popup(self) -> None:
+        if self._details_popup_just_opened:
+            imgui.open_popup(_DETAILS_POPUP_NAME)
+            self._details_popup_just_opened = False
+
+        if self.details_item is None:
             return
 
-        imgui.begin_child("request_movies_list", imgui.ImVec2(0, _LIST_HEIGHT), True)
-        if not self.request_movies:
-            imgui.text_disabled("Nothing here yet.")
-        for index, movie in enumerate(self.request_movies):
-            label = movie.get("display_title") or movie.get("movie_name") or ""
-            imgui.text(label)
-            imgui.same_line()
-            if self._draw_download_state("movies", movie):
-                can_download_again = (
-                    movie.get("exists_locally") or movie.get("_downloaded")
-                ) and not self.ignore_existing_games
-                if can_download_again:
-                    imgui.same_line()
-                    if imgui.button(f"Download Again##request_movie_{index}"):
-                        self._request_item("movies", movie, label)
-                        imgui.same_line()
-                        widgets.spinner()
-                        imgui.same_line()
-                        imgui.text_disabled("Starting...")
-            elif self._pending_request_key == ("movies", _request_item_key(movie)):
-                widgets.spinner()
-                imgui.same_line()
-                imgui.text_disabled("Downloading...")
-            elif imgui.button(f"Download##request_movie_{index}"):
-                self._request_item("movies", movie, label)
-                imgui.same_line()
-                widgets.spinner()
-                imgui.same_line()
-                imgui.text_disabled("Starting...")
-        imgui.end_child()
+        opened, _ = imgui.begin_popup_modal(
+            _DETAILS_POPUP_NAME,
+            flags=imgui.WindowFlags_.always_auto_resize.value,
+        )
+        if not opened:
+            return
+
+        item = self.details_item
+        imgui.text(_item_display_title(item))
+        imgui.separator()
+        for label, key in (
+            ("Source Drone", "drone_name"),
+            ("System", "system"),
+            ("Artist", "artist"),
+            ("Album", "album"),
+            ("Show", "show_title"),
+            ("Path", "file_path"),
+        ):
+            value = item.get(key)
+            if value:
+                imgui.text(f"{label}: {value}")
+        if item.get("file_size"):
+            imgui.text(f"Size: {_format_bytes(item.get('file_size'))}")
+        imgui.spacing()
+
+        imgui.set_item_default_focus()
+        close_pressed = imgui.button("Close") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
+        imgui.same_line()
+        if imgui.button("Download"):
+            self._download_item(item)
+            self.details_item = None
+            imgui.close_current_popup()
+        elif close_pressed:
+            self.details_item = None
+            imgui.close_current_popup()
+
+        imgui.end_popup()
 
     # --- draw ------------------------------------------------------------
 
     def draw(self, navigator) -> None:
+        if not imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id.value):
+            if imgui.is_key_pressed(imgui.Key.gamepad_l2, False):
+                self._step_tab(-1)
+            elif imgui.is_key_pressed(imgui.Key.gamepad_r2, False):
+                self._step_tab(1)
+
         for key, label in _TABS:
             tab_button(label, active=self.tab == key, on_click=lambda k=key, value=label: self._queue_tab(k, value))
             imgui.same_line()
@@ -1450,7 +1376,10 @@ class SwarmScreen(Screen):
             self._draw_tailnet()
         elif self.tab == _TAB_LAN:
             self._draw_lan()
-        elif self.tab == _TAB_REFERENCE:
-            self._draw_reference()
         else:
-            self._draw_request()
+            self._draw_search()
+
+        if self.tab == _TAB_SEARCH:
+            button_hint_footer("A Select   B Back   X Download   Y Details   L2/R2 Sub-tab   L1/R1 Section")
+        else:
+            button_hint_footer("A Select   B Back   L2/R2 Sub-tab   L1/R1 Section")

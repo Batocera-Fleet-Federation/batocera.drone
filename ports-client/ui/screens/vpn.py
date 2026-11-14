@@ -20,6 +20,7 @@ from client.errors import DroneApiError
 
 from .. import virtual_keyboard
 from ..theme import ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR
+from ..widgets import button_hint_footer
 from .base import Screen
 
 
@@ -222,6 +223,8 @@ class VpnScreen(Screen):
         if self.action_message:
             imgui.spacing()
             imgui.text_disabled(self.action_message)
+
+        button_hint_footer("A Select   B Back   L1/R1 Section")
 
     def _draw_get_config(self) -> None:
         imgui.text_disabled("No VPN config uploaded yet.")

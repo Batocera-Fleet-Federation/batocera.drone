@@ -89,8 +89,6 @@ def seed_swarm(settings: Settings, peer_id: str = "11:22:33:44:55:66") -> None:
     save_payload(db, "local_pairing_code", {"code": "12345678", "expires_at": "2999-01-01T00:00:00+00:00"})
     save_payload(db, "local_peer_checks", [{"peer": peer_id}])
     save_payload(db, "tailnet_forgotten_peers", [peer_id])
-    save_payload(db, "network_share_manager.json", {"peers": {peer_id: {"mounted": True}}})
-    save_payload(db, "nfs_export_manager.json", {"peers": {peer_id: {}}})
     save_payload(
         db,
         "swarm_membership",

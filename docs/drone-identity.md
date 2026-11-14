@@ -76,7 +76,7 @@ is not adopted silently: it holds swarm networking (`certificate_mismatch`) unti
 ## Startup order
 
 `main()` runs `ensure_identity()` after logging is configured and before **any** listener,
-poller, discovery worker, peer worker, sharing poller, share/NFS replay, download manager or
+poller, discovery worker, peer worker, sharing poller, download manager or
 Tailscale bootstrap exists:
 
 1. take the exclusive provisioning lock (`identity/provisioning.lock`, flock + in-process lock);
@@ -158,10 +158,8 @@ chooses a new identity or the original evidence returns.
 
 Paired peers, discovered peers (including `identity-conflict` rows), pinned peer certificates
 (`local-peer-certs/`), the swarm membership roster/epochs/tombstones, the pairing code, peer
-health checks, the peer route cache, sync activity, tailnet "forgotten peers", network-share
-and NFS-export authorizations/references, and queued downloads that name a source peer.
-Live NFS client exports are revoked and Drone-owned bind mounts are removed before
-their SQLite records are deleted; a failed revocation holds provisioning for retry.
+health checks, the peer route cache, sync activity, tailnet "forgotten peers",
+and queued downloads that name a source peer.
 All browser sessions and the MCP bearer token from the source are invalidated. A fresh
 login and a new MCP token are required on the new Drone, while the configured login
 credentials remain available. The source Drone's sessions and MCP token keep working.

@@ -247,8 +247,7 @@ class IdentityResetTests(unittest.TestCase):
         store = SessionStore(settings)
         store.create(sample_session())
         with mock.patch("app.transfer.swarm_reset._clear_pinned_peer_certificates", return_value=0), \
-                mock.patch("app.transfer.swarm_reset._revoke_shared_credentials", return_value=[]), \
-                mock.patch("app.device.nfs_export_manager.revoke_exports_for_identity_change"):
+                mock.patch("app.transfer.swarm_reset._revoke_shared_credentials", return_value=[]):
             swarm_reset.reset_swarm_identity_state(settings)
         self.assertEqual(store.all(), [])
 

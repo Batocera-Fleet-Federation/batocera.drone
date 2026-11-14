@@ -180,14 +180,13 @@ def log_path(settings: Settings) -> Path:
 
 def vpn_import_dir(settings: Settings) -> Path:
     """A drop folder a PC can reach over Batocera's own default guest SMB
-    share (\\\\<device>\\share -- confirmed the same stock export
-    network_share_manager.py already relies on as a peer-side transport --
-    maps to <userdata_root>, so this folder is reachable at
-    \\\\<device>\\share\\vpn-import) without any new server-side setup.
+    share (\\\\<device>\\share maps to <userdata_root>, so this folder is
+    reachable at \\\\<device>\\share\\vpn-import) without any new server-side
+    setup.
 
     Deliberately anchored at settings.userdata_root, NOT
     _drone_install_root() like every other Drone-managed working directory
-    (vpn_dir(), torrent_manager's watch folder, network-shares) -- the
+    (vpn_dir(), torrent_manager's watch folder) -- the
     whole point of this folder is a human typing/navigating a network path
     by hand, so a short path wins over directory-layout consistency here.
     DRONE_VPN_IMPORT_DIR mirrors DRONE_VPN_DIR's escape-hatch pattern for

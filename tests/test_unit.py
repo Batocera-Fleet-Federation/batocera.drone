@@ -3192,45 +3192,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["systems"], [])
             self.assertEqual(snapshot["roms"], [])
 
-    def test_poll_rom_metadata_cache_skips_network_rom_and_bios_links(self) -> None:
-        import app.roms.rom_scanner as rom_scanner
-        import app.roms.rom_systems as rom_systems
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            share_root = root / "system" / "drone-app" / "network-shares"
-            remote_system = share_root / "peer-1" / "roms" / "gba"
-            remote_system.mkdir(parents=True)
-            (remote_system / "game.zip").write_bytes(b"remote-rom")
-            (remote_system / "gamelist.xml").write_text(
-                "<gameList><game><path>./game.zip</path><name>Remote</name></game></gameList>",
-                encoding="utf-8",
-            )
-            remote_bios = share_root / "peer-1" / "bios" / "remote.bin"
-            remote_bios.parent.mkdir(parents=True)
-            remote_bios.write_bytes(b"remote-bios")
-            (root / "roms").mkdir(parents=True)
-            (root / "bios").mkdir(parents=True)
-            (root / "roms" / "gba").symlink_to(remote_system, target_is_directory=True)
-            (root / "bios" / "remote.bin").symlink_to(remote_bios)
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-
-            with mock.patch.object(rom_systems, "network_reference_root", return_value=share_root), \
-                    mock.patch.object(rom_scanner, "network_reference_root", return_value=share_root):
-                snapshot, _changed, stats = _poll_rom_metadata_cache(settings, repo)
-
-            self.assertEqual(snapshot["systems"], [])
-            self.assertEqual(snapshot["roms"], [])
-            self.assertEqual(snapshot["bios"], [])
-            self.assertEqual(stats["systems_scanned"], 0)
-            self.assertEqual(stats["bios_discovered"], 0)
-
     def test_poll_rom_metadata_cache_unknown_bios_has_no_systems(self) -> None:
         import app.roms.rom_asset_bios as rom_asset_bios
 
@@ -3968,43 +3929,6 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("gba", names)
             self.assertNotIn("snes.old", names)
             self.assertNotIn("gba.old.20260805T120000", names)
-
-    def test_network_system_is_visible_but_excluded_from_local_scans_without_resolving(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            local_dir = root / "roms" / "snes"
-            local_dir.mkdir(parents=True)
-            (root / "bios").mkdir(parents=True)
-            share_root = root / "drone-app" / "network-shares"
-            remote_link = root / "roms" / "gba"
-            remote_link.symlink_to(share_root / "peer-1" / "roms" / "gba", target_is_directory=True)
-            repo = RomRepository(root / "roms", root / "bios")
-
-            with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
-                self.assertEqual(repo.list_system_names(), ["gba", "snes"])
-                self.assertEqual(repo.list_local_system_names(), ["snes"])
-
-            self.assertTrue(remote_link.is_symlink())
-            self.assertFalse(remote_link.exists())  # target was deliberately never mounted
-
-    def test_network_system_cannot_be_resolved_as_peer_owned_content(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            (root / "roms").mkdir(parents=True)
-            (root / "bios").mkdir(parents=True)
-            share_root = root / "drone-app" / "network-shares"
-            remote_system = share_root / "peer-1" / "roms" / "snes"
-            remote_system.mkdir(parents=True)
-            (remote_system / "Loop.zip").write_bytes(b"remote")
-            (root / "roms" / "snes").symlink_to(remote_system, target_is_directory=True)
-            repo = RomRepository(root / "roms", root / "bios")
-
-            with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
-                # Local playback still follows the reference.
-                self.assertEqual(repo.get_system_dir("snes"), remote_system.resolve())
-                # Peer serving must never export those same network bytes.
-                with self.assertRaises(FileNotFoundError):
-                    repo.get_local_system_dir("snes")
 
     def test_list_systems_does_not_hash_rom_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7685,7 +7609,7 @@ class SwarmPageTests(unittest.TestCase):
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        self.assertIn("loadSwarmOverview()", body)
+        self.assertIn("loadSwarmOverview(", body)
         self.assertIn("renderSwarmDroneCard", body)
 
     def test_swarm_overview_deduplicates_inflight_calls_and_uses_short_cache(self) -> None:
@@ -8332,92 +8256,6 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertNotIn("ensureRemoteManagementReady", self.js)
         self.assertNotIn("showRemoteConnectGate", self.js)
         self.assertNotIn("/admin/remote/", self.js)
-
-    def test_swarm_page_fetches_network_shares_alongside_overview(self) -> None:
-        page_start = self.js.index("async function renderSwarmPage()")
-        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
-        body = self.js[page_start:page_end]
-        promise_all_index = body.index("Promise.all([")
-        promise_all_close = body.index("]);", promise_all_index)
-        shares_index = body.index('api("/admin/network-shares")')
-        self.assertTrue(promise_all_index < shares_index < promise_all_close)
-        self.assertIn("swarmNetworkSharesByPeer = Object.fromEntries", body)
-
-    def test_card_reference_button_opens_reference_roms_page_gated_on_address_and_online(self) -> None:
-        # Issue #35: the inline confirm-then-enable-all button became a link to
-        # the dedicated Reference ROMs page, where systems are chosen first.
-        card_start = self.js.index("function renderSwarmDroneCard(")
-        card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
-        self.assertIn("setHash('#admin/reference-roms/${droneToken}')", card_body)
-        self.assertIn("drone.online && (drone.tailnet_ip || lanUrl)", card_body)
-        self.assertNotIn("swarmReferencePeerRoms", self.js)
-        self.assertNotIn("swarmUnreferencePeerRoms", self.js)
-
-    def test_reference_roms_page_is_routed_and_loads_selection_state(self) -> None:
-        self.assertIn('hash.startsWith("#admin/reference-roms/")', self.js)
-        fn_start = self.js.index("async function renderReferenceRomsPage(")
-        fn_body = self.js[fn_start:self.js.index("\nfunction referenceRomsBodyHtml(", fn_start)]
-        self.assertIn('api("/admin/network-reference")', fn_body)
-        # Only one machine may be referenced at a time.
-        self.assertIn("already referencing", fn_body)
-
-    def test_reference_roms_toggle_saves_selection_then_enables_or_disables(self) -> None:
-        fn_start = self.js.index("async function toggleReferenceActive(")
-        fn_body = self.js[fn_start:self.js.index("\nasync function referenceRomsWaitForSettled(", fn_start)]
-        self.assertIn("/admin/network-reference/selection", fn_body)
-        self.assertIn("/admin/network-shares/${encodeURIComponent(st.peerId)}/enable", fn_body)
-        self.assertIn("/admin/network-shares/${encodeURIComponent(st.peerId)}/disable", fn_body)
-        self.assertIn("Select at least one system", fn_body)
-
-    def test_reference_roms_selecting_a_system_toggles_that_system(self) -> None:
-        fn_start = self.js.index("function toggleReferenceRomSystem(")
-        fn_body = self.js[fn_start:self.js.index("\nfunction removeReferenceSystem(", fn_start)]
-        self.assertIn("selectedSystems", fn_body)
-        self.assertIn("renderReferenceRomsSummary()", fn_body)
-        self.assertIn("renderReferenceRomsTable()", fn_body)
-
-    def test_reference_roms_lists_systems_instead_of_games(self) -> None:
-        # Issue #57: a reference can only link a whole system, so the grid
-        # rows are systems. Filters and paging stay on the page.
-        fn_start = self.js.index("function referenceRomsBodyHtml(")
-        fn_body = self.js[fn_start:self.js.index("\nfunction wireReferenceRomsControls(", fn_start)]
-        self.assertIn("referenceRomsSystem", fn_body)
-        self.assertIn("referenceRomsGenre", fn_body)
-        self.assertIn("referenceRomsQuery", fn_body)
-        self.assertIn("referenceRomsPageSize", fn_body)
-        self.assertIn("referenceRomsPagination", fn_body)
-        self.assertIn("<th>System</th>", fn_body)
-        self.assertIn("<th>Games</th>", fn_body)
-        self.assertNotIn("<th>Game</th>", fn_body)
-        self.assertIn("Loading systems...", fn_body)
-        self.assertNotIn("Loading games", fn_body)
-        load_start = self.js.index("async function loadReferenceRoms(")
-        load_body = self.js[load_start:self.js.index("\nfunction renderReferenceRomsTable(", load_start)]
-        self.assertIn('type: "systems"', load_body)
-        self.assertNotIn('type: "roms"', load_body)
-        # A payload that is not a systems page is refused outright rather than
-        # painted, so a game row can never reach the grid.
-        self.assertIn('!== "systems"', load_body)
-        table_start = self.js.index("function renderReferenceRomsTable(")
-        table_body = self.js[table_start:self.js.index("\nfunction renderReferenceRomsPagination(", table_start)]
-        self.assertIn("toggleReferenceRomSystem(", table_body)
-        self.assertNotIn("showReferenceRomDetail", table_body)
-        self.assertNotIn("item.title", table_body)
-        # The games column is the whole system, not the filtered match count.
-        row_start = self.js.index("function referenceSystemRow(")
-        row_body = self.js[row_start:self.js.index("\nasync function loadReferenceRoms(", row_start)]
-        self.assertIn("systemCounts[system]", row_body)
-
-    def test_reference_roms_uses_the_compact_torrent_style_grid(self) -> None:
-        fn_start = self.js.index("function referenceRomsBodyHtml(")
-        fn_body = self.js[fn_start:self.js.index("\nfunction wireReferenceRomsControls(", fn_start)]
-        self.assertIn("themed-table download-table local-assets-table bff-stack reference-roms-table", fn_body)
-        self.assertIn("<colgroup>", fn_body)
-        self.assertIn("download-summary-grid", self.js)
-        self.assertIn('class="download-actions">Actions', fn_body)
-        self.assertIn(".reference-roms-table {", self.css)
-        self.assertIn(".reference-roms-row-selected", self.css)
-
 
 
 class TailnetServiceTests(unittest.TestCase):
@@ -9487,7 +9325,7 @@ class SwarmAsyncProbeTests(unittest.TestCase):
 
     def test_page_requests_the_unprobed_overview_then_fans_out(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
-        page_body = self.js[page_start:self.js.index("// Issue #35", page_start)]
+        page_body = self.js[page_start:self.js.index("async function renderIntegrationTransfersPanel", page_start)]
         self.assertIn("loadSwarmOverview(false, { probe: false })", page_body)
         # Not awaited: the cards must fill in after the page is usable.
         self.assertIn("preloadSwarmConnectedDrones(overview, generation);", page_body)

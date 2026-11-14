@@ -20,6 +20,7 @@ from client.errors import AuthenticationError, DroneApiError
 
 from .. import virtual_keyboard
 from ..theme import ERROR_COLOR
+from ..widgets import button_hint_footer
 from .base import Screen
 
 
@@ -78,6 +79,8 @@ class LoginScreen(Screen):
         imgui.spacing()
         if imgui.button("Log in") and self.username and self.password:
             self.defer_action("Signing in...", self._attempt_login)
+
+        button_hint_footer("A Select   B Back   D-Pad Navigate")
 
     def _attempt_login(self) -> None:
         try:
