@@ -447,6 +447,10 @@ def validate_group(settings, item, group):
         elif rel != path and rel.lower() != (path + '.png').lower():
             raise SaveError('File is outside the save set.')
         if layout == 'system' or layout.startswith('saves-'):
+            # Switch NAND/bis trees hold per-profile data; only the dedicated layouts
+            # remap them to the local profile/slot, so the generic layouts never may.
+            if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in relative(rel).parts):
+                raise SaveError('Switch profile saves must use a Switch save layout.')
             if _named_group(item, rel) != (path, kind):
                 raise SaveError('Save does not belong to this ROM.')
         elif layout.startswith('ryujinx-'):
