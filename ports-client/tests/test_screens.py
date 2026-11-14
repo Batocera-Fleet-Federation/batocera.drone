@@ -12,7 +12,12 @@ from ui.screens.about import AboutScreen
 from ui.screens.backups import BackupsScreen
 from ui.screens.base import Screen
 from ui.screens.login import LoginScreen
-from ui.screens.swarm import SwarmScreen, _download_job_label, _drone_status_text
+from ui.screens.swarm import (
+    SwarmScreen,
+    _download_job_label,
+    _drone_status_text,
+    _item_metadata_label,
+)
 from ui.screens.vpn import VpnScreen
 from ui.shell import AppShell
 
@@ -951,6 +956,51 @@ class BackgroundActionTests(unittest.TestCase):
         release.set()
         screen.wait_for_deferred_action()
         self.assertIsNone(screen.deferred_action_label)
+
+
+class ItemMetadataLabelTests(unittest.TestCase):
+    """Paired peers supply episode metadata, so malformed values must not raise."""
+
+    def test_numeric_and_digit_string_episodes_are_formatted(self):
+        self.assertEqual(
+            _item_metadata_label("movies", {"show_title": "Show", "season": 2, "episode": "5"}),
+            "Show S02E05",
+        )
+
+    def test_hostile_season_or_episode_values_fall_back_without_raising(self):
+        for season, episode in (
+            ("not-a-number", 1),
+            (1, "x"),
+            (float("nan"), 1),
+            (float("inf"), 1),
+            (True, 1),
+            (10**40, 1),
+            (-1, 1),
+            ([1], {"a": 1}),
+            ("1" * 5000, 1),
+            ("\u0661", 1),
+        ):
+            with self.subTest(season=season, episode=episode):
+                label = _item_metadata_label(
+                    "movies", {"show_title": "Show", "season": season, "episode": episode}
+                )
+                self.assertTrue(label.startswith("Show"))
+                self.assertNotIn("not-a-number", label)
+
+    def test_season_only_shows_season_label(self):
+        self.assertEqual(_item_metadata_label("movies", {"show_title": "Show", "season": 3}), "Show Season 3")
+
+
+class DownloadPollThreadTests(unittest.TestCase):
+    def test_unexpected_poll_error_is_captured_not_raised(self):
+        class _Boom(_FakeApiClient):
+            def get(self, *_args, **_kwargs):
+                raise RuntimeError("boom")
+
+        screen = SwarmScreen(_Boom())
+        screen._fetch_download_snapshot()  # must not raise
+        self.assertIsNone(screen._download_poll_result)
+        self.assertIn("RuntimeError", screen._download_poll_error)
 
 
 if __name__ == "__main__":

@@ -282,8 +282,11 @@ def _cleanup_nfs_exports(settings: Settings, database, umount_bin: str) -> None:
             address = str(raw_addr or "").strip()
             if not address:
                 continue
-            # No exportfs binary means the kernel cannot hold any export.
-            if exportfs_bin and not _revoke_address(exportfs_bin, address, export_root):
+            # A missing exportfs binary is not proof the grant is gone: the
+            # already-running kernel NFS server may still hold it (an upgraded
+            # userland can lack the tool temporarily). Keep the ownership record
+            # so a later start, once exportfs is available, can revoke it.
+            if not exportfs_bin or not _revoke_address(exportfs_bin, address, export_root):
                 failed_addresses.append(address)
         if failed_addresses:
             remaining[peer_id] = {**peer_entry, "addresses": failed_addresses}
