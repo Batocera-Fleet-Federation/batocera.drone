@@ -5839,6 +5839,66 @@
         "servers": []
       },
       "timeoutSeconds": 120
+    },
+    {
+      "id": "adversarial-security-issue-722-missing-exportfs-cleanup",
+      "name": "Issue #722: unavailable exportfs must preserve NFS ownership for retry",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_722_missing_exportfs_cleanup.py"
+      ],
+      "timeoutSeconds": 120,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/security/test_issue_722_missing_exportfs_cleanup.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "id": "adversarial-security-issue-722-peer-episode-metadata",
+      "name": "Issue #722: peer episode metadata cannot terminate Ports rendering",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_722_peer_episode_metadata.py"
+      ],
+      "timeoutSeconds": 120,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "tests/adversarial/security/test_issue_722_peer_episode_metadata.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
     }
   ],
   "version": 1
