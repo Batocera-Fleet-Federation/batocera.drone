@@ -121,6 +121,32 @@ class LegacyReferenceCleanupTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             self.assertEqual(legacy_reference_cleanup._export_root(), drone_install_root() / "nfs-export")
 
+    def test_failed_export_revocation_keeps_only_failed_addresses_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                "DRONE_NFS_EXPORT_ROOT": str(root / "nfs-export"),
+            }
+            with mock.patch.dict("os.environ", env, clear=True):
+                settings = Settings.from_env()
+                db = database_path(settings.userdata_root)
+                save_payload(db, "nfs_export_manager.json", {"peers": {"p": {"addresses": ["192.168.1.1", "192.168.1.2"]}}})
+
+                def fake_run(cmd, **_kwargs):
+                    bad = "-s" in cmd or any("192.168.1.2:" in str(part) for part in cmd)
+                    return mock.Mock(returncode=1 if bad else 0, stdout="", stderr="")
+
+                with mock.patch("app.device.legacy_reference_cleanup.subprocess.run", side_effect=fake_run), mock.patch(
+                    "app.device.legacy_reference_cleanup.shutil.which", side_effect=lambda n: f"/usr/sbin/{n}"
+                ):
+                    legacy_reference_cleanup.cleanup_legacy_network_references(settings)
+                peers = (load_payload(db, "nfs_export_manager.json", {}) or {}).get("peers")
+                self.assertEqual(peers, {"p": {"addresses": ["192.168.1.2"]}})
+
 
 if __name__ == "__main__":
     unittest.main()
