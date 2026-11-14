@@ -5961,6 +5961,134 @@
         "mounts": [],
         "servers": []
       }
+    },
+    {
+      "id": "adversarial-security-issue-726-switch-nand-case-bypass",
+      "name": "Issue #726: Switch NAND/Ryujinx case variants cannot bypass profile remapping",
+      "origin": "adversarial-security",
+      "enabled": true,
+      "disruptive": false,
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_726_switch_nand_case_bypass.py"
+      ],
+      "timeoutSeconds": 120,
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "tests/adversarial/security/test_issue_726_switch_nand_case_bypass.py"
+        ],
+        "mounts": [],
+        "servers": []
+      }
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_726_peer_discovery_errors_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-726-peer-discovery-errors-uat",
+      "name": "Issue #726: peer save discovery reports real timeouts, TLS failures, unreachable peers, and 404s accurately",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "openssl",
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "app/web/handlers_game_saves.py",
+          "tests/adversarial/test_issue_726_peer_discovery_errors_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_726_switch_and_symlink_discovery_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-726-switch-and-symlink-discovery-uat",
+      "name": "Issue #726: Switch Smash Ultimate save discovery survives symlinked emulator roots and large unrelated titles",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "app/web/handlers_game_saves.py",
+          "tests/adversarial/test_issue_726_switch_and_symlink_discovery_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_726_stale_cache_orphaned_saves_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-726-stale-cache-orphaned-saves-uat",
+      "name": "Issue #726: stale ROM cache entry on peer does not block orphaned save discovery with a 404",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/transfer/game_saves.py",
+          "app/web/handlers_game_saves.py",
+          "tests/adversarial/test_issue_726_stale_cache_orphaned_saves_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
