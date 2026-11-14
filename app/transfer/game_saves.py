@@ -55,7 +55,7 @@ def relative(value):
     if not isinstance(value, str) or not value or len(value) > 1024 or '\\' in value or '\x00' in value:
         raise SaveError('Invalid save path.')
     parts = value.split('/')
-    if any(p in ('', '.', '..') or p.startswith('.') or ':' in p for p in parts):
+    if any(p in ('', '.', '..') or p.startswith('.') for p in parts):
         raise SaveError('Invalid save path.')
     return PurePosixPath(value)
 
@@ -299,9 +299,13 @@ def inventory(settings, item, hashes=True):
     for layout, root in roots(settings, item).items():
         slots = _ryujinx_slots(root, item) if layout.startswith('ryujinx-') else {}
         for rel in _walk(root):
+            try:
+                rel_parts = relative(rel).parts
+            except SaveError:
+                continue
             if layout == 'system' or layout.startswith('saves-'):
                 # Switch NAND slots need local-profile remapping by the dedicated layouts.
-                match = None if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in relative(rel).parts) else _named_group(item, rel)
+                match = None if item['system'] == 'switch' and any(p in ('nand', 'bis') for p in rel_parts) else _named_group(item, rel)
             elif slots:
                 slot, _, tail = rel.partition('/')
                 match = (slot + '/0', 'directory') if slot in slots and tail.startswith('0/') else None

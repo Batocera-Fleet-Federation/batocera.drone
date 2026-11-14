@@ -287,6 +287,23 @@ class GameSavesTests(unittest.TestCase):
         with self.assertRaises(saves.SaveError):
             saves._NoRedirect().redirect_request(None, None, 302, '', {}, 'http://attacker/secret')
 
+    def test_colon_in_rom_and_save_names_works_end_to_end(self):
+        item = {'system': 'snes', 'rom': "Zelda: Link's Awakening.sfc",
+                'stem': "Zelda: Link's Awakening", 'filename': "Zelda: Link's Awakening.sfc", 'ids': []}
+        self.write("snes/Zelda: Link's Awakening.srm", b'old progress')
+        found = saves.inventory(self.settings, item)
+        self.assertEqual([g['path'] for g in found], ["Zelda: Link's Awakening.srm"])
+        group = self.group("Zelda: Link's Awakening.srm")
+        result = self.apply(self.choose(group, item), item=item)
+        self.assertTrue(result['applied'])
+        self.assertEqual((self.settings.saves_root / "snes/Zelda: Link's Awakening.srm").read_bytes(), b'new progress')
+
+    def test_stray_unusual_filenames_do_not_hide_valid_saves(self):
+        self.write('snes/Mario.srm', b'mario')
+        self.write('snes/Back\\Slash.srm', b'other')
+        self.write("snes/Zelda: Link's Awakening.srm", b'other')
+        self.assertEqual([g['path'] for g in saves.inventory(self.settings, self.item)], ['Mario.srm'])
+
 
 class HandlerTests(unittest.TestCase):
     def handler(self):
