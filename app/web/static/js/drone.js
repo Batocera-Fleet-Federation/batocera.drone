@@ -2972,6 +2972,7 @@ async function renderMusicDetailsPage(entryKey) {
   setLoading(true, "Loading track...");
   try {
     const track = await fetchMediaDetail("music", entryKey);
+    window.currentMusicDetail = track;
     content.innerHTML = renderMusicDetailShell(track);
   } catch (err) {
     content.innerHTML = `
@@ -3759,6 +3760,7 @@ async function renderMovieDetailsPage(entryKey) {
   setLoading(true, "Loading movie...");
   try {
     const movie = await fetchMediaDetail("movies", entryKey);
+    window.currentMovieDetail = movie;
     content.innerHTML = renderMovieDetailShell(movie);
     await renderMovieScraperCard(entryKey, movie);
   } catch (err) {
@@ -13046,6 +13048,9 @@ async function router(retryDepth = 0) {
       const parsed = parseMoviesHash(hash);
       if (parsed && parsed.view === "detail") {
         await renderMovieDetailsPage(parsed.entryKey);
+        if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
+          DroneRemoteMedia.onRouteRendered(hash, window.currentMovieDetail || null).catch(() => {});
+        }
       } else if (parsed && parsed.view === "show") {
         await renderShowDetailsPage(parsed.showTitle, parsed.seasonNumber);
       } else {
@@ -13058,6 +13063,9 @@ async function router(retryDepth = 0) {
       const parsed = parseMusicHash(hash);
       if (parsed && parsed.view === "detail") {
         await renderMusicDetailsPage(parsed.entryKey);
+        if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
+          DroneRemoteMedia.onRouteRendered(hash, window.currentMusicDetail || null).catch(() => {});
+        }
       } else if (parsed && parsed.view === "artist") {
         await renderArtistDetailsPage(parsed.artist, parsed.album);
       } else {
@@ -13242,7 +13250,8 @@ async function router(retryDepth = 0) {
     }
     // Local game/movie/track detail pages list every Drone that has the item
     // (media_browse.js); fire-and-forget so it can never delay or break the page.
-    if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken) {
+    if (typeof DroneRemoteMedia !== "undefined" && myNavToken === routerNavToken
+        && !hash.startsWith("#movies/") && !hash.startsWith("#music/")) {
       DroneRemoteMedia.onRouteRendered(hash).catch(() => {});
     }
     // The awaited render call above may have taken long enough that a newer

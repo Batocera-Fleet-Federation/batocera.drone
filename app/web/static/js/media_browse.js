@@ -1,7 +1,8 @@
 // Other Drones' Games, Movies/Shows and Music, shown in place on the normal pages (#systems,
 // #movies, #music) -- there is no separate page.  This file is a *layer* on top of the existing
 // explorers: it never replaces their rendering, it appends remote cards to the end of their grid
-// and adds an "Available on" card to local detail pages.
+// and adds an "Available on" card to detail pages. The owning Drone is shown immediately; other
+// Drones are checked only when the user asks.
 //
 // * The pages show only this Drone's items by default.  A "Drones" section injected at the top
 //   of each explorer's filter sidebar lists the paired Drones that are online (latest background
@@ -826,24 +827,43 @@
       ${badge(it)}<span class="small text-muted flex-grow-1">${it.file_size ? esc(formatBytes(it.file_size)) : ""}${it.exists_locally ? " · already on this Drone" : ""}</span>${play}${copy}${like}</div>`;
   }
 
-  // Which Drones hold this title?  Fills `host` asynchronously; never blocks the page.
-  async function fillAvailability(kind, it, host, registry, includeSelf) {
-    host.innerHTML = `<div class="small text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Checking which Drones have this…</div>`;
+  function renderOwner(kind, it, host, registry, localPage) {
+    registry.set(keyOf(it), it);
+    host._owner = it;
+    host.innerHTML = `${copyRow(kind, it)}${localPage ? '<div class="small text-muted">This page</div>' : ""}
+      <div class="nm-check-results" aria-live="polite"></div>
+      <button type="button" class="btn btn-sm btn-outline-info mt-2" data-act="check-others">Check other Drones</button>`;
+  }
+
+  // Cross-Drone lookup is explicitly user-triggered. Owner/actions remain visible during and after it.
+  async function fillAvailability(kind, it, host, registry, token) {
+    const results = host.querySelector(".nm-check-results");
+    const button = host.querySelector('[data-act="check-others"]');
+    if (!results || !button || button.disabled) return;
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Checking…';
+    results.innerHTML = "";
     const params = new URLSearchParams({ title: titleOf(it) });
     ["fingerprint", "artist", "system"].forEach((k) => it[k] && params.set(k, it[k]));
     if (it.drone_id) params.set("exclude_drone", it.drone_id);
     try {
       const res = await api(`${API}/${kind}/also-on?${params}`, { timeoutMs: 45000 });
+      if (!host.isConnected || host._checkToken !== token) return;
       const copies = res.copies || [];
-      if (includeSelf && copies.some((c) => c.is_local)) it.exists_locally = true;
+      if (copies.some((c) => c.is_local)) it.exists_locally = true;
       copies.forEach((c) => registry.set(keyOf(c), c));
-      const rows = (includeSelf ? [it] : []).concat(copies);
-      rows.forEach((r) => registry.set(keyOf(r), r));
+      const rows = copies.filter((r) => keyOf(r) !== keyOf(it));
       const down = (res.sources || []).filter((s) => !["ok", "cached"].includes(s.status));
-      host.innerHTML = `${rows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">Only on this Drone.</div>'}
+      results.innerHTML = `${rows.map((r) => copyRow(kind, r)).join("") || '<div class="small text-muted">No other copies found.</div>'}
         ${down.length ? `<div class="small text-muted mt-2">Could not check: ${esc(down.map((s) => s.name).join(", "))}</div>` : ""}`;
     } catch (err) {
-      host.innerHTML = `<div class="small text-muted">Could not check other Drones${err && err.message ? ` (${esc(err.message)})` : ""}.</div>`;
+      if (!host.isConnected || host._checkToken !== token) return;
+      results.innerHTML = `<div class="small text-muted">Could not check other Drones${err && err.message ? ` (${esc(err.message)})` : ""}.</div>`;
+    } finally {
+      if (host.isConnected && host._checkToken === token) {
+        button.disabled = false;
+        button.textContent = "Check other Drones";
+      }
     }
   }
 
@@ -881,7 +901,9 @@
         <div class="mb-2 small text-muted">${esc([it.artist, it.album, it.system, meta.release_date || meta.year].filter(Boolean).join(" · "))}</div>
         ${meta.overview ? `<p class="small">${esc(meta.overview)}</p>` : ""}
         <h6 class="mt-3">Available on</h6><div class="nm-avail"></div>`;
-      fillAvailability(kind, it, body.querySelector(".nm-avail"), registry, true);
+      const host = body.querySelector(".nm-avail");
+      host._checkToken = `${Date.now()}-${Math.random()}`;
+      renderOwner(kind, it, host, registry, false);
     }
     bootstrap.Modal.getOrCreateInstance(modal).show();
   }
@@ -932,6 +954,11 @@
     if (!btn || !scope.contains(btn)) return;
     const kind = scope._kind;
     const act = btn.dataset.act;
+    if (act === "check-others") {
+      const host = btn.closest(".nm-avail");
+      if (host) fillAvailability(kind, host._owner, host, scope._registry, host._checkToken);
+      return;
+    }
     if (act === "copy-all" && scope._group) { copyItems(kind, scope._group.items); return; }
     const it = scope._registry && scope._registry.get(btn.dataset.key);
     if (!it) return;
@@ -941,8 +968,8 @@
   }
 
   // ================================================================== local detail pages
-  // A local game/movie/track page gets an "Available on" card showing every Drone that has it.
-  async function onRouteRendered(hash) {
+  // Detail pages show their known owner immediately; other Drones are checked on demand.
+  async function onRouteRendered(hash, detailData) {
     document.querySelectorAll(".drone-availability").forEach((n) => n.remove());
     let kind = "";
     let item = null;
@@ -958,7 +985,7 @@
         if (!parsed || parsed.view !== "detail" || !parsed.entryKey) return;
         kind = hash.startsWith("#movies/") ? "movies" : "music";
         const remote = remoteKeyParts(parsed.entryKey);
-        const detail = await fetchMediaDetail(kind, parsed.entryKey);
+        const detail = detailData || await fetchMediaDetail(kind, parsed.entryKey);
         item = { title: detail.display_title || detail.movie_name || detail.track_name, fingerprint: detail.fingerprint || "", artist: detail.artist || "" };
         if (remote) {
           // A page for another Drone's item: that Drone is the first row, then every other holder.
@@ -979,13 +1006,11 @@
     card._kind = kind;
     card._registry = new Map();
     card.addEventListener("click", (event) => onAction(event, card));
-    if (remoteItem) { await fillAvailability(kind, item, card.querySelector(".nm-avail"), card._registry, true); return; }
-    let self = null;
-    try { self = (await peers()).find((p) => p.is_local); } catch (e) { /* offline listing is fine */ }
-    const here = { ...item, drone_id: self ? self.drone_id : "", drone_name: "This Drone", is_local: true };
-    await fillAvailability(kind, here, card.querySelector(".nm-avail"), card._registry, false);
     const host = card.querySelector(".nm-avail");
-    if (host && card.isConnected) host.insertAdjacentHTML("afterbegin", `<div class="nm-copy d-flex align-items-center gap-2 py-2">${badge(here)}<span class="small text-muted">This page</span></div>`);
+    host._checkToken = `${Date.now()}-${Math.random()}`;
+    if (!remoteItem) Object.assign(item, { drone_name: "This Drone", is_local: true });
+    host._owner = item;
+    renderOwner(kind, item, host, card._registry, !remoteItem);
   }
   window.DroneRemoteMedia = { onRouteRendered, refresh() { cache.clear(); for (const k of Object.keys(L)) L[k].sig = ""; queueScan(); } };
 
