@@ -1214,8 +1214,11 @@ class HandlersNetworkMixin:
             result = self._peer_systems_inventory(peer, peer_id, query_params)
         else:
             result = self._peer_inventory_request(peer, peer_id, asset_type, query_params)
-        if asset_type == "roms" and isinstance(result, dict):
-            self._annotate_roms_exist_locally(result.get("items") or [])
+        if isinstance(result, dict):
+            if asset_type == "roms":
+                self._annotate_roms_exist_locally(result.get("items") or [])
+            elif asset_type in {"bios", "saves", "movies", "music", "config_backups"}:
+                self._annotate_assets_exist_locally(asset_type, result.get("items") or [])
         self._send_json(200, result)
 
     def _peer_inventory_request(
@@ -1364,6 +1367,33 @@ class HandlersNetworkMixin:
                 continue
             index = self._local_rom_index(system, cache=cache)
             item["exists_locally"] = self._match_local_rom(index, item) is not None
+
+    def _annotate_assets_exist_locally(self, asset_type: str, items: List[dict]) -> None:
+        """Flag each non-ROM peer asset row with whether it already exists on this machine."""
+        dir_attr = {
+            "bios": "bios_dir",
+            "saves": "saves_dir",
+            "movies": "movies_dir",
+            "music": "music_dir",
+            "config_backups": "config_backups_dir",
+        }.get(asset_type)
+        base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
+        if not base_val:
+            return
+        base_dir = Path(base_val).resolve()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("file_path") or item.get("relative_path") or item.get("path") or item.get("file_name") or "").strip()
+            if not rel:
+                item["exists_locally"] = False
+                continue
+            if asset_type == "saves":
+                system = str(item.get("system") or "").strip()
+                candidate = (base_dir / system / rel).resolve() if system else (base_dir / rel).resolve()
+            else:
+                candidate = (base_dir / rel).resolve()
+            item["exists_locally"] = candidate.is_relative_to(base_dir) and candidate.is_file()
 
     def _local_rom_index(self, system: str, cache: Optional[dict] = None) -> dict:
         """Build a lookup of this machine's ROMs for a system: content
