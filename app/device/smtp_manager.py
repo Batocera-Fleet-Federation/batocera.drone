@@ -53,6 +53,7 @@ from urllib.parse import quote
 try:
     from ..common.peer_labels import clean_single_line_label as _clean_single_line_label
     from ..common.peer_labels import resolve_peer_label as _resolve_peer_label
+    from ..common.peer_labels import sanitize_single_line_text as _sanitize_single_line_text
     from ..common.poller_interval import poller_interval_from_env, seconds_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
@@ -67,6 +68,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.peer_labels import clean_single_line_label as _clean_single_line_label  # type: ignore
     from common.peer_labels import resolve_peer_label as _resolve_peer_label  # type: ignore
+    from common.peer_labels import sanitize_single_line_text as _sanitize_single_line_text  # type: ignore
     from common.poller_interval import poller_interval_from_env, seconds_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
@@ -546,13 +548,23 @@ def _drone_label(settings: Settings) -> str:
     return device_id or hostname or "unknown drone"
 
 
+def _single_line_event_title(value, fallback: str, *, max_length: Optional[int] = None) -> str:
+    """Return a single-line event title, falling back when blank or unsafe."""
+    if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+        return fallback
+    text = str(value)
+    if max_length is not None:
+        text = text[:max_length]
+    return _clean_single_line_label(text) or fallback
+
+
 def send_mail(settings: Settings, subject: str, body: str) -> None:
     """Low-level SMTP delivery used only by the outbound-mail worker."""
     state = _load_state(settings)
     if not state["has_config"]:
         raise SmtpSendError("SMTP is not configured on this drone.")
     message = MIMEText(body, "plain", "utf-8")
-    message["Subject"] = subject
+    message["Subject"] = _sanitize_single_line_text(subject)
     message["From"] = formataddr((f"Batocera Drone - {_drone_label(settings)}", state["from_address"]))
     message["To"] = state["recipient_email"]
     try:
@@ -578,7 +590,7 @@ def send_mail_with_attachment(settings: Settings, subject: str, body: str, attac
     if not state["has_config"]:
         raise SmtpSendError("SMTP is not configured on this drone.")
     message = MIMEMultipart()
-    message["Subject"] = subject
+    message["Subject"] = _sanitize_single_line_text(subject)
     message["From"] = formataddr((f"Batocera Drone - {_drone_label(settings)}", state["from_address"]))
     message["To"] = state["recipient_email"]
     message.attach(MIMEText(body, "plain", "utf-8"))
@@ -740,7 +752,11 @@ def _compose_digest(items: list, settings: Settings, asset_rows: Optional[list] 
     crashes = [item for item in items if item["event_type"] == "game_crash"]
     if crashes:
         extra = total - 1
-        subject = f"Batocera Drone [{drone_label}]: {crashes[0]['title']}" + (f" (+{extra} more)" if extra else "")
+        crash_title = _single_line_event_title(
+            crashes[0].get("title"),
+            str(crashes[0].get("event_type") or "game_crash"),
+        )
+        subject = f"Batocera Drone [{drone_label}]: {crash_title}" + (f" (+{extra} more)" if extra else "")
     lines = [f"Drone: {drone_label}", "", f"{total} new item(s) since the last digest:", ""]
     if asset_rows:
         lines.extend(_asset_summary_lines(asset_rows))
@@ -752,7 +768,7 @@ def _compose_digest(items: list, settings: Settings, asset_rows: Optional[list] 
         if not source_name and (raw_source_name is not None or details.get("relayed")):
             source_name = _clean_single_line_label(details.get("source_drone_id"))
         source_suffix = f" on {source_name}" if source_name else ""
-        title = _clean_single_line_label(item.get("title")) or str(item.get("event_type") or "")
+        title = _single_line_event_title(item.get("title"), str(item.get("event_type") or ""))
         lines.append(f"- [{item['created_at']}] {label}{source_suffix}: {title}")
         # Indent every line of the message, not just the first -- a
         # drone_updated item's message can carry embedded newlines (the
@@ -838,7 +854,7 @@ def ingest_relayed_notifications(
         _audit_store.insert_relayed_event(
             settings,
             event_type,
-            str(raw.get("title") or event_type)[:240],
+            _single_line_event_title(raw.get("title"), event_type, max_length=240),
             source_drone_id=source_drone_id,
             source_event_id=source_event_id,
             message=str(raw.get("message") or "")[:8000],
@@ -976,7 +992,7 @@ def ingest_relayed_mail_jobs(
         _mail_store.enqueue(
             settings,
             kind=kind,
-            subject=str(raw.get("subject") or "").replace("\r", " ").replace("\n", " ")[:1000],
+            subject=_sanitize_single_line_text(raw.get("subject"))[:1000],
             body=str(raw.get("body") or "")[:100000],
             source_drone_id=source_drone_id,
             source_job_id=source_job_id,

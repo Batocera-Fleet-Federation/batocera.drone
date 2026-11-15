@@ -7,7 +7,11 @@ from unittest import mock
 
 import app.device.smtp_manager as smtp_manager
 import app.transfer.local_network as local_network
-from app.common.peer_labels import clean_single_line_label, resolve_peer_label
+from app.common.peer_labels import (
+    clean_single_line_label,
+    resolve_peer_label,
+    sanitize_single_line_text,
+)
 from app.common.settings import Settings
 from app.transfer.download_manager import _peer_label
 from app.transfer.transfer_batch import TransferBatch
@@ -150,6 +154,14 @@ class PeerLabelSanitizationTests(unittest.TestCase):
             )
             self.assertNotIn("Forged", body)
             self.assertIn("on sat-1:", body)
+
+    def test_sanitize_single_line_text_removes_controls_and_line_breaks(self) -> None:
+        self.assertEqual(sanitize_single_line_text("  hello  "), "hello")
+        self.assertEqual(sanitize_single_line_text(None), "")
+        self.assertEqual(sanitize_single_line_text({"bad": 1}), "")
+        cleaned = sanitize_single_line_text("subj\r\nforged\x85line\u2028break\u2029end\x00")
+        for bad in ("\r", "\n", "\x85", "\u2028", "\u2029", "\x00"):
+            self.assertNotIn(bad, cleaned)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,22 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
+def _is_control_or_line_break(ch: str) -> bool:
+    return ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F or ch in ("\u2028", "\u2029")
+
+
 def _has_control_or_line_break(text: str) -> bool:
-    return any(
-        ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F or ch in ("\u2028", "\u2029")
-        for ch in text
-    )
+    return any(_is_control_or_line_break(ch) for ch in text)
+
+
+def sanitize_single_line_text(value: Any) -> str:
+    """Replace ASCII/C1 control characters and Unicode line breaks with spaces."""
+    if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+        return ""
+    return "".join(
+        " " if _is_control_or_line_break(ch) else ch
+        for ch in str(value)
+    ).strip()
 
 
 def clean_single_line_label(value: Any, *, max_length: Optional[int] = None) -> str:
