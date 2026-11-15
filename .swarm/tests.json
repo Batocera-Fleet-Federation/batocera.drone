@@ -6215,6 +6215,40 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_740_who_downloaded_from_who_uat.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-740-who-downloaded-from-who-uat",
+      "name": "Issue #740: download/upload email and notification name the other drone; blank peer names fall back",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/transfer/download_manager.py",
+          "app/transfer/transfer_batch.py",
+          "app/web/handlers_peer.py",
+          "tests/adversarial/test_issue_740_who_downloaded_from_who_uat.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
