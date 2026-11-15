@@ -679,14 +679,19 @@ def _asset_system(row: dict) -> str:
     return str(_asset_details(row).get("system") or "").strip() or "unknown system"
 
 
-def _asset_source(row: dict) -> str:
+def _asset_peer_label(row: dict, name_key: str, id_key: str, fallback: str) -> str:
     details = _asset_details(row)
-    return str(details.get("source_drone_name") or details.get("source_drone_id") or "").strip() or "unknown source"
+    name = str(details.get(name_key) or "").strip()
+    peer_id = str(details.get(id_key) or "").strip()
+    return name or peer_id or fallback
+
+
+def _asset_source(row: dict) -> str:
+    return _asset_peer_label(row, "source_drone_name", "source_drone_id", "unknown source")
 
 
 def _asset_target(row: dict) -> str:
-    details = _asset_details(row)
-    return str(details.get("target_drone_name") or details.get("target_drone_id") or "").strip() or "unknown peer"
+    return _asset_peer_label(row, "target_drone_name", "target_drone_id", "unknown peer")
 
 
 def _group_assets(rows: list, key_for_row) -> dict:
