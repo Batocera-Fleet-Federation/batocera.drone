@@ -114,6 +114,7 @@
         }
       }
       if (stats.done + stats.failed >= stats.files) stats.state = stats.failed ? "failed" : "done";
+      if (!this.ids.size) return;
       this.render(stats);
       if (stats.state !== "running") this.finish(stats);
     },
@@ -124,6 +125,9 @@
       window.dispatchEvent(new CustomEvent("drone-transfer-finished", { detail: stats }));
     },
     close() {
+      this.ids.clear();
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      try { sessionStorage.removeItem(STORE_KEY); } catch (e) { /* ignore */ }
       if (this.el) { dismissToast(this.el); this.el = null; }
     },
     ensure() {

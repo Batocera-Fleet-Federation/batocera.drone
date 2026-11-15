@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
+    from ..device.config_backup import backups_directory as _config_backups_directory
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired
     from ..device.tailnet_service import (
         install_tailscale as _install_tailscale,
@@ -54,6 +55,7 @@ try:
     from .server_tls import load_peer_cert_everywhere, activate_peer_certificate
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
+    from device.config_backup import backups_directory as _config_backups_directory  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired  # type: ignore
     from device.tailnet_service import (  # type: ignore
         install_tailscale as _install_tailscale,
@@ -1370,29 +1372,33 @@ class HandlersNetworkMixin:
 
     def _annotate_assets_exist_locally(self, asset_type: str, items: List[dict]) -> None:
         """Flag each non-ROM peer asset row with whether it already exists on this machine."""
-        dir_attr = {
-            "bios": "bios_dir",
-            "saves": "saves_dir",
-            "movies": "movies_dir",
-            "music": "music_dir",
-            "config_backups": "config_backups_dir",
-        }.get(asset_type)
-        base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
-        if not base_val:
-            return
-        base_dir = Path(base_val).resolve()
+        if asset_type == "config_backups":
+            base_dir = _config_backups_directory(self.settings).resolve()
+        else:
+            dir_attr = {
+                "bios": "bios_root",
+                "saves": "saves_root",
+                "movies": "movies_root",
+                "music": "music_root",
+            }.get(asset_type)
+            base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
+            if not base_val:
+                return
+            base_dir = Path(base_val).resolve()
         for item in items:
             if not isinstance(item, dict):
                 continue
-            rel = str(item.get("file_path") or item.get("relative_path") or item.get("path") or item.get("file_name") or "").strip()
+            rel = str(
+                item.get("file_path")
+                or item.get("relative_path")
+                or item.get("path")
+                or item.get("file_name")
+                or ""
+            ).strip()
             if not rel:
                 item["exists_locally"] = False
                 continue
-            if asset_type == "saves":
-                system = str(item.get("system") or "").strip()
-                candidate = (base_dir / system / rel).resolve() if system else (base_dir / rel).resolve()
-            else:
-                candidate = (base_dir / rel).resolve()
+            candidate = (base_dir / rel).resolve()
             item["exists_locally"] = candidate.is_relative_to(base_dir) and candidate.is_file()
 
     def _local_rom_index(self, system: str, cache: Optional[dict] = None) -> dict:
