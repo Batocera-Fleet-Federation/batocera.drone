@@ -27,6 +27,10 @@ from urllib.request import Request, urlopen
 
 try:
     from ..common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed
+    from ..common.peer_labels import (
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_peer_route as _load_peer_route
@@ -42,6 +46,10 @@ try:
     from .network_identity import drone_scheme as _drone_scheme
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.identity_provisioning import swarm_networking_allowed as _identity_swarm_networking_allowed  # type: ignore
+    from common.peer_labels import (  # type: ignore
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_peer_route as _load_peer_route  # type: ignore
@@ -713,7 +721,14 @@ def _local_pair_peer(
             settings,
             {
                 **peer,
-                "name": str(result.get("name") or peer.get("name") or peer_id),
+                "name": _resolve_peer_label(
+                    result.get("name"),
+                    peer.get("name"),
+                    _clean_single_line_label(result.get("hostname"))
+                    or _clean_single_line_label(peer.get("hostname"))
+                    or peer_id,
+                    fallback=peer_id,
+                ),
                 "reachable_url": address,
                 "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
                 "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),

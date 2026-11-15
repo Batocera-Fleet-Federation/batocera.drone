@@ -17,8 +17,10 @@ from threading import Lock, Timer
 from typing import Any, Optional
 
 try:
+    from ..common.peer_labels import clean_single_line_label as _clean_single_line_label
     from ..device import notifications as _notifications
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.peer_labels import clean_single_line_label as _clean_single_line_label  # type: ignore
     from device import notifications as _notifications  # type: ignore
 
 
@@ -58,7 +60,7 @@ class TransferBatch:
     def __init__(self, batch_id: str, direction: str, peer_label: str) -> None:
         self.batch_id = batch_id
         self.direction = direction  # "download" or "upload"
-        self.peer_label = peer_label
+        self.peer_label = _clean_single_line_label(peer_label) or "a paired peer"
         self.selected = 0
         self.total_bytes = 0
         self.systems: set = set()

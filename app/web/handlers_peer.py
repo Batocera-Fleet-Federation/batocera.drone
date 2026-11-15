@@ -19,6 +19,10 @@ from urllib.parse import unquote
 try:
     from ..common import identity_provisioning as _identity
     from ..common.auth import record_unauthorized_response
+    from ..common.peer_labels import (
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from ..transfer.drone_network import _certificate_pem_fingerprint
     from ..device.tailnet_service import tailnet_peer_ips
     from ..device.tailnet_service import export_tailnet_payload as _tailnet_export_payload
@@ -65,6 +69,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from web.media_security import MEDIA_CONTENT_SECURITY_POLICY  # type: ignore
     from common import identity_provisioning as _identity  # type: ignore
     from common.auth import record_unauthorized_response  # type: ignore
+    from common.peer_labels import (  # type: ignore
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
     from device.tailnet_service import export_tailnet_payload as _tailnet_export_payload  # type: ignore
@@ -111,12 +119,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 def _upload_peer_label(settings, device_id: Optional[str]) -> str:
     peer = _local_network.get_paired_peer(settings, device_id) if device_id else None
     if peer:
-        name = str(peer.get("name") or "").strip()
-        hostname = str(peer.get("hostname") or "").strip()
-        label = name or hostname
-        if label:
-            return label
-    return device_id or "a paired peer"
+        return _resolve_peer_label(
+            peer.get("name"),
+            peer.get("hostname"),
+            device_id,
+            fallback="a paired peer",
+        )
+    return _clean_single_line_label(device_id) or "a paired peer"
 
 
 class HandlersPeerMixin:
@@ -187,8 +196,13 @@ class HandlersPeerMixin:
             self.settings,
             {
                 "drone_id": peer_id,
-                "name": str(payload.get("name") or peer_id),
-                "hostname": str(payload.get("hostname") or ""),
+                "name": _resolve_peer_label(
+                    payload.get("name"),
+                    payload.get("hostname"),
+                    peer_id,
+                    fallback=peer_id,
+                ),
+                "hostname": _clean_single_line_label(payload.get("hostname")),
                 "reachable_url": reachable_url,
                 "advertised_reachable_url": advertised_reachable_url,
                 "scheme": scheme,
@@ -1199,7 +1213,12 @@ class HandlersPeerMixin:
         if not source_peer_id or not peer:
             self._send_json(403, {"error": "notification relay requires a paired source drone"})
             return
-        source_peer_name = str(peer.get("name") or peer.get("hostname") or source_peer_id)
+        source_peer_name = _resolve_peer_label(
+            peer.get("name"),
+            peer.get("hostname"),
+            source_peer_id,
+            fallback=source_peer_id,
+        )
         try:
             result = _smtp.ingest_relayed_notifications(
                 self.settings,
@@ -1230,7 +1249,12 @@ class HandlersPeerMixin:
         if not source_peer_id or not peer:
             self._send_json(403, {"error": "mail relay requires a paired source drone"})
             return
-        source_peer_name = str(peer.get("name") or peer.get("hostname") or source_peer_id)
+        source_peer_name = _resolve_peer_label(
+            peer.get("name"),
+            peer.get("hostname"),
+            source_peer_id,
+            fallback=source_peer_id,
+        )
         try:
             result = _smtp.ingest_relayed_mail_jobs(
                 self.settings,
