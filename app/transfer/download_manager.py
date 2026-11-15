@@ -1403,6 +1403,7 @@ class DownloadManager:
                         details={
                             "asset_type": terminal_activity.get("asset_type"),
                             "source_drone_id": terminal_activity.get("source_drone_id"),
+                            "source_drone_name": _peer_label(peer) if isinstance(peer, dict) else None,
                             "system": terminal_activity.get("system"),
                             "size_bytes": int(size_bytes) if size_bytes else None,
                         },

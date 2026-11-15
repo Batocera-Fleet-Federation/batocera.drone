@@ -684,6 +684,11 @@ def _asset_source(row: dict) -> str:
     return str(details.get("source_drone_name") or details.get("source_drone_id") or "").strip() or "unknown source"
 
 
+def _asset_target(row: dict) -> str:
+    details = _asset_details(row)
+    return str(details.get("target_drone_name") or details.get("target_drone_id") or "").strip() or "unknown peer"
+
+
 def _group_assets(rows: list, key_for_row) -> dict:
     groups: dict = {}
     for row in rows:
@@ -712,6 +717,10 @@ def _asset_summary_lines(rows: list) -> list:
             by_source = _group_assets(typed, _asset_source)
             for source in sorted(by_source, key=lambda name: (-len(by_source[name]), name)):
                 lines.append(f"    from {source}: {_asset_count_text(by_source[source])}")
+        elif event_type == "asset_uploaded":
+            by_target = _group_assets(typed, _asset_target)
+            for target in sorted(by_target, key=lambda name: (-len(by_target[name]), name)):
+                lines.append(f"    to {target}: {_asset_count_text(by_target[target])}")
         lines.append("")
     return lines
 

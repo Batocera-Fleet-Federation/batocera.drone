@@ -1330,6 +1330,7 @@ class HandlersPeerMixin:
                         tracker.progress(upload_id, sent)
             if upload_id:
                 tracker.finish(upload_id, "completed")
+                upload_peer_label = _upload_peer_label(self.settings, peer_device_id)
                 _notifications.record_audit_event(
                     self.settings,
                     "asset_uploaded",
@@ -1337,6 +1338,8 @@ class HandlersPeerMixin:
                     asset_name,
                     details={
                         "asset_type": (upload_meta or {}).get("asset_type"),
+                        "target_drone_id": peer_device_id,
+                        "target_drone_name": upload_peer_label,
                         "system": (upload_meta or {}).get("system"),
                         "size_bytes": file_size,
                     },

@@ -141,7 +141,8 @@ class TransferBatch:
         if self.cancelled:
             counts += f", {self.cancelled} cancelled"
         size = f" ({format_size(self.completed_bytes)})" if self.completed_bytes else ""
-        message = f"{self._verb} finished: {counts}{size}."
+        direction_prep = "to" if self.direction == "upload" else "from"
+        message = f"{self._verb} {direction_prep} {self.peer_label} finished: {counts}{size}."
         if self.failed_names:
             listed = ", ".join(self.failed_names)
             hidden = self.failed - len(self.failed_names)
