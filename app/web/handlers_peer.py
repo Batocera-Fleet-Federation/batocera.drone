@@ -111,7 +111,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 def _upload_peer_label(settings, device_id: Optional[str]) -> str:
     peer = _local_network.get_paired_peer(settings, device_id) if device_id else None
     if peer:
-        return str(peer.get("name") or peer.get("hostname") or device_id)
+        name = str(peer.get("name") or "").strip()
+        hostname = str(peer.get("hostname") or "").strip()
+        label = name or hostname
+        if label:
+            return label
     return device_id or "a paired peer"
 
 

@@ -222,7 +222,10 @@ def _terminal_jobs_by_completion(jobs) -> list:
 
 
 def _peer_label(peer: dict) -> str:
-    return str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "a paired peer")
+    name = str(peer.get("name") or "").strip()
+    hostname = str(peer.get("hostname") or "").strip()
+    drone_id = str(peer.get("drone_id") or "").strip()
+    return name or hostname or drone_id or "a paired peer"
 
 
 class DownloadManager:
