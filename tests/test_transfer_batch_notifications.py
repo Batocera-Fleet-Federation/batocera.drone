@@ -103,7 +103,7 @@ class TransferBatchBellTests(unittest.TestCase):
             started = record_event.call_args_list[0].args
             self.assertIn("Downloading 14 assets from BATOCERA-R5 (snes, 13.7 KB).", started[3])
             finished = record_event.call_args_list[1].args
-            self.assertIn("Download finished: 14 completed, 0 failed (13.7 KB).", finished[3])
+            self.assertIn("Download from BATOCERA-R5 finished: 14 completed, 0 failed (13.7 KB).", finished[3])
 
     def test_started_entry_waits_for_the_selection_to_be_sealed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

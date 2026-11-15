@@ -19,6 +19,10 @@ from urllib.parse import urlparse
 
 try:
     from ..common import identity_provisioning as _identity
+    from ..common.peer_labels import (
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from ..device import notifications as _notifications
     from ..storage.state_store import (
         append_event,
@@ -30,6 +34,10 @@ try:
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:
     from common import identity_provisioning as _identity  # type: ignore
+    from common.peer_labels import (  # type: ignore
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from device import notifications as _notifications  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event,
@@ -326,8 +334,13 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "device_id": peer_id,
         "conflicting_drone_id": peer_id if identity_conflict else "",
         "identity_conflict": identity_conflict,
-        "name": str(payload.get("name") or peer_id),
-        "hostname": str(payload.get("hostname") or ""),
+        "name": _resolve_peer_label(
+            payload.get("name"),
+            payload.get("hostname"),
+            peer_id,
+            fallback=peer_id,
+        ),
+        "hostname": _clean_single_line_label(payload.get("hostname")),
         **announced,
         "announced_reachable_url": reachable_url,
         "announced_certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
@@ -439,7 +452,7 @@ def refresh_paired_peer_name(settings: Any, peer_id: str, name: str) -> bool:
 
 
 def save_paired_peer(settings: Any, peer: dict) -> dict:
-    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
+    peer_id = _clean_single_line_label(peer.get("drone_id") or peer.get("device_id"))
     if not peer_id or peer_id == str(settings.device_id):
         raise ValueError("invalid peer id")
     peers = _load_peer_map(settings, "local_paired_peers")
@@ -460,6 +473,20 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     for key in _PEER_URL_KEYS:
         if key in peer:
             peer[key] = normalize_peer_url(peer[key])
+    if "hostname" in peer:
+        peer["hostname"] = _clean_single_line_label(peer.get("hostname"))
+    if "name" in peer:
+        cleaned_name = _clean_single_line_label(peer.get("name"))
+        if cleaned_name:
+            peer["name"] = cleaned_name
+        else:
+            peer["name"] = (
+                _clean_single_line_label(
+                    peer.get("hostname") if "hostname" in peer else previous.get("hostname")
+                )
+                or _clean_single_line_label(previous.get("name"))
+                or peer_id
+            )
     stored = {
         **previous,
         **peer,
@@ -482,7 +509,12 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
         # without duplicating the is_new check at each one, and without
         # misfiring on the 3 other callers that only refresh an
         # already-paired peer's address/last_seen.
-        peer_name = str(stored.get("name") or stored.get("hostname") or peer_id)
+        peer_name = _resolve_peer_label(
+            stored.get("name"),
+            stored.get("hostname"),
+            peer_id,
+            fallback=peer_id,
+        )
         _notifications.record_event(settings, "swarm_peer_connected", "Newly connected to swarm", peer_name)
     return stored
 

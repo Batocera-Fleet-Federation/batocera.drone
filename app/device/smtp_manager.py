@@ -51,6 +51,8 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 
 try:
+    from ..common.peer_labels import clean_single_line_label as _clean_single_line_label
+    from ..common.peer_labels import resolve_peer_label as _resolve_peer_label
     from ..common.poller_interval import poller_interval_from_env, seconds_from_env
     from ..common.runtime_state import poller_generation, poller_retired
     from ..common.settings import Settings
@@ -63,6 +65,8 @@ try:
     from . import crash_history as _crash_history
     from . import usb_enumeration as _usb_enumeration
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.peer_labels import clean_single_line_label as _clean_single_line_label  # type: ignore
+    from common.peer_labels import resolve_peer_label as _resolve_peer_label  # type: ignore
     from common.poller_interval import poller_interval_from_env, seconds_from_env  # type: ignore
     from common.runtime_state import poller_generation, poller_retired  # type: ignore
     from common.settings import Settings  # type: ignore
@@ -533,10 +537,10 @@ def _drone_label(settings: Settings) -> str:
     without opening the message.
     """
     try:
-        hostname = socket.gethostname()
+        hostname = _clean_single_line_label(socket.gethostname())
     except OSError:
         hostname = ""
-    device_id = settings.device_id or ""
+    device_id = _clean_single_line_label(settings.device_id)
     if hostname and device_id:
         return f"{hostname} ({device_id})"
     return device_id or hostname or "unknown drone"
@@ -676,12 +680,20 @@ def _asset_count_text(rows: list) -> str:
 
 def _asset_system(row: dict) -> str:
     # Rows recorded before the system was tracked fall into one group.
-    return str(_asset_details(row).get("system") or "").strip() or "unknown system"
+    return _clean_single_line_label(_asset_details(row).get("system")) or "unknown system"
+
+
+def _asset_peer_label(row: dict, name_key: str, id_key: str, fallback: str) -> str:
+    details = _asset_details(row)
+    return _resolve_peer_label(details.get(name_key), None, details.get(id_key), fallback=fallback)
 
 
 def _asset_source(row: dict) -> str:
-    details = _asset_details(row)
-    return str(details.get("source_drone_name") or details.get("source_drone_id") or "").strip() or "unknown source"
+    return _asset_peer_label(row, "source_drone_name", "source_drone_id", "unknown source")
+
+
+def _asset_target(row: dict) -> str:
+    return _asset_peer_label(row, "target_drone_name", "target_drone_id", "unknown peer")
 
 
 def _group_assets(rows: list, key_for_row) -> dict:
@@ -712,6 +724,10 @@ def _asset_summary_lines(rows: list) -> list:
             by_source = _group_assets(typed, _asset_source)
             for source in sorted(by_source, key=lambda name: (-len(by_source[name]), name)):
                 lines.append(f"    from {source}: {_asset_count_text(by_source[source])}")
+        elif event_type == "asset_uploaded":
+            by_target = _group_assets(typed, _asset_target)
+            for target in sorted(by_target, key=lambda name: (-len(by_target[name]), name)):
+                lines.append(f"    to {target}: {_asset_count_text(by_target[target])}")
         lines.append("")
     return lines
 
@@ -731,9 +747,13 @@ def _compose_digest(items: list, settings: Settings, asset_rows: Optional[list] 
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
         details = item.get("details") if isinstance(item.get("details"), dict) else {}
-        source_name = str(details.get("source_drone_name") or "").strip()
+        raw_source_name = details.get("source_drone_name")
+        source_name = _clean_single_line_label(raw_source_name)
+        if not source_name and (raw_source_name is not None or details.get("relayed")):
+            source_name = _clean_single_line_label(details.get("source_drone_id"))
         source_suffix = f" on {source_name}" if source_name else ""
-        lines.append(f"- [{item['created_at']}] {label}{source_suffix}: {item['title']}")
+        title = _clean_single_line_label(item.get("title")) or str(item.get("event_type") or "")
+        lines.append(f"- [{item['created_at']}] {label}{source_suffix}: {title}")
         # Indent every line of the message, not just the first -- a
         # drone_updated item's message can carry embedded newlines (the
         # release notes commit list), and only indenting the first line
@@ -789,8 +809,8 @@ def ingest_relayed_notifications(
     state = _load_state(settings)
     if not state["has_config"] or not state["sharing_enabled"] or state["source_peer_id"]:
         raise PermissionError("This drone is not accepting SMTP notification relays")
-    source_drone_id = str(source_drone_id or "").strip()
-    source_drone_name = str(source_drone_name or source_drone_id).strip()
+    source_drone_id = _clean_single_line_label(source_drone_id)
+    source_drone_name = _clean_single_line_label(source_drone_name) or source_drone_id
     if not source_drone_id:
         raise ValueError("source_drone_id is required")
     if not isinstance(events, list):
@@ -914,8 +934,8 @@ def ingest_relayed_mail_jobs(
     state = _load_state(settings)
     if not state["has_config"] or not state["sharing_enabled"] or state["source_peer_id"]:
         raise PermissionError("This drone is not accepting outbound mail relays")
-    source_drone_id = str(source_drone_id or "").strip()
-    source_drone_name = str(source_drone_name or source_drone_id).strip()
+    source_drone_id = _clean_single_line_label(source_drone_id)
+    source_drone_name = _clean_single_line_label(source_drone_name) or source_drone_id
     if not source_drone_id:
         raise ValueError("source_drone_id is required")
     if not isinstance(jobs, list):

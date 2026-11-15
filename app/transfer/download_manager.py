@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from urllib.error import HTTPError
 
 try:
+    from ..common.peer_labels import resolve_peer_label as _resolve_peer_label
     from ..common.settings import Settings
     from ..device import notifications as _notifications
     from ..storage import movies_store as _movies_store
@@ -44,6 +45,7 @@ try:
         _download_save_from_peer,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.peer_labels import resolve_peer_label as _resolve_peer_label  # type: ignore
     from common.settings import Settings  # type: ignore
     from device import notifications as _notifications  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
@@ -222,7 +224,12 @@ def _terminal_jobs_by_completion(jobs) -> list:
 
 
 def _peer_label(peer: dict) -> str:
-    return str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "a paired peer")
+    return _resolve_peer_label(
+        peer.get("name"),
+        peer.get("hostname"),
+        peer.get("drone_id"),
+        fallback="a paired peer",
+    )
 
 
 class DownloadManager:
@@ -1403,6 +1410,7 @@ class DownloadManager:
                         details={
                             "asset_type": terminal_activity.get("asset_type"),
                             "source_drone_id": terminal_activity.get("source_drone_id"),
+                            "source_drone_name": _peer_label(peer) if isinstance(peer, dict) else None,
                             "system": terminal_activity.get("system"),
                             "size_bytes": int(size_bytes) if size_bytes else None,
                         },
