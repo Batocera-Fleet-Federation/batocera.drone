@@ -1374,21 +1374,21 @@ class HandlersNetworkMixin:
 
     def _annotate_assets_exist_locally(self, asset_type: str, items: List[dict]) -> None:
         """Flag each non-ROM peer asset row with whether it already exists on this machine."""
-        if asset_type == "config_backups":
-            base_val = _config_backups_directory(self.settings)
-        else:
-            dir_attr = {
-                "bios": "bios_root",
-                "saves": "saves_root",
-                "movies": "movies_root",
-                "music": "music_root",
-            }.get(asset_type)
-            base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
-        if not base_val:
-            return
         try:
+            if asset_type == "config_backups":
+                base_val = _config_backups_directory(self.settings)
+            else:
+                dir_attr = {
+                    "bios": "bios_root",
+                    "saves": "saves_root",
+                    "movies": "movies_root",
+                    "music": "music_root",
+                }.get(asset_type)
+                base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
+            if not base_val:
+                return
             base_dir = Path(base_val).resolve()
-        except (ValueError, OSError, RuntimeError):
+        except (TypeError, ValueError, OSError, RuntimeError):
             for item in items:
                 if isinstance(item, dict):
                     item["exists_locally"] = False
