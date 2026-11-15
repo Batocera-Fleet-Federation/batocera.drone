@@ -6249,6 +6249,37 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_740_digest_blank_peer_fallback.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-740-digest-blank-peer-fallback",
+      "name": "Issue #740: digest falls back to drone id when peer name is blank",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "tests/adversarial/test_issue_740_digest_blank_peer_fallback.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 180
     }
   ],
   "version": 1
