@@ -21,11 +21,19 @@ from typing import Any, Callable, Optional
 
 try:
     from ..common import identity_provisioning as _identity
+    from ..common.peer_labels import (
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from ..storage.state_store import database_path, load_payload, save_payload
     from . import local_network as _local_network
     from .drone_network import _certificate_pem_fingerprint
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common import identity_provisioning as _identity  # type: ignore
+    from common.peer_labels import (  # type: ignore
+        clean_single_line_label as _clean_single_line_label,
+        resolve_peer_label as _resolve_peer_label,
+    )
     from storage.state_store import database_path, load_payload, save_payload  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint  # type: ignore
@@ -343,8 +351,13 @@ def _apply_add(settings: Any, state: dict, record: dict, *, remote: bool = True)
         return False
     peer = {
         "drone_id": peer_id,
-        "name": str(card.get("name") or peer_id),
-        "hostname": str(card.get("hostname") or ""),
+        "name": _resolve_peer_label(
+            card.get("name"),
+            card.get("hostname"),
+            peer_id,
+            fallback=peer_id,
+        ),
+        "hostname": _clean_single_line_label(card.get("hostname")),
         "reachable_url": _local_network.normalize_peer_url(card.get("reachable_url")),
         "advertised_reachable_url": _local_network.normalize_peer_url(card.get("advertised_reachable_url")),
         "scheme": str(card.get("scheme") or "https").strip().lower(),
@@ -384,7 +397,8 @@ def _apply_add(settings: Any, state: dict, record: dict, *, remote: bool = True)
         "epoch": int(record["epoch"]),
         "origin": record["origin"],
         "remote": bool(remote),
-        "card": {**card, "scheme": peer["scheme"], "reachable_url": peer["reachable_url"],
+        "card": {**card, "name": peer["name"], "hostname": peer["hostname"],
+                 "scheme": peer["scheme"], "reachable_url": peer["reachable_url"],
                  "advertised_reachable_url": peer["advertised_reachable_url"],
                  "certificate_fingerprint": stored_fingerprint, "certificate_pem": pem},
     }

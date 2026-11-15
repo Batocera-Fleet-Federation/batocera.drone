@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 try:
     from ..common.http_cache import valid_segment
+    from ..common.peer_labels import resolve_peer_label as _resolve_peer_label
     from ..common.settings import Settings
     from ..device import config_backup as _config_backup
     from ..device.device_control import _ensure_rom_write_access
@@ -41,6 +42,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
+    from common.peer_labels import resolve_peer_label as _resolve_peer_label  # type: ignore
     from common.settings import Settings  # type: ignore
     from device import config_backup as _config_backup  # type: ignore
     from device.device_control import _ensure_rom_write_access  # type: ignore
@@ -1115,7 +1117,12 @@ def _download_config_backup_from_peer(
         name=backup_name,
         description=backup_description,
         source_drone_id=peer_id,
-        source_drone_name=str(peer.get("name") or peer.get("hostname") or peer_id),
+        source_drone_name=_resolve_peer_label(
+            peer.get("name"),
+            peer.get("hostname"),
+            peer_id,
+            fallback=peer_id,
+        ),
         source_created_at=source_created_at,
     )
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
