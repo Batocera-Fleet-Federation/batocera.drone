@@ -114,6 +114,7 @@
         }
       }
       if (stats.done + stats.failed >= stats.files) stats.state = stats.failed ? "failed" : "done";
+      if (!this.ids.size) return;
       this.render(stats);
       if (stats.state !== "running") this.finish(stats);
     },
@@ -124,6 +125,9 @@
       window.dispatchEvent(new CustomEvent("drone-transfer-finished", { detail: stats }));
     },
     close() {
+      this.ids.clear();
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      try { sessionStorage.removeItem(STORE_KEY); } catch (e) { /* ignore */ }
       if (this.el) { dismissToast(this.el); this.el = null; }
     },
     ensure() {
@@ -135,7 +139,7 @@
       el.innerHTML = `
         <div class="tt-head"><i class="bi bi-cloud-arrow-down-fill tt-icon"></i>
           <span class="tt-title"></span>
-          <button type="button" class="tt-close d-none" aria-label="Dismiss"><i class="bi bi-x-lg"></i></button></div>
+          <button type="button" class="tt-close" aria-label="Dismiss"><i class="bi bi-x-lg"></i></button></div>
         <div class="tt-sub"></div>
         <div class="progress tt-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar"></div></div>
         <div class="tt-meta"><span class="tt-files"></span><span class="tt-speed"></span></div>
@@ -166,8 +170,7 @@
       el.querySelector(".tt-speed").textContent = !finished && s.speed > 0 ? `${formatBytes(s.speed)}/s` : "";
       const names = s.names.slice(0, 2).join(", ");
       el.querySelector(".tt-names").textContent = !finished && names ? `${names}${s.names.length > 2 ? ` +${s.names.length - 2} more` : ""}` : "";
-      // "Stays until it's done": only offer a dismiss control once the transfer has ended.
-      el.querySelector(".tt-close").classList.toggle("d-none", !finished);
+      // Allow dismissing the transfer toast at any time (especially on mobile).
     },
   };
   window.DroneTransferToast = Toast;

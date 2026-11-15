@@ -9393,12 +9393,10 @@ function renderLocalAssetRows(payload) {
   return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table bff-stack">
     <thead><tr><th>Name</th><th>Path</th><th>System / Source</th><th>Size</th><th>Details</th><th></th></tr></thead>
     <tbody>${localPeerAssetContext.items.map((item, index) => {
-      const exists = isRoms && item.exists_locally === true;
-      const statusBadge = isRoms
-        ? (exists
-            ? '<span class="badge text-bg-success ms-2" title="This ROM is already on this machine (matched by thumbprint)">On this machine</span>'
-            : '<span class="badge text-bg-info ms-2">New</span>')
-        : "";
+      const exists = item.exists_locally === true;
+      const statusBadge = exists
+        ? `<span class="badge text-bg-success ms-2" title="${isRoms ? "This ROM is already on this machine (matched by thumbprint)" : "This asset is already on this machine"}">On this machine</span>`
+        : (isRoms ? '<span class="badge text-bg-info ms-2">New</span>' : "");
       // ROM rows use a compact icon-only button to keep the table tight; an
       // existing ROM is not re-downloaded but the button still copies its artwork.
       const romBtn = `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" title="${exists ? "On this machine — copy its artwork" : "Download"}" aria-label="${exists ? "Copy artwork" : "Download"}" onclick="copyLocalPeerAsset(${index})"><i class="bi ${exists ? "bi-images" : "bi-cloud-arrow-down"}"></i></button>`;

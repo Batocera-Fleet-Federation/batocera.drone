@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
+    from ..device.config_backup import backups_directory as _config_backups_directory
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired
     from ..device.tailnet_service import (
         install_tailscale as _install_tailscale,
@@ -32,6 +33,7 @@ try:
         create_invite_auth_key as _create_invite_auth_key,
     )
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
+    from ..storage.movies_store import resolve_media_relative_path
     from ..storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts
     from ..transfer import local_network as _local_network
     from ..transfer.drone_network import _network_mode
@@ -54,6 +56,7 @@ try:
     from .server_tls import load_peer_cert_everywhere, activate_peer_certificate
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
+    from device.config_backup import backups_directory as _config_backups_directory  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired  # type: ignore
     from device.tailnet_service import (  # type: ignore
         install_tailscale as _install_tailscale,
@@ -66,6 +69,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         create_invite_auth_key as _create_invite_auth_key,
     )
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
+    from storage.movies_store import resolve_media_relative_path  # type: ignore
     from storage.rom_metadata_store import match_rom_cache_page, read_cached_asset_counts  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _network_mode  # type: ignore
@@ -1214,8 +1218,11 @@ class HandlersNetworkMixin:
             result = self._peer_systems_inventory(peer, peer_id, query_params)
         else:
             result = self._peer_inventory_request(peer, peer_id, asset_type, query_params)
-        if asset_type == "roms" and isinstance(result, dict):
-            self._annotate_roms_exist_locally(result.get("items") or [])
+        if isinstance(result, dict):
+            if asset_type == "roms":
+                self._annotate_roms_exist_locally(result.get("items") or [])
+            elif asset_type in {"bios", "saves", "movies", "music", "config_backups"}:
+                self._annotate_assets_exist_locally(asset_type, result.get("items") or [])
         self._send_json(200, result)
 
     def _peer_inventory_request(
@@ -1364,6 +1371,55 @@ class HandlersNetworkMixin:
                 continue
             index = self._local_rom_index(system, cache=cache)
             item["exists_locally"] = self._match_local_rom(index, item) is not None
+
+    def _annotate_assets_exist_locally(self, asset_type: str, items: List[dict]) -> None:
+        """Flag each non-ROM peer asset row with whether it already exists on this machine."""
+        if asset_type == "config_backups":
+            base_val = _config_backups_directory(self.settings)
+        else:
+            dir_attr = {
+                "bios": "bios_root",
+                "saves": "saves_root",
+                "movies": "movies_root",
+                "music": "music_root",
+            }.get(asset_type)
+            base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
+        if not base_val:
+            return
+        try:
+            base_dir = Path(base_val).resolve()
+        except (ValueError, OSError, RuntimeError):
+            for item in items:
+                if isinstance(item, dict):
+                    item["exists_locally"] = False
+            return
+        shows_root = getattr(self.settings, "shows_root", None) if asset_type == "movies" else None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            rel = str(
+                item.get("file_path")
+                or item.get("relative_path")
+                or item.get("path")
+                or item.get("file_name")
+                or ""
+            ).strip()
+            if not rel or "\x00" in rel or len(rel) > 4096:
+                item["exists_locally"] = False
+                continue
+            try:
+                if asset_type == "movies":
+                    candidate = resolve_media_relative_path(base_dir, rel, shows_root)
+                    item["exists_locally"] = candidate.is_file()
+                else:
+                    candidate = (base_dir / rel).resolve()
+                    item["exists_locally"] = (
+                        candidate != base_dir
+                        and candidate.is_relative_to(base_dir)
+                        and candidate.is_file()
+                    )
+            except (FileNotFoundError, ValueError, OSError, RuntimeError):
+                item["exists_locally"] = False
 
     def _local_rom_index(self, system: str, cache: Optional[dict] = None) -> dict:
         """Build a lookup of this machine's ROMs for a system: content

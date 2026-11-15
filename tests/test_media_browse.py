@@ -847,8 +847,10 @@ class UiContractTests(unittest.TestCase):
         css = (self.ROOT / "static" / "css" / "drone.css").read_text(encoding="utf-8")
         self.assertIn(".movie-explorer-grid-wrap.rm-hide-local > .movie-explorer-grid > :not(.remote-media-layer)", css)
 
-    def test_transfer_toast_has_no_dismiss_while_running(self):
-        self.assertIn('classList.toggle("d-none", !finished)', self._script())
+    def test_transfer_toast_has_dismiss_button(self):
+        script = self._script()
+        self.assertIn('class="tt-close"', script)
+        self.assertNotIn('classList.toggle("d-none", !finished)', script)
 
 
 if __name__ == "__main__":
