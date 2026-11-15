@@ -6280,6 +6280,38 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial/security",
+        "-p",
+        "test_issue_740_digest_peer_label_forgery.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-security-issue-740-digest-peer-label-forgery",
+      "name": "Security: peer display names cannot forge digest who-downloaded-from-who lines",
+      "origin": "adversarial-security",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/device/smtp_manager.py",
+          "app/transfer/download_manager.py",
+          "tests/adversarial/security/test_issue_740_digest_peer_label_forgery.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 600
     }
   ],
   "version": 1
