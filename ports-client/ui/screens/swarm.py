@@ -23,13 +23,19 @@ from client import endpoints
 from client.errors import DroneApiError
 
 from .. import virtual_keyboard, widgets
-from ..theme import ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR
+from ..theme import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, WARNING_COLOR
 from ..widgets import button_hint_footer, search_box, tab_button
 from .base import Screen
 
 _LIST_HEIGHT = 240.0
 _STATUS_COLUMN_X = 340.0
 _DOWNLOAD_PROGRESS_WIDTH = 190.0
+# Search Assets result table: fixed columns so status and buttons line up on every row.
+_RESULT_DRONE_WIDTH = 150.0
+_RESULT_SIZE_WIDTH = 80.0
+_RESULT_STATUS_WIDTH = _DOWNLOAD_PROGRESS_WIDTH + 10.0
+_RESULT_DOWNLOAD_WIDTH = 135.0
+_RESULT_DETAILS_WIDTH = 70.0
 _DOWNLOAD_POLL_SECONDS = 1.0
 _DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 _BROWSE_PAGE_LIMIT = 50
@@ -1282,8 +1288,21 @@ class SwarmScreen(Screen):
         imgui.begin_child("search_assets_results", imgui.ImVec2(0, _LIST_HEIGHT), True)
         if not visible_items:
             imgui.text_disabled("No matching assets found across online paired Drones.")
-        for index, item in enumerate(visible_items):
-            self._draw_search_result_row(index, item)
+        elif imgui.begin_table(
+            "search_assets_table",
+            6,
+            imgui.TableFlags_.row_bg.value | imgui.TableFlags_.borders_inner_h.value | imgui.TableFlags_.pad_outer_x.value,
+        ):
+            fixed = imgui.TableColumnFlags_.width_fixed.value
+            imgui.table_setup_column("Name", imgui.TableColumnFlags_.width_stretch.value)
+            imgui.table_setup_column("Drone", fixed, _RESULT_DRONE_WIDTH)
+            imgui.table_setup_column("Size", fixed, _RESULT_SIZE_WIDTH)
+            imgui.table_setup_column("Status", fixed, _RESULT_STATUS_WIDTH)
+            imgui.table_setup_column("Download", fixed, _RESULT_DOWNLOAD_WIDTH)
+            imgui.table_setup_column("Details", fixed, _RESULT_DETAILS_WIDTH)
+            for index, item in enumerate(visible_items):
+                self._draw_search_result_row(index, item)
+            imgui.end_table()
         if self.has_more_pages and self.next_page_token:
             scroll_max = imgui.get_scroll_max_y()
             near_bottom = scroll_max > 0 and imgui.get_scroll_y() >= scroll_max - 32.0
@@ -1312,45 +1331,52 @@ class SwarmScreen(Screen):
         self._draw_download_queue_panel()
 
     def _draw_search_result_row(self, index: int, item: dict) -> None:
+        """One row of the Search Assets table: Name | Drone | Size | Status | Download | Details.
+
+        The name cell is a row-wide selectable (gamepad focus/highlight); every other
+        cell has a fixed width so status text and buttons sit in the same column on
+        every row, whatever the title length.
+        """
         title = _item_display_title(item)
         meta = _item_metadata_label(self.asset_kind, item)
         drone_name = str(item.get("drone_name") or item.get("drone_id") or "")
         size_text = _format_bytes(item.get("file_size")) if item.get("file_size") else ""
 
-        parts = [title]
-        if meta:
-            parts.append(f"[{meta}]")
-        if drone_name:
-            parts.append(f"({drone_name})")
-        if size_text:
-            parts.append(size_text)
-        row_label = "   ".join(parts)
-
+        imgui.table_next_row()
+        imgui.table_set_column_index(0)
+        label = f"{title}   [{meta}]" if meta else title
         _, clicked = imgui.selectable(
-            f"{row_label}##result_row_{index}",
+            f"{label}##result_row_{index}",
             self.focused_row_index == index,
-            imgui.SelectableFlags_.allow_overlap.value,
+            imgui.SelectableFlags_.span_all_columns.value | imgui.SelectableFlags_.allow_overlap.value,
         )
         if imgui.is_item_focused() or clicked:
             self.focused_row_index = index
 
-        imgui.same_line()
-        if self._draw_download_state(self.asset_kind, item):
-            can_redownload = (
-                item.get("exists_locally") or item.get("_downloaded")
-            ) and not (self.hide_local_items or self.ignore_existing_games)
-            if can_redownload:
-                imgui.same_line()
-                if imgui.button(f"Download Again##result_dl_{index}"):
-                    self._download_item(item)
-        elif self._pending_request_key == (self.asset_kind, _request_item_key(item)):
+        imgui.table_set_column_index(1)
+        imgui.text_colored(MUTED_COLOR, drone_name)
+        imgui.table_set_column_index(2)
+        imgui.text_colored(MUTED_COLOR, size_text)
+
+        imgui.table_set_column_index(3)
+        has_state = self._draw_download_state(self.asset_kind, item)
+        pending = not has_state and self._pending_request_key == (self.asset_kind, _request_item_key(item))
+        if pending:
             widgets.spinner()
             imgui.same_line()
             imgui.text_disabled("Starting...")
-        elif imgui.button(f"Download##result_dl_{index}"):
+
+        imgui.table_set_column_index(4)
+        if has_state:
+            can_redownload = (
+                item.get("exists_locally") or item.get("_downloaded")
+            ) and not (self.hide_local_items or self.ignore_existing_games)
+            if can_redownload and imgui.button(f"Download Again##result_dl_{index}"):
+                self._download_item(item)
+        elif not pending and imgui.button(f"Download##result_dl_{index}"):
             self._download_item(item)
 
-        imgui.same_line()
+        imgui.table_set_column_index(5)
         if imgui.button(f"Details##result_info_{index}"):
             self.details_item = item
             self._details_popup_just_opened = True

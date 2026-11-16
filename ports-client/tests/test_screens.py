@@ -876,6 +876,54 @@ class BackupsScreenTests(unittest.TestCase):
         screen._restore()
         self.assertIn("already running", screen.dialog["plan_error"])
 
+    def test_choose_files_restores_only_picked_folders_and_files(self) -> None:
+        from ui.screens.backups import build_file_trees, toggle_file, toggle_node
+        files = [
+            {"path": "saves/snes/Mario.srm", "category": "saves:snes", "size": 10},
+            {"path": "saves/snes/Zelda.srm", "category": "saves:snes", "size": 10},
+            {"path": "system/batocera.conf", "category": "batocera", "size": 5},
+            {"path": "saves/yuzu/0000/USER/0100A/a.bin", "category": "saves:yuzu", "size": 7},
+            {"path": "saves/yuzu/0000/USER/0100A/b.bin", "category": "saves:yuzu", "size": 7},
+            {"path": "saves/yuzu/0000/USER/0100B/c.bin", "category": "saves:yuzu", "size": 7},
+        ]
+        trees = build_file_trees(files)
+        yuzu = trees["saves:yuzu"]
+        self.assertEqual(yuzu.path, "saves/yuzu/0000/USER")
+        self.assertEqual(list(yuzu.dirs), ["0100A", "0100B"])
+
+        categories = _CATEGORIES + [{"id": "saves:yuzu", "label": "Saves: yuzu", "group": "saves", "group_label": "Saves", "file_count": 3}]
+        client = _FakeApiClient(
+            get_responses={f"/admin/backups/{_BACKUP_ID}": {"files": files}, "/admin/backups": {}},
+            post_responses={f"/admin/backups/{_BACKUP_ID}/plan": {"mode": "overlay", "totals": {}, "warnings": []},
+                            f"/admin/backups/{_BACKUP_ID}/restore": {"state": "running"}},
+        )
+        screen = BackupsScreen(client)
+        screen._open_restore(self._local(categories=categories))
+        screen._load_files()
+        dialog = screen.dialog
+        self.assertIsNotNone(dialog["trees"])
+        toggle_node(dialog, dialog["trees"]["saves:yuzu"], False)       # untick a whole part
+        toggle_node(dialog, dialog["trees"]["saves:yuzu"].dirs["0100A"], True)  # tick one folder
+        toggle_file(dialog, "saves:snes", "saves/snes/Zelda.srm", False)  # narrow a whole part
+        screen._preview()
+        body = client.post_calls[0][1]
+        self.assertEqual(body["categories"], ["batocera"])
+        self.assertEqual(sorted(body["paths"]), ["saves/snes/Mario.srm", "saves/yuzu/0000/USER/0100A"])
+        screen._restore()
+        self.assertEqual(sorted(client.post_calls[1][1]["paths"]), ["saves/snes/Mario.srm", "saves/yuzu/0000/USER/0100A"])
+
+    def test_retick_every_file_restores_the_whole_part(self) -> None:
+        from ui.screens.backups import build_file_trees, toggle_file
+        files = [{"path": "saves/snes/Mario.srm", "category": "saves:snes", "size": 1},
+                 {"path": "saves/snes/Zelda.srm", "category": "saves:snes", "size": 1}]
+        screen = BackupsScreen(_FakeApiClient())
+        screen._open_restore(self._local())
+        screen.dialog["trees"] = build_file_trees(files)
+        toggle_file(screen.dialog, "saves:snes", "saves/snes/Mario.srm", False)
+        toggle_file(screen.dialog, "saves:snes", "saves/snes/Mario.srm", True)
+        self.assertNotIn("paths", screen._dialog_options())
+        self.assertIn("saves:snes", screen._dialog_options()["categories"])
+
     def test_format_size(self) -> None:
         from ui.screens.backups import _format_size
         self.assertEqual(_format_size(500), "500B")

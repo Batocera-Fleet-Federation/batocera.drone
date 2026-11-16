@@ -62,7 +62,19 @@ def _ensure_imgui_stub() -> None:
 
     class _SelectableFlags:
         none = _Flag(0)
+        span_all_columns = _Flag(1 << 1)
         allow_overlap = _Flag(1 << 4)
+
+    class _TableFlags:
+        none = _Flag(0)
+        row_bg = _Flag(1 << 6)
+        borders_inner_h = _Flag(1 << 7)
+        pad_outer_x = _Flag(1 << 21)
+
+    class _TableColumnFlags:
+        none = _Flag(0)
+        width_stretch = _Flag(1 << 3)
+        width_fixed = _Flag(1 << 4)
 
     class _InputTextFlags:
         none = _Flag(0)
@@ -116,6 +128,8 @@ def _ensure_imgui_stub() -> None:
     imgui.WindowFlags_ = _WindowFlags
     imgui.PopupFlags_ = _PopupFlags
     imgui.SelectableFlags_ = _SelectableFlags
+    imgui.TableFlags_ = _TableFlags
+    imgui.TableColumnFlags_ = _TableColumnFlags
     imgui.InputTextFlags_ = _InputTextFlags
     imgui.BackendFlags_ = _BackendFlags
     imgui.ConfigFlags_ = _ConfigFlags

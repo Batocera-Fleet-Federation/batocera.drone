@@ -9,7 +9,8 @@ Two tabs:
 * **This Drone** -- create a settings backup (saves are left out by default), restore one of this Drone's
   backups, or roll back a restore from its automatic safety snapshot.
 
-Restores open a gamepad-navigable popup: pick the parts (grouped checkboxes),
+Restores open a gamepad-navigable popup: pick the parts (grouped checkboxes) --
+or, after "Choose files...", folders and single files in a per-part tree --
 Overlay or Exact, optionally include this machine's display/audio/network keys,
 Preview (the Drone compares against local files), acknowledge any compatibility
 warnings, then Restore. The Drone takes a safety snapshot first and then closes
@@ -176,14 +177,35 @@ class BackupsScreen(Screen):
             "ack": False,
             "ack_warnings": False,
             "rollback": rollback,
+            # Per-file choice, filled by _load_files: trees per category, and the picked
+            # file paths of categories that are not restored whole.
+            "trees": None,
+            "picked": set(),
+            "files_error": None,
         }
         self._dialog_just_opened = True
+
+    def _load_files(self) -> None:
+        dialog = self.dialog
+        if not dialog:
+            return
+        try:
+            detail = endpoints.backup_detail(self.api_client, dialog["backup"]["backup_id"]) or {}
+        except DroneApiError as error:
+            dialog["files_error"] = str(error)
+            return
+        dialog["trees"] = build_file_trees(detail.get("files") or [])
+        dialog["files_error"] = None
 
     def _dialog_options(self) -> dict:
         dialog = self.dialog or {}
         ordered = [item.get("id") for item in dialog.get("categories") or [] if item.get("id") in dialog.get("selected", set())]
-        return {"categories": ordered, "mode": dialog.get("mode", "overlay"),
-                "include_machine_keys": bool(dialog.get("machine_keys"))}
+        options = {"categories": ordered, "mode": dialog.get("mode", "overlay"),
+                   "include_machine_keys": bool(dialog.get("machine_keys"))}
+        paths = selection_paths(dialog)
+        if paths:
+            options["paths"] = paths
+        return options
 
     def _preview(self) -> None:
         dialog = self.dialog
@@ -193,7 +215,8 @@ class BackupsScreen(Screen):
         try:
             dialog["plan"] = endpoints.plan_backup_restore(
                 self.api_client, dialog["backup"]["backup_id"], options["categories"],
-                mode=options["mode"], include_machine_keys=options["include_machine_keys"])
+                mode=options["mode"], include_machine_keys=options["include_machine_keys"],
+                paths=options.get("paths"))
             dialog["plan_error"] = None
         except DroneApiError as error:
             dialog["plan"] = None
@@ -207,7 +230,8 @@ class BackupsScreen(Screen):
         try:
             endpoints.restore_backup(self.api_client, dialog["backup"]["backup_id"], options["categories"],
                                      mode=options["mode"], include_machine_keys=options["include_machine_keys"],
-                                     acknowledge_warnings=bool(dialog.get("ack_warnings")))
+                                     acknowledge_warnings=bool(dialog.get("ack_warnings")),
+                                     paths=options.get("paths"))
             self.message = ("Restore started. A safety snapshot is taken first, then running games (including this app) "
                             "close and EmulationStation restarts.")
             self.dialog = None
@@ -354,16 +378,30 @@ class BackupsScreen(Screen):
             else f"Restore '{backup.get('name') or 'backup'}' to this Drone"
         imgui.text_colored(WARNING_COLOR, title)
         imgui.text_colored(MUTED_COLOR, _details(backup))
-        imgui.begin_child("restore_parts", imgui.ImVec2(560, 220), True)
+        trees = dialog.get("trees")
+        imgui.begin_child("restore_parts", imgui.ImVec2(640, 300 if trees else 220), True)
         for group in _groups(dialog["categories"]):
             imgui.text_colored(MUTED_COLOR, group["label"])
             for item in group["items"]:
+                if trees and item["id"] in trees:
+                    self._draw_tree_node(dialog, trees[item["id"]], item.get("label") or item["id"])
+                    continue
                 checked = item["id"] in dialog["selected"]
                 changed, value = imgui.checkbox(f"{item.get('label') or item['id']} ({int(item.get('file_count') or 0)} files)##cat_{item['id']}", checked)
                 if changed:
                     (dialog["selected"].add if value else dialog["selected"].discard)(item["id"])
                     self._reset_plan()
         imgui.end_child()
+        picked, total = picked_file_count(dialog)
+        if trees:
+            imgui.text_colored(MUTED_COLOR, f"{picked} of {total} files selected. Open a part to pick folders or single files.")
+        elif not dialog["rollback"]:
+            if imgui.button("Choose files...##restore_choose_files"):
+                self.defer_action("Loading the backup's files...", self._load_files)
+            imgui.same_line()
+            imgui.text_colored(MUTED_COLOR, "Pick folders or single files instead of whole parts.")
+        if dialog.get("files_error"):
+            imgui.text_colored(ERROR_COLOR, dialog["files_error"])
         if imgui.radio_button("Overlay: write the backup's files only", dialog["mode"] == "overlay"):
             dialog["mode"] = "overlay"
             self._reset_plan()
@@ -404,6 +442,189 @@ class BackupsScreen(Screen):
             imgui.close_current_popup()
             self.defer_action("Starting restore...", self._restore)
         imgui.end_popup()
+
+
+    def _draw_tree_node(self, dialog: dict, node: "FileNode", label: Optional[str] = None) -> None:
+        """One part or folder: a checkbox (ticks everything under it) beside an expandable node."""
+        picked = node_picked(dialog, node)
+        name = label or node.name
+        partial = f"  [{picked}/{node.file_count}]" if 0 < picked < node.file_count else ""
+        changed, value = imgui.checkbox(f"##pick_{node.key}", picked == node.file_count and node.file_count > 0)
+        if changed:
+            toggle_node(dialog, node, value)
+            self._reset_plan()
+        imgui.same_line()
+        opened = imgui.tree_node(f"{name}{partial}  -- {node.file_count} files, {_format_size(node.size)}##node_{node.key}")
+        if not opened:
+            return
+        for child in node.dirs.values():
+            self._draw_tree_node(dialog, child)
+        for entry in node.files[:_TREE_FILE_LIMIT]:
+            checked = node.category in dialog["selected"] or entry["path"] in dialog["picked"]
+            changed, value = imgui.checkbox(f"{entry['name']}  ({_format_size(int(entry.get('size') or 0))})##file_{entry['path']}", checked)
+            if changed:
+                toggle_file(dialog, node.category, entry["path"], value)
+                self._reset_plan()
+        if len(node.files) > _TREE_FILE_LIMIT:
+            imgui.text_colored(MUTED_COLOR, f"...and {len(node.files) - _TREE_FILE_LIMIT} more; tick the folder to include them all.")
+        imgui.tree_pop()
+
+
+# ------------------------------------------------------------- file tree logic
+#
+# Same model as the browser picker: a category in dialog["selected"] is restored
+# whole; otherwise only the paths in dialog["picked"]. A fully ticked folder is
+# sent as one folder path (the Drone treats a path as "this file or everything
+# under this folder").
+
+_TREE_FILE_LIMIT = 200
+
+
+class FileNode:
+    def __init__(self, key: str, name: str, path: str, category: str):
+        self.key = key
+        self.name = name
+        self.path = path
+        self.category = category
+        self.dirs: Dict[str, "FileNode"] = {}
+        self.files: List[dict] = []
+        self.file_count = 0
+        self.size = 0
+        self.is_category = False
+        self._paths: Optional[List[str]] = None
+
+    def paths(self) -> List[str]:
+        if self._paths is None:
+            self._paths = [entry["path"] for entry in self.files]
+            for child in self.dirs.values():
+                self._paths.extend(child.paths())
+        return self._paths
+
+
+def build_file_trees(files) -> Dict[str, FileNode]:
+    """One folder tree per category, rooted at the category's common folder, with
+    single-child folder chains merged (``nand/user/save``) to keep it compact."""
+    by_category: Dict[str, List[dict]] = {}
+    for entry in files or []:
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry.get("category"):
+            by_category.setdefault(str(entry["category"]), []).append(entry)
+    counter = [0]
+
+    def make(name: str, path: str, category: str) -> FileNode:
+        counter[0] += 1
+        return FileNode(f"n{counter[0]}", name, path, category)
+
+    trees: Dict[str, FileNode] = {}
+    for category, entries in by_category.items():
+        split = [entry["path"].split("/") for entry in entries]
+        prefix = split[0][:-1]
+        for parts in split:
+            i = 0
+            while i < len(prefix) and i < len(parts) - 1 and parts[i] == prefix[i]:
+                i += 1
+            prefix = prefix[:i]
+        root = make(category, "/".join(prefix), category)
+        root.is_category = True
+        for entry, parts in zip(entries, split):
+            node = root
+            for folder in parts[len(prefix):-1]:
+                if folder not in node.dirs:
+                    node.dirs[folder] = make(folder, f"{node.path}/{folder}" if node.path else folder, category)
+                node = node.dirs[folder]
+            node.files.append(dict(entry, name=parts[-1]))
+        _finish(root)
+        trees[category] = root
+    return trees
+
+
+def _finish(node: FileNode) -> None:
+    merged: Dict[str, FileNode] = {}
+    for child in node.dirs.values():
+        while len(child.dirs) == 1 and not child.files:
+            only = next(iter(child.dirs.values()))
+            only.name = f"{child.name}/{only.name}"
+            child = only
+        merged[child.name] = child
+    node.dirs = dict(sorted(merged.items(), key=lambda item: item[0].lower()))
+    node.files.sort(key=lambda entry: entry["name"].lower())
+    node.file_count = len(node.files)
+    node.size = sum(int(entry.get("size") or 0) for entry in node.files)
+    for child in node.dirs.values():
+        _finish(child)
+        node.file_count += child.file_count
+        node.size += child.size
+
+
+def node_picked(dialog: dict, node: FileNode) -> int:
+    if node.category in dialog["selected"]:
+        return node.file_count
+    picked = dialog["picked"]
+    return sum(1 for path in node.paths() if path in picked)
+
+
+def _unwhole(dialog: dict, category: str) -> None:
+    if category in dialog["selected"]:
+        dialog["selected"].discard(category)
+        dialog["picked"].update(dialog["trees"][category].paths())
+
+
+def _normalize(dialog: dict, category: str) -> None:
+    root = dialog["trees"][category]
+    paths = root.paths()
+    if paths and all(path in dialog["picked"] for path in paths):
+        dialog["picked"].difference_update(paths)
+        dialog["selected"].add(category)
+
+
+def toggle_node(dialog: dict, node: FileNode, value: bool) -> None:
+    if node.is_category:
+        dialog["picked"].difference_update(node.paths())
+        (dialog["selected"].add if value else dialog["selected"].discard)(node.category)
+        return
+    _unwhole(dialog, node.category)
+    if value:
+        dialog["picked"].update(node.paths())
+    else:
+        dialog["picked"].difference_update(node.paths())
+    _normalize(dialog, node.category)
+
+
+def toggle_file(dialog: dict, category: str, path: str, value: bool) -> None:
+    _unwhole(dialog, category)
+    (dialog["picked"].add if value else dialog["picked"].discard)(path)
+    _normalize(dialog, category)
+
+
+def selection_paths(dialog: dict) -> List[str]:
+    """Picked files of partly chosen categories, with fully ticked folders folded into one path."""
+    trees = dialog.get("trees") or {}
+    picked = dialog.get("picked") or set()
+    if not picked:
+        return []
+    out: List[str] = []
+
+    def emit(node: FileNode) -> None:
+        count = node_picked(dialog, node)
+        if not count:
+            return
+        if count == node.file_count and not node.is_category and node.path:
+            out.append(node.path)
+            return
+        out.extend(entry["path"] for entry in node.files if entry["path"] in picked)
+        for child in node.dirs.values():
+            emit(child)
+
+    for category, root in trees.items():
+        if category not in dialog["selected"]:
+            emit(root)
+    return out
+
+
+def picked_file_count(dialog: dict):
+    trees = dialog.get("trees") or {}
+    total = sum(root.file_count for root in trees.values())
+    picked = sum(node_picked(dialog, root) for root in trees.values())
+    return picked, total
 
 
 def _groups(categories) -> List[dict]:
