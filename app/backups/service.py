@@ -329,11 +329,12 @@ def _warnings(settings: Any, row: dict, chosen: List[str]) -> List[str]:
     return warnings
 
 
-def plan(settings: Any, backup_id: str, *, categories: Any, mode: str, include_machine_keys: bool = False) -> dict:
+def plan(settings: Any, backup_id: str, *, categories: Any, mode: str, include_machine_keys: bool = False,
+         paths: Any = None) -> dict:
     row = get_local(settings, backup_id)
     manifest = _selectable(local_manifest(settings, backup_id), row)
     result = _restore.plan(_categories.Roots.from_settings(settings), archive_path(settings, backup_id), manifest,
-                           categories or [], mode, bool(include_machine_keys))
+                           categories or [], mode, bool(include_machine_keys), paths)
     result["warnings"] = _warnings(settings, row, [item["id"] for item in result["categories"]])
     result["backup"] = _decorate(settings, row)
     return result
@@ -350,11 +351,12 @@ def _set_restore(**values) -> None:
 
 
 def start_restore(settings: Any, backup_id: str, *, categories: Any, mode: str, include_machine_keys: bool = False,
-                  acknowledge_warnings: bool = False, runner: Optional[Callable] = None) -> dict:
+                  acknowledge_warnings: bool = False, runner: Optional[Callable] = None, paths: Any = None) -> dict:
     """Validate, then snapshot + restore on a background thread; poll ``restore_status``."""
     row = get_local(settings, backup_id)
     manifest = _selectable(local_manifest(settings, backup_id), row)
-    chosen = _restore.check_selection(manifest, categories or [], mode)
+    selection = _restore.resolve_selection(manifest, categories or [], mode, paths)
+    chosen, paths = selection.categories, selection.paths
     warnings = _warnings(settings, row, chosen)
     if warnings and not acknowledge_warnings:
         raise BackupError("Confirm the compatibility warnings before restoring this backup.", 409,
@@ -366,22 +368,23 @@ def start_restore(settings: Any, backup_id: str, *, categories: Any, mode: str, 
             raise BackupError("Wait for the backup that is being created to finish.", 409)
         _RESTORE.clear()
         _RESTORE.update(state="running", stage="snapshot", backup_id=backup_id, backup_name=row["name"],
-                        categories=chosen, mode=mode, started_at=_archive.now_iso(), finished_at=None,
+                        categories=chosen, paths=paths, mode=mode, started_at=_archive.now_iso(), finished_at=None,
                         result=None, error=None, snapshot_id=None)
     thread = threading.Thread(
         target=_restore_job, name="drone-backup-restore", daemon=True,
-        args=(settings, row, chosen, mode, bool(include_machine_keys), runner or _run_restore))
+        args=(settings, row, chosen, mode, bool(include_machine_keys), runner or _run_restore, paths))
     thread.start()
     return restore_status()
 
 
 def _restore_job(settings: Any, row: dict, chosen: List[str], mode: str, include_machine_keys: bool,
-                 runner: Callable) -> None:
+                 runner: Callable, paths: Optional[List[str]] = None) -> None:
     backup_id = row["backup_id"]
     try:
         snapshot = create_backup(
             settings, kind="snapshot", categories=chosen, wait=True,
-            snapshot_of={"backup_id": backup_id, "name": row["name"], "categories": chosen})
+            snapshot_of=dict({"backup_id": backup_id, "name": row["name"], "categories": chosen},
+                             **({"paths": paths} if paths else {})))
         if snapshot.get("status") != _store.STATUS_COMPLETE:
             raise BackupError(snapshot.get("error_message") or "The safety snapshot could not be created.", 500)
         _set_restore(stage="restore", snapshot_id=snapshot["backup_id"])
@@ -390,6 +393,7 @@ def _restore_job(settings: Any, row: dict, chosen: List[str], mode: str, include
             "manifest": local_manifest(settings, backup_id),
             "extra_categories": _snapshot_categories(row),
             "categories": chosen,
+            "paths": paths,
             "mode": mode,
             "include_machine_keys": include_machine_keys,
             "userdata_root": str(settings.userdata_root),

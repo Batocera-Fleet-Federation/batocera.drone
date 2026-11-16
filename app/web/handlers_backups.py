@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import Optional
+from urllib.parse import unquote
 
 try:
     from ..backups import service as _backups
@@ -37,6 +38,12 @@ def _get_download_manager():
     except ImportError:  # pragma: no cover - direct script execution fallback
         from drone_api import _get_download_manager as _impl  # type: ignore
     return _impl()
+
+
+def _segments(parts: list) -> list:
+    # The router passes path segments still percent-encoded; the browser and the
+    # Ports client encode Drone ids with encodeURIComponent/quote.
+    return [unquote(str(part)) for part in parts]
 
 
 def _first(query: dict, name: str) -> str:
@@ -73,6 +80,7 @@ class HandlersBackupsMixin:
 
     def _handle_admin_backups_get(self, parts: list, query: dict) -> None:
         settings = self.settings
+        parts = _segments(parts)
         try:
             if not parts:
                 self._send_json(200, _backups.list_local(settings))
@@ -113,6 +121,7 @@ class HandlersBackupsMixin:
             return
         payload = payload if isinstance(payload, dict) else {}
         settings = self.settings
+        parts = _segments(parts)
         try:
             if not parts:
                 row = _backups.create_backup(settings, name=payload.get("name") or "",
@@ -132,7 +141,8 @@ class HandlersBackupsMixin:
             elif len(parts) == 2 and parts[1] in ("plan", "restore"):
                 options = dict(categories=payload.get("categories") if isinstance(payload.get("categories"), list) else [],
                                mode=str(payload.get("mode") or "overlay"),
-                               include_machine_keys=payload.get("include_machine_keys") is True)
+                               include_machine_keys=payload.get("include_machine_keys") is True,
+                               paths=payload.get("paths") if isinstance(payload.get("paths"), list) else None)
                 if parts[1] == "plan":
                     self._send_json(200, _backups.plan(settings, parts[0], **options))
                 else:
@@ -147,6 +157,7 @@ class HandlersBackupsMixin:
     # --------------------------------------------------------------------- peer
 
     def _handle_peer_backups(self, parts: list) -> None:
+        parts = _segments(parts)
         if self.settings.http_only:
             self._send_json(403, {"error": "Backup sharing requires paired HTTPS."})
             return

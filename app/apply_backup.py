@@ -115,7 +115,7 @@ def run(request: dict, *, manage_emulationstation: bool = True) -> dict:
     try:
         result = _restore.apply(roots, archive_path, manifest, request.get("categories") or [],
                                 str(request.get("mode") or "overlay"), bool(request.get("include_machine_keys")),
-                                Path(request["staging_dir"]))
+                                Path(request["staging_dir"]), request.get("paths"))
     finally:
         started = _start_emulationstation() if manage_emulationstation else None
     result["emulationstation_restarted"] = started

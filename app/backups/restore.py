@@ -31,7 +31,7 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 try:
     from . import archive as _archive
@@ -66,6 +66,69 @@ def check_selection(manifest: dict, selected: Iterable[str], mode: str) -> List[
     if not chosen:
         raise RestoreError("Select at least one category to restore.")
     return chosen
+
+
+MAX_PATH_FILTERS = 5000
+
+
+def check_paths(manifest: dict, paths: Any) -> Optional[List[str]]:
+    """Normalize an optional file/folder filter. ``None`` means "whole categories".
+
+    Each entry is a backup path (``saves/snes/Mario.srm``) or a folder prefix
+    (``system/configs/dolphin-emu``); a file is restored when it equals an entry or
+    sits under one. Every entry must match at least one file in the backup.
+    """
+    if paths is None:
+        return None
+    if not isinstance(paths, list) or not paths:
+        raise RestoreError("Select at least one file or folder to restore.")
+    if len(paths) > MAX_PATH_FILTERS:
+        raise RestoreError(f"Select at most {MAX_PATH_FILTERS} files or folders; choose a whole category instead.")
+    files = [item["path"] for item in manifest["files"]]
+    clean: List[str] = []
+    for value in paths:
+        value = _archive.safe_relative_path(value.rstrip("/") if isinstance(value, str) else value)
+        if not any(path == value or path.startswith(value + "/") for path in files):
+            raise RestoreError(f"This backup has nothing at {value!r}.")
+        if value not in clean:
+            clean.append(value)
+    return clean
+
+
+class Selection:
+    """Which backup files a restore covers.
+
+    ``categories`` are restored whole, except the ones a ``paths`` entry falls in
+    (``narrowed``): there only files equal to or under one of the paths are restored,
+    and Exact mode only removes local files under those paths.
+    """
+
+    def __init__(self, categories: List[str], paths: Optional[List[str]], narrowed: Set[str]):
+        self.categories = categories
+        self.paths = paths
+        self.narrowed = narrowed
+
+    def includes(self, path: str, category: Optional[str]) -> bool:
+        if category not in self.categories:
+            return False
+        if category not in self.narrowed:
+            return True
+        return any(path == value or path.startswith(value + "/") for value in self.paths or [])
+
+
+def resolve_selection(manifest: dict, selected: Iterable[str], mode: str, paths: Any = None) -> Selection:
+    """Validate categories + optional file/folder filter. With a filter and no
+    categories, the categories are the ones the chosen files belong to."""
+    clean_paths = check_paths(manifest, paths)
+    selected = list(selected or [])
+    narrowed: Set[str] = set()
+    for item in manifest["files"]:
+        if clean_paths and any(item["path"] == v or item["path"].startswith(v + "/") for v in clean_paths):
+            narrowed.add(item["category"])
+            if item["category"] not in selected:
+                selected.append(item["category"])
+    chosen = check_selection(manifest, selected, mode)
+    return Selection(chosen, clean_paths, narrowed)
 
 
 def with_extra_categories(manifest: dict, extra: Iterable[str]) -> dict:
@@ -180,17 +243,19 @@ def _merged(entry: dict) -> bool:
     return entry["path"] == BATOCERA_CONF or bool(entry.get("redacted"))
 
 
-def _removals(roots: "_categories.Roots", manifest: dict, selected: List[str]) -> List[str]:
+def _removals(roots: "_categories.Roots", manifest: dict, selection: Selection) -> List[str]:
     present = {item["path"] for item in manifest["files"]}
-    local = _categories.collect(roots, selected)
-    return [item.arcpath for item in local.files if item.arcpath not in present]
+    local = _categories.collect(roots, selection.categories)
+    return [item.arcpath for item in local.files
+            if item.arcpath not in present and selection.includes(item.arcpath, item.category)]
 
 
 def plan(roots: "_categories.Roots", archive_path: Path, manifest: dict, selected: Iterable[str], mode: str,
-         include_machine_keys: bool = False) -> dict:
+         include_machine_keys: bool = False, paths: Any = None) -> dict:
     """What a restore would change, per category, without writing anything."""
-    chosen = check_selection(manifest, selected, mode)
-    entries = [item for item in manifest["files"] if item["category"] in chosen]
+    selection = resolve_selection(manifest, selected, mode, paths)
+    chosen, paths = selection.categories, selection.paths
+    entries = [item for item in manifest["files"] if selection.includes(item["path"], item["category"])]
     merged_paths = {item["path"] for item in entries if _merged(item)}
     backup_members = read_members(archive_path, merged_paths)
     rows = {category: {"new": 0, "changed": 0, "identical": 0, "remove": 0, "blocked": 0} for category in chosen}
@@ -215,7 +280,7 @@ def plan(roots: "_categories.Roots", archive_path: Path, manifest: dict, selecte
             bucket["identical"] += 1
         else:
             bucket["changed"] += 1
-    removals: List[str] = _removals(roots, manifest, chosen) if mode == "exact" else []
+    removals: List[str] = _removals(roots, manifest, selection) if mode == "exact" else []
     for path in removals:
         rows[_categories.classify(path)]["remove"] += 1
     return {
@@ -226,6 +291,8 @@ def plan(roots: "_categories.Roots", archive_path: Path, manifest: dict, selecte
         "batocera_conf": conf_changes,
         "removals": removals[:MAX_LISTED_REMOVALS],
         "removal_count": len(removals),
+        "paths": paths,
+        "file_count": len(entries),
     }
 
 
@@ -300,10 +367,11 @@ def _stage(archive_path: Path, wanted: Dict[str, dict], staging: Path) -> Dict[s
 
 
 def apply(roots: "_categories.Roots", archive_path: Path, manifest: dict, selected: Iterable[str], mode: str,
-          include_machine_keys: bool, staging_parent: Path) -> dict:
-    """Restore the selected categories. Caller stops EmulationStation around this."""
-    chosen = check_selection(manifest, selected, mode)
-    wanted = {item["path"]: item for item in manifest["files"] if item["category"] in chosen}
+          include_machine_keys: bool, staging_parent: Path, paths: Any = None) -> dict:
+    """Restore the selected categories (optionally only some files). Caller stops ES around this."""
+    selection = resolve_selection(manifest, selected, mode, paths)
+    chosen, paths = selection.categories, selection.paths
+    wanted = {item["path"]: item for item in manifest["files"] if selection.includes(item["path"], item["category"])}
     staging_parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=str(staging_parent)))
     written = unchanged = removed = 0
@@ -329,7 +397,7 @@ def apply(roots: "_categories.Roots", archive_path: Path, manifest: dict, select
             except (OSError, RestoreError) as error:
                 failed.append({"path": path, "error": str(getattr(error, "strerror", None) or error)})
         if mode == "exact":
-            for path in _removals(roots, manifest, chosen):
+            for path in _removals(roots, manifest, selection):
                 try:
                     _remove_file(roots, path)
                     removed += 1
@@ -338,4 +406,5 @@ def apply(roots: "_categories.Roots", archive_path: Path, manifest: dict, select
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {"written": written, "unchanged": unchanged, "removed": removed,
-            "failed": failed[:MAX_LISTED_REMOVALS], "failed_count": len(failed), "categories": chosen, "mode": mode}
+            "failed": failed[:MAX_LISTED_REMOVALS], "failed_count": len(failed), "categories": chosen, "mode": mode,
+            "paths": paths}

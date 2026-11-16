@@ -355,12 +355,19 @@ async function bkDelete(backupId) {
 }
 
 // ------------------------------------------------------------------ contents
+//
+// The Contents view doubles as a picker: tick whole parts or single files, then
+// "Restore selected". BK.pick = { whole: Set(categoryId), files: Set(path) } -- a part
+// is either whole or narrowed to some of its files, never both.
 
-async function bkOpenContents(droneId, backupId) {
+const BK_MAX_PICKED_FILES = 5000;
+
+async function bkOpenContents(droneId, backupId, preset = null) {
   bkModal("bkContentsModal", `
     <div class="modal-header"><h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>Backup contents</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body"><div class="text-center py-4"><span class="spinner-border"></span></div></div>`, "modal-xl");
-  const url = droneId ? `/admin/backups/swarm/${encodeURIComponent(droneId)}/${encodeURIComponent(backupId)}` : `/admin/backups/${encodeURIComponent(backupId)}`;
+  const isLocalDrone = !droneId || BK.assets.sources.some((s) => s.is_local && s.drone_id === droneId);
+  const url = droneId && !isLocalDrone ? `/admin/backups/swarm/${encodeURIComponent(droneId)}/${encodeURIComponent(backupId)}` : `/admin/backups/${encodeURIComponent(backupId)}`;
   let data;
   try {
     data = await api(url, BK_SLOW);
@@ -368,50 +375,203 @@ async function bkOpenContents(droneId, backupId) {
     document.querySelector("#bkContentsModal .modal-body").innerHTML = `<div class="alert alert-danger mb-0">${escapeHtml(err.message || "Could not load the backup.")}</div>`;
     return;
   }
-  BK.contents = data;
   const backup = data.backup || {};
-  const warnings = backup.compatibility?.warnings || [];
-  document.querySelector("#bkContentsModal .modal-title").innerHTML = `<i class="bi bi-folder2-open me-2"></i>${escapeHtml(backup.name || "Backup")}`;
-  document.querySelector("#bkContentsModal .modal-body").innerHTML = `
-    ${backup.description ? `<p class="mb-1">${escapeHtml(backup.description)}</p>` : ""}
-    <p class="small text-muted mb-2">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""} · ${Number((data.files || []).length)} files</p>
-    ${warnings.map((w) => `<div class="alert alert-warning py-2 small mb-2">${escapeHtml(w)}</div>`).join("")}
-    <input class="form-control form-control-sm mb-2" placeholder="Filter files…" oninput="bkFilterContents(this.value)">
-    <div id="bkContentsTree">${bkContentsTree(data.files || [], "")}</div>
-    ${(data.skipped || []).length ? `<details class="mt-2"><summary class="small text-muted">${Number(backup.skipped_count || data.skipped.length)} file(s) were left out</summary><ul class="small">${data.skipped.map((s) => `<li><code>${escapeHtml(s.path)}</code> ${escapeHtml(s.reason)}</li>`).join("")}</ul></details>` : ""}`;
-}
-
-function bkContentsTree(files, filter) {
-  const needle = String(filter || "").toLowerCase();
+  const files = data.files || [];
   const byCategory = new Map();
   for (const file of files) {
-    if (needle && !file.path.toLowerCase().includes(needle)) continue;
     if (!byCategory.has(file.category)) byCategory.set(file.category, []);
     byCategory.get(file.category).push(file);
   }
-  const labels = new Map((BK.contents?.backup?.categories || []).map((c) => [c.id, c.label]));
-  if (!byCategory.size) return '<div class="text-muted small">No matching files.</div>';
-  return `<div class="accordion themed-accordion" id="bkContentsAccordion">${Array.from(byCategory.entries()).map(([category, list], index) => {
-    const size = list.reduce((sum, f) => sum + Number(f.size || 0), 0);
+  BK.contents = { data, droneId: isLocalDrone ? null : droneId, backupId, byCategory, filter: "" };
+  BK.pick = { whole: new Set(preset?.categories || []), files: new Set(preset?.paths || []) };
+  const warnings = backup.compatibility?.warnings || [];
+  const modal = document.getElementById("bkContentsModal");
+  modal.querySelector(".modal-title").innerHTML = `<i class="bi bi-folder2-open me-2"></i>${escapeHtml(backup.name || "Backup")}`;
+  modal.querySelector(".modal-body").innerHTML = `
+    ${backup.description ? `<p class="mb-1">${escapeHtml(backup.description)}</p>` : ""}
+    <p class="small text-muted mb-2">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""} · ${files.length} files</p>
+    ${warnings.map((w) => `<div class="alert alert-warning py-2 small mb-2">${escapeHtml(w)}</div>`).join("")}
+    <p class="small text-muted mb-2">Tick whole parts or single files to restore only those.</p>
+    <div class="d-flex flex-wrap gap-2 mb-2">
+      <input class="form-control form-control-sm flex-grow-1" style="max-width: 28rem" placeholder="Filter files, e.g. Mario or dolphin" oninput="bkFilterContents(this.value)">
+      <button class="btn btn-sm btn-outline-info" id="bkPickMatching" onclick="bkPickMatching(true)" disabled>Select matching</button>
+      <button class="btn btn-sm btn-outline-secondary" id="bkUnpickMatching" onclick="bkPickMatching(false)" disabled>Clear matching</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="bkPickAll(false)">Clear all</button>
+    </div>
+    <div id="bkContentsTree" onchange="bkContentsChanged(event)"></div>
+    ${(data.skipped || []).length ? `<details class="mt-2"><summary class="small text-muted">${Number(backup.skipped_count || data.skipped.length)} file(s) were left out</summary><ul class="small">${data.skipped.map((s) => `<li><code>${escapeHtml(s.path)}</code> ${escapeHtml(s.reason)}</li>`).join("")}</ul></details>` : ""}`;
+  let footer = modal.querySelector(".modal-footer");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "modal-footer";
+    modal.querySelector(".modal-content").appendChild(footer);
+  }
+  footer.innerHTML = `
+    <span class="small text-muted me-auto" id="bkPickSummary"></span>
+    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+    <button type="button" class="btn btn-warning" id="bkPickRestore" onclick="bkRestorePicked()" disabled></button>`;
+  bkRenderContentsTree();
+}
+
+function bkVisibleFiles(category) {
+  const needle = BK.contents.filter;
+  const list = BK.contents.byCategory.get(category) || [];
+  return needle ? list.filter((f) => f.path.toLowerCase().includes(needle)) : list;
+}
+
+function bkCategoryState(category) {
+  if (BK.pick.whole.has(category)) return "all";
+  const list = BK.contents.byCategory.get(category) || [];
+  const picked = list.filter((f) => BK.pick.files.has(f.path)).length;
+  return picked === 0 ? "none" : picked === list.length ? "all" : "some";
+}
+
+function bkRenderContentsTree() {
+  const tree = document.getElementById("bkContentsTree");
+  if (!tree || !BK.contents) return;
+  const { byCategory, filter } = BK.contents;
+  const labels = new Map((BK.contents.data.backup?.categories || []).map((c) => [c.id, c.label]));
+  const sections = [];
+  let index = 0;
+  for (const [category, all] of byCategory.entries()) {
+    const list = bkVisibleFiles(category);
+    index += 1;
+    if (filter && !list.length) continue;
+    const size = all.reduce((sum, f) => sum + Number(f.size || 0), 0);
     const shown = list.slice(0, 1500);
-    return `<div class="accordion-item">
-      <h2 class="accordion-header"><button class="accordion-button ${needle ? "" : "collapsed"} py-2" type="button" data-bs-toggle="collapse" data-bs-target="#bkc-${index}">
-        ${escapeHtml(labels.get(category) || category)} <span class="ms-2 small text-muted">${list.length} files · ${formatBytes(size)}</span></button></h2>
-      <div id="bkc-${index}" class="accordion-collapse collapse ${needle ? "show" : ""}"><div class="accordion-body p-2">
-        <table class="table table-sm themed-table mb-0"><tbody>${shown.map((f) => `<tr><td class="small"><code>${escapeHtml(f.path)}</code>${f.redacted ? ' <span class="badge text-bg-dark" title="Passwords and tokens were removed from this file; this Drone\'s own values are kept on restore.">secrets removed</span>' : ""}</td><td class="small text-end text-nowrap">${formatBytes(f.size || 0)}</td></tr>`).join("")}</tbody></table>
-        ${list.length > shown.length ? `<div class="small text-muted">…and ${list.length - shown.length} more (use the filter)</div>` : ""}
-      </div></div></div>`;
-  }).join("")}</div>`;
+    const state = bkCategoryState(category);
+    const whole = BK.pick.whole.has(category);
+    sections.push(`<div class="accordion-item">
+      <h2 class="accordion-header d-flex align-items-center">
+        <input class="form-check-input ms-3 me-1 flex-shrink-0 bk-pick-cat" type="checkbox" aria-label="Restore all of ${escapeHtml(labels.get(category) || category)}"
+          data-cat="${escapeHtml(category)}" ${state === "all" ? "checked" : ""} data-indeterminate="${state === "some" ? 1 : 0}">
+        <button class="accordion-button ${filter ? "" : "collapsed"} py-2" type="button" data-bs-toggle="collapse" data-bs-target="#bkc-${index}">
+          ${escapeHtml(labels.get(category) || category)} <span class="ms-2 small text-muted">${all.length} files · ${formatBytes(size)}${filter ? ` · ${list.length} match` : ""}</span></button></h2>
+      <div id="bkc-${index}" class="accordion-collapse collapse ${filter ? "show" : ""}"><div class="accordion-body p-2">
+        <table class="table table-sm themed-table mb-0"><tbody>${shown.map((f) => `<tr>
+          <td style="width: 2rem"><input class="form-check-input bk-pick-file" type="checkbox" aria-label="Restore ${escapeHtml(f.path)}" data-cat="${escapeHtml(category)}" data-path="${escapeHtml(f.path)}" ${whole || BK.pick.files.has(f.path) ? "checked" : ""}></td>
+          <td class="small"><code>${escapeHtml(f.path)}</code>${f.redacted ? ' <span class="badge text-bg-dark" title="Passwords and tokens were removed from this file; this Drone\'s own values are kept on restore.">secrets removed</span>' : ""}</td>
+          <td class="small text-end text-nowrap">${formatBytes(f.size || 0)}</td></tr>`).join("")}</tbody></table>
+        ${list.length > shown.length ? `<div class="small text-muted">…and ${list.length - shown.length} more (narrow the filter, or use Select matching)</div>` : ""}
+      </div></div></div>`);
+  }
+  tree.innerHTML = sections.length ? `<div class="accordion themed-accordion">${sections.join("")}</div>` : '<div class="text-muted small">No matching files.</div>';
+  tree.querySelectorAll('.bk-pick-cat[data-indeterminate="1"]').forEach((box) => { box.indeterminate = true; });
+  bkUpdatePickSummary();
+}
+
+function bkContentsChanged(event) {
+  const box = event.target;
+  if (!BK.contents || !box?.classList) return;
+  const category = box.dataset.cat;
+  if (box.classList.contains("bk-pick-cat")) {
+    for (const f of BK.contents.byCategory.get(category) || []) BK.pick.files.delete(f.path);
+    if (box.checked) BK.pick.whole.add(category);
+    else BK.pick.whole.delete(category);
+  } else if (box.classList.contains("bk-pick-file")) {
+    const path = box.dataset.path;
+    if (BK.pick.whole.has(category)) {
+      // Narrow a whole part to every file except this one.
+      BK.pick.whole.delete(category);
+      for (const f of BK.contents.byCategory.get(category) || []) BK.pick.files.add(f.path);
+    }
+    if (box.checked) BK.pick.files.add(path);
+    else BK.pick.files.delete(path);
+    bkNormalizeCategory(category);
+  } else {
+    return;
+  }
+  bkRenderContentsTree();
+}
+
+function bkNormalizeCategory(category) {
+  const list = BK.contents.byCategory.get(category) || [];
+  if (list.length && list.every((f) => BK.pick.files.has(f.path))) {
+    list.forEach((f) => BK.pick.files.delete(f.path));
+    BK.pick.whole.add(category);
+  }
+}
+
+function bkPickMatching(select) {
+  if (!BK.contents?.filter) return;
+  for (const category of BK.contents.byCategory.keys()) {
+    const matches = bkVisibleFiles(category);
+    if (!matches.length) continue;
+    if (BK.pick.whole.has(category)) {
+      if (select) continue;
+      BK.pick.whole.delete(category);
+      for (const f of BK.contents.byCategory.get(category)) BK.pick.files.add(f.path);
+    }
+    for (const f of matches) {
+      if (select) BK.pick.files.add(f.path);
+      else BK.pick.files.delete(f.path);
+    }
+    bkNormalizeCategory(category);
+  }
+  bkRenderContentsTree();
+}
+
+function bkPickAll(select) {
+  BK.pick = { whole: new Set(select ? BK.contents.byCategory.keys() : []), files: new Set() };
+  bkRenderContentsTree();
+}
+
+function bkPickedSelection() {
+  const pick = BK.pick || { whole: new Set(), files: new Set() };
+  let fileCount = 0;
+  for (const category of pick.whole) fileCount += (BK.contents?.byCategory.get(category) || []).length;
+  fileCount += pick.files.size;
+  return { categories: Array.from(pick.whole), paths: pick.files.size ? Array.from(pick.files) : null, fileCount };
+}
+
+function bkUpdatePickSummary() {
+  const selection = bkPickedSelection();
+  const summary = document.getElementById("bkPickSummary");
+  const button = document.getElementById("bkPickRestore");
+  const tooMany = (selection.paths || []).length > BK_MAX_PICKED_FILES;
+  if (summary) {
+    summary.innerHTML = selection.fileCount
+      ? `${selection.fileCount} file(s) selected${tooMany ? ` <span class="text-warning">– pick at most ${BK_MAX_PICKED_FILES} single files, or tick whole parts</span>` : ""}`
+      : "Nothing selected";
+  }
+  if (button) {
+    const remote = Boolean(BK.contents?.droneId) && !bkHaveLocally(BK.contents.backupId);
+    button.innerHTML = `<i class="bi bi-arrow-repeat me-1"></i>${remote ? "Download &amp; restore selected" : "Restore selected"}`;
+    button.disabled = !selection.fileCount || tooMany;
+  }
+  const filtered = Boolean(BK.contents?.filter);
+  for (const id of ["bkPickMatching", "bkUnpickMatching"]) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !filtered;
+  }
+}
+
+function bkHaveLocally(backupId) {
+  for (const result of Object.values(BK.assets.results || {})) {
+    for (const b of result.backups || []) if (b.backup_id === backupId && (b.is_local || b.available_locally)) return true;
+  }
+  return window.location.hash === BK_ADMIN_HASH;
 }
 
 function bkFilterContents(value) {
-  const tree = document.getElementById("bkContentsTree");
-  if (tree && BK.contents) tree.innerHTML = bkContentsTree(BK.contents.files || [], value);
+  if (!BK.contents) return;
+  BK.contents.filter = String(value || "").trim().toLowerCase();
+  bkRenderContentsTree();
+}
+
+function bkRestorePicked() {
+  const selection = bkPickedSelection();
+  if (!selection.fileCount) return;
+  const preset = { categories: selection.categories, paths: selection.paths, fileCount: selection.fileCount };
+  const { droneId, backupId } = BK.contents;
+  bkHideModal("bkContentsModal");
+  if (droneId && !bkHaveLocally(backupId)) bkDownloadFromDrone(droneId, backupId, true, preset);
+  else bkOpenRestore(backupId, false, preset);
 }
 
 // ------------------------------------------------------------------- restore
 
-async function bkOpenRestore(backupId, rollback) {
+async function bkOpenRestore(backupId, rollback, preset = null) {
   bkModal("bkRestoreModal", `
     <div class="modal-header"><h5 class="modal-title mb-0">Restore</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body"><div class="text-center py-4"><span class="spinner-border"></span></div></div>`);
@@ -428,23 +588,29 @@ async function bkOpenRestore(backupId, rollback) {
   for (const id of snapshotCats) {
     if (!categories.some((c) => c.id === id)) categories = categories.concat([{ id, label: id, group: "other", group_label: "Previously empty", file_count: 0, size_bytes: 0 }]);
   }
-  BK.wizard = { backupId, rollback, backup };
+  const picked = preset && (preset.paths || []).length ? preset : null;
+  BK.wizard = { backupId, rollback, backup, paths: picked ? picked.paths : null, presetCategories: picked ? picked.categories : null };
+  const checkedIds = preset ? new Set(preset.categories || []) : null;
   const title = rollback ? `Roll back: ${backup.snapshot_of?.name || backup.name}` : `Restore ${backup.name || "backup"}`;
   bkModal("bkRestoreModal", `
     <div class="modal-header"><h5 class="modal-title mb-0"><i class="bi ${rollback ? "bi-arrow-counterclockwise" : "bi-arrow-repeat"} me-2"></i>${escapeHtml(title)}</h5>
       <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body">
       <p class="small text-muted mb-2">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""}</p>
+      ${picked ? `<div class="alert alert-info py-2 small d-flex flex-wrap align-items-center gap-2 mb-3">
+          <span><i class="bi bi-check2-square me-1"></i><strong>${Number(picked.fileCount || 0)} selected file(s)</strong>${(picked.categories || []).length ? ` (${picked.categories.length} whole part(s) plus single files)` : ""}. Only these are restored.</span>
+          <button class="btn btn-sm btn-outline-light ms-auto" onclick="bkChangePicked()">Change selection</button>
+          <button class="btn btn-sm btn-outline-light" onclick="bkClearPicked()">Restore whole parts instead</button></div>` : `
       <div class="d-flex justify-content-between align-items-center mb-1">
         <span class="small fw-semibold">Parts to restore</span>
-        <span><button class="btn btn-link btn-sm p-0 me-2" onclick="bkSetAll('bkRestoreList', true); bkResetPreview()">All</button><button class="btn btn-link btn-sm p-0" onclick="bkSetAll('bkRestoreList', false); bkResetPreview()">None</button></span>
+        <span>${rollback ? "" : `<button class="btn btn-link btn-sm p-0 me-3" onclick="bkChangePicked()">Choose files…</button>`}<button class="btn btn-link btn-sm p-0 me-2" onclick="bkSetAll('bkRestoreList', true); bkResetPreview()">All</button><button class="btn btn-link btn-sm p-0" onclick="bkSetAll('bkRestoreList', false); bkResetPreview()">None</button></span>
       </div>
-      <div id="bkRestoreList" class="bk-checklist border rounded p-2 mb-3" style="max-height: 32vh; overflow:auto" onchange="bkResetPreview()">${bkCategoryChecklist(categories, "bkr")}</div>
+      <div id="bkRestoreList" class="bk-checklist border rounded p-2 mb-3" style="max-height: 32vh; overflow:auto" onchange="bkResetPreview()">${bkCategoryChecklist(categories, "bkr", checkedIds)}</div>`}
       <div class="mb-2"><span class="small fw-semibold d-block mb-1">How</span>
         <div class="form-check"><input class="form-check-input" type="radio" name="bkMode" id="bkModeOverlay" value="overlay" ${rollback ? "" : "checked"} onchange="bkResetPreview()">
           <label class="form-check-label small" for="bkModeOverlay"><strong>Overlay</strong> – write the backup's files; leave other files in these parts alone.</label></div>
         <div class="form-check"><input class="form-check-input" type="radio" name="bkMode" id="bkModeExact" value="exact" ${rollback ? "checked" : ""} onchange="bkResetPreview()">
-          <label class="form-check-label small" for="bkModeExact"><strong>Exact</strong> – make these parts match the backup, also removing files the backup does not have.</label></div>
+          <label class="form-check-label small" for="bkModeExact"><strong>Exact</strong> – ${picked ? "also remove local files under the selected folders/files that the backup does not have" : "make these parts match the backup, also removing files the backup does not have"}.</label></div>
       </div>
       <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="bkMachineKeys" onchange="bkResetPreview()">
         <label class="form-check-label small" for="bkMachineKeys">Also restore this machine's display, audio, network and hostname settings from <code>batocera.conf</code></label></div>
@@ -457,7 +623,29 @@ async function bkOpenRestore(backupId, rollback) {
     </div>`);
 }
 
+function bkChangePicked() {
+  const wizard = BK.wizard;
+  if (!wizard) return;
+  const preset = wizard.paths ? { categories: wizard.presetCategories || [], paths: wizard.paths }
+    : { categories: bkCheckedCategories("bkRestoreList"), paths: null };
+  bkHideModal("bkRestoreModal");
+  bkOpenContents(null, wizard.backupId, preset);
+}
+
+function bkClearPicked() {
+  if (!BK.wizard) return;
+  bkOpenRestore(BK.wizard.backupId, BK.wizard.rollback);
+}
+
 function bkRestoreOptions() {
+  if (BK.wizard?.paths) {
+    return {
+      categories: BK.wizard.presetCategories || [],
+      paths: BK.wizard.paths,
+      mode: document.getElementById("bkModeExact")?.checked ? "exact" : "overlay",
+      include_machine_keys: Boolean(document.getElementById("bkMachineKeys")?.checked),
+    };
+  }
   return {
     categories: bkCheckedCategories("bkRestoreList"),
     mode: document.getElementById("bkModeExact")?.checked ? "exact" : "overlay",
@@ -486,7 +674,7 @@ function bkConfChanges(conf) {
 async function bkPreview() {
   const options = bkRestoreOptions();
   const preview = document.getElementById("bkPreview");
-  if (!options.categories.length) { preview.innerHTML = '<div class="alert alert-warning py-2 small">Choose at least one part.</div>'; return; }
+  if (!options.categories.length && !(options.paths || []).length) { preview.innerHTML = '<div class="alert alert-warning py-2 small">Choose at least one part.</div>'; return; }
   preview.innerHTML = '<div class="text-center py-3"><span class="spinner-border spinner-border-sm me-2"></span><span class="small">Comparing with this Drone…</span></div>';
   let plan;
   try {
@@ -717,7 +905,7 @@ function bkAssetCard(backup) {
     </div></div></div>`;
 }
 
-async function bkDownloadFromDrone(droneId, backupId, thenRestore) {
+async function bkDownloadFromDrone(droneId, backupId, thenRestore, preset = null) {
   const card = document.getElementById(`bk-card-${droneId}-${backupId}`);
   const progress = card?.querySelector(".bk-progress");
   const setProgress = (html) => { if (progress) progress.innerHTML = html; };
@@ -731,7 +919,7 @@ async function bkDownloadFromDrone(droneId, backupId, thenRestore) {
   }
   if (result.status !== "queued") {
     setProgress('<span class="text-success">Already on this Drone.</span>');
-    if (thenRestore) bkOpenRestore(backupId, false);
+    if (thenRestore) bkOpenRestore(backupId, false, preset);
     return;
   }
   const jobId = result.job?.id;
@@ -747,7 +935,7 @@ async function bkDownloadFromDrone(droneId, backupId, thenRestore) {
       setProgress('<span class="text-success"><i class="bi bi-check2 me-1"></i>Copied to this Drone and verified.</span>');
       delete BK.assets.results[droneId];
       delete BK.assets.results[(BK.assets.sources.find((s) => s.is_local) || {}).drone_id];
-      if (thenRestore) bkOpenRestore(backupId, false);
+      if (thenRestore) bkOpenRestore(backupId, false, preset);
       else bkLoadAssets();
       return;
     }

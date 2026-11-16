@@ -256,20 +256,25 @@ def copy_backup_from_drone(client: DroneApiClient, drone_id: str, backup_id: str
     )
 
 
-def _restore_body(categories, mode: str, include_machine_keys: bool) -> dict:
-    return {"categories": list(categories), "mode": mode, "include_machine_keys": bool(include_machine_keys)}
+def _restore_body(categories, mode: str, include_machine_keys: bool, paths=None) -> dict:
+    body = {"categories": list(categories), "mode": mode, "include_machine_keys": bool(include_machine_keys)}
+    if paths:
+        # Only these files/folders (within their parts) are restored; other listed
+        # categories are restored whole.
+        body["paths"] = list(paths)
+    return body
 
 
 def plan_backup_restore(client: DroneApiClient, backup_id: str, categories, *, mode: str = "overlay",
-                        include_machine_keys: bool = False) -> dict:
+                        include_machine_keys: bool = False, paths=None) -> dict:
     # Hashes the matching local files to say what would change.
     return client.post(f"/admin/backups/{quote(str(backup_id), safe='')}/plan",
-                       _restore_body(categories, mode, include_machine_keys), timeout=_BACKUP_SCAN_TIMEOUT_SECONDS)
+                       _restore_body(categories, mode, include_machine_keys, paths), timeout=_BACKUP_SCAN_TIMEOUT_SECONDS)
 
 
 def restore_backup(client: DroneApiClient, backup_id: str, categories, *, mode: str = "overlay",
-                   include_machine_keys: bool = False, acknowledge_warnings: bool = False) -> dict:
-    body = _restore_body(categories, mode, include_machine_keys)
+                   include_machine_keys: bool = False, acknowledge_warnings: bool = False, paths=None) -> dict:
+    body = _restore_body(categories, mode, include_machine_keys, paths)
     body["acknowledge_warnings"] = bool(acknowledge_warnings)
     # Returns once the job is queued; the snapshot + restore run on the Drone.
     return client.post(f"/admin/backups/{quote(str(backup_id), safe='')}/restore", body,

@@ -259,6 +259,39 @@ class RestoreTests(Fixture):
         with self.assertRaises(restore.RestoreError):
             restore.plan(self.roots, dest, manifest, ["saves:snes"], "wipe")
 
+    def test_path_filter_restores_only_chosen_files_and_folders(self):
+        self.write("saves/gba/Zelda.srm", "zelda")
+        dest, manifest = self.build()
+        for rel in ("saves/snes/Mario.srm", "saves/snes/Mario.state1", "saves/gba/Zelda.srm",
+                    "system/configs/retroarch/retroarchcustom.cfg"):
+            self.write(rel, "changed")
+        self.write("saves/snes/Added.srm", "added")
+        self.write("saves/gba/Added.srm", "added")
+        plan = restore.plan(self.roots, dest, manifest, [], "exact", paths=["saves/snes/Mario.srm"])
+        self.assertEqual([row["id"] for row in plan["categories"]], ["saves:snes"])
+        self.assertEqual((plan["totals"]["changed"], plan["removal_count"]), (1, 0))
+        # A whole category plus one file of another category.
+        result = restore.apply(self.roots, dest, manifest, ["retroarch"], "exact", False, self.base / "staging",
+                               paths=["saves/snes/Mario.srm"])
+        self.assertEqual(result["written"], 2)
+        self.assertEqual(self.read("saves/snes/Mario.srm"), "save")
+        self.assertEqual(self.read("saves/snes/Mario.state1"), "changed")
+        self.assertEqual(self.read("saves/gba/Zelda.srm"), "changed")
+        self.assertTrue((self.userdata / "saves/snes/Added.srm").exists(), "outside the filter: never removed")
+        self.assertIn("gl", self.read("system/configs/retroarch/retroarchcustom.cfg"))
+        # A folder filter removes extra local files only under that folder in Exact mode.
+        result = restore.apply(self.roots, dest, manifest, [], "exact", False, self.base / "staging",
+                               paths=["saves/gba"])
+        self.assertEqual(self.read("saves/gba/Zelda.srm"), "zelda")
+        self.assertFalse((self.userdata / "saves/gba/Added.srm").exists())
+        self.assertTrue((self.userdata / "saves/snes/Added.srm").exists())
+
+    def test_path_filter_rejects_unknown_or_unsafe_paths(self):
+        dest, manifest = self.build(["saves:snes"])
+        for bad in (["saves/snes/Nope.srm"], ["saves/../system/batocera.conf"], ["/etc/passwd"], [], "saves/snes"):
+            with self.assertRaises(archive.BackupError, msg=repr(bad)):
+                restore.plan(self.roots, dest, manifest, [], "overlay", paths=bad)
+
     def test_redacted_secrets_keep_local_values_on_restore(self):
         dest, manifest = self.build(["retroarch"])
         self.write("system/configs/retroarch/retroarchcustom.cfg", 'video_driver = "vulkan"\ncheevos_password = "mine"\n')
@@ -300,6 +333,18 @@ class ServiceTests(Fixture):
         self.assertEqual(self._wait_restore()["state"], "complete")
         self.assertEqual(self.read("saves/snes/Mario.srm"), "broken")
         self.assertEqual(self.read("saves/snes/New.srm"), "added later")
+
+    def test_partial_restore_records_paths_on_its_snapshot(self):
+        row = service.create_backup(self.settings, categories=["saves:snes"], wait=True)
+        self.write("saves/snes/Mario.srm", "broken")
+        service.start_restore(self.settings, row["backup_id"], categories=[], mode="overlay",
+                              paths=["saves/snes/Mario.srm"], runner=self._run)
+        status = self._wait_restore()
+        self.assertEqual((status["state"], status["result"]["written"]), ("complete", 1), status)
+        snapshot = service.list_local(self.settings)["snapshots"][0]
+        self.assertEqual(snapshot["snapshot_of"]["paths"], ["saves/snes/Mario.srm"])
+        self.assertEqual(service.local_manifest(self.settings, snapshot["backup_id"])["snapshot_of"]["paths"],
+                         ["saves/snes/Mario.srm"])
 
     def test_roll_back_of_a_previously_empty_category_removes_added_files(self):
         self.write("saves/gba/Zelda.srm", "remote save")
@@ -432,6 +477,12 @@ class HandlerTests(Fixture):
         handler._multiplayer_origin_ok = lambda: False
         handler._handle_admin_backups_post([], {})
         self.assertEqual(handler.sent[0][0], 403)
+
+    def test_percent_encoded_drone_ids_are_decoded(self):
+        handler = self._handler()
+        with mock.patch.object(service, "peer_backup_detail", return_value={"backup": {}}) as detail:
+            handler._handle_admin_backups_get(["swarm", "drone%3Aabc", "c" * 32], {})
+        detail.assert_called_once_with(self.settings, "drone:abc", "c" * 32)
 
     def test_unknown_backup_is_404(self):
         handler = self._handler()

@@ -410,6 +410,10 @@ identity and is kept when a peer copies it. Categories: `batocera`, `emulationst
   snapshot (`kind="snapshot"`, newest 5 kept, never shared) is taken first; rollback restores
   previously-empty categories via `with_extra_categories`. Non-root runs go through the privileged
   worker (`apply-backup.request`/`.result` in `service_bootstrap.sh`).
+- **Partial restores:** `paths` (files or folder prefixes, ≤5000, each must match a backup file) narrows only
+  the categories it touches (`restore.Selection`); other selected categories restore whole, and Exact-mode
+  removals stay under the chosen paths. The browser's Contents view is the picker. Admin path segments
+  arrive percent-encoded from the router — `handlers_backups._segments` decodes them (Drone ids).
 - Compatibility differences (Batocera major, architecture, board, foreign scripts) need
   `acknowledge_warnings`; otherwise 409 with `warnings`.
 - Mutating admin routes need a session + same-origin; `/peer/backups*` is mTLS and HTTPS-only.

@@ -169,6 +169,15 @@ def validate_manifest(raw: Any, *, expected_id: Optional[str] = None) -> dict:
             "name": _clean_text(snapshot_of.get("name"), 120),
             "categories": restored[:2000],
         }
+        paths = snapshot_of.get("paths")
+        if isinstance(paths, list):
+            clean_paths = []
+            for value in paths[:5000]:
+                try:
+                    clean_paths.append(safe_relative_path(value))
+                except BackupError:
+                    continue
+            manifest["snapshot_of"]["paths"] = clean_paths
     return manifest
 
 
