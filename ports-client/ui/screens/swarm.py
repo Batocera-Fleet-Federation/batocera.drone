@@ -1291,7 +1291,12 @@ class SwarmScreen(Screen):
                 self.defer_action("Loading more results...", self._load_next_page)
         imgui.end_child()
 
-        if visible_items and 0 <= self.focused_row_index < len(visible_items):
+        if (
+            visible_items
+            and 0 <= self.focused_row_index < len(visible_items)
+            and self.deferred_action_label is None
+            and not imgui.is_popup_open("", imgui.PopupFlags_.any_popup_id.value)
+        ):
             focused_item = visible_items[self.focused_row_index]
             if imgui.is_key_pressed(imgui.Key.gamepad_face_left, False):
                 self._download_item(focused_item)
