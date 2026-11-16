@@ -212,22 +212,69 @@ def vpn_import_from_folder(client: DroneApiClient, filename: str) -> dict:
 
 
 # --- Backups -------------------------------------------------------------
+# Categorized backups (see app/backups/): find them on every online paired Drone,
+# copy one to this Drone through the normal transfer queue, preview a restore, and
+# restore it here. Restores always run on *this* Drone; a peer can never be told to
+# restore anything.
 
-def config_backups(client: DroneApiClient) -> dict:
-    return client.get("/admin/config-backups")
-
-
-def create_config_backup(client: DroneApiClient, *, name: str = "", description: str = "") -> dict:
-    return client.post("/admin/config-backups", {"name": name, "description": description})
-
-
-_APPLY_CONFIG_BACKUP_TIMEOUT_SECONDS = 180
+_BACKUP_LIST_TIMEOUT_SECONDS = 60
+_BACKUP_SCAN_TIMEOUT_SECONDS = 180
 
 
-def apply_config_backup(client: DroneApiClient, backup_id: int) -> dict:
-    # Stops EmulationStation, copies the backup's files, then restarts it --
-    # comfortably past the client's normal 15s default on real hardware, so
-    # this needs its own generous budget or a slow-but-successful apply would
-    # surface as a client-side "could not reach Drone" timeout instead of the
-    # real result.
-    return client.post(f"/admin/config-backups/{backup_id}/apply", {}, timeout=_APPLY_CONFIG_BACKUP_TIMEOUT_SECONDS)
+def backups(client: DroneApiClient) -> dict:
+    return client.get("/admin/backups")
+
+
+def backup_categories(client: DroneApiClient) -> dict:
+    # Walks this machine's settings and saves folders; allow for a large library.
+    return client.get("/admin/backups/categories", timeout=_BACKUP_SCAN_TIMEOUT_SECONDS)
+
+
+def create_backup(client: DroneApiClient, *, name: str = "", description: str = "", categories=None) -> dict:
+    body = {"name": name, "description": description}
+    if categories is not None:
+        body["categories"] = list(categories)
+    return client.post("/admin/backups", body)
+
+
+def backups_swarm(client: DroneApiClient, *, query: str = "", drones=()) -> dict:
+    params = {"q": str(query or "")}
+    if drones:
+        params["drones"] = ",".join(str(item) for item in drones if item)
+    return client.get(f"/admin/backups/swarm?{urlencode(params)}", timeout=_BACKUP_LIST_TIMEOUT_SECONDS)
+
+
+def backup_detail(client: DroneApiClient, backup_id: str) -> dict:
+    return client.get(f"/admin/backups/{quote(str(backup_id), safe='')}", timeout=_BACKUP_LIST_TIMEOUT_SECONDS)
+
+
+def copy_backup_from_drone(client: DroneApiClient, drone_id: str, backup_id: str) -> dict:
+    return client.post(
+        f"/admin/backups/swarm/{quote(str(drone_id), safe='')}/{quote(str(backup_id), safe='')}/download",
+        {},
+        timeout=_BACKUP_LIST_TIMEOUT_SECONDS,
+    )
+
+
+def _restore_body(categories, mode: str, include_machine_keys: bool) -> dict:
+    return {"categories": list(categories), "mode": mode, "include_machine_keys": bool(include_machine_keys)}
+
+
+def plan_backup_restore(client: DroneApiClient, backup_id: str, categories, *, mode: str = "overlay",
+                        include_machine_keys: bool = False) -> dict:
+    # Hashes the matching local files to say what would change.
+    return client.post(f"/admin/backups/{quote(str(backup_id), safe='')}/plan",
+                       _restore_body(categories, mode, include_machine_keys), timeout=_BACKUP_SCAN_TIMEOUT_SECONDS)
+
+
+def restore_backup(client: DroneApiClient, backup_id: str, categories, *, mode: str = "overlay",
+                   include_machine_keys: bool = False, acknowledge_warnings: bool = False) -> dict:
+    body = _restore_body(categories, mode, include_machine_keys)
+    body["acknowledge_warnings"] = bool(acknowledge_warnings)
+    # Returns once the job is queued; the snapshot + restore run on the Drone.
+    return client.post(f"/admin/backups/{quote(str(backup_id), safe='')}/restore", body,
+                       timeout=_BACKUP_LIST_TIMEOUT_SECONDS)
+
+
+def backup_restore_status(client: DroneApiClient) -> dict:
+    return client.get("/admin/backups/restore")

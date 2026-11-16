@@ -17,8 +17,9 @@ from app.mock_data import seed_mock_userdata
 from app.transfer.peer_workers import stop_local_network_workers
 from client.config import ClientConfig
 from client.endpoints import (
-    config_backups,
-    create_config_backup,
+    backups,
+    backups_swarm,
+    create_backup,
     local_network_discover,
     local_network_pair,
     local_network_rotate_pairing_code,
@@ -142,19 +143,22 @@ class DroneApiClientIntegrationTests(unittest.TestCase):
             vpn_connect(client)
         self.assertNotIn("HTTP 400", str(ctx.exception))
 
-    def test_config_backups_list_and_create_round_trip(self) -> None:
+    def test_backups_list_create_and_swarm_round_trip(self) -> None:
         client = self._client()
         client.login(USERNAME, PASSWORD)
 
-        empty = config_backups(client)
+        empty = backups(client)
         self.assertEqual(empty.get("backups"), [])
 
-        created = create_config_backup(client)
-        self.assertEqual(created.get("status"), "ok")
-        self.assertIn("backup", created)
+        created = create_backup(client, name="Ports test", categories=["batocera"])
+        self.assertEqual(created.get("status"), "started")
+        self.assertEqual(created["backup"]["name"], "Ports test")
 
-        listed = config_backups(client)
+        listed = backups(client)
         self.assertEqual(len(listed.get("backups", [])), 1)
+
+        swarm = backups_swarm(client)
+        self.assertTrue(any(source.get("status") == "ok" for source in swarm.get("sources", [])))
 
     def test_tailnet_status_round_trip(self) -> None:
         client = self._client()

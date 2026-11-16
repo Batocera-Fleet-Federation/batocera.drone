@@ -102,6 +102,11 @@ find files nested under a subpackage. Every `except ImportError` fallback must f
   `MultiplayerOrchestrator` (`orchestrator.py`, composed from `core`/`sessions`/`protocol`/
   `lifecycle`/`library` mixins) and `dependencies` (the one-click, checksum-verified Sunshine installer + `DRONE_SUNSHINE`
   service; nothing else is installed by multiplayer). HTTP: `web/handlers_multiplayer.py`; UI: `web/static/js/multiplayer.js`.
+- `backups/` — categorized backups (see the Backups section below): `categories` (collection +
+  `classify`), `confmerge` (secret scrubbing, `batocera.conf` merge), `archive` (build/verify),
+  `restore` (plan/apply), `service` (orchestration, snapshots, swarm listing/download);
+  table in `storage/backup_store.py`, root helper `app/apply_backup.py`, routes in
+  `web/handlers_backups.py`, UI `web/static/js/backups.js`.
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
   (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported
@@ -382,6 +387,35 @@ Gameplay traffic is the emulator's own transport, never the HTTPS API. Invariant
   `multiplayer.js`, `handlers_multiplayer.py` and `multiplayer/{__init__,orchestrator}.py`.
 
 Skill: `drone-multiplayer`. Depth: `docs/multiplayer.md`.
+
+## Backups (`app/backups/`) — categorized, swarm-visible, local-only restore
+
+Replaced the old single-archive Config Backups (`/admin/config-backups`, `config_backups` table left
+untouched, never reintroduce it). A backup is a gzip tar of `data/<root>/<path>` members (roots:
+system, roms (gamelist.xml only), saves, cheats) plus `manifest.json` last, with a sidecar
+`<id>.manifest.json` in `userdata/system/drone-app/backups/`; `backup_id` (32 hex) is the global
+identity and is kept when a peer copies it. Categories: `batocera`, `emulationstation`, `controllers`,
+`retroarch`, `emulator:<dir>`, `configs-misc`, `scripts`, `gamelists`, `cheats`, `saves:<system>`,
+`states:<system>`. Invariants:
+
+- **No secrets in archives.** `.cfg/.conf/.ini/.properties` are scrubbed (`confmerge.scrub`); redacted
+  `(section, key)` pairs are recorded and the local values are kept on restore. `batocera.conf` merges
+  key-by-key; machine keys (display/audio/network/hostname) stay local unless `include_machine_keys`.
+- **Verify before writing.** `validate_manifest` recomputes every category (`category == classify(path)`);
+  `verify_archive` rejects unlisted/linked/traversing members and per-file SHA-256 mismatches; a
+  peer download must match the listed archive SHA-256 (`install_download`).
+- **Restore is local-only** (a peer can list/download, never restore). Selected files are staged and
+  verified, directories opened `O_NOFOLLOW`, atomic `os.replace`; symlinks/special files are never
+  replaced; Exact removals are limited to what the collector would collect. A synchronous safety
+  snapshot (`kind="snapshot"`, newest 5 kept, never shared) is taken first; rollback restores
+  previously-empty categories via `with_extra_categories`. Non-root runs go through the privileged
+  worker (`apply-backup.request`/`.result` in `service_bootstrap.sh`).
+- Compatibility differences (Batocera major, architecture, board, foreign scripts) need
+  `acknowledge_warnings`; otherwise 409 with `warnings`.
+- Mutating admin routes need a session + same-origin; `/peer/backups*` is mTLS and HTTPS-only.
+- UI: Admin → Backups (`#admin/backups`, manage) and Assets → Backups (`#backups`, search/copy/restore
+  across online Drones); the Ports client's Backups screen mirrors the Assets flow.
+  Tests: `tests/test_backups.py`.
 
 ## Multi-Drone media browsing (in place on `#systems`, `#movies`, `#music`)
 

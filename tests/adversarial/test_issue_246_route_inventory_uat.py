@@ -2,7 +2,7 @@
 
 The issue's attacker is an on-LAN host that announces scheme=http for an
 already-paired drone_id. Health workers, the swarm overview probe, inventory
-browse, BIOS download, config-backup file pull, and LanDirectTransport.fetch
+browse, BIOS download, backup archive pull, and LanDirectTransport.fetch
 must not dial that plaintext listener. Pairing must consult the persisted TLS
 pin even when the discovered dict omits paired_over_tls.
 
@@ -178,7 +178,7 @@ class Issue246RouteInventoryUAT(unittest.TestCase):
         with self.assertRaises(Exception):
             peer_connectivity._peer_download_file_for_peer(
                 stored,
-                "/v1/api/peer/config-backups/evil",
+                "/v1/api/peer/backups/evil/archive",
                 dest,
                 self.settings,
                 peer_id=PEER_ID,

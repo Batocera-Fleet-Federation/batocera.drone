@@ -830,75 +830,59 @@ def _schemas() -> Dict[str, Schema]:
             },
             description="Result of installing the static aria2c binary.",
         ),
-        "ConfigBackup": _object(
+        "BackupCategory": _object(
             {
-                "id": _integer(),
+                "id": _string("batocera, emulationstation, controllers, retroarch, emulator:<dir>, configs-misc, scripts, gamelists, cheats, saves:<system> or states:<system>"),
+                "label": _string(),
+                "group": _string(),
+                "group_label": _string(),
+                "file_count": _integer(),
+                "size_bytes": _integer(),
+            },
+            ("id", "label", "group"),
+        ),
+        "Backup": _object(
+            {
+                "backup_id": _string("32 hex characters; the same on every Drone that holds this backup"),
+                "kind": _enum(("backup", "snapshot")),
                 "status": _enum(("creating", "complete", "error")),
-                "file_name": _string(),
-                "size_bytes": _integer(),
-                "included_file_count": _integer(),
-                "skipped_file_count": _integer("Files excluded, e.g. by the configs/ per-file size cap"),
-                "skipped_bytes": _integer(),
-                "error_message": _string(),
-                "created_at": _string(),
-                "completed_at": _string(),
-                "name": _string("User-supplied label, empty if none was given"),
-                "description": _string(),
-                "source_drone_id": _string("Set only when pulled from a paired peer, null for a locally-built backup"),
-                "source_drone_name": _string(),
-                "source_created_at": _string("The backup's original creation time on its source drone, if pulled from a peer"),
-                "is_local": _boolean("False when this backup was pulled from a paired peer rather than built here"),
-            },
-            ("id", "status", "file_name"),
-            description="One config-backup tarball's metadata (bytes live on disk, not in this row). Also a P2P asset type (config_backups) -- see /peer/config-backups/{file_name}.",
-        ),
-        "ConfigBackupsListResponse": _object({"backups": _array(_ref("ConfigBackup"))}, ("backups",)),
-        "ConfigBackupCreateRequest": _object(
-            {"name": _string(), "description": _string()},
-            description="Both optional -- a user-supplied label/description to identify this backup later, including to a peer browsing it via the Request Assets flow.",
-        ),
-        "ConfigBackupCreateResponse": _object(
-            {"status": _string(), "backup": _ref("ConfigBackup")},
-            ("status",),
-            description="'already_creating' (409) if a backup is already being built.",
-        ),
-        "ConfigBackupEmailResponse": _object(
-            {
-                "status": _enum(("queued", "not_configured", "too_large", "error", "not_found")),
-                "job_id": _integer("Persistent outbound-mail queue ID when status is 'queued'"),
-                "queued_at": _string(fmt="date-time", nullable=True),
-                "size_bytes": _integer("Present when status is 'too_large'"),
-                "limit_bytes": _integer("Present when status is 'too_large'"),
-                "error": _string("Present when status is 'error'"),
-            },
-            ("status",),
-            description="A successful request is persisted for asynchronous delivery by the backend mail worker (202). Validation outcomes remain synchronous so every UI can branch consistently.",
-        ),
-        "ConfigBackupActionResponse": _object({"status": _string()}, ("status",)),
-        "ConfigBackupTreeFile": _object({"relative_path": _string(), "size": _integer()}, ("relative_path", "size")),
-        "ConfigBackupTreeResponse": _object(
-            {
-                "status": _enum(("ok", "not_found", "error")),
-                "file_name": _string(),
                 "name": _string(),
-                "size_bytes": _integer(),
-                "files": _array(_ref("ConfigBackupTreeFile")),
-                "error": _string("Present when status is 'error'"),
+                "description": _string(),
+                "created_at": _string(),
+                "size_bytes": _integer("Archive size"),
+                "archive_sha256": _string(),
+                "file_count": _integer(),
+                "content_bytes": _integer(),
+                "categories": _array(_ref("BackupCategory")),
+                "source": _object(additional_properties=True),
+                "origin": _enum(("local", "peer")),
+                "drone_id": _string("Swarm listings: the Drone that holds this copy"),
+                "drone_name": _string(),
+                "available_locally": _boolean(),
+                "compatibility": _object(additional_properties=True),
+                "error_message": _string(),
             },
-            ("status",),
-            description="Read-only listing of every file inside the tarball (path + size, never contents), for the admin UI's tree browser.",
+            ("backup_id", "name"),
+            description="A categorized backup of Batocera/EmulationStation/emulator settings, saves and states. Secrets are never included.",
         ),
-        "ConfigBackupApplyResponse": _object(
+        "BackupList": _object(
+            {"backups": _array(_ref("Backup")), "snapshots": _array(_ref("Backup")), "restore": _object(additional_properties=True)},
+            ("backups",),
+        ),
+        "BackupCreateRequest": _object(
+            {"name": _string(), "description": _string(), "categories": _array(_string())},
+            description="Omit categories to include everything this machine has.",
+        ),
+        "BackupRestoreRequest": _object(
             {
-                "status": _enum(("ok", "not_found", "error")),
-                "restored_file_count": _integer(),
-                "skipped_file_count": _integer(),
-                "restarted_emulationstation": _boolean(),
-                "error": _string("Present when status is 'error'"),
+                "categories": _array(_string()),
+                "mode": _enum(("overlay", "exact")),
+                "include_machine_keys": _boolean("Also restore this machine's display/audio/network/hostname keys from batocera.conf"),
+                "acknowledge_warnings": _boolean("Required when the backup came from a different Batocera version, architecture or board"),
             },
-            ("status",),
-            description="Extracts the tarball back onto this machine's real config/gamelist/saves paths. An overlay, not a wipe-and-replace: only files the backup actually contains are overwritten, nothing already on disk is deleted or cleared first. Overwriting a targeted file is still irreversible -- the admin UI requires an explicit confirmation before calling this. EmulationStation is stopped during the copy and restarted afterward.",
+            ("categories", "mode"),
         ),
+        "BackupResult": _object(additional_properties=True),
         "TorrentUploadRequest": _object(
             {"torrents": _array({"type": "string", "format": "binary"})},
             description="One or more .torrent files as multipart file parts (any field names).",
@@ -1214,10 +1198,10 @@ def _schemas() -> Dict[str, Schema]:
         "SmtpRelayedMailJob": _object(
             {
                 "source_job_id": _string("Stable queue ID on the source Drone; used as the idempotency key"),
-                "kind": _enum(("test", "config_backup")),
+                "kind": _enum(("test",)),
                 "subject": _string(),
                 "body": _string(),
-                "attachment_filename": _string("For config backups, fetched from the source Drone by the owner worker over mTLS"),
+                "attachment_filename": _string("Always empty: relayed mail carries no attachment"),
                 "metadata": {**_object(additional_properties=True), "nullable": True},
                 "created_at": _string(fmt="date-time"),
             },
@@ -2596,28 +2580,25 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/torrents/aria2/install": {
                 "post": _operation("Download and install the static aria2c binary", {"200": _json_response("Aria2InstallResponse")}, tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
-            "/admin/config-backups": {
-                "get": _operation("List config-backup tarballs, newest first", {"200": _json_response("ConfigBackupsListResponse")}, tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500")),
-                "post": _operation("Start building a new config-backup tarball in the background", {"200": _json_response("ConfigBackupCreateResponse"), "409": _json_response("ConfigBackupCreateResponse", "A backup is already being built")}, request_body=_json_request("ConfigBackupCreateRequest"), tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500")),
+            "/admin/backups": {
+                "get": _operation("List this Drone's backups and pre-restore snapshots", {"200": _json_response("BackupList")}, tags=["admin", "backups"]),
+                "post": _operation("Start creating a backup of the chosen categories", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupCreateRequest"), tags=["admin", "backups"]),
             },
-            "/admin/config-backups/{backup_id}/download": {
-                "get": _operation("Download a completed config-backup tarball", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
-            "/admin/config-backups/{backup_id}/tree": {
-                "get": _operation("List the files/directories inside a completed config-backup tarball (no contents)", {"200": _json_response("ConfigBackupTreeResponse"), "404": _json_response("ConfigBackupTreeResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
-            "/admin/config-backups/{backup_id}/apply": {
-                "post": _operation("Apply (restore) a completed config-backup tarball onto this machine -- irreversible", {"200": _json_response("ConfigBackupApplyResponse"), "404": _json_response("ConfigBackupApplyResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
-            "/admin/config-backups/{backup_id}/delete": {
-                "post": _operation("Delete a config-backup tarball and its metadata", {"200": _json_response("ConfigBackupActionResponse"), "404": _json_response("ConfigBackupActionResponse", "Backup not found")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
-            "/admin/config-backups/{backup_id}/email": {
-                "post": _operation("Queue a completed config-backup tarball for asynchronous email delivery by the backend worker", {"202": _json_response("ConfigBackupEmailResponse", "Queued"), "200": _json_response("ConfigBackupEmailResponse", "Synchronous validation outcome"), "404": _json_response("ConfigBackupEmailResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
-            "/peer/config-backups/{file_name}": {
-                "get": _operation("mTLS: download a completed config-backup tarball from a paired peer", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "400": _json_response("ConfigBackupActionResponse", "Invalid file name"), "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("file_name")], tags=["peer", "config-backups"], error_codes=("401", "403", "429", "500"))
-            },
+            "/admin/backups/categories": {"get": _operation("Categories a new backup could contain on this machine", {"200": _json_response("BackupResult")}, tags=["admin", "backups"])},
+            "/admin/backups/restore": {"get": _operation("Status of the running or last restore", {"200": _json_response("BackupResult")}, tags=["admin", "backups"])},
+            "/admin/backups/sources": {"get": _operation("This Drone and its paired Drones, with online state", {"200": _json_response("BackupResult")}, tags=["admin", "backups"])},
+            "/admin/backups/swarm": {"get": _operation("Backups on this Drone and on online paired Drones", {"200": _json_response("BackupResult")}, parameters=[_query_param("drones", _string(), "Comma-separated Drone ids (default: all online)"), _query_param("q", _string(), "Search text")], tags=["admin", "backups"])},
+            "/admin/backups/swarm/{drone_id}/{backup_id}": {"get": _operation("One backup's files on any Drone", {"200": _json_response("BackupResult")}, parameters=[_path_param("drone_id"), _path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/swarm/{drone_id}/{backup_id}/download": {"post": _operation("Queue a pull of a paired Drone's backup", {"200": _json_response("BackupResult")}, parameters=[_path_param("drone_id"), _path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}": {"get": _operation("A local backup's details and files", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/download": {"get": _operation("Download a local backup archive", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}}, parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/rename": {"post": _operation("Rename a backup", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/delete": {"post": _operation("Delete a backup", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/plan": {"post": _operation("Preview what restoring would change", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupRestoreRequest"), parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/restore": {"post": _operation("Snapshot, then restore the chosen categories onto this Drone", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupRestoreRequest"), parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/peer/backups": {"get": _operation("mTLS: list this Drone's shareable backups", {"200": _json_response("BackupResult")}, tags=["peer", "backups"])},
+            "/peer/backups/{backup_id}": {"get": _operation("mTLS: one backup's manifest", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["peer", "backups"])},
+            "/peer/backups/{backup_id}/archive": {"get": _operation("mTLS: download one backup archive", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}}, parameters=[_path_param("backup_id")], tags=["peer", "backups"])},
             "/admin/torrents/{torrent_id}/force-start": {
                 "post": _operation("Force-start a torrent, bypassing the concurrency limit", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent already completed")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },

@@ -1283,9 +1283,8 @@ def _peer_download_file_for_peer(
 ) -> tuple[int, str]:
     """Download a cert-pinned peer file using the normal route failover.
 
-    This is intentionally worker-facing rather than browser-facing.  The
-    centralized mail dispatcher uses it to retrieve a satellite's queued
-    config-backup attachment before opening the owner's SMTP connection.
+    This is intentionally worker-facing rather than browser-facing: it streams a
+    file from a paired peer to a local path with a hard size cap.
     """
     path = str(endpoint or "").strip()
     if not path.startswith("/"):

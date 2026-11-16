@@ -762,94 +762,124 @@ class VpnScreenTests(unittest.TestCase):
         self.assertEqual(screen._get_config_loaded, {"peer", "folder"})
 
 
+_BACKUP_ID = "a" * 32
+_CATEGORIES = [
+    {"id": "batocera", "label": "Batocera", "group": "batocera", "group_label": "Batocera", "file_count": 1},
+    {"id": "saves:snes", "label": "Saves: snes", "group": "saves", "group_label": "Saves", "file_count": 3},
+]
+
+
 class BackupsScreenTests(unittest.TestCase):
-    def test_on_enter_populates_backups(self) -> None:
+    def _local(self, **extra):
+        row = {"backup_id": _BACKUP_ID, "name": "Known good", "status": "complete", "kind": "backup",
+               "categories": _CATEGORIES, "size_bytes": 2048}
+        row.update(extra)
+        return row
+
+    def test_on_enter_loads_local_and_swarm_backups(self) -> None:
         client = _FakeApiClient(get_responses={
-            "/admin/config-backups": {"backups": [{"id": 1, "status": "complete", "file_name": "backup-1.tar.gz"}]}
+            "/admin/backups": {"backups": [self._local()], "snapshots": [], "restore": {"state": "idle"}},
+            "/admin/backups/swarm": {"sources": [
+                {"drone_id": "peer-1", "name": "Den", "status": "ok", "backups": [
+                    {"backup_id": "b" * 32, "drone_id": "peer-1", "name": "Den setup", "categories": _CATEGORIES}]},
+                {"drone_id": "peer-2", "name": "Attic", "status": "error", "error": "offline", "backups": []},
+            ]},
         })
         screen = BackupsScreen(client)
         screen.on_enter()
-        self.assertEqual(len(screen.backups), 1)
+        self.assertEqual(len(screen.local_backups), 1)
+        self.assertEqual([source["drone_id"] for source in screen.sources], ["peer-1", "peer-2"])
         self.assertIsNone(screen.error)
+        self.assertTrue(any(call.startswith("/admin/backups/swarm?") for call in client.get_calls))
 
     def test_on_enter_surfaces_error(self) -> None:
-        client = _FakeApiClient(get_error=DroneApiError("backups unavailable"))
-        screen = BackupsScreen(client)
+        screen = BackupsScreen(_FakeApiClient(get_error=DroneApiError("backups unavailable")))
         screen.on_enter()
         self.assertEqual(screen.error, "backups unavailable")
 
-    def test_create_backup_success_reloads_list(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": [{"id": 1, "status": "creating"}]}},
-            post_responses={"/admin/config-backups": {"status": "ok", "backup": {"id": 1, "status": "creating"}}},
-        )
+    def test_search_sends_query(self) -> None:
+        client = _FakeApiClient(get_responses={"/admin/backups/swarm": {"sources": []}})
         screen = BackupsScreen(client)
-        screen._create_backup()
-        self.assertEqual(screen.create_message, "Backup started.")
-        self.assertEqual(len(screen.backups), 1)
+        screen.query = "retroarch shaders"
+        screen._search()
+        self.assertIn("q=retroarch+shaders", client.get_calls[-1])
 
-    def test_create_backup_already_creating(self) -> None:
+    def test_create_backup_posts_and_reloads(self) -> None:
         client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": []}},
-            post_responses={"/admin/config-backups": {"status": "already_creating"}},
+            get_responses={"/admin/backups": {"backups": [self._local(status="creating")], "snapshots": []}},
+            post_responses={"/admin/backups": {"status": "started"}},
         )
         screen = BackupsScreen(client)
         screen._create_backup()
-        self.assertEqual(screen.create_message, "A backup is already being created.")
+        self.assertEqual(client.post_calls[0][0], "/admin/backups")
+        self.assertIn("Backup started", screen.message)
+        self.assertEqual(len(screen.local_backups), 1)
+
+    def test_copy_then_restore_opens_dialog_when_transfer_completes(self) -> None:
+        peer_id = "b" * 32
+        client = _FakeApiClient(
+            get_responses={
+                "/admin/downloads": {"active": [], "queued": [], "recent": [{"id": "job-1", "status": "completed", "percentage": 100}]},
+                "/admin/backups": {"backups": [self._local(backup_id=peer_id, name="Den setup")], "snapshots": []},
+                "/admin/backups/swarm": {"sources": []},
+            },
+            post_responses={f"/admin/backups/swarm/peer-1/{peer_id}/download": {"status": "queued", "job": {"id": "job-1"}}},
+        )
+        screen = BackupsScreen(client)
+        screen._poller = threading.current_thread()  # keep the test synchronous: no background poller
+        screen._request_copy("peer-1", peer_id, restore_after=True)
+        self.assertEqual(screen.copies[peer_id]["status"], "queued")
+        self.assertFalse(screen._poll_downloads_once())
+        self.assertEqual(screen.copies[peer_id]["status"], "completed")
+        self.assertEqual(screen._open_after_copy, peer_id)
+
+    def test_copy_failure_is_reported_on_the_row(self) -> None:
+        client = _FakeApiClient(post_error=DroneApiError("That Drone is offline"))
+        screen = BackupsScreen(client)
+        screen._request_copy("peer-1", "b" * 32)
+        self.assertEqual(screen.copies["b" * 32]["status"], "failed")
+        self.assertIn("offline", screen.copies["b" * 32]["error"])
+
+    def test_preview_and_restore_send_selected_categories_and_mode(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
+            post_responses={
+                f"/admin/backups/{_BACKUP_ID}/plan": {"mode": "exact", "totals": {"new": 1, "changed": 2, "identical": 0, "remove": 1}, "warnings": []},
+                f"/admin/backups/{_BACKUP_ID}/restore": {"state": "running"},
+            },
+        )
+        screen = BackupsScreen(client)
+        screen._open_restore(self._local())
+        screen.dialog["selected"].discard("batocera")
+        screen.dialog["mode"] = "exact"
+        screen._preview()
+        self.assertEqual(client.post_calls[0], (f"/admin/backups/{_BACKUP_ID}/plan",
+                                                {"categories": ["saves:snes"], "mode": "exact", "include_machine_keys": False}))
+        self.assertIsNotNone(screen.dialog["plan"])
+        screen._restore()
+        self.assertEqual(client.post_calls[1][1]["categories"], ["saves:snes"])
+        self.assertFalse(client.post_calls[1][1]["acknowledge_warnings"])
+        self.assertIsNone(screen.dialog)
+        self.assertIn("safety snapshot", screen.message)
+
+    def test_rollback_defaults_to_exact_and_includes_previously_empty_parts(self) -> None:
+        screen = BackupsScreen(_FakeApiClient())
+        snapshot = self._local(kind="snapshot", snapshot_of={"name": "Known good", "categories": ["batocera", "states:snes"]})
+        screen._open_restore(snapshot, rollback=True)
+        self.assertEqual(screen.dialog["mode"], "exact")
+        self.assertIn("states:snes", screen.dialog["selected"])
+
+    def test_restore_error_stays_in_dialog(self) -> None:
+        client = _FakeApiClient(get_responses={"/admin/backups": {}}, post_error=DroneApiError("A restore is already running."))
+        screen = BackupsScreen(client)
+        screen._open_restore(self._local())
+        screen._restore()
+        self.assertIn("already running", screen.dialog["plan_error"])
 
     def test_format_size(self) -> None:
         from ui.screens.backups import _format_size
         self.assertEqual(_format_size(500), "500B")
         self.assertEqual(_format_size(2048), "2.0KB")
-
-    def test_open_apply_confirmation_sets_pending_state_and_resets_ack(self) -> None:
-        screen = BackupsScreen(_FakeApiClient())
-        screen.apply_ack = True
-        screen._open_apply_confirmation(7, "nightly-backup")
-        self.assertEqual(screen.pending_apply_id, 7)
-        self.assertEqual(screen.pending_apply_name, "nightly-backup")
-        self.assertFalse(screen.apply_ack)
-        self.assertTrue(screen._apply_popup_just_opened)
-
-    def test_apply_backup_success_reports_restored_count_and_es_restart(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": []}},
-            post_responses={"/admin/config-backups/7/apply": {
-                "status": "ok", "restored_file_count": 12, "restarted_emulationstation": True,
-            }},
-        )
-        screen = BackupsScreen(client)
-        screen._apply_backup(7)
-        self.assertIn("12 file(s) restored", screen.apply_message)
-        self.assertIn("EmulationStation was restarted", screen.apply_message)
-        self.assertEqual(client.post_calls, [("/admin/config-backups/7/apply", {})])
-
-    def test_apply_backup_not_found(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": []}},
-            post_responses={"/admin/config-backups/7/apply": {"status": "not_found"}},
-        )
-        screen = BackupsScreen(client)
-        screen._apply_backup(7)
-        self.assertEqual(screen.apply_message, "That backup no longer exists.")
-
-    def test_apply_backup_server_error(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": []}},
-            post_responses={"/admin/config-backups/7/apply": {"status": "error", "error": "helper unreachable"}},
-        )
-        screen = BackupsScreen(client)
-        screen._apply_backup(7)
-        self.assertIn("helper unreachable", screen.apply_message)
-
-    def test_apply_backup_transport_error(self) -> None:
-        client = _FakeApiClient(
-            get_responses={"/admin/config-backups": {"backups": []}},
-            post_error=DroneApiError("could not reach Drone"),
-        )
-        screen = BackupsScreen(client)
-        screen._apply_backup(7)
-        self.assertIn("could not reach Drone", screen.apply_message)
 
 
 class AboutScreenTests(unittest.TestCase):
@@ -904,7 +934,8 @@ class AppShellTests(unittest.TestCase):
         client = _FakeApiClient(get_responses={
             "/admin/swarm/overview": {"active": False, "drones": []},
             "/admin/vpn": {"status": "disconnected", "installed": True, "has_config": False},
-            "/admin/config-backups": {"backups": []},
+            "/admin/backups": {"backups": [], "snapshots": []},
+            "/admin/backups/swarm": {"sources": []},
         })
         shell = AppShell(client, "batocera", on_quit=lambda: None)
         shell.on_enter()  # about, default section

@@ -37,7 +37,7 @@ try:
     from .peer_download import (
         _download_artwork_from_peer,
         _download_bios_from_peer,
-        _download_config_backup_from_peer,
+        _download_backup_from_peer,
         _download_movie_from_peer,
         _download_music_from_peer,
         _download_rom_folder_from_peer,
@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_download import (  # type: ignore
         _download_artwork_from_peer,
         _download_bios_from_peer,
-        _download_config_backup_from_peer,
+        _download_backup_from_peer,
         _download_movie_from_peer,
         _download_music_from_peer,
         _download_rom_folder_from_peer,
@@ -169,19 +169,15 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             cancellation_event=cancel_event,
             overwrite=request.overwrite,
         )
-    if asset_type == "config_backups":
-        return _download_config_backup_from_peer(
+    if asset_type == "backups":
+        return _download_backup_from_peer(
             settings,
-            config,
             peer,
             rel,
             expected_size=expected_size,
-            backup_name=request.backup_name,
-            backup_description=request.backup_description,
-            source_created_at=request.source_created_at,
+            expected_sha256=expected_fingerprint,
             progress_callback=progress,
             cancellation_event=cancel_event,
-            overwrite=request.overwrite,
         )
     if request.entry_type == "folder":
         return _download_rom_folder_from_peer(
@@ -818,21 +814,21 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
-    def enqueue_config_backup(
+    def enqueue_backup(
         self,
         config: dict,
         peer: dict,
-        relative_path: str,
-        expected_size=None,
+        backup_id: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
         backup_name: str = "",
-        backup_description: str = "",
-        source_created_at: Optional[str] = None,
-        overwrite: bool = False,
     ) -> dict:
-        """Pull one config-backup tarball from a peer. Same flat (no-system)
-        shape as ``enqueue_movie`` -- ``relative_path`` is the backup's
-        ``file_name``, its identity on both sides (see
-        ``handlers_peer.py``'s ``_handle_peer_config_backup_download``)."""
+        """Pull one backup archive from a paired peer (``backups/service.py``).
+
+        Flat (no system) like movies. ``relative_path`` is the backup's global id; the
+        archive's SHA-256 from the peer's pinned listing is the expected fingerprint and
+        the archive is verified against it and its own manifest before it is kept."""
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -842,13 +838,13 @@ class DownloadManager:
             "sync_id": job_id,
             "source_drone_id": peer_id,
             "target_drone_id": self.settings.device_id,
-            "asset_type": "config_backups",
-            "file_path": relative_path,
-            "file_name": Path(relative_path).name,
-            "file_type": "Config Backup",
-            "system": "config_backups",
-            "rom_name": backup_name or relative_path,
-            "relative_path": relative_path,
+            "asset_type": "backups",
+            "file_path": backup_id,
+            "file_name": backup_name or backup_id,
+            "file_type": "Backup",
+            "system": "backups",
+            "rom_name": backup_name or backup_id,
+            "relative_path": backup_id,
             "total_bytes": expected_size,
             "file_size": expected_size,
             "downloaded_bytes": 0,
@@ -865,13 +861,11 @@ class DownloadManager:
             "failure_reason": None,
             "cancellation_requested": False,
             "created_at": now,
-            "_asset_type": "config_backups",
+            "_asset_type": "backups",
             "_config": config,
             "_peer": peer,
-            "_overwrite": bool(overwrite),
-            "_backup_name": backup_name,
-            "_backup_description": backup_description,
-            "_source_created_at": source_created_at,
+            "_expected_fingerprint": expected_sha256,
+            "_overwrite": False,
         }
         with self._lock:
             self._attach_batch_locked(job)
@@ -1262,9 +1256,6 @@ class DownloadManager:
             expected_fingerprint = job.get("_expected_fingerprint")
             entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
             marker_relative_path = job.get("_marker_relative_path")
-            backup_name = str(job.get("_backup_name") or "")
-            backup_description = str(job.get("_backup_description") or "")
-            source_created_at = job.get("_source_created_at")
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
             overwrite = bool(job.get("_overwrite")) if "_overwrite" in job else asset_type == "saves"
@@ -1305,9 +1296,6 @@ class DownloadManager:
                 overwrite=overwrite,
                 local_rom_path=artwork_local_rom_path,
                 marker_relative_path=marker_relative_path,
-                backup_name=backup_name,
-                backup_description=backup_description,
-                source_created_at=source_created_at,
             )
             context = TransferContext(
                 settings=self.settings,

@@ -20,7 +20,6 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
-    from ..device.config_backup import backups_directory as _config_backups_directory
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired
     from ..device.tailnet_service import (
         install_tailscale as _install_tailscale,
@@ -56,7 +55,6 @@ try:
     from .server_tls import load_peer_cert_everywhere, activate_peer_certificate
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
-    from device.config_backup import backups_directory as _config_backups_directory  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status, TailnetApprovalRequired  # type: ignore
     from device.tailnet_service import (  # type: ignore
         install_tailscale as _install_tailscale,
@@ -168,7 +166,6 @@ class _PlanningDownloadManager:
         "enqueue_save": "SAVE",
         "enqueue_movie": "MOVIE",
         "enqueue_music": "MUSIC",
-        "enqueue_config_backup": "CONFIG_BACKUP",
     }
 
     def __init__(self, manager) -> None:
@@ -1221,7 +1218,7 @@ class HandlersNetworkMixin:
         if isinstance(result, dict):
             if asset_type == "roms":
                 self._annotate_roms_exist_locally(result.get("items") or [])
-            elif asset_type in {"bios", "saves", "movies", "music", "config_backups"}:
+            elif asset_type in {"bios", "saves", "movies", "music"}:
                 self._annotate_assets_exist_locally(asset_type, result.get("items") or [])
         self._send_json(200, result)
 
@@ -1375,16 +1372,13 @@ class HandlersNetworkMixin:
     def _annotate_assets_exist_locally(self, asset_type: str, items: List[dict]) -> None:
         """Flag each non-ROM peer asset row with whether it already exists on this machine."""
         try:
-            if asset_type == "config_backups":
-                base_val = _config_backups_directory(self.settings)
-            else:
-                dir_attr = {
-                    "bios": "bios_root",
-                    "saves": "saves_root",
-                    "movies": "movies_root",
-                    "music": "music_root",
-                }.get(asset_type)
-                base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
+            dir_attr = {
+                "bios": "bios_root",
+                "saves": "saves_root",
+                "movies": "movies_root",
+                "music": "music_root",
+            }.get(asset_type)
+            base_val = getattr(self.settings, dir_attr, None) if dir_attr else None
             if not base_val:
                 return
             base_dir = Path(base_val).resolve()
@@ -1699,22 +1693,8 @@ class HandlersNetworkMixin:
                 expected_fingerprint=item.get("music_fingerprint") or item.get("fingerprint"),
                 overwrite=overwrite_files,
             ))
-        elif asset_type == "config_backups":
-            relative_path = str(item.get("file_path") or item.get("relative_path") or item.get("file_name") or "").strip()
-            if not relative_path:
-                return jobs
-            jobs.append(manager.enqueue_config_backup(
-                config,
-                peer,
-                relative_path,
-                expected_size=item.get("size_bytes") or item.get("file_size"),
-                backup_name=str(item.get("name") or ""),
-                backup_description=str(item.get("description") or ""),
-                source_created_at=item.get("created_at"),
-                overwrite=overwrite_files,
-            ))
         else:
-            raise ValueError("asset_type must be roms, bios, artwork, saves, movies, music, or config_backups")
+            raise ValueError("asset_type must be roms, bios, artwork, saves, movies, or music")
         return jobs
 
     def _handle_admin_local_sync(self, payload: dict) -> None:
@@ -1777,8 +1757,8 @@ class HandlersNetworkMixin:
             return
         peer_id = str(payload.get("peer_id") or "").strip()
         asset_type = str(payload.get("asset_type") or "").strip().lower()
-        if asset_type not in {"roms", "bios", "artwork", "saves", "movies", "music", "config_backups"}:
-            self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, saves, movies, or config_backups"})
+        if asset_type not in {"roms", "bios", "artwork", "saves", "movies", "music"}:
+            self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, saves, movies, or music"})
             return
         system = str(payload.get("system") or "").strip()
         systems = [

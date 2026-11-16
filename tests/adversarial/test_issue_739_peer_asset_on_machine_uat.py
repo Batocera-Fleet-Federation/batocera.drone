@@ -5,8 +5,8 @@ own) and the asset is on the machine then it should indicate that the asset is
 already on machine."
 
 The swarm Request/Search Assets panel loads a peer inventory through
-``_handle_admin_local_peer_assets``. Non-ROM types (BIOS, saves, movies,
-config backups) must set ``exists_locally`` when the same file is already on
+``_handle_admin_local_peer_assets``. Non-ROM types (BIOS, saves, movies)
+must set ``exists_locally`` when the same file is already on
 this Drone so the UI can show "On this machine".
 """
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest import mock
 
 from app.common.settings import Settings
-from app.device import config_backup as config_backup_mod
 from app.drone_api import RomRequestHandler
 from app.web import handlers_network
 
@@ -147,33 +146,6 @@ class PeerAssetOnMachineUat(unittest.TestCase):
             self.assertTrue(
                 payload["items"][0].get("exists_locally") is True,
                 "Movie already stored under MOVIES_ROOT must be flagged exists_locally "
-                f"when browsing a peer: {payload['items'][0]!r}",
-            )
-
-    def test_config_backup_already_on_this_machine_is_flagged(self):
-        # Issue #739: "When you search assets on a drone in the swarm (not your
-        # own) and the asset is on the machine then it should indicate that the
-        # asset is already on machine."
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            settings = _settings(root)
-            backups = config_backup_mod.backups_directory(settings)
-            (backups / "cabinet.tar.gz").write_bytes(b"backup-bytes")
-            handler = _handler(settings)
-            payload = self._search(
-                handler,
-                "config_backups",
-                [
-                    {
-                        "name": "cabinet",
-                        "file_name": "cabinet.tar.gz",
-                        "relative_path": "cabinet.tar.gz",
-                    }
-                ],
-            )
-            self.assertTrue(
-                payload["items"][0].get("exists_locally") is True,
-                "Config backup already on this machine must be flagged exists_locally "
                 f"when browsing a peer: {payload['items'][0]!r}",
             )
 

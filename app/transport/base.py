@@ -24,7 +24,8 @@ class DownloadRequest:
 
     Mirrors the per-asset arguments the queue previously spread across the
     individual ``_download_*_from_peer`` calls. ``expected_fingerprint`` carries
-    the ROM/save fingerprint or the BIOS md5 depending on ``asset_type`` -- the
+    the ROM/save fingerprint, the BIOS md5 or a backup archive's SHA-256 depending
+    on ``asset_type`` -- the
     transport passes it straight through so the shared skip-if-present and hash
     verification logic is unchanged.
     """
@@ -42,13 +43,6 @@ class DownloadRequest:
     # Folder-unit ROMs only: the gamelist <path> (marker file) inside the transferred
     # folder; carries the ROM's identity/fingerprint and is written last on receive.
     marker_relative_path: Optional[str] = None
-    # config_backups only: the source peer's own label for the backup, carried
-    # through so the locally-registered row (see record_downloaded()) shows
-    # the same name/description/original-creation-time the peer set, not just
-    # a blank/renamed copy.
-    backup_name: str = ""
-    backup_description: str = ""
-    source_created_at: Optional[str] = None
 
 
 @dataclass

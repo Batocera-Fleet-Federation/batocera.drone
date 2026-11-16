@@ -70,7 +70,7 @@ class PeerFileDownloadConnectivityTests(unittest.TestCase):
             ) as remember:
                 size, address = peer_connectivity._peer_download_file_for_peer(
                     peer,
-                    "/v1/api/peer/config-backups/weekly.tar.gz",
+                    "/v1/api/peer/backups/weekly/archive",
                     destination,
                     settings,
                     peer_id="peer-1",
@@ -78,7 +78,7 @@ class PeerFileDownloadConnectivityTests(unittest.TestCase):
             self.assertEqual(size, 11)
             self.assertEqual(address, "https://peer.local")
             self.assertEqual(destination.read_bytes(), b"backup-data")
-            self.assertIn("/v1/api/peer/config-backups/weekly.tar.gz", opened.call_args.args[0].full_url)
+            self.assertIn("/v1/api/peer/backups/weekly/archive", opened.call_args.args[0].full_url)
             remember.assert_called_once_with(settings, "peer-1", "https://peer.local")
 
     def test_oversized_download_is_removed(self) -> None:

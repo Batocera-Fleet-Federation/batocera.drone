@@ -21,9 +21,7 @@ try:
     from ..common.http_cache import valid_segment
     from ..common.peer_labels import resolve_peer_label as _resolve_peer_label
     from ..common.settings import Settings
-    from ..device import config_backup as _config_backup
     from ..device.device_control import _ensure_rom_write_access
-    from ..storage import config_backup_store as _config_backup_store
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
     from .signed_inventory import fetch_inventory, verify_file
     from .download_errors import DownloadCancelled
@@ -44,9 +42,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from common.peer_labels import resolve_peer_label as _resolve_peer_label  # type: ignore
     from common.settings import Settings  # type: ignore
-    from device import config_backup as _config_backup  # type: ignore
     from device.device_control import _ensure_rom_write_access  # type: ignore
-    from storage import config_backup_store as _config_backup_store  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
     from transfer.signed_inventory import fetch_inventory, verify_file
     from transfer.download_errors import DownloadCancelled  # type: ignore
@@ -976,177 +972,91 @@ def _download_music_from_peer(
     })
 
 
-def _download_config_backup_from_peer(
+def _download_backup_from_peer(
     settings: Settings,
-    config: dict,
     peer: dict,
-    relative_path: str,
+    backup_id: str,
     expected_size=None,
-    backup_name: str = "",
-    backup_description: str = "",
-    source_created_at=None,
+    expected_sha256=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
-    overwrite: bool = False,
 ) -> dict:
-    """Pull one config-backup tarball from a peer. Same flat shape as
-    ``_download_movie_from_peer`` (no system dimension, ``relative_path`` is
-    the peer's own ``file_name``) except there's no fingerprint to verify --
-    a size check is the integrity bar here, matching what's actually
-    available (a backup has no pre-computed content hash, unlike ROMs/saves/
-    movies). On success, registers a brand-new local ``config_backups`` row
-    (``record_downloaded``) rather than just returning an activity dict --
-    unlike a ROM/save landing in a scanned directory that a poller will pick
-    up later, nothing else will ever notice this file exists otherwise."""
-    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
-    if not address:
-        raise RuntimeError("selected peer has no address")
-    rel = _safe_rom_relative_path(relative_path)
-    url = f"{address}/v1/api/peer/config-backups/{quote(rel, safe='')}"
-    backups_root = _config_backup.backups_directory(settings)
-    # Prefix with the source peer's own id so a backup pulled from another
-    # drone can never collide with (or silently overwrite) one of this
-    # drone's own, and so it's visually obvious where it came from just by
-    # looking at the directory.
-    prefixed_name = f"{peer_id}-{rel}" if peer_id else rel
-    target = _collision_safe_target(backups_root, prefixed_name)
-    partial_target = target.with_name(f"{target.name}.part")
-    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    started = started_dt.isoformat()
-    started_mono = time.monotonic()
+    """Pull one backup archive (``backups/service.py``) from a paired peer.
 
-    if not overwrite and target.is_file():
-        raise RuntimeError("target path already exists")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
-    if urlparse(address).scheme == "https" and not cafile:
-        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
-    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
-    bytes_written = 0
-    request = Request(url, headers={"User-Agent": "batocera-drone-config-backup-sync/1.0"})
-
-    def ensure_not_cancelled() -> None:
-        if cancellation_event is not None and cancellation_event.is_set():
-            if partial_target.exists():
-                partial_target.unlink()
-            raise DownloadCancelled("download cancelled")
-
-    def response_total(response) -> Optional[int]:
-        if expected_size not in (None, ""):
-            try:
-                return int(expected_size)
-            except Exception:
-                pass
-        try:
-            return int(response.headers.get("Content-Length") or 0) or None
-        except Exception:
-            return None
-
+    Uses the pinned-certificate HTTPS opener shared with save imports (no plaintext,
+    no proxies, no redirects, certificate must match the pairing pin). The archive is
+    streamed to a private partial file, capped at the size the peer listed, and only
+    kept once ``install_download`` has verified it against the listing's SHA-256 and
+    its own manifest."""
     try:
-        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
-            total_bytes = response_total(response)
+        from ..backups import service as _backups
+        from . import game_saves as _pinned
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from backups import service as _backups  # type: ignore
+        from transfer import game_saves as _pinned  # type: ignore
+    if not _backups.valid_backup_id(backup_id):
+        raise RuntimeError("invalid backup id")
+    try:
+        size_limit = int(expected_size)
+    except (TypeError, ValueError):
+        raise RuntimeError("the source Drone did not report the backup size")
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        raise RuntimeError("the source Drone did not report the backup checksum")
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started_mono = time.monotonic()
+    partial = _backups.backups_directory(settings) / f".drone-backup-dl-{backup_id}.part"
+    written = 0
+    try:
+        pinned_peer = _pinned.tls_peer(settings, peer_id)
+        with _pinned._open_peer(settings, pinned_peer, f"/v1/api/peer/backups/{backup_id}/archive", timeout=60) as response, \
+                partial.open("wb") as handle:
             while True:
-                ensure_not_cancelled()
+                if cancellation_event is not None and cancellation_event.is_set():
+                    raise DownloadCancelled("download cancelled")
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > size_limit:
+                    raise RuntimeError("the backup is larger than the source Drone reported")
                 handle.write(chunk)
-                bytes_written += len(chunk)
                 if progress_callback:
-                    progress_callback(bytes_written, total_bytes)
-    except (ssl.SSLError, URLError) as error:
-        if isinstance(error, URLError) and not _is_ssl_url_error(error):
-            raise
-        ssl_error = getattr(error, "reason", error)
-        print(f"Config backup sync SSL validation failed: {_peer_ssl_diagnostic(url, cafile, ssl_error)}", file=sys.stderr, flush=True)
-        if partial_target.exists():
-            partial_target.unlink()
-        cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
-        if urlparse(address).scheme == "https" and not cafile:
-            raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
-        context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
-        bytes_written = 0
+                    progress_callback(written, size_limit)
+        if written != size_limit:
+            raise RuntimeError(f"size mismatch expected={size_limit} actual={written}")
+        row = _backups.install_download(settings, partial, backup_id=backup_id,
+                                        expected_sha256=expected_sha256, peer=peer)
+    except BaseException as error:
         try:
-            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
-                total_bytes = response_total(response)
-                while True:
-                    ensure_not_cancelled()
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    bytes_written += len(chunk)
-                    if progress_callback:
-                        progress_callback(bytes_written, total_bytes)
-        except (ssl.SSLError, URLError) as retry_error:
-            if isinstance(retry_error, URLError) and not _is_ssl_url_error(retry_error):
-                raise
-            retry_ssl_error = getattr(retry_error, "reason", retry_error)
-            print(f"Config backup sync SSL validation retry failed: {_peer_ssl_diagnostic(url, cafile, retry_ssl_error)}", file=sys.stderr, flush=True)
-            if partial_target.exists():
-                partial_target.unlink()
-            raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
-    except DownloadCancelled:
-        if partial_target.exists():
-            partial_target.unlink()
-        raise
-    except Exception:
-        if partial_target.exists():
-            partial_target.unlink()
-        raise
-    if expected_size not in (None, ""):
-        try:
-            if int(expected_size) != bytes_written:
-                # Unlike movies/ROMs/saves, a backup has no content fingerprint
-                # to fall back on -- this size check is the only integrity
-                # gate, so (unlike the shared pattern elsewhere in this file)
-                # it must clean up the partial file itself rather than
-                # relying on a later fingerprint-mismatch branch to do it.
-                if partial_target.exists():
-                    partial_target.unlink()
-                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
-        except ValueError:
+            partial.unlink()
+        except OSError:
             pass
-    partial_target.replace(target)
-    row = _config_backup_store.record_downloaded(
-        settings,
-        file_name=target.name,
-        size_bytes=bytes_written,
-        name=backup_name,
-        description=backup_description,
-        source_drone_id=peer_id,
-        source_drone_name=_resolve_peer_label(
-            peer.get("name"),
-            peer.get("hostname"),
-            peer_id,
-            fallback=peer_id,
-        ),
-        source_created_at=source_created_at,
-    )
+        if isinstance(error, _pinned.SaveError):
+            raise RuntimeError(str(error).replace("Save transfers", "Backup transfers")) from error
+        raise
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
-        "asset_type": "config_backups",
-        "file_type": "Config Backup",
+        "asset_type": "backups",
+        "file_type": "Backup",
         "source_drone_id": peer_id,
         "target_drone_id": settings.device_id,
-        "system": "config_backups",
-        "rom_name": backup_name or rel,
-        "relative_path": target.name,
+        "system": "backups",
+        "rom_name": row.get("name") or backup_id,
+        "relative_path": backup_id,
         "action": "download",
         "status": "completed",
-        "bytes_transferred": bytes_written,
-        "file_size": expected_size or bytes_written,
-        "config_backup_id": row["id"] if row else None,
-        "download_started_at": started,
+        "bytes_transferred": written,
+        "file_size": written,
+        "backup_id": backup_id,
+        "download_started_at": started_dt.isoformat(),
         "download_completed_at": completed_dt.isoformat(),
-        "started_at": started,
+        "started_at": started_dt.isoformat(),
         "completed_at": completed_dt.isoformat(),
         "duration_ms": duration_ms,
         "duration_seconds": round(duration_ms / 1000, 3),
-        "selected_peer_reason": "healthy peer with requested config backup",
+        "selected_peer_reason": "paired Drone listing the requested backup",
     }
 
 

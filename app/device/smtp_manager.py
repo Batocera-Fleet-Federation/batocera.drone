@@ -967,19 +967,9 @@ def ingest_relayed_mail_jobs(
         source_job_id = str(raw.get("source_job_id") or raw.get("id") or "").strip()
         kind = str(raw.get("kind") or "").strip()
         attachment_filename = str(raw.get("attachment_filename") or "").strip()
-        valid_attachment = (
-            kind == "test" and not attachment_filename
-        ) or (
-            kind == "config_backup"
-            and bool(attachment_filename)
-            and len(attachment_filename) <= 255
-            and "/" not in attachment_filename
-            and "\\" not in attachment_filename
-            and "\r" not in attachment_filename
-            and "\n" not in attachment_filename
-            and not attachment_filename.startswith(".")
-        )
-        if not source_job_id or kind not in {"test", "config_backup"} or not valid_attachment:
+        # Only test mail is relayed; emailing backups was retired with the old Config Backups.
+        valid_attachment = kind == "test" and not attachment_filename
+        if not source_job_id or kind != "test" or not valid_attachment:
             if source_job_id:
                 rejected.append(source_job_id)
             continue
@@ -1017,7 +1007,7 @@ def relay_mail_jobs_to_source(settings: Settings) -> dict:
             return {"status": "skipped", "reason": "SMTP configuration is self-owned"}
         jobs = [
             job for job in _mail_store.pending(settings, OUTBOUND_MAIL_RELAY_MAX_ITEMS)
-            if job.get("kind") in {"test", "config_backup"}
+            if job.get("kind") == "test"
         ]
         if not jobs:
             return {"status": "skipped", "reason": "nothing new"}
@@ -1084,37 +1074,7 @@ def _remote_attachment_for_job(settings: Settings, job: dict) -> Optional[Path]:
     if str(job.get("attachment_path") or "") and local_path.is_file():
         return local_path
 
-    source_drone_id = str(job.get("source_drone_id") or "").strip()
-    if not source_drone_id or source_drone_id == settings.device_id:
-        raise FileNotFoundError(f"Queued attachment no longer exists: {attachment_filename}")
-    try:
-        from ..transfer import local_network as _local_network
-        from ..transfer.peer_connectivity import _peer_download_file_for_peer
-    except ImportError:  # pragma: no cover - direct script execution fallback
-        from transfer import local_network as _local_network  # type: ignore
-        from transfer.peer_connectivity import _peer_download_file_for_peer  # type: ignore
-    peer = _local_network.get_paired_peer(settings, source_drone_id)
-    if not peer:
-        raise FileNotFoundError("The Drone providing this email attachment is no longer paired")
-    spool = settings.userdata_root / "system" / "drone-app" / "mail-spool"
-    spool.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix="mail-", suffix=".attachment", dir=str(spool))
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
-    try:
-        _peer_download_file_for_peer(
-            peer,
-            f"/v1/api/peer/config-backups/{quote(attachment_filename, safe='')}",
-            temporary_path,
-            settings,
-            peer_id=source_drone_id,
-            timeout=SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS,
-            max_bytes=OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES,
-        )
-        return temporary_path
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
+    raise FileNotFoundError(f"Queued attachment no longer exists: {attachment_filename}")
 
 
 def _process_outbound_mail_queue_unlocked(settings: Settings) -> dict:

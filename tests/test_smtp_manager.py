@@ -840,43 +840,21 @@ class OutboundMailRelayTests(unittest.TestCase):
             self.assertEqual(second["accepted_job_ids"], ["22"])
             self.assertEqual(len(smtp_manager._mail_store.pending(settings)), 1)
 
-    def test_owner_worker_fetches_remote_backup_over_peer_channel(self) -> None:
+    def test_relay_refuses_attachment_jobs(self) -> None:
+        # Mailing a backup archive was removed with the old Config Backups feature;
+        # a relayed job may never make the owner fetch a file from a peer.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             smtp_manager.update_settings(settings, _VALID_SETTINGS)
             smtp_manager.set_sharing_enabled(settings, True)
-            smtp_manager.ingest_relayed_mail_jobs(
+            result = smtp_manager.ingest_relayed_mail_jobs(
                 settings,
-                [{
-                    "source_job_id": "23",
-                    "kind": "config_backup",
-                    "subject": "Remote backup",
-                    "body": "attached",
-                    "attachment_filename": "weekly.tar.gz",
-                }],
+                [{"source_job_id": "23", "kind": "config_backup", "subject": "Remote backup",
+                  "body": "attached", "attachment_filename": "weekly.tar.gz"}],
                 source_drone_id="satellite-1",
                 source_drone_name="Living Room",
             )
-            peer = {"drone_id": "satellite-1", "name": "Living Room"}
-            delivered = []
-
-            def download(_peer, endpoint, destination, _settings, **_kwargs):
-                self.assertEqual(endpoint, "/v1/api/peer/config-backups/weekly.tar.gz")
-                destination.write_bytes(b"backup-data")
-                return 11, "https://satellite"
-
-            def send_attachment(_settings, subject, body, path, filename):
-                delivered.append((subject, body, path.read_bytes(), filename))
-
-            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
-                    mock.patch("app.transfer.peer_connectivity._peer_download_file_for_peer", side_effect=download), \
-                    mock.patch.object(smtp_manager, "send_mail_with_attachment", side_effect=send_attachment), \
-                    mock.patch.object(smtp_manager, "send_mail") as plain_send:
-                result = smtp_manager.process_outbound_mail_queue(settings)
-            plain_send.assert_not_called()
-            self.assertEqual(result["sent_count"], 1)
-            self.assertEqual(delivered[0][2], b"backup-data")
-            self.assertEqual(delivered[0][3], "weekly.tar.gz")
+            self.assertEqual(result["accepted_job_ids"], [])
             self.assertEqual(smtp_manager._mail_store.pending(settings), [])
 
     def test_satellite_relay_does_not_depend_on_local_smtp_switch(self) -> None:

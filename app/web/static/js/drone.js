@@ -211,9 +211,6 @@ let transfersInFlight = false;
 let torrentsTimer = null;
 let torrentsInFlight = false;
 let torrentsLastPayload = null;
-let configBackupsTimer = null;
-let configBackupsInFlight = false;
-let configBackupsLastPayload = [];
 let swarmDronesById = {};
 // Bumped at the start of every renderSwarmPage(). In-flight overview fetches
 // and per-peer probes capture the value and refuse to write the DOM once a
@@ -952,609 +949,6 @@ function startTorrentsAutoRefresh() {
   }, 3000);
 }
 
-// -------------------------------------------------------------- Config Backups
-
-function stopConfigBackupsAutoRefresh() {
-  if (configBackupsTimer) {
-    clearInterval(configBackupsTimer);
-    configBackupsTimer = null;
-  }
-  configBackupsInFlight = false;
-}
-
-// Only polls while at least one backup is still "creating" -- this is a rare,
-// one-off admin action (not a persistent queue like Torrents), so there's no
-// need for an always-on interval; it starts on demand and stops itself once
-// nothing is left building.
-function startConfigBackupsAutoRefreshIfNeeded(backups) {
-  const stillBuilding = (backups || []).some((b) => b.status === "creating");
-  if (!stillBuilding) {
-    stopConfigBackupsAutoRefresh();
-    return;
-  }
-  if (configBackupsTimer) return;
-  configBackupsTimer = setInterval(async () => {
-    if (document.hidden || configBackupsInFlight) return;
-    if (window.location.hash !== "#admin/config-backups") return;
-    const bodyNode = document.getElementById("configBackupsTableBody");
-    if (!bodyNode) return;
-    configBackupsInFlight = true;
-    try {
-      const payload = await api("/admin/config-backups");
-      if (window.location.hash === "#admin/config-backups" && bodyNode.isConnected) {
-        patchConfigBackupsLive(payload.backups || []);
-      }
-    } catch (err) {
-      // Transient poll failure: leave the last good data in place silently.
-    } finally {
-      configBackupsInFlight = false;
-    }
-  }, 2000);
-}
-
-function configBackupStatusBadge(row) {
-  const status = String(row.status || "creating");
-  const cls = status === "error" ? "danger" : status === "complete" ? "success" : "info";
-  const title = status === "error" ? escapeHtml(row.error_message || "") : "";
-  return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
-}
-
-function configBackupRowMarkup(row) {
-  const id = row.id;
-  const complete = row.status === "complete";
-  const skippedNote = row.skipped_file_count
-    ? `<div class="small text-muted">${Number(row.skipped_file_count)} file${row.skipped_file_count === 1 ? "" : "s"} skipped (${formatBytes(row.skipped_bytes || 0)}, see MANIFEST.txt in the archive)</div>`
-    : "";
-  const displayName = row.name || row.file_name || "";
-  const sourceBadge = row.is_local === false
-    ? `<span class="badge text-bg-info ms-1" title="This backup was pulled from a paired Drone over the swarm -- it was not created on this machine."><i class="bi bi-cloud-download me-1"></i>Downloaded from ${escapeHtml(row.source_drone_name || row.source_drone_id || "peer")}</span>`
-    : `<span class="badge text-bg-secondary ms-1" title="Built on this machine"><i class="bi bi-hdd me-1"></i>Created here</span>`;
-  const nameCell = `<div><strong>${escapeHtml(displayName)}</strong>${sourceBadge}</div>${row.description ? `<div class="small text-muted">${escapeHtml(row.description)}</div>` : ""}`;
-  return `<tr>
-    <td class="small">${nameCell}</td>
-    <td class="small text-nowrap">${escapeHtml(row.created_at || "")}</td>
-    <td>${configBackupStatusBadge(row)}</td>
-    <td class="small">${complete ? formatBytes(row.size_bytes || 0) : "--"}</td>
-    <td class="small">${complete ? `${Number(row.included_file_count || 0)} files` : "--"}${skippedNote}</td>
-    <td class="download-actions">
-      <a class="btn btn-sm btn-outline-primary${complete ? "" : " invisible"}" title="Download" aria-label="Download" tabindex="${complete ? "0" : "-1"}" ${complete ? `href="${escapeHtml(_apiRequestUrl(`/admin/config-backups/${id}/download`))}"` : ""}><i class="bi bi-download"></i></a>
-      <button class="btn btn-sm btn-outline-secondary${complete ? "" : " invisible"}" title="View contents" aria-label="View contents" tabindex="${complete ? "0" : "-1"}" onclick="${complete ? `openConfigBackupTreeModal(${id})` : ""}"><i class="bi bi-folder2-open"></i></button>
-      <button class="btn btn-sm btn-outline-info${complete ? "" : " invisible"}" title="Email this backup" aria-label="Email this backup" tabindex="${complete ? "0" : "-1"}" onclick="${complete ? `emailConfigBackup(${id})` : ""}"><i class="bi bi-envelope"></i></button>
-      <button class="btn btn-sm btn-outline-warning${complete ? "" : " invisible"}" title="Apply this backup to this Drone" aria-label="Apply this backup to this Drone" tabindex="${complete ? "0" : "-1"}" onclick="${complete ? `openApplyConfigBackupModal(${id})` : ""}"><i class="bi bi-arrow-repeat"></i></button>
-      <button class="btn btn-sm btn-outline-danger" title="Delete backup" aria-label="Delete backup" onclick="deleteConfigBackup(${id})"><i class="bi bi-trash"></i></button>
-    </td>
-  </tr>`;
-}
-
-function renderConfigBackupsTableBody(backups) {
-  if (!backups.length) {
-    return `<tr><td colspan="6" class="text-center text-muted small py-3">No backups yet. Click "Create Backup" to bundle Batocera + emulator settings, gamelist.xml, saves, and custom scripts into a downloadable archive.</td></tr>`;
-  }
-  return backups.map(configBackupRowMarkup).join("");
-}
-
-function patchConfigBackupsLive(backups) {
-  configBackupsLastPayload = backups;
-  const bodyNode = document.getElementById("configBackupsTableBody");
-  if (bodyNode) bodyNode.innerHTML = renderConfigBackupsTableBody(backups);
-  startConfigBackupsAutoRefreshIfNeeded(backups);
-}
-
-async function renderConfigBackupsPage() {
-  currentSystemContext = null;
-  clearSystemTheme();
-  titleNode.textContent = "Backups";
-  subtitleNode.textContent = "Bundle Batocera + emulator settings into a downloadable archive";
-  setLoading(true, "Loading backups...");
-  let payload;
-  try {
-    payload = await api("/admin/config-backups");
-  } catch (err) {
-    setLoading(false);
-    content.innerHTML = `<div class="alert alert-danger">Failed to load backups: ${escapeHtml(err.message || "unknown error")}</div>`;
-    return;
-  } finally {
-    setLoading(false);
-  }
-  const backups = payload.backups || [];
-  configBackupsLastPayload = backups;
-  content.innerHTML = `
-    <div class="card log-card mb-3">
-      <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <span><i class="bi bi-archive me-2" aria-hidden="true"></i>Config Backups</span>
-        <button class="btn btn-sm btn-primary" id="createConfigBackupBtn" onclick="openCreateConfigBackupModal()"><i class="bi bi-plus-circle me-1"></i>Create Backup</button>
-      </div>
-      <div class="card-body">
-        <p class="text-muted small mb-3">
-          Each backup bundles <code>batocera.conf</code>, the text-based settings files under <code>system/configs/**</code> (images, fonts, sound, firmware, and shader/other caches are excluded, whatever their size), every system's <code>gamelist.xml</code>, custom scripts under <code>system/services</code>/<code>custom</code>/<code>custom-scripts</code>/<code>scripts</code>, and everything in <code>saves/</code> except known emulator firmware/OS-partition data and disk images. It does not include ROM/BIOS files or this Drone's own credentials.
-        </p>
-        <div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table bff-stack">
-          <thead><tr><th>Name</th><th>Created</th><th>Status</th><th>Size</th><th>Files</th><th class="download-actions">Actions</th></tr></thead>
-          <tbody id="configBackupsTableBody">${renderConfigBackupsTableBody(backups)}</tbody>
-        </table></div>
-      </div>
-    </div>
-  `;
-  startConfigBackupsAutoRefreshIfNeeded(backups);
-}
-
-function openCreateConfigBackupModal() {
-  const modalId = "createConfigBackupModal";
-  let modal = document.getElementById(modalId);
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = modalId;
-    modal.className = "modal fade";
-    modal.tabIndex = -1;
-    modal.setAttribute("aria-hidden", "true");
-    document.body.appendChild(modal);
-  }
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content themed-modal">
-        <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-archive me-2"></i>Create Backup</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div class="mb-3">
-            <label class="form-label small" for="configBackupNameInput">Name <span class="text-muted">(optional)</span></label>
-            <input class="form-control" type="text" id="configBackupNameInput" placeholder="e.g. Before RetroArch update" maxlength="120" autofocus>
-          </div>
-          <div class="mb-1">
-            <label class="form-label small" for="configBackupDescriptionInput">Description <span class="text-muted">(optional)</span></label>
-            <textarea class="form-control" id="configBackupDescriptionInput" rows="3" maxlength="1000" placeholder="Anything worth remembering about this backup -- helps you (or a swarm peer downloading it) tell it apart from others later."></textarea>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-primary" id="submitCreateConfigBackupBtn" onclick="submitCreateConfigBackup()"><i class="bi bi-plus-circle me-1"></i>Create Backup</button>
-        </div>
-      </div>
-    </div>`;
-  if (window.bootstrap?.Modal) {
-    window.bootstrap.Modal.getOrCreateInstance(modal).show();
-  } else {
-    modal.classList.add("show");
-    modal.style.display = "block";
-  }
-  document.getElementById("configBackupNameInput")?.focus();
-}
-
-async function submitCreateConfigBackup() {
-  const name = (document.getElementById("configBackupNameInput")?.value || "").trim();
-  const description = (document.getElementById("configBackupDescriptionInput")?.value || "").trim();
-  const button = document.getElementById("submitCreateConfigBackupBtn");
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Starting...';
-  }
-  try {
-    await apiPost("/admin/config-backups", { name, description });
-    const modal = document.getElementById("createConfigBackupModal");
-    if (window.bootstrap?.Modal && modal) {
-      window.bootstrap.Modal.getOrCreateInstance(modal).hide();
-    } else if (modal) {
-      modal.classList.remove("show");
-      modal.style.display = "none";
-    }
-    showToast("Backup started -- building in the background.", "success");
-    await renderConfigBackupsPage();
-  } catch (err) {
-    showToast(`Failed to start backup: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = '<i class="bi bi-plus-circle me-1"></i>Create Backup';
-    }
-  }
-}
-
-async function deleteConfigBackup(backupId) {
-  if (!window.confirm("Delete this backup? This cannot be undone.")) return;
-  try {
-    await apiPost(`/admin/config-backups/${encodeURIComponent(backupId)}/delete`, {});
-    await renderConfigBackupsPage();
-  } catch (err) {
-    showToast(`Failed to delete backup: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  }
-}
-
-function showEmailNotConfiguredModal() {
-  const modalId = "configBackupEmailNotConfiguredModal";
-  let modal = document.getElementById(modalId);
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = modalId;
-    modal.className = "modal fade";
-    modal.tabIndex = -1;
-    modal.setAttribute("aria-hidden", "true");
-    document.body.appendChild(modal);
-  }
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content themed-modal">
-        <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-envelope-exclamation me-2"></i>Email isn't set up yet</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <p>This Drone doesn't have SMTP configured, so it has no way to send mail yet.</p>
-          <p class="mb-0">Open the <strong>Email</strong> tile in Admin, fill in your mail provider's host/port and a from/recipient address, save, and this button will work. If a paired Drone already has email set up, you can also pull its configuration from there instead of entering your own.</p>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
-          <button type="button" class="btn btn-primary" onclick="setHash('#admin/smtp')" data-bs-dismiss="modal"><i class="bi bi-envelope me-1"></i>Open Email settings</button>
-        </div>
-      </div>
-    </div>`;
-  if (window.bootstrap?.Modal) {
-    window.bootstrap.Modal.getOrCreateInstance(modal).show();
-  } else {
-    modal.classList.add("show");
-    modal.style.display = "block";
-  }
-}
-
-async function emailConfigBackup(backupId) {
-  try {
-    const result = await apiPost(`/admin/config-backups/${encodeURIComponent(backupId)}/email`, {});
-    if (result.status === "not_configured") {
-      showEmailNotConfiguredModal();
-      return;
-    }
-    if (result.status === "too_large") {
-      const limit = formatBytes(result.limit_bytes || 0);
-      const size = formatBytes(result.size_bytes || 0);
-      showToast(`This backup is too large to email (${size}, limit ${limit}). Download it directly from this page instead.`, "warning", 8000);
-      return;
-    }
-    if (result.status === "error") {
-      showToast(`Failed to queue email: ${escapeHtml(result.error || "unknown error")}`, "danger");
-      return;
-    }
-    if (result.status === "not_found") {
-      showToast("That backup no longer exists.", "warning");
-      return;
-    }
-    if (result.status === "queued") {
-      showToast("Backup email queued. The backend mail worker will send it even if you close this page.", "success", 7000);
-      return;
-    }
-    showToast("The backup email could not be queued.", "danger");
-  } catch (err) {
-    showToast(`Failed to queue email: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  }
-}
-
-// Read-only variant of renderFileTreeNode (buildFileTree is shared -- see the
-// Torrents "Move Files" tree) -- no checkboxes, since this is just for
-// browsing what's inside the tarball, never for selecting a subset of it.
-function renderConfigBackupTreeNode(node) {
-  const dirItems = Array.from(node.dirs.entries()).map(([name, child]) => `
-    <li class="file-tree-node expanded" data-kind="dir">
-      <div class="file-tree-row">
-        <span class="file-tree-toggle"><i class="bi bi-chevron-right"></i></span>
-        <i class="bi bi-folder2 file-tree-icon"></i>
-        <span class="file-tree-label" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-      </div>
-      <ul class="file-tree-children">${renderConfigBackupTreeNode(child)}</ul>
-    </li>
-  `).join("");
-  const fileItems = node.files.map((file) => `
-    <li class="file-tree-node" data-kind="file">
-      <div class="file-tree-row">
-        <span class="file-tree-toggle"></span>
-        <i class="bi bi-file-earmark file-tree-icon"></i>
-        <span class="file-tree-label" title="${escapeHtml(file.relative_path || file.name || "")}">${escapeHtml(file.name || file.relative_path || "")}</span>
-        <span class="file-tree-size">${file.size != null ? formatBytes(file.size) : ""}</span>
-      </div>
-    </li>
-  `).join("");
-  return dirItems + fileItems;
-}
-
-function renderConfigBackupTreeList(files) {
-  if (!files.length) {
-    return '<div class="text-muted small px-2 py-1">This archive is empty.</div>';
-  }
-  const tree = buildFileTree(files);
-  return `<ul class="file-tree">${renderConfigBackupTreeNode(tree)}</ul>`;
-}
-
-// The name's own extension, lowercased with the leading dot kept (e.g.
-// "retroarch.cfg" -> ".cfg"); files with no extension (or a leading-dot
-// dotfile like ".gitkeep", which has no *real* extension) bucket together.
-function configBackupFileExtension(relativePath) {
-  const name = String(relativePath || "").split("/").pop() || "";
-  const dotIndex = name.lastIndexOf(".");
-  if (dotIndex <= 0) return "(no extension)";
-  return name.slice(dotIndex).toLowerCase();
-}
-
-function summarizeConfigBackupExtensions(files) {
-  const byExtension = new Map();
-  files.forEach((file) => {
-    const ext = configBackupFileExtension(file.relative_path || file.name || "");
-    const entry = byExtension.get(ext) || { ext, count: 0, size: 0 };
-    entry.count += 1;
-    entry.size += Number(file.size || 0);
-    byExtension.set(ext, entry);
-  });
-  return Array.from(byExtension.values());
-}
-
-const CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS = 10;
-let configBackupTreeAllFiles = [];
-let configBackupTreeSearchQuery = "";
-let configBackupExtensionSummaryExpanded = false;
-let configBackupExtensionSummarySort = { key: "size", dir: "desc" };
-
-function sortConfigBackupExtensionRows(rows) {
-  const { key, dir } = configBackupExtensionSummarySort;
-  const sign = dir === "asc" ? 1 : -1;
-  return [...rows].sort((a, b) => sign * (a[key] - b[key]));
-}
-
-// A quick-glance summary at the top of the tree view -- how many of which
-// file type, and how much disk space each accounts for -- so it's obvious
-// at a glance what a backup is actually made of without expanding the tree.
-// Collapsed to the top 10 rows by default (sorted by the current column);
-// "Show all" expands it. Files/Size headers are clickable to sort by that
-// column, toggling direction on repeat clicks.
-function renderConfigBackupExtensionSummary(files, expanded) {
-  if (!files.length) return "";
-  const rows = sortConfigBackupExtensionRows(summarizeConfigBackupExtensions(files));
-  const shown = expanded ? rows : rows.slice(0, CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS);
-  const toggle = rows.length > CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS
-    ? `<button type="button" class="btn btn-sm btn-outline-secondary w-100 mt-1" onclick="toggleConfigBackupExtensionSummary()">
-         <i class="bi ${expanded ? "bi-chevron-up" : "bi-chevron-down"} me-1"></i>${expanded ? "Show fewer" : `Show all ${rows.length} types`}
-       </button>`
-    : "";
-  const sortIndicator = (key) => configBackupExtensionSummarySort.key === key
-    ? `<i class="bi ${configBackupExtensionSummarySort.dir === "asc" ? "bi-caret-up-fill" : "bi-caret-down-fill"} ms-1"></i>`
-    : "";
-  return `
-    <div class="table-responsive mb-3">
-      <table class="table table-sm table-hover align-middle themed-table mb-0">
-        <thead><tr>
-          <th>Type</th>
-          <th class="text-end sortable-col" onclick="setConfigBackupExtensionSort('count')">Files${sortIndicator("count")}</th>
-          <th class="text-end sortable-col" onclick="setConfigBackupExtensionSort('size')">Size${sortIndicator("size")}</th>
-        </tr></thead>
-        <tbody>
-          ${shown.map((row) => `
-            <tr>
-              <td class="small"><code>${escapeHtml(row.ext)}</code></td>
-              <td class="small text-end">${row.count}</td>
-              <td class="small text-end">${formatBytes(row.size)}</td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-      ${toggle}
-    </div>
-  `;
-}
-
-function refreshConfigBackupExtensionSummary() {
-  const container = document.getElementById("configBackupExtensionSummaryContainer");
-  if (container) container.innerHTML = renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded);
-}
-
-function toggleConfigBackupExtensionSummary() {
-  configBackupExtensionSummaryExpanded = !configBackupExtensionSummaryExpanded;
-  refreshConfigBackupExtensionSummary();
-}
-
-function setConfigBackupExtensionSort(key) {
-  configBackupExtensionSummarySort = configBackupExtensionSummarySort.key === key
-    ? { key, dir: configBackupExtensionSummarySort.dir === "asc" ? "desc" : "asc" }
-    : { key, dir: "desc" };
-  refreshConfigBackupExtensionSummary();
-}
-
-// Delegated on the tree container: clicking a folder row toggles it expanded/
-// collapsed; file rows have nothing to do.
-function handleConfigBackupTreeClick(event) {
-  const row = event.target.closest(".file-tree-row");
-  const node = row ? row.closest(".file-tree-node") : null;
-  if (node && node.dataset.kind === "dir") {
-    node.classList.toggle("expanded");
-  }
-}
-
-// A real backup can hold 10,000+ files -- rendering every match as a fully
-// expanded DOM tree got slow (100-200ms+ per keystroke on a real device's
-// worth of files, since replacing the existing large tree in the DOM is what
-// actually dominates the cost, not the filtering itself). Search results are
-// capped so each render stays fast regardless of how broad the query is; the
-// unfiltered full tree (no search box query yet) is intentionally NOT capped
-// here, since that's a one-time render at modal-open, not a per-keystroke one.
-const CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS = 500;
-
-function renderConfigBackupTreeListContainer() {
-  const query = configBackupTreeSearchQuery.trim().toLowerCase();
-  if (!query) return renderConfigBackupTreeList(configBackupTreeAllFiles);
-  const filtered = [];
-  let truncated = false;
-  for (const file of configBackupTreeAllFiles) {
-    if (!String(file.relative_path || file.name || "").toLowerCase().includes(query)) continue;
-    if (filtered.length >= CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS) {
-      truncated = true;
-      break;
-    }
-    filtered.push(file);
-  }
-  if (!filtered.length) {
-    return `<div class="text-muted small px-2 py-3 text-center">No files or folders match "${escapeHtml(configBackupTreeSearchQuery.trim())}".</div>`;
-  }
-  const note = truncated
-    ? `<div class="small text-muted px-2 py-1">Showing the first ${CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS} matches -- refine your search to narrow further.</div>`
-    : "";
-  return note + renderConfigBackupTreeList(filtered);
-}
-
-// Only the tree list re-renders as the user types -- the search input itself
-// is never touched, so it never loses focus/cursor position mid-keystroke.
-// Debounced so rapid typing doesn't trigger a (potentially 100ms+, see above)
-// re-render on every single keystroke -- only once typing pauses briefly.
-const CONFIG_BACKUP_TREE_FILTER_DEBOUNCE_MS = 200;
-let configBackupTreeFilterTimer = null;
-
-function filterConfigBackupTree(value) {
-  configBackupTreeSearchQuery = value || "";
-  if (configBackupTreeFilterTimer) clearTimeout(configBackupTreeFilterTimer);
-  configBackupTreeFilterTimer = setTimeout(() => {
-    configBackupTreeFilterTimer = null;
-    const container = document.getElementById("configBackupTreeListContainer");
-    if (container) container.innerHTML = renderConfigBackupTreeListContainer();
-  }, CONFIG_BACKUP_TREE_FILTER_DEBOUNCE_MS);
-}
-
-async function openConfigBackupTreeModal(backupId) {
-  const modalId = "configBackupTreeModal";
-  let modal = document.getElementById(modalId);
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = modalId;
-    modal.className = "modal fade";
-    modal.tabIndex = -1;
-    modal.setAttribute("aria-hidden", "true");
-    document.body.appendChild(modal);
-  }
-  configBackupTreeAllFiles = [];
-  configBackupTreeSearchQuery = "";
-  configBackupExtensionSummaryExpanded = false;
-  configBackupExtensionSummarySort = { key: "size", dir: "desc" };
-  if (configBackupTreeFilterTimer) {
-    clearTimeout(configBackupTreeFilterTimer);
-    configBackupTreeFilterTimer = null;
-  }
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
-      <div class="modal-content themed-modal">
-        <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>Backup Contents</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body" id="configBackupTreeModalBody">
-          <div class="small text-muted mb-2" id="configBackupTreeMeta"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...</div>
-          <div id="configBackupExtensionSummaryContainer"></div>
-          <input type="text" class="form-control form-control-sm mb-2" id="configBackupTreeSearchInput" placeholder="Filter files and folders..." oninput="filterConfigBackupTree(this.value)">
-          <div id="configBackupTreeListContainer"></div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
-        </div>
-      </div>
-    </div>`;
-  modal.querySelector("#configBackupTreeListContainer").addEventListener("click", handleConfigBackupTreeClick);
-  if (window.bootstrap?.Modal) {
-    window.bootstrap.Modal.getOrCreateInstance(modal).show();
-  } else {
-    modal.classList.add("show");
-    modal.style.display = "block";
-  }
-  const meta = document.getElementById("configBackupTreeMeta");
-  try {
-    const payload = await api(`/admin/config-backups/${encodeURIComponent(backupId)}/tree`);
-    if (!document.body.contains(meta)) return;
-    if (payload.status !== "ok") {
-      const modalBody = document.getElementById("configBackupTreeModalBody");
-      if (modalBody) modalBody.innerHTML = `<div class="text-danger small">Failed to read this archive: ${escapeHtml(payload.error || payload.status || "unknown error")}</div>`;
-      return;
-    }
-    configBackupTreeAllFiles = payload.files || [];
-    meta.innerHTML = `${configBackupTreeAllFiles.length} file${configBackupTreeAllFiles.length === 1 ? "" : "s"}, ${formatBytes(payload.size_bytes || 0)} compressed`;
-    document.getElementById("configBackupExtensionSummaryContainer").innerHTML =
-      renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded);
-    document.getElementById("configBackupTreeListContainer").innerHTML = renderConfigBackupTreeListContainer();
-  } catch (err) {
-    const modalBody = document.getElementById("configBackupTreeModalBody");
-    if (modalBody && document.body.contains(modalBody)) {
-      modalBody.innerHTML = `<div class="text-danger small">Failed to load contents: ${escapeHtml(err.message || "unknown error")}</div>`;
-    }
-  }
-}
-
-function openApplyConfigBackupModal(backupId) {
-  const row = (configBackupsLastPayload || []).find((item) => Number(item.id) === Number(backupId));
-  const displayName = row ? (row.name || row.file_name || "") : "";
-  const modalId = "configBackupApplyModal";
-  let modal = document.getElementById(modalId);
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = modalId;
-    modal.className = "modal fade";
-    modal.tabIndex = -1;
-    modal.setAttribute("aria-hidden", "true");
-    document.body.appendChild(modal);
-  }
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content themed-modal">
-        <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Apply Backup to This Drone</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <p>This will extract <strong>${escapeHtml(displayName || "this backup")}</strong> onto this machine. Every file the backup contains overwrites the matching file here (<code>batocera.conf</code>, specific <code>system/configs</code> settings, a system's <code>gamelist.xml</code>, custom scripts, specific saves). Nothing is deleted -- anything on this Drone that isn't part of this particular backup (other emulators' configs, other saves) is left exactly as it is.</p>
-          <p>EmulationStation (and any running game) will be stopped during the copy and restarted afterward.</p>
-          <div class="alert alert-danger py-2 small mb-3"><strong>This cannot be undone.</strong> Whatever is currently in the files this backup targets will be permanently replaced.</div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="applyConfigBackupAck" onchange="document.getElementById('applyConfigBackupConfirmBtn').disabled = !this.checked">
-            <label class="form-check-label small" for="applyConfigBackupAck">I understand this will overwrite the specific files in this backup, and cannot be undone.</label>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-danger" id="applyConfigBackupConfirmBtn" onclick="confirmApplyConfigBackup(${Number(backupId)})" disabled><i class="bi bi-arrow-repeat me-1"></i>Apply Backup</button>
-        </div>
-      </div>
-    </div>`;
-  if (window.bootstrap?.Modal) {
-    window.bootstrap.Modal.getOrCreateInstance(modal).show();
-  } else {
-    modal.classList.add("show");
-    modal.style.display = "block";
-  }
-}
-
-async function confirmApplyConfigBackup(backupId) {
-  const button = document.getElementById("applyConfigBackupConfirmBtn");
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Applying...';
-  }
-  try {
-    const result = await apiPost(`/admin/config-backups/${encodeURIComponent(backupId)}/apply`, {});
-    if (result.status === "not_found") {
-      showToast("That backup no longer exists.", "warning");
-      return;
-    }
-    if (result.status === "error") {
-      showToast(`Failed to apply backup: ${escapeHtml(result.error || "unknown error")}`, "danger", 10000);
-      return;
-    }
-    const modal = document.getElementById("configBackupApplyModal");
-    if (window.bootstrap?.Modal && modal) {
-      window.bootstrap.Modal.getOrCreateInstance(modal).hide();
-    } else if (modal) {
-      modal.classList.remove("show");
-      modal.style.display = "none";
-    }
-    const restarted = result.restarted_emulationstation ? "EmulationStation was restarted." : "";
-    showToast(`Backup applied: ${Number(result.restored_file_count || 0)} file(s) restored. ${restarted}`.trim(), "success", 8000);
-  } catch (err) {
-    showToast(`Failed to apply backup: ${escapeHtml(err.message || "unknown error")}`, "danger", 10000);
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Apply Backup';
-    }
-  }
-}
 
 // The poll runs every few seconds; with thousands of queued jobs the full
 // snapshot (queue listed twice) is megabytes, so ask for the compact shape and
@@ -1916,6 +1310,7 @@ function renderAssetTypeSwitcher(active) {
     ["systems", "Games", "bi-grid", "#systems"],
     ["movies", "Movies", "bi-film", "#movies"],
     ["music", "Music", "bi-music-note-beamed", "#music"],
+    ...(adminEnabled ? [["backups", "Backups", "bi-archive", "#backups"]] : []),
   ];
   return `
     <div class="asset-type-switcher">
@@ -5717,10 +5112,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/config-backups')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/backups')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-archive me-2"></i>Backups</h5>
-            <p class="card-text">Bundle Batocera + emulator settings, gamelist.xml, saves, and custom scripts into a downloadable archive.</p>
+            <p class="card-text">Back up Batocera, EmulationStation and emulator settings, saves and save states by category, then restore known-good setups. Paired Drones can share them.</p>
           </div>
         </div>
       </div>
@@ -8157,7 +7552,7 @@ const SMTP_EVENT_TYPES = [
   ["asset_downloaded", "Asset downloaded (pulled from a peer)"],
   ["torrent_completed", "Torrent download completed"],
   ["drone_updated", "Drone app updated"],
-  ["config_backup_applied", "Config backup applied to this machine"],
+  ["backup_restored", "Backup restored on this machine"],
   ["torrent_move_started", "Moving downloaded torrent files started"],
   ["torrent_move_resuming", "Moving downloaded torrent files resumed after interruption"],
   ["torrent_move_failed", "Moving downloaded torrent files failed"],
@@ -9292,12 +8687,12 @@ function localAssetDetail(item) {
   return date ? formatCompactLocalDate(date) : (item.duration || item.emulator || "");
 }
 
-const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "saves", "movies", "config_backups"]);
-// Movies and config backups have no system or artwork association at all
+const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "saves", "movies"]);
+// Movies have no system or artwork association at all
 // (unlike ROMs/BIOS/saves), so the Systems filter is meaningless for them and
 // gets grayed out instead of just staying populated-but-inert like it does
 // for the other flat types.
-const LOCAL_SYSTEMLESS_TYPES = new Set(["movies", "config_backups"]);
+const LOCAL_SYSTEMLESS_TYPES = new Set(["movies"]);
 
 function localAssetNativeLabel(key) {
   return String(key || "")
@@ -10237,7 +9632,7 @@ async function renderLocalTransferRequestPanel(target) {
         <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, saves, and movies can be copied here; emulator configs and gameplay history are available for inspection.</div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-3"><label class="form-label small" for="localAssetPeer">Connected Drone</label><select id="localAssetPeer" class="form-select"></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="movies">Movies</option><option value="config_backups">Config Backups</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
+          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="movies">Movies</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
           <div class="col-6 col-lg-2" id="localAssetSystemsWrap"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Request assets to load systems.</div></div></div></div>
           <div class="col-8 col-lg-3"><label class="form-label small" for="localAssetQuery">Search</label><input id="localAssetQuery" class="form-control" placeholder="Search assets"></div>
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
@@ -10679,7 +10074,7 @@ function localBulkBody({ peerId, type, systems = [], system = "", q = "" }) {
 
 function localBulkNoun(body) {
   if (body.asset_type === "roms") return body.include_roms ? "games" : "artwork files";
-  return { artwork: "artwork files", bios: "BIOS files", saves: "save files", movies: "videos", config_backups: "config backups" }[body.asset_type] || "files";
+  return { artwork: "artwork files", bios: "BIOS files", saves: "save files", movies: "videos" }[body.asset_type] || "files";
 }
 
 function localBulkIncludesText(body) {
@@ -10794,7 +10189,7 @@ async function copyAllLocalAssets() {
   const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
-  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, saves, movies, and config backups.", "warning"); return; }
+  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, saves, and movies.", "warning"); return; }
   const includeRoms = type !== "roms" || localAssetIncludeRoms();
   if (type === "roms" && !includeRoms && !localAssetIncludeArtwork()) {
     showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
@@ -12632,8 +12027,8 @@ async function router(retryDepth = 0) {
     if (hash !== "#admin/torrents") {
       stopTorrentsAutoRefresh();
     }
-    if (hash !== "#admin/config-backups") {
-      stopConfigBackupsAutoRefresh();
+    if (hash !== "#admin/backups" && typeof stopBackupsAutoRefresh === "function") {
+      stopBackupsAutoRefresh();
     }
     if (hash !== "#admin/vpn") {
       stopVpnAutoRefresh();
@@ -12855,11 +12250,21 @@ async function router(retryDepth = 0) {
       }
       await renderTorrentsPage();
     } else if (hash === "#admin/config-backups") {
+      // Retired single-archive Config Backups page.
+      setHash("#admin/backups");
+      return;
+    } else if (hash === "#admin/backups") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      await renderConfigBackupsPage();
+      await renderBackupsAdminPage();
+    } else if (hash === "#backups") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderBackupsAssetsPage();
     } else if (hash === "#admin/vpn") {
       if (!adminEnabled) {
         setHash("");

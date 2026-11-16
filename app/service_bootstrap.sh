@@ -90,6 +90,7 @@ validate_local_app() {
     "$WORK_DIR/app/web/api_routes.py" \
     "$WORK_DIR/app/web/ui_routes.py" \
     "$WORK_DIR/app/web/route_config.py" \
+    "$WORK_DIR/app/apply_backup.py" \
     "$WORK_DIR/app/web/static/js/integrations.js" \
     "$WORK_DIR/app/web/handlers_integrations.py" \
     "$WORK_DIR/app/integrations/__init__.py" \
@@ -277,11 +278,11 @@ set_es_collections_as_root() {
   python3 "$helper" "$request_file"
 }
 
-apply_config_backup_as_root() {
+apply_backup_as_root() {
   request_file="$1"
-  helper="$WORK_DIR/app/apply_config_backup.py"
+  helper="$WORK_DIR/app/apply_backup.py"
   if [ ! -f "$helper" ]; then
-    echo "[drone-service] Unable to apply config backup: helper was not found."
+    echo "[drone-service] Unable to restore backup: helper was not found."
     return 1
   fi
   python3 "$helper" "$request_file"
@@ -415,21 +416,22 @@ service_control_worker() {
       rm -f "$collections_request"
       echo "[drone-service] ES collections update result: ${collections_output}"
     fi
-    apply_backup_request="$CONTROL_DIR/apply-config-backup.request"
-    apply_backup_result="$CONTROL_DIR/apply-config-backup.result"
+    apply_backup_request="$CONTROL_DIR/apply-backup.request"
+    apply_backup_result="$CONTROL_DIR/apply-backup.result"
     if [ -f "$apply_backup_request" ]; then
       # Same "keep the request file in place until the helper returns" reasoning
-      # as the ES collections case above -- this can take a while (EmulationStation
-      # stop/start plus extracting saves), and the loop is single-threaded/synchronous.
+      # as the ES collections case above -- a restore stops EmulationStation,
+      # copies files and restarts it, and this loop is single-threaded. The helper
+      # writes its detailed JSON result to the path named in the request.
       rm -f "$apply_backup_result"
-      echo "[drone-service] Config backup restore requested by Drone app."
-      if apply_backup_output="$(apply_config_backup_as_root "$apply_backup_request" 2>&1)"; then
+      echo "[drone-service] Backup restore requested by Drone app."
+      if apply_backup_output="$(apply_backup_as_root "$apply_backup_request" 2>&1)"; then
         printf '%s\n' "ok" > "$apply_backup_result"
       else
-        printf 'Privileged config backup restore failed: %s\n' "$(printf '%s' "$apply_backup_output" | tr '\n' ' ' | cut -c1-300)" > "$apply_backup_result"
+        printf 'Privileged backup restore failed: %s\n' "$(printf '%s' "$apply_backup_output" | tr '\n' ' ' | cut -c1-300)" > "$apply_backup_result"
       fi
       rm -f "$apply_backup_request"
-      echo "[drone-service] Config backup restore result: ${apply_backup_output}"
+      echo "[drone-service] Backup restore result: ${apply_backup_output}"
     fi
     sleep 1
   done

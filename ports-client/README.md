@@ -30,14 +30,36 @@ Movies & Shows, and Music across every online paired Drone at once, filter
 by System or Drone, hide locally owned items, pull individual items or
 Download All with live queue progress), VPN (status,
 Connect/Disconnect, credentials, sharing, and getting a config onto the
-device -- see "Full controller navigation" below), and Backups (list,
-Create, and Apply/restore -- see "Backup restore" below). Deliberately
+device -- see "Full controller navigation" below), and Backups (search
+backups on every online Drone, copy one here, preview and restore it, roll
+back from a safety snapshot -- see "Categorized backups" below). Deliberately
 **not** built anywhere a gamepad-only console UI still has no good answer:
 VPN config upload via a file-picker dialog (the two Get Config flows below
-cover this without one), Backups download/delete/email (nowhere on the
-console to save a downloaded file to, and delete/email are lower-value
+cover this without one), Backups archive download/rename/delete (nowhere on the
+console to save a downloaded file to, and rename/delete are lower-value
 from a controller), and Tailnet/Local Network peer *management* --
 rotate-auth-key, sharing toggles, pull-from-peer, forget/dismiss.
+
+## Categorized backups (2026-11-16)
+
+The old single-archive Config Backups (`/admin/config-backups`) were replaced
+by categorized backups (`/admin/backups`, see `app/backups/`). The Backups
+screen has two tabs:
+
+- **Find Backups** searches this Drone and every online paired Drone
+  (`GET /admin/backups/swarm?q=`). A peer's backup can be copied here
+  through the normal transfer queue (verified by SHA-256 on arrival), or
+  copied and then restored in one step; copy progress is polled from
+  `/admin/downloads` on a daemon thread so frames keep rendering.
+- **This Drone** creates a backup of everything, restores one, or rolls back
+  a restore from its automatic safety snapshot.
+
+The restore popup picks parts (grouped checkboxes), Overlay or Exact, and
+optionally this machine's display/audio/network keys; Preview asks the Drone
+what would change (`POST /admin/backups/{id}/plan`), compatibility warnings
+must be acknowledged, and the popup states that running games -- including
+this Ports app -- close and EmulationStation restarts. The sections below that
+mention `/admin/config-backups` describe the retired feature.
 
 ## Search Assets, Download progress, Download All, and global loading state
 

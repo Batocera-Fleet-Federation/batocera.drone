@@ -6104,7 +6104,7 @@
       "disruptive": false,
       "enabled": true,
       "id": "adversarial-issue-739-peer-asset-on-machine-uat",
-      "name": "Issue #739: peer asset search flags BIOS, saves, movies, and backups already on this machine",
+      "name": "Issue #739: peer asset search flags BIOS, saves, and movies already on this machine",
       "origin": "adversarial",
       "requirements": {
         "credentials": [],
