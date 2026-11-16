@@ -46,6 +46,11 @@ CONFIG_TEXT_EXTENSIONS = frozenset({
 })
 SCRIPT_DIRS = ("custom", "custom-scripts", "scripts")
 CACHE_DIR_NAMES = frozenset({"cache", "mesa_shader_cache", "shader_cache", "shadercache", "radv_builtin_shaders"})
+# Rebuilt automatically by the emulator: MAME's software-list hash cache and the
+# yuzu-family (yuzu/Eden/Citron/Sudachi) game list cache, which they also copy into saves.
+CACHE_FILE_NAMES = frozenset({"mess_hash_cache.json", "game_metadata_cache.json"})
+# Only under system/configs/<emulator>/: the yuzu-family game list cache folder.
+CONFIG_CACHE_DIR_NAMES = frozenset({"game_list"})
 DISK_IMAGE_EXTENSIONS = frozenset({".qcow2", ".vdi", ".vmdk", ".img", ".iso"})
 # Vita3K firmware/system partitions; real game saves live under ux0.
 EMULATED_OS_DIR_NAMES = frozenset({"vs0", "sa0", "os0", "vd0", "pd0"})
@@ -207,6 +212,10 @@ def _excluded_reason(root: str, dir_parts: Tuple[str, ...], name: str) -> Option
         return "Drone staging folder"
     if any(part in CACHE_DIR_NAMES for part in lowered):
         return "cache directory"
+    if name.lower() in CACHE_FILE_NAMES:
+        return "emulator cache file"
+    if root == "system" and lowered[:1] == ["configs"] and any(part in CONFIG_CACHE_DIR_NAMES for part in lowered[2:3]):
+        return "cache directory"
     if root == "saves":
         if any(part in EMULATED_OS_DIR_NAMES for part in lowered):
             return "emulated firmware/system partition"
@@ -276,12 +285,16 @@ def _subtree_wanted(root: str, parts: Tuple[str, ...], wanted: Optional[Set[str]
     return True
 
 
-def collect(roots: Roots, categories: Optional[Iterable[str]] = None) -> Collection:
-    """Every backup-eligible file on this machine, optionally limited to ``categories``."""
+def collect(roots: Roots, categories: Optional[Iterable[str]] = None, include_saves: bool = True) -> Collection:
+    """Every backup-eligible file on this machine, optionally limited to ``categories``.
+
+    ``include_saves=False`` (only meaningful without ``categories``) leaves out the
+    saves and save-state parts -- the default for a new backup.
+    """
     wanted = None if categories is None else set(categories)
     result = Collection()
     for root in ROOT_NAMES:
-        if not _root_wanted(root, wanted):
+        if not _root_wanted(root, wanted) or (wanted is None and not include_saves and root == "saves"):
             continue
         base = roots.path(root)
         try:

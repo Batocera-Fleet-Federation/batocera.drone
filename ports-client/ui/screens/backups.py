@@ -6,7 +6,7 @@ Two tabs:
   (``GET /admin/backups/swarm``). A peer's backup can be copied to this Drone
   through the normal transfer queue (verified on arrival), or copied and then
   restored in one go.
-* **This Drone** -- create a backup of everything, restore one of this Drone's
+* **This Drone** -- create a settings backup (saves are left out by default), restore one of this Drone's
   backups, or roll back a restore from its automatic safety snapshot.
 
 Restores open a gamepad-navigable popup: pick the parts (grouped checkboxes),
@@ -305,7 +305,7 @@ class BackupsScreen(Screen):
         imgui.spacing()
 
     def _draw_local(self) -> None:
-        if imgui.button("Create Backup (everything)##backups_create"):
+        if imgui.button("Create Backup (settings, no saves)##backups_create"):
             self.defer_action("Starting backup...", self._create_backup)
         imgui.begin_child("backups_local_list", imgui.ImVec2(0, _LIST_HEIGHT), True)
         imgui.text_colored(MUTED_COLOR, "BACKUPS")

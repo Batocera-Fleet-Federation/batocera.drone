@@ -230,9 +230,10 @@ def build_archive(
     categories: Optional[Iterable[str]],
     source: dict,
     snapshot_of: Optional[dict] = None,
+    include_saves: bool = True,
 ) -> dict:
     """Write an archive atomically to ``destination``; returns its validated manifest."""
-    collection = _categories.collect(roots, categories)
+    collection = _categories.collect(roots, categories, include_saves=include_saves)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
     files: List[dict] = []

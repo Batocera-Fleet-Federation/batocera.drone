@@ -87,6 +87,23 @@ class CategoryTests(Fixture):
         reasons = {item["path"]: item["reason"] for item in collection.skipped}
         self.assertEqual(reasons["saves/snes/link.srm"], "symbolic link")
 
+    def test_emulator_caches_are_never_collected(self):
+        self.write("saves/mame/mess_hash_cache.json", "{}")
+        self.write("saves/yuzu/game_metadata_cache.json", "{}")
+        self.write("system/configs/yuzu/game_list/game_metadata_cache.json", "{}")
+        self.write("system/configs/yuzu/game_list/0100.pv.txt", "1")
+        self.write("system/configs/yuzu/qt-config.ini", "[UI]\n")
+        paths = {item.arcpath for item in categories.collect(self.roots).files}
+        self.assertIn("system/configs/yuzu/qt-config.ini", paths)
+        for cached in ("saves/mame/mess_hash_cache.json", "saves/yuzu/game_metadata_cache.json",
+                       "system/configs/yuzu/game_list/game_metadata_cache.json", "system/configs/yuzu/game_list/0100.pv.txt"):
+            self.assertNotIn(cached, paths)
+
+    def test_settings_only_collection_leaves_saves_out(self):
+        files = {item.category for item in categories.collect(self.roots, include_saves=False).files}
+        self.assertFalse(any(c.startswith(("saves:", "states:")) for c in files))
+        self.assertIn("batocera", files)
+
     def test_selected_categories_limit_the_walk(self):
         files = categories.collect(self.roots, ["states:snes"]).files
         self.assertEqual({item.arcpath for item in files}, {"saves/snes/Mario.state1", "saves/snes/Mario.state1.png"})
@@ -392,6 +409,14 @@ class ServiceTests(Fixture):
         self.assertNotIn("files", shared[0])
         with self.assertRaises(service.BackupError):
             service.peer_archive(self.settings, listing["snapshots"][0]["backup_id"])
+
+    def test_default_backup_is_settings_only_but_saves_can_be_chosen(self):
+        default = service.create_backup(self.settings, wait=True)
+        cats = {c["id"] for c in default["categories"]}
+        self.assertIn("batocera", cats)
+        self.assertFalse(any(c.startswith(("saves:", "states:")) for c in cats))
+        chosen = service.create_backup(self.settings, categories=["saves:snes"], wait=True)
+        self.assertEqual([c["id"] for c in chosen["categories"]], ["saves:snes"])
 
     def test_only_one_user_backup_builds_at_a_time(self):
         service._ACTIVE_BUILDS["f" * 32] = "backup"

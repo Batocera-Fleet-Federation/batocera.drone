@@ -410,9 +410,12 @@ identity and is kept when a peer copies it. Categories: `batocera`, `emulationst
   snapshot (`kind="snapshot"`, newest 5 kept, never shared) is taken first; rollback restores
   previously-empty categories via `with_extra_categories`. Non-root runs go through the privileged
   worker (`apply-backup.request`/`.result` in `service_bootstrap.sh`).
+- **Defaults:** a create request without `categories` is settings-only (`collect(include_saves=False)`);
+  saves/states move per game via the ROM Saves card and are opt-in in both create UIs. Emulator caches
+  (`CACHE_FILE_NAMES`, yuzu-family `configs/<emu>/game_list`) are never collected.
 - **Partial restores:** `paths` (files or folder prefixes, ≤5000, each must match a backup file) narrows only
   the categories it touches (`restore.Selection`); other selected categories restore whole, and Exact-mode
-  removals stay under the chosen paths. The browser's Contents view is the picker. Admin path segments
+  removals stay under the chosen paths. The browser's Contents view is the picker (a folder tree; fully ticked folders are sent as one folder path). Admin path segments
   arrive percent-encoded from the router — `handlers_backups._segments` decodes them (Drone ids).
 - Compatibility differences (Batocera major, architecture, board, foreign scripts) need
   `acknowledge_warnings`; otherwise 409 with `warnings`.

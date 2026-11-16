@@ -225,12 +225,12 @@ def _clean_categories(values: Any) -> Optional[List[str]]:
 
 
 def _build(settings: Any, backup_id: str, *, kind: str, name: str, description: str,
-           categories: Optional[List[str]], snapshot_of: Optional[dict]) -> dict:
+           categories: Optional[List[str]], snapshot_of: Optional[dict], include_saves: bool = True) -> dict:
     try:
         manifest = _archive.build_archive(
             _categories.Roots.from_settings(settings), archive_path(settings, backup_id),
             backup_id=backup_id, kind=kind, name=name, description=description, categories=categories,
-            source=source_info(settings), snapshot_of=snapshot_of)
+            source=source_info(settings), snapshot_of=snapshot_of, include_saves=include_saves)
         _archive.write_sidecar(manifest_path(settings, backup_id), manifest)
         path = archive_path(settings, backup_id)
         _store.mark_complete(settings, backup_id, manifest, size_bytes=path.stat().st_size,
@@ -266,7 +266,10 @@ def create_backup(settings: Any, *, name: str = "", description: str = "", categ
         with _LOCK:
             _ACTIVE_BUILDS.pop(backup_id, None)
         raise
-    options = dict(kind=kind, name=name, description=description, categories=chosen, snapshot_of=snapshot_of)
+    # Without an explicit choice a backup holds settings only: saves and save states are
+    # large and move per game through each ROM's Saves & Saved States card instead.
+    options = dict(kind=kind, name=name, description=description, categories=chosen, snapshot_of=snapshot_of,
+                   include_saves=chosen is not None or kind != "backup")
     if wait:
         _build(settings, backup_id, **options)
         return _store.get(settings, backup_id) or row

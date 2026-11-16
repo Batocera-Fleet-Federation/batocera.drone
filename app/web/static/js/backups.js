@@ -176,7 +176,7 @@ async function renderBackupsAdminPage() {
         </div>
       </div>
       <div class="card-body">
-        <p class="text-muted small mb-3">A backup holds the parts you choose: <code>batocera.conf</code>, EmulationStation settings and collections, controller mappings and RetroArch remaps, RetroArch and each standalone emulator's settings, cheats, game lists, custom scripts, and per-system saves and save states. Passwords, Wi-Fi keys and API tokens are never included. ROMs, BIOS files, firmware and caches are not backed up. Paired Drones can see and download your backups from their Backups page.</p>
+        <p class="text-muted small mb-3">A backup holds the parts you choose: <code>batocera.conf</code>, EmulationStation settings and collections, controller mappings and RetroArch remaps, RetroArch and each standalone emulator's settings, cheats, game lists and custom scripts, plus per-system saves and save states if you tick them. Passwords, Wi-Fi keys and API tokens are never included. ROMs, BIOS files, firmware and caches are not backed up. Paired Drones can see and download your backups from their Backups page.</p>
         <div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table bff-stack">
           <thead><tr><th>Name</th><th>Created</th><th>Contents</th><th>Size</th><th class="download-actions">Actions</th></tr></thead>
           <tbody id="bkAdminBody">${bkAdminRows(payload.backups || [], false)}</tbody>
@@ -284,7 +284,8 @@ async function bkOpenCreate() {
         <span class="small fw-semibold">What to include <span class="text-muted fw-normal">(${categories.length} parts, about ${formatBytes(total)} before compression)</span></span>
         <span><button class="btn btn-link btn-sm p-0 me-2" onclick="bkSetAll('bkCreateList', true)">All</button><button class="btn btn-link btn-sm p-0" onclick="bkSetAll('bkCreateList', false)">None</button></span>
       </div>
-      <div id="bkCreateList" class="bk-checklist border rounded p-2" style="max-height: 45vh; overflow:auto">${categories.length ? bkCategoryChecklist(categories, "bkc") : '<div class="text-muted small">Nothing to back up was found.</div>'}</div>
+      <div id="bkCreateList" class="bk-checklist border rounded p-2" style="max-height: 45vh; overflow:auto">${categories.length ? bkCategoryChecklist(categories, "bkc", new Set(categories.filter((c) => !["saves", "states"].includes(c.group)).map((c) => c.id))) : '<div class="text-muted small">Nothing to back up was found.</div>'}</div>
+      <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Saves and save states are not ticked by default: they are large, and a game's saves can be copied between Drones from its page (Saves &amp; Saved States). Tick them to include them.</div>
       ${data.skipped_count ? `<div class="small text-muted mt-2">${Number(data.skipped_count)} file(s) are always left out (caches, links, firmware and oversized files).</div>` : ""}
     </div>
     <div class="modal-footer">
@@ -382,7 +383,11 @@ async function bkOpenContents(droneId, backupId, preset = null) {
     if (!byCategory.has(file.category)) byCategory.set(file.category, []);
     byCategory.get(file.category).push(file);
   }
-  BK.contents = { data, droneId: isLocalDrone ? null : droneId, backupId, byCategory, filter: "" };
+  const nodes = new Map();
+  const trees = new Map();
+  for (const [category, list] of byCategory.entries()) trees.set(category, bkBuildTree(category, list, nodes));
+  BK.contents = { data, droneId: isLocalDrone ? null : droneId, backupId, byCategory, trees, nodes, open: new Set(), filter: "" };
+  if (trees.size === 1) BK.contents.open.add(trees.values().next().value.id);
   BK.pick = { whole: new Set(preset?.categories || []), files: new Set(preset?.paths || []) };
   const warnings = backup.compatibility?.warnings || [];
   const modal = document.getElementById("bkContentsModal");
@@ -398,7 +403,7 @@ async function bkOpenContents(droneId, backupId, preset = null) {
       <button class="btn btn-sm btn-outline-secondary" id="bkUnpickMatching" onclick="bkPickMatching(false)" disabled>Clear matching</button>
       <button class="btn btn-sm btn-outline-secondary" onclick="bkPickAll(false)">Clear all</button>
     </div>
-    <div id="bkContentsTree" onchange="bkContentsChanged(event)"></div>
+    <div id="bkContentsTree" class="bk-tree" role="tree" onchange="bkContentsChanged(event)" onclick="bkTreeClick(event)"></div>
     ${(data.skipped || []).length ? `<details class="mt-2"><summary class="small text-muted">${Number(backup.skipped_count || data.skipped.length)} file(s) were left out</summary><ul class="small">${data.skipped.map((s) => `<li><code>${escapeHtml(s.path)}</code> ${escapeHtml(s.reason)}</li>`).join("")}</ul></details>` : ""}`;
   let footer = modal.querySelector(".modal-footer");
   if (!footer) {
@@ -419,69 +424,185 @@ function bkVisibleFiles(category) {
   return needle ? list.filter((f) => f.path.toLowerCase().includes(needle)) : list;
 }
 
-function bkCategoryState(category) {
-  if (BK.pick.whole.has(category)) return "all";
-  const list = BK.contents.byCategory.get(category) || [];
-  const picked = list.filter((f) => BK.pick.files.has(f.path)).length;
-  return picked === 0 ? "none" : picked === list.length ? "all" : "some";
+// Folder tree per part. Single-child folder chains are merged ("nand/user/save") to keep
+// it compact; folders render only when opened, and at most BK_TREE_FILE_LIMIT files
+// per folder.
+const BK_TREE_FILE_LIMIT = 400;
+
+function bkBuildTree(category, files, nodes) {
+  const split = files.map((f) => f.path.split("/"));
+  let prefix = split.length ? split[0].slice(0, -1) : [];
+  for (const parts of split) {
+    let i = 0;
+    while (i < prefix.length && i < parts.length - 1 && parts[i] === prefix[i]) i += 1;
+    prefix = prefix.slice(0, i);
+  }
+  const make = (name, path, category, depth) => {
+    const node = { id: `n${nodes.size}`, name, path, category, dirs: new Map(), files: [], fileCount: 0, size: 0, depth };
+    nodes.set(node.id, node);
+    return node;
+  };
+  const root = make(category, prefix.join("/"), category, 0);
+  root.isCategory = true;
+  for (const file of files) {
+    const parts = file.path.split("/").slice(prefix.length);
+    let node = root;
+    for (const dir of parts.slice(0, -1)) {
+      if (!node.dirs.has(dir)) node.dirs.set(dir, make(dir, node.path ? `${node.path}/${dir}` : dir, category, 0));
+      node = node.dirs.get(dir);
+    }
+    node.files.push(Object.assign({ name: parts[parts.length - 1] }, file));
+  }
+  const finish = (node, depth) => {
+    const merged = new Map();
+    for (let child of node.dirs.values()) {
+      while (child.dirs.size === 1 && !child.files.length) {
+        const only = child.dirs.values().next().value;
+        only.name = `${child.name}/${only.name}`;
+        nodes.delete(child.id);
+        child = only;
+      }
+      merged.set(child.name, child);
+    }
+    node.dirs = new Map(Array.from(merged.entries()).sort((x, y) => x[0].localeCompare(y[0], undefined, { numeric: true })));
+    node.files.sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
+    node.depth = depth;
+    node.fileCount = node.files.length;
+    node.size = node.files.reduce((sum, f) => sum + Number(f.size || 0), 0);
+    for (const child of node.dirs.values()) {
+      finish(child, depth + 1);
+      node.fileCount += child.fileCount;
+      node.size += child.size;
+    }
+  };
+  finish(root, 0);
+  return root;
+}
+
+function bkNodePaths(node) {
+  if (!node.allPaths) {
+    node.allPaths = node.files.map((f) => f.path);
+    for (const child of node.dirs.values()) node.allPaths.push(...bkNodePaths(child));
+  }
+  return node.allPaths;
+}
+
+function bkNodePicked(node) {
+  if (BK.pick.whole.has(node.category)) return node.fileCount;
+  let count = 0;
+  for (const path of bkNodePaths(node)) if (BK.pick.files.has(path)) count += 1;
+  return count;
+}
+
+function bkNodeMatches(node) {
+  const filter = BK.contents.filter;
+  if (!filter) return node.fileCount;
+  if (node.matchFilter !== filter) {
+    node.matchFilter = filter;
+    node.matchCount = bkNodePaths(node).filter((p) => p.toLowerCase().includes(filter)).length;
+  }
+  return node.matchCount;
+}
+
+function bkTreeCheckbox(attrs, picked, total, label) {
+  const state = picked === 0 ? "" : picked === total ? "checked" : "";
+  const partial = picked > 0 && picked < total ? 1 : 0;
+  return `<input class="form-check-input" type="checkbox" ${attrs} ${state} data-indeterminate="${partial}" aria-label="${escapeHtml(label)}">`;
+}
+
+function bkTreeRows(node, out) {
+  const filter = BK.contents.filter;
+  const labels = BK.contents.labels;
+  const open = filter ? bkNodeMatches(node) > 0 : BK.contents.open.has(node.id);
+  const picked = bkNodePicked(node);
+  const label = node.isCategory ? (labels.get(node.category) || node.category) : node.name;
+  const meta = `${filter ? `${bkNodeMatches(node)} of ` : ""}${node.fileCount} file${node.fileCount === 1 ? "" : "s"} · ${formatBytes(node.size)}${picked && picked < node.fileCount ? ` · ${picked} selected` : ""}`;
+  out.push(`<div class="bk-tree-row ${node.isCategory ? "bk-tree-cat" : ""}" role="treeitem" aria-expanded="${open}" style="--depth:${node.depth}">
+    <button type="button" class="bk-tree-caret" data-toggle="${node.id}" aria-label="${open ? "Collapse" : "Expand"} ${escapeHtml(label)}"><i class="bi bi-chevron-right"></i></button>
+    ${bkTreeCheckbox(`data-node="${node.id}"`, picked, node.fileCount, `Restore ${label}`)}
+    <i class="bi ${node.isCategory ? "bi-collection" : open ? "bi-folder2-open" : "bi-folder2"} bk-tree-icon"></i>
+    <span class="bk-tree-name" data-toggle="${node.id}" title="${escapeHtml(node.path || label)}">${escapeHtml(label)}${node.isCategory && node.path ? ` <span class="bk-tree-path">${escapeHtml(node.path)}/</span>` : ""}</span>
+    <span class="bk-tree-meta">${meta}</span></div>`);
+  if (!open) return;
+  for (const child of node.dirs.values()) {
+    if (!filter || bkNodeMatches(child)) bkTreeRows(child, out);
+  }
+  const files = filter ? node.files.filter((f) => f.path.toLowerCase().includes(filter)) : node.files;
+  const whole = BK.pick.whole.has(node.category);
+  for (const file of files.slice(0, BK_TREE_FILE_LIMIT)) {
+    out.push(`<div class="bk-tree-row bk-tree-file" role="treeitem" style="--depth:${node.depth + 1}">
+      <span class="bk-tree-spacer"></span>
+      <input class="form-check-input bk-pick-file" type="checkbox" data-cat="${escapeHtml(file.category)}" data-path="${escapeHtml(file.path)}" ${whole || BK.pick.files.has(file.path) ? "checked" : ""} aria-label="Restore ${escapeHtml(file.path)}">
+      <i class="bi bi-file-earmark bk-tree-icon"></i>
+      <span class="bk-tree-name" title="${escapeHtml(file.path)}">${escapeHtml(file.name)}${file.redacted ? ' <span class="badge text-bg-dark" title="Passwords and tokens were removed from this file; this Drone\'s own values are kept on restore.">secrets removed</span>' : ""}</span>
+      <span class="bk-tree-meta">${formatBytes(file.size || 0)}</span></div>`);
+  }
+  if (files.length > BK_TREE_FILE_LIMIT) {
+    out.push(`<div class="bk-tree-row bk-tree-more" style="--depth:${node.depth + 1}"><span class="bk-tree-spacer"></span>…and ${files.length - BK_TREE_FILE_LIMIT} more files. Tick the folder to include them all, or narrow the filter.</div>`);
+  }
 }
 
 function bkRenderContentsTree() {
   const tree = document.getElementById("bkContentsTree");
   if (!tree || !BK.contents) return;
-  const { byCategory, filter } = BK.contents;
-  const labels = new Map((BK.contents.data.backup?.categories || []).map((c) => [c.id, c.label]));
-  const sections = [];
-  let index = 0;
-  for (const [category, all] of byCategory.entries()) {
-    const list = bkVisibleFiles(category);
-    index += 1;
-    if (filter && !list.length) continue;
-    const size = all.reduce((sum, f) => sum + Number(f.size || 0), 0);
-    const shown = list.slice(0, 1500);
-    const state = bkCategoryState(category);
-    const whole = BK.pick.whole.has(category);
-    sections.push(`<div class="accordion-item">
-      <h2 class="accordion-header d-flex align-items-center">
-        <input class="form-check-input ms-3 me-1 flex-shrink-0 bk-pick-cat" type="checkbox" aria-label="Restore all of ${escapeHtml(labels.get(category) || category)}"
-          data-cat="${escapeHtml(category)}" ${state === "all" ? "checked" : ""} data-indeterminate="${state === "some" ? 1 : 0}">
-        <button class="accordion-button ${filter ? "" : "collapsed"} py-2" type="button" data-bs-toggle="collapse" data-bs-target="#bkc-${index}">
-          ${escapeHtml(labels.get(category) || category)} <span class="ms-2 small text-muted">${all.length} files · ${formatBytes(size)}${filter ? ` · ${list.length} match` : ""}</span></button></h2>
-      <div id="bkc-${index}" class="accordion-collapse collapse ${filter ? "show" : ""}"><div class="accordion-body p-2">
-        <table class="table table-sm themed-table mb-0"><tbody>${shown.map((f) => `<tr>
-          <td style="width: 2rem"><input class="form-check-input bk-pick-file" type="checkbox" aria-label="Restore ${escapeHtml(f.path)}" data-cat="${escapeHtml(category)}" data-path="${escapeHtml(f.path)}" ${whole || BK.pick.files.has(f.path) ? "checked" : ""}></td>
-          <td class="small"><code>${escapeHtml(f.path)}</code>${f.redacted ? ' <span class="badge text-bg-dark" title="Passwords and tokens were removed from this file; this Drone\'s own values are kept on restore.">secrets removed</span>' : ""}</td>
-          <td class="small text-end text-nowrap">${formatBytes(f.size || 0)}</td></tr>`).join("")}</tbody></table>
-        ${list.length > shown.length ? `<div class="small text-muted">…and ${list.length - shown.length} more (narrow the filter, or use Select matching)</div>` : ""}
-      </div></div></div>`);
+  BK.contents.labels = new Map((BK.contents.data.backup?.categories || []).map((c) => [c.id, c.label]));
+  const scroller = tree.closest(".modal-body");
+  const top = scroller ? scroller.scrollTop : 0;
+  const out = [];
+  for (const root of BK.contents.trees.values()) {
+    if (!BK.contents.filter || bkNodeMatches(root)) bkTreeRows(root, out);
   }
-  tree.innerHTML = sections.length ? `<div class="accordion themed-accordion">${sections.join("")}</div>` : '<div class="text-muted small">No matching files.</div>';
-  tree.querySelectorAll('.bk-pick-cat[data-indeterminate="1"]').forEach((box) => { box.indeterminate = true; });
+  tree.innerHTML = out.join("") || '<div class="text-muted small p-2">No matching files.</div>';
+  tree.querySelectorAll('input[data-indeterminate="1"]').forEach((box) => { box.indeterminate = true; });
+  if (scroller) scroller.scrollTop = top;
   bkUpdatePickSummary();
+}
+
+function bkTreeClick(event) {
+  const target = event.target.closest("[data-toggle]");
+  if (!target || !BK.contents || BK.contents.filter) return;
+  const id = target.dataset.toggle;
+  if (BK.contents.open.has(id)) BK.contents.open.delete(id);
+  else BK.contents.open.add(id);
+  bkRenderContentsTree();
 }
 
 function bkContentsChanged(event) {
   const box = event.target;
-  if (!BK.contents || !box?.classList) return;
-  const category = box.dataset.cat;
-  if (box.classList.contains("bk-pick-cat")) {
-    for (const f of BK.contents.byCategory.get(category) || []) BK.pick.files.delete(f.path);
-    if (box.checked) BK.pick.whole.add(category);
-    else BK.pick.whole.delete(category);
-  } else if (box.classList.contains("bk-pick-file")) {
-    const path = box.dataset.path;
-    if (BK.pick.whole.has(category)) {
-      // Narrow a whole part to every file except this one.
-      BK.pick.whole.delete(category);
-      for (const f of BK.contents.byCategory.get(category) || []) BK.pick.files.add(f.path);
+  if (!BK.contents || !box?.dataset) return;
+  if (box.dataset.node) {
+    const node = BK.contents.nodes.get(box.dataset.node);
+    if (!node) return;
+    const category = node.category;
+    if (node.isCategory) {
+      for (const path of bkNodePaths(node)) BK.pick.files.delete(path);
+      if (box.checked) BK.pick.whole.add(category);
+      else BK.pick.whole.delete(category);
+    } else {
+      bkUnwhole(category);
+      for (const path of bkNodePaths(node)) {
+        if (box.checked) BK.pick.files.add(path);
+        else BK.pick.files.delete(path);
+      }
+      bkNormalizeCategory(category);
     }
-    if (box.checked) BK.pick.files.add(path);
-    else BK.pick.files.delete(path);
+  } else if (box.dataset.path) {
+    const category = box.dataset.cat;
+    bkUnwhole(category);
+    if (box.checked) BK.pick.files.add(box.dataset.path);
+    else BK.pick.files.delete(box.dataset.path);
     bkNormalizeCategory(category);
   } else {
     return;
   }
   bkRenderContentsTree();
+}
+
+function bkUnwhole(category) {
+  // Turn a whole part into "every file of it" before narrowing it.
+  if (!BK.pick.whole.has(category)) return;
+  BK.pick.whole.delete(category);
+  for (const f of BK.contents.byCategory.get(category) || []) BK.pick.files.add(f.path);
 }
 
 function bkNormalizeCategory(category) {
@@ -521,7 +642,21 @@ function bkPickedSelection() {
   let fileCount = 0;
   for (const category of pick.whole) fileCount += (BK.contents?.byCategory.get(category) || []).length;
   fileCount += pick.files.size;
-  return { categories: Array.from(pick.whole), paths: pick.files.size ? Array.from(pick.files) : null, fileCount };
+  // Send a fully-ticked folder as one folder path rather than every file in it.
+  const paths = [];
+  const emit = (node) => {
+    const picked = bkNodePicked(node);
+    if (!picked) return;
+    if (picked === node.fileCount && !node.isCategory && node.path) { paths.push(node.path); return; }
+    for (const f of node.files) if (pick.files.has(f.path)) paths.push(f.path);
+    for (const child of node.dirs.values()) emit(child);
+  };
+  if (BK.contents?.trees) {
+    for (const [category, root] of BK.contents.trees.entries()) if (!pick.whole.has(category)) emit(root);
+  } else {
+    paths.push(...pick.files);
+  }
+  return { categories: Array.from(pick.whole), paths: paths.length ? paths : null, fileCount };
 }
 
 function bkUpdatePickSummary() {

@@ -2383,3 +2383,96 @@
   table.bff-stack.transfer-table td.download-actions { grid-column: 1 / -1; justify-content: flex-start; text-align: left; width: 100%; white-space: normal; }
   table.bff-stack.transfer-table td.download-actions .btn { margin: 0.15rem 0.3rem 0.15rem 0; }
 }
+
+    /* Backups: compact contents tree / restore picker (backups.js) */
+    .bk-tree {
+      border: 1px solid var(--admin-border);
+      border-radius: 0.5rem;
+      font-size: 0.85rem;
+      overflow: hidden;
+    }
+    .bk-tree-row {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 1.85rem;
+      padding: 0.1rem 0.6rem 0.1rem calc(0.6rem + var(--depth, 0) * 1.15rem);
+      color: var(--admin-text);
+    }
+    .bk-tree-row:hover {
+      background: var(--admin-surface-muted);
+    }
+    .bk-tree-cat {
+      font-weight: 600;
+      background: var(--admin-surface);
+      border-top: 1px solid var(--admin-border);
+    }
+    .bk-tree-cat:first-child {
+      border-top: 0;
+    }
+    .bk-tree-row .form-check-input {
+      margin: 0;
+      flex-shrink: 0;
+    }
+    .bk-tree-caret {
+      width: 1.15rem;
+      flex-shrink: 0;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--admin-muted);
+      line-height: 1;
+    }
+    .bk-tree-caret i {
+      display: inline-block;
+      transition: transform 0.15s ease;
+    }
+    .bk-tree-row[aria-expanded="true"] > .bk-tree-caret i {
+      transform: rotate(90deg);
+    }
+    .bk-tree-spacer {
+      width: 1.15rem;
+      flex-shrink: 0;
+    }
+    .bk-tree-icon {
+      color: var(--admin-muted);
+      flex-shrink: 0;
+    }
+    .bk-tree-row:not(.bk-tree-file) .bk-tree-icon {
+      color: var(--admin-accent-coin);
+    }
+    .bk-tree-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: default;
+    }
+    .bk-tree-row:not(.bk-tree-file) .bk-tree-name {
+      cursor: pointer;
+    }
+    .bk-tree-path {
+      color: var(--admin-muted);
+      font-weight: 400;
+      font-size: 0.75rem;
+      margin-left: 0.35rem;
+    }
+    .bk-tree-meta {
+      color: var(--admin-muted);
+      font-size: 0.75rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .bk-tree-more {
+      color: var(--admin-muted);
+      font-size: 0.75rem;
+    }
+    @media (max-width: 576px) {
+      .bk-tree-row {
+        padding-left: calc(0.4rem + var(--depth, 0) * 0.7rem);
+      }
+      .bk-tree-path {
+        display: none;
+      }
+    }
