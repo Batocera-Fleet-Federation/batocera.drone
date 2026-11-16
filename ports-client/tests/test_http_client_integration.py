@@ -234,6 +234,85 @@ class DroneApiClientIntegrationTests(unittest.TestCase):
             request_asset(client, "not-a-real-peer-id", "roms", {"name": "Chrono Trigger"}, system="snes")
         self.assertIn("paired peer not found", str(ctx.exception))
 
+    def test_swarm_screen_search_assets_and_gamepad_details_against_live_server(self) -> None:
+        from contextlib import ExitStack
+        from unittest import mock
+
+        from ui.screens import swarm as swarm_module
+        from ui.screens.swarm import SwarmScreen
+
+        client = self._client()
+        client.login(USERNAME, PASSWORD)
+
+        screen = SwarmScreen(client)
+        screen._queue_tab(swarm_module._TAB_SEARCH, "Search Assets")
+        screen.wait_for_deferred_action(timeout=5)
+        self.assertEqual(screen.tab, swarm_module._TAB_SEARCH)
+        self.assertIsNone(screen.browse_error)
+
+        # Ensure a focused row is present (live server has no paired peers in isolated temp state).
+        if not screen.browse_items:
+            screen.browse_items = [
+                {
+                    "display_title": "Chrono Trigger",
+                    "name": "Chrono Trigger",
+                    "system": "snes",
+                    "file_path": "snes/Chrono Trigger.zip",
+                    "file_size": 4194304,
+                    "drone_id": "missing-peer-id",
+                    "drone_name": "LivingRoom",
+                    "exists_locally": False,
+                }
+            ]
+        screen.focused_row_index = 0
+
+        imgui = swarm_module.imgui
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(swarm_module, "search_box", return_value=("", False)))
+            stack.enter_context(mock.patch.object(swarm_module, "tab_button"))
+            stack.enter_context(mock.patch.object(imgui, "checkbox", return_value=(False, False)))
+            stack.enter_context(mock.patch.object(imgui, "begin_combo", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "button", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "get_scroll_max_y", return_value=0.0))
+            stack.enter_context(mock.patch.object(imgui, "is_popup_open", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "selectable", return_value=(False, False)))
+            stack.enter_context(mock.patch.object(imgui, "is_item_focused", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "begin_popup_modal", return_value=(True, True)))
+            stack.enter_context(
+                mock.patch.object(
+                    imgui,
+                    "is_key_pressed",
+                    side_effect=lambda key, *a: key == imgui.Key.gamepad_face_up,
+                )
+            )
+            screen._draw_search()
+
+        self.assertIs(screen.details_item, screen.browse_items[0])
+
+        # Pressing X (gamepad_face_left) on the focused row queues a real POST /admin/local-network/sync
+        # request to the live server when no popup is open.
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(swarm_module, "search_box", return_value=("", False)))
+            stack.enter_context(mock.patch.object(swarm_module, "tab_button"))
+            stack.enter_context(mock.patch.object(imgui, "checkbox", return_value=(False, False)))
+            stack.enter_context(mock.patch.object(imgui, "begin_combo", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "button", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "get_scroll_max_y", return_value=0.0))
+            stack.enter_context(mock.patch.object(imgui, "is_popup_open", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "selectable", return_value=(False, False)))
+            stack.enter_context(mock.patch.object(imgui, "is_item_focused", return_value=False))
+            stack.enter_context(mock.patch.object(imgui, "begin_popup_modal", return_value=(False, True)))
+            stack.enter_context(
+                mock.patch.object(
+                    imgui,
+                    "is_key_pressed",
+                    side_effect=lambda key, *a: key == imgui.Key.gamepad_face_left,
+                )
+            )
+            screen._draw_search()
+        screen.wait_for_deferred_action(timeout=5)
+        self.assertIn("paired peer not found", screen.request_message or "")
+
 
 if __name__ == "__main__":
     unittest.main()
