@@ -377,7 +377,8 @@ async function bkOpenContents(droneId, backupId, preset = null) {
     return;
   }
   const backup = data.backup || {};
-  const files = data.files || [];
+  // Older backups may hold Batocera's empty-folder markers; restores skip them.
+  const files = (data.files || []).filter((f) => !/(^|\/)\.(git)?keep$/i.test(f.path));
   const byCategory = new Map();
   for (const file of files) {
     if (!byCategory.has(file.category)) byCategory.set(file.category, []);

@@ -99,6 +99,14 @@ class CategoryTests(Fixture):
                        "system/configs/yuzu/game_list/game_metadata_cache.json", "system/configs/yuzu/game_list/0100.pv.txt"):
             self.assertNotIn(cached, paths)
 
+    def test_placeholder_files_are_skipped_silently(self):
+        self.write("cheats/cht/a5200/.gitkeep", "")
+        self.write("saves/snes/.keep", "")
+        self.write("system/configs/dolphin-emu/.gitkeep", "")
+        collection = categories.collect(self.roots)
+        paths = {item.arcpath for item in collection.files} | {item["path"] for item in collection.skipped}
+        self.assertFalse(any(path.endswith((".gitkeep", ".keep")) for path in paths), paths)
+
     def test_settings_only_collection_leaves_saves_out(self):
         files = {item.category for item in categories.collect(self.roots, include_saves=False).files}
         self.assertFalse(any(c.startswith(("saves:", "states:")) for c in files))
@@ -302,6 +310,17 @@ class RestoreTests(Fixture):
         self.assertEqual(self.read("saves/gba/Zelda.srm"), "zelda")
         self.assertFalse((self.userdata / "saves/gba/Added.srm").exists())
         self.assertTrue((self.userdata / "saves/snes/Added.srm").exists())
+
+    def test_restore_ignores_placeholders_in_older_backups(self):
+        self.write("cheats/cht/a5200/.gitkeep", "")
+        with mock.patch.object(categories, "PLACEHOLDER_NAMES", frozenset()):
+            dest, manifest = self.build(["cheats"])
+        self.assertIn("cheats/cht/a5200/.gitkeep", [f["path"] for f in manifest["files"]])
+        import shutil
+        shutil.rmtree(self.userdata / "cheats")
+        result = restore.apply(self.roots, dest, manifest, ["cheats"], "overlay", False, self.base / "staging")
+        self.assertEqual(result["written"], 1)
+        self.assertFalse((self.userdata / "cheats/cht").exists())
 
     def test_path_filter_rejects_unknown_or_unsafe_paths(self):
         dest, manifest = self.build(["saves:snes"])

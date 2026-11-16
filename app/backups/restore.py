@@ -111,6 +111,8 @@ class Selection:
     def includes(self, path: str, category: Optional[str]) -> bool:
         if category not in self.categories:
             return False
+        if path.rsplit("/", 1)[-1].lower() in _categories.PLACEHOLDER_NAMES:
+            return False  # folder markers in older backups: never recreate empty folders
         if category not in self.narrowed:
             return True
         return any(path == value or path.startswith(value + "/") for value in self.paths or [])

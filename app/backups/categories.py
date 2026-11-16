@@ -49,6 +49,10 @@ CACHE_DIR_NAMES = frozenset({"cache", "mesa_shader_cache", "shader_cache", "shad
 # Rebuilt automatically by the emulator: MAME's software-list hash cache and the
 # yuzu-family (yuzu/Eden/Citron/Sudachi) game list cache, which they also copy into saves.
 CACHE_FILE_NAMES = frozenset({"mess_hash_cache.json", "game_metadata_cache.json"})
+# Zero-content folder markers (Batocera's stock /userdata ships hundreds of .gitkeep
+# files). They hold nothing and restoring them only recreates empty folders, so they
+# are skipped silently -- not even listed as "left out".
+PLACEHOLDER_NAMES = frozenset({".gitkeep", ".keep"})
 # Only under system/configs/<emulator>/: the yuzu-family game list cache folder.
 CONFIG_CACHE_DIR_NAMES = frozenset({"game_list"})
 DISK_IMAGE_EXTENSIONS = frozenset({".qcow2", ".vdi", ".vmdk", ".img", ".iso"})
@@ -320,7 +324,7 @@ def collect(roots: Roots, categories: Optional[Iterable[str]] = None, include_sa
             if stat.S_ISLNK(info.st_mode):
                 result.skipped.append({"path": arcpath, "size": 0, "reason": "symbolic link"})
                 continue
-            if not stat.S_ISREG(info.st_mode):
+            if not stat.S_ISREG(info.st_mode) or entry.name.lower() in PLACEHOLDER_NAMES:
                 continue
             reason = _excluded_reason(root, dir_parts, entry.name)
             if reason:

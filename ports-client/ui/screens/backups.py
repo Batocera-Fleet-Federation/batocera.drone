@@ -506,7 +506,8 @@ def build_file_trees(files) -> Dict[str, FileNode]:
     single-child folder chains merged (``nand/user/save``) to keep it compact."""
     by_category: Dict[str, List[dict]] = {}
     for entry in files or []:
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry.get("category"):
+        if (isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry.get("category")
+                and entry["path"].rsplit("/", 1)[-1].lower() not in (".gitkeep", ".keep")):  # folder markers
             by_category.setdefault(str(entry["category"]), []).append(entry)
     counter = [0]
 
