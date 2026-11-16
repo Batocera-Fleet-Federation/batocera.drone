@@ -54,6 +54,29 @@ def _ensure_imgui_stub() -> None:
         no_collapse = _Flag(1 << 10)
         no_inputs = _Flag(1 << 11)
         no_decoration = _Flag(1 << 12)
+        no_nav_focus = _Flag(1 << 13)
+
+    class _PopupFlags:
+        none = _Flag(0)
+        any_popup_id = _Flag(1 << 10)
+
+    class _SelectableFlags:
+        none = _Flag(0)
+        allow_overlap = _Flag(1 << 4)
+
+    class _InputTextFlags:
+        none = _Flag(0)
+        enter_returns_true = _Flag(1 << 5)
+        password = _Flag(1 << 10)
+
+    class _BackendFlags:
+        none = _Flag(0)
+        has_gamepad = _Flag(1 << 0)
+
+    class _ConfigFlags:
+        none = _Flag(0)
+        nav_enable_keyboard = _Flag(1 << 0)
+        nav_enable_gamepad = _Flag(1 << 1)
 
     class _Key:
         # Only real imgui_bundle (1.93) Key members, so a typo such as
@@ -91,6 +114,11 @@ def _ensure_imgui_stub() -> None:
     imgui.ImVec2 = _ImVec2
     imgui.ImVec4 = _ImVec4
     imgui.WindowFlags_ = _WindowFlags
+    imgui.PopupFlags_ = _PopupFlags
+    imgui.SelectableFlags_ = _SelectableFlags
+    imgui.InputTextFlags_ = _InputTextFlags
+    imgui.BackendFlags_ = _BackendFlags
+    imgui.ConfigFlags_ = _ConfigFlags
 
     bundle = types.ModuleType("imgui_bundle")
     bundle.imgui = imgui
