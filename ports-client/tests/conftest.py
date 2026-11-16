@@ -55,7 +55,39 @@ def _ensure_imgui_stub() -> None:
         no_inputs = _Flag(1 << 11)
         no_decoration = _Flag(1 << 12)
 
+    class _Key:
+        # Only real imgui_bundle (1.93) Key members, so a typo such as
+        # ``gamepad_face_top`` raises AttributeError in tests like on device.
+        gamepad_face_left = 1
+        gamepad_face_right = 2
+        gamepad_face_up = 3
+        gamepad_face_down = 4
+        gamepad_dpad_left = 5
+        gamepad_dpad_right = 6
+        gamepad_dpad_up = 7
+        gamepad_dpad_down = 8
+        gamepad_l1 = 9
+        gamepad_r1 = 10
+        gamepad_l2 = 11
+        gamepad_r2 = 12
+        gamepad_l3 = 13
+        gamepad_r3 = 14
+        gamepad_start = 15
+        gamepad_back = 16
+        gamepad_l_stick_up = 17
+        gamepad_l_stick_down = 18
+        gamepad_l_stick_left = 19
+        gamepad_l_stick_right = 20
+        gamepad_r_stick_up = 21
+        gamepad_r_stick_down = 22
+        gamepad_r_stick_left = 23
+        gamepad_r_stick_right = 24
+        enter = 25
+        escape = 26
+        backspace = 27
+
     imgui = mock.MagicMock()
+    imgui.Key = _Key
     imgui.ImVec2 = _ImVec2
     imgui.ImVec4 = _ImVec4
     imgui.WindowFlags_ = _WindowFlags
