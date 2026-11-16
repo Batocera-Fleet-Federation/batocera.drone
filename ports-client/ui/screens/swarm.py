@@ -1295,7 +1295,7 @@ class SwarmScreen(Screen):
             focused_item = visible_items[self.focused_row_index]
             if imgui.is_key_pressed(imgui.Key.gamepad_face_left, False):
                 self._download_item(focused_item)
-            if imgui.is_key_pressed(imgui.Key.gamepad_face_top, False):
+            if imgui.is_key_pressed(imgui.Key.gamepad_face_up, False):
                 self.details_item = focused_item
                 self._details_popup_just_opened = True
 
