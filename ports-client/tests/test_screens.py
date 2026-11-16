@@ -1005,3 +1005,28 @@ class DownloadPollThreadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SearchDrawKeyTests(unittest.TestCase):
+    def test_draw_search_with_focused_row_opens_details_on_y(self) -> None:
+        from unittest import mock
+
+        from ui.screens import swarm as swarm_module
+
+        screen = SwarmScreen(_FakeApiClient())
+        item = {"title": "Sonic", "drone_id": "peer1", "drone_name": "Arcade"}
+        screen.focused_row_index = 0
+        imgui = swarm_module.imgui
+        imgui.checkbox.return_value = (False, False)
+        imgui.begin_combo.return_value = False
+        imgui.button.return_value = False
+        imgui.get_scroll_max_y.return_value = 0.0
+        pressed = imgui.Key.gamepad_face_up
+        with mock.patch.object(screen, "_visible_browse_items", return_value=[item]), \
+                mock.patch.object(screen, "_draw_search_result_row"), \
+                mock.patch.object(screen, "_draw_details_popup"), \
+                mock.patch.object(swarm_module, "search_box", return_value=("", False)), \
+                mock.patch.object(swarm_module, "tab_button"), \
+                mock.patch.object(imgui, "is_key_pressed", side_effect=lambda key, *a: key == pressed):
+            screen._draw_search()
+        self.assertIs(screen.details_item, item)
