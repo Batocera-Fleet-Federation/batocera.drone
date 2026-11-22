@@ -1626,6 +1626,58 @@ def _cache_is_ready(connection: sqlite3.Connection) -> bool:
     return bool(last_full_scan) and not bool(scan_in_progress)
 
 
+def list_rom_asset_rows(settings: Any, *, limit: int = 1_000_000) -> Optional[dict]:
+    """Every cached ROM as a light row, for backups' asset records and local-presence checks.
+
+    ``rows`` are ``(system, file_path, file_size, entry_type, fingerprint, rom_name, extra_json)``
+    tuples; ``missing`` maps ``(system, file_path)`` -> the gamelist media fields whose tag is
+    empty; ``has_entry`` is the set of ``(system, file_path)`` that have a gamelist entry.
+    Read-only, nothing is hashed. ``None`` means the cache is not authoritative yet.
+    """
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            rows = connection.execute(
+                "SELECT system, file_path, file_size, entry_type, fingerprint, rom_name, extra_json, "
+                "COALESCE(gamelist_path, ''), entry_key FROM rom_cache_entries "
+                "ORDER BY system COLLATE NOCASE, file_path COLLATE NOCASE LIMIT ?",
+                (max(1, int(limit)) + 1,),
+            ).fetchall()
+            missing_by_key: dict = {}
+            for key, field in connection.execute("SELECT entry_key, field FROM rom_missing_artwork"):
+                missing_by_key.setdefault(key, set()).add(field)
+    except sqlite3.Error as error:
+        print(f"ROM asset query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    out_rows, missing, has_entry = [], {}, set()
+    for system, file_path, size, entry_type, fingerprint, name, extra_json, gamelist_path, entry_key in rows:
+        out_rows.append((system, file_path, _int(size), entry_type or "file", fingerprint, name, extra_json))
+        ident = (system, file_path)
+        if gamelist_path:
+            has_entry.add(ident)
+        if entry_key in missing_by_key:
+            missing[ident] = missing_by_key[entry_key]
+    return {"rows": out_rows, "missing": missing, "has_entry": has_entry}
+
+
+def list_bios_asset_rows(settings: Any) -> Optional[list]:
+    """Cached BIOS files as ``(file_path, file_size, md5)``; ``None`` until the cache is ready."""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            return [
+                (path, _int(size), md5)
+                for path, size, md5 in connection.execute(
+                    "SELECT file_path, file_size, md5 FROM bios_cache_entries ORDER BY file_path COLLATE NOCASE"
+                )
+            ]
+    except sqlite3.Error as error:
+        print(f"BIOS asset query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+
+
 def _page_bounds(limit: int, offset: int, *, maximum: int = 5000) -> tuple[int, int]:
     return max(1, min(int(limit), maximum)), max(0, int(offset))
 

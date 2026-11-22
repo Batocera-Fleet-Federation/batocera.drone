@@ -929,6 +929,150 @@ class BackupsScreenTests(unittest.TestCase):
         self.assertEqual(_format_size(500), "500B")
         self.assertEqual(_format_size(2048), "2.0KB")
 
+    def test_restore_wizard_also_fetch_games_and_media_step(self) -> None:
+        from ui.screens.backups import (
+            _asset_space_warnings,
+            asset_selection_totals,
+            asset_space_pools,
+            toggle_asset_group,
+            toggle_probable_asset,
+            untick_assets_until_fits,
+        )
+        asset_plan = {
+            "plan_id": "plan-123",
+            "totals": {"here": 2, "available": 4, "probable": 1, "unavailable": 1},
+            "groups": [
+                {
+                    "key": "roms:snes",
+                    "kind": "roms",
+                    "system": "snes",
+                    "count": 3,
+                    "default_count": 2,
+                    "bytes": 300,
+                    "items": [
+                        {"key": "r0", "kind": "roms", "system": "snes", "path": "Zelda.sfc", "size": 200, "action": "download"},
+                        {"key": "r1", "kind": "roms", "system": "snes", "path": "Mario.sfc", "size": 100, "action": "download"},
+                        {"key": "r9", "kind": "roms", "system": "snes", "path": "Unknown.sfc", "size": 0, "size_unknown": True, "default_selected": False, "action": "download"},
+                    ],
+                },
+                {
+                    "key": "music:",
+                    "kind": "music",
+                    "system": "",
+                    "count": 1,
+                    "default_count": 1,
+                    "bytes": 50,
+                    "items": [
+                        {"key": "m0", "kind": "music", "system": "", "path": "Song.mp3", "size": 50, "action": "download"},
+                    ],
+                },
+            ],
+            "probable": [
+                {"key": "r2", "kind": "roms", "system": "snes", "path": "Metroid.sfc", "size": 400, "action": "download"},
+            ],
+            "unavailable": [
+                {"key": "r3", "kind": "roms", "system": "snes", "path": "Kirby.sfc", "size": 500, "action": ""},
+            ],
+            "sources": [{"drone_id": "peer-1", "name": "Den", "status": "ok", "matched": 4}],
+            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 500, "reserve": 100, "queued": 50, "group": "dev1"}},
+        }
+        client = _FakeApiClient(
+            get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
+            post_responses={
+                f"/admin/backups/{_BACKUP_ID}/plan": {"mode": "overlay", "totals": {"new": 1}, "warnings": []},
+                f"/admin/backups/{_BACKUP_ID}/assets/plan": asset_plan,
+                f"/admin/backups/{_BACKUP_ID}/restore": {"state": "running", "assets": {"state": "pending"}},
+            },
+        )
+        screen = BackupsScreen(client)
+        screen._open_restore(self._local())
+        # BIOS is off by default; ROMs, movies and music are on by default.
+        self.assertEqual(screen.dialog["asset_kinds"], {"roms", "movies", "music"})
+        screen._plan_assets()
+        self.assertEqual(
+            client.post_calls[0],
+            (f"/admin/backups/{_BACKUP_ID}/assets/plan", {"kinds": ["roms", "movies", "music"], "include_bios": False}),
+        )
+        self.assertTrue(screen.dialog["fetch_assets"])
+        # Exact known-size matches are selected by default; unknown-size and probable matches are unticked.
+        self.assertEqual(asset_selection_totals(screen.dialog), (3, 350))
+        pools = asset_space_pools(screen.dialog, asset_plan)
+        self.assertEqual((pools[0]["required"], pools[0]["reserve"], pools[0]["fits"]), (450, 100, True))
+        self.assertEqual(_asset_space_warnings(screen.dialog, asset_plan), [])
+        # Tick a probable match -> 700 + 50 + 100 = 850 > 500 -> does not fit and _restore refuses.
+        toggle_probable_asset(screen.dialog, "r2", True)
+        self.assertEqual(asset_selection_totals(screen.dialog), (4, 750))
+        warnings = _asset_space_warnings(screen.dialog, asset_plan)
+        self.assertEqual(len(warnings), 1)
+        screen._preview()
+        screen._restore()
+        self.assertEqual(client.post_calls[-1][0], f"/admin/backups/{_BACKUP_ID}/plan")
+        self.assertIn("Not enough free disk space", screen.dialog["asset_plan_error"])
+        # "Untick until it fits" drops the largest item (r2) so the selection fits again.
+        untick_assets_until_fits(screen.dialog, asset_plan)
+        self.assertEqual(asset_selection_totals(screen.dialog), (3, 350))
+        self.assertTrue(all(p["fits"] for p in asset_space_pools(screen.dialog, asset_plan)))
+        # Untick the music group, then restore succeeds.
+        toggle_asset_group(screen.dialog, asset_plan["groups"][1], False)
+        self.assertEqual(asset_selection_totals(screen.dialog), (2, 300))
+        screen._restore()
+        restore_call = client.post_calls[-1]
+        self.assertEqual(restore_call[0], f"/admin/backups/{_BACKUP_ID}/restore")
+        self.assertEqual(
+            restore_call[1]["assets"],
+            {
+                "plan_id": "plan-123",
+                "selected": [],
+                "deselected": [],
+                "deselected_groups": ["music:"],
+            },
+        )
+
+    def test_get_missing_games_standalone_and_batch_cancel(self) -> None:
+        asset_plan = {
+            "plan_id": "plan-standalone",
+            "totals": {"here": 0, "available": 1, "probable": 0, "unavailable": 2},
+            "groups": [
+                {
+                    "key": "roms:snes",
+                    "kind": "roms",
+                    "system": "snes",
+                    "count": 1,
+                    "bytes": 200,
+                    "items": [
+                        {"key": "r0", "kind": "roms", "system": "snes", "path": "Zelda.sfc", "size": 200, "action": "download"},
+                    ],
+                },
+            ],
+            "probable": [],
+            "unavailable": [{"key": "r1", "kind": "roms", "system": "snes", "path": "Gone.sfc", "size": 100, "action": ""}],
+            "sources": [{"drone_id": "peer-1", "name": "Den", "status": "ok", "matched": 1}],
+            "space": {},
+        }
+        client = _FakeApiClient(
+            get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
+            post_responses={
+                f"/admin/backups/{_BACKUP_ID}/assets/plan": asset_plan,
+                f"/admin/backups/{_BACKUP_ID}/assets/fetch": {"batch_id": "batch-99", "queued": 1, "unavailable": 2},
+                "/admin/downloads/batches/batch-99/cancel": {"status": "cancelled", "cancelled": 1},
+            },
+        )
+        screen = BackupsScreen(client)
+        screen._open_missing_games(self._local())
+        screen.assets_dialog["asset_kinds"].add("bios")
+        screen._plan_missing_games()
+        self.assertEqual(
+            client.post_calls[0],
+            (f"/admin/backups/{_BACKUP_ID}/assets/plan", {"kinds": ["roms", "movies", "music", "bios"], "include_bios": True}),
+        )
+        screen._fetch_missing_games()
+        self.assertIsNone(screen.assets_dialog)
+        self.assertEqual(screen.active_batch["batch_id"], "batch-99")
+        self.assertIn("2 unavailable", screen.message)
+        screen._cancel_batch("batch-99")
+        self.assertIsNone(screen.active_batch)
+        self.assertEqual(client.post_calls[-1][0], "/admin/downloads/batches/batch-99/cancel")
+
 
 class AboutScreenTests(unittest.TestCase):
     def test_reload_url_uses_the_self_row_reachable_url(self) -> None:

@@ -20,11 +20,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import socket
+import tarfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +36,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 try:
     from . import archive as _archive
+    from . import assets as _assets
     from . import categories as _categories
     from . import restore as _restore
     from ..common.batocera_version import _read_batocera_version
@@ -41,6 +44,7 @@ try:
     from ..storage import backup_store as _store
 except ImportError:  # pragma: no cover - flat execution
     from backups import archive as _archive  # type: ignore
+    from backups import assets as _assets  # type: ignore
     from backups import categories as _categories  # type: ignore
     from backups import restore as _restore  # type: ignore
     from common.batocera_version import _read_batocera_version  # type: ignore
@@ -77,6 +81,11 @@ def archive_path(settings: Any, backup_id: str) -> Path:
 
 def manifest_path(settings: Any, backup_id: str) -> Path:
     return backups_directory(settings) / f"{backup_id}.manifest.json"
+
+
+def assets_path(settings: Any, backup_id: str) -> Path:
+    """Local copy of the backup's ``assets.json.gz`` member (planning never reads the archive)."""
+    return backups_directory(settings) / f"{backup_id}.assets.json.gz"
 
 
 def valid_backup_id(value: Any) -> bool:
@@ -154,7 +163,7 @@ def _reconcile(settings: Any) -> None:
 
 
 def _remove_files(settings: Any, backup_id: str) -> None:
-    for path in (archive_path(settings, backup_id), manifest_path(settings, backup_id)):
+    for path in (archive_path(settings, backup_id), manifest_path(settings, backup_id), assets_path(settings, backup_id)):
         try:
             path.unlink()
         except OSError:
@@ -199,7 +208,62 @@ def local_manifest(settings: Any, backup_id: str) -> dict:
 def detail(settings: Any, backup_id: str) -> dict:
     row = _decorate(settings, get_local(settings, backup_id))
     manifest = local_manifest(settings, backup_id)
-    return {"backup": row, "files": manifest["files"], "skipped": manifest["skipped"]}
+    return {"backup": row, "files": manifest["files"], "skipped": manifest["skipped"],
+            "assets": assets_overview(manifest)}
+
+
+def assets_overview(manifest: dict) -> dict:
+    """What a backup records about games and media, for the detail view and the wizards."""
+    recorded = manifest.get("assets")
+    if recorded:
+        return {"recorded": True, "legacy": False, "counts": recorded["counts"], "bytes": recorded["bytes"],
+                "truncated": recorded["truncated"], "media_roms": recorded.get("media_roms", 0)}
+    has_gamelists = any(item["category"] == "gamelists" for item in manifest.get("files") or [])
+    return {"recorded": False, "legacy": has_gamelists, "counts": {kind: 0 for kind in _assets.KINDS},
+            "bytes": {kind: 0 for kind in _assets.KINDS}, "truncated": False, "media_roms": 0}
+
+
+def load_assets(settings: Any, backup_id: str) -> dict:
+    """The asset wish list of a local backup: the recorded list, else a path-only ROM list read
+    from its archived gamelists (``legacy`` is True). Never raises for a damaged record."""
+    manifest = local_manifest(settings, backup_id)
+    recorded = manifest.get("assets")
+    if recorded:
+        blob = None
+        try:
+            blob = assets_path(settings, backup_id).read_bytes()
+        except OSError:
+            pass
+        if blob is None or _sha256(blob) != recorded["sha256"]:
+            blob = _read_archive_assets(archive_path(settings, backup_id), recorded["sha256"])
+        if blob is not None:
+            try:
+                document = _assets.decode(blob)
+                document["legacy"] = False
+                return document
+            except ValueError:
+                pass
+    try:
+        document = _assets.legacy_from_gamelists(_archive.iter_members(archive_path(settings, backup_id)))
+    except (OSError, ValueError, EOFError, tarfile.TarError):
+        document = _assets.sanitize({"version": _assets.ASSETS_VERSION})
+        document["legacy"] = True
+    return document
+
+
+def _sha256(blob: bytes) -> str:
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _read_archive_assets(path: Path, expected_sha256: str) -> Optional[bytes]:
+    try:
+        for member, handle in _archive.iter_members(path):
+            if member.name == _archive.ASSETS_MEMBER and handle is not None and member.size <= _assets.MAX_MEMBER_BYTES:
+                blob = handle.read()
+                return blob if _sha256(blob) == expected_sha256 else None
+    except (OSError, EOFError, tarfile.TarError):
+        return None
+    return None
 
 
 def available_categories(settings: Any) -> dict:
@@ -227,11 +291,23 @@ def _clean_categories(values: Any) -> Optional[List[str]]:
 def _build(settings: Any, backup_id: str, *, kind: str, name: str, description: str,
            categories: Optional[List[str]], snapshot_of: Optional[dict], include_saves: bool = True) -> dict:
     try:
+        package = None
+        if kind == "backup":
+            # Every user backup (even settings-only) records which games and media this Drone has.
+            # Snapshots are throw-away rollback points and never carry the list. A cache that
+            # cannot be read must not stop a backup of the settings.
+            try:
+                package = _assets.package(_assets.collect(settings))
+            except Exception:  # noqa: BLE001
+                package = None
         manifest = _archive.build_archive(
             _categories.Roots.from_settings(settings), archive_path(settings, backup_id),
             backup_id=backup_id, kind=kind, name=name, description=description, categories=categories,
-            source=source_info(settings), snapshot_of=snapshot_of, include_saves=include_saves)
+            source=source_info(settings), snapshot_of=snapshot_of, include_saves=include_saves,
+            assets_package=package)
         _archive.write_sidecar(manifest_path(settings, backup_id), manifest)
+        if package is not None:
+            _write_assets_sidecar(assets_path(settings, backup_id), package[0])
         path = archive_path(settings, backup_id)
         _store.mark_complete(settings, backup_id, manifest, size_bytes=path.stat().st_size,
                              archive_sha256=_archive.file_sha256(path))
@@ -243,6 +319,12 @@ def _build(settings: Any, backup_id: str, *, kind: str, name: str, description: 
     finally:
         with _LOCK:
             _ACTIVE_BUILDS.pop(backup_id, None)
+
+
+def _write_assets_sidecar(path: Path, blob: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(blob)
+    os.replace(temporary, path)
 
 
 def create_backup(settings: Any, *, name: str = "", description: str = "", categories: Any = None,
@@ -354,9 +436,18 @@ def _set_restore(**values) -> None:
 
 
 def start_restore(settings: Any, backup_id: str, *, categories: Any, mode: str, include_machine_keys: bool = False,
-                  acknowledge_warnings: bool = False, runner: Optional[Callable] = None, paths: Any = None) -> dict:
-    """Validate, then snapshot + restore on a background thread; poll ``restore_status``."""
+                  acknowledge_warnings: bool = False, runner: Optional[Callable] = None, paths: Any = None,
+                  assets: Any = None, manager: Any = None) -> dict:
+    """Validate, then snapshot + restore on a background thread; poll ``restore_status``.
+
+    ``assets`` (``{plan_id, selected, deselected, deselected_groups}`` from a plan made with
+    ``plan_assets``) asks for the confirmed games and media to be queued **after** the
+    configuration restore succeeds; a failed restore queues nothing. Progress is
+    ``restore_status()["assets"]``."""
     row = get_local(settings, backup_id)
+    asset_job = None
+    if assets is not None:
+        asset_job = _prepare_asset_restore(settings, backup_id, assets, manager)
     manifest = _selectable(local_manifest(settings, backup_id), row)
     selection = _restore.resolve_selection(manifest, categories or [], mode, paths)
     chosen, paths = selection.categories, selection.paths
@@ -372,16 +463,17 @@ def start_restore(settings: Any, backup_id: str, *, categories: Any, mode: str, 
         _RESTORE.clear()
         _RESTORE.update(state="running", stage="snapshot", backup_id=backup_id, backup_name=row["name"],
                         categories=chosen, paths=paths, mode=mode, started_at=_archive.now_iso(), finished_at=None,
-                        result=None, error=None, snapshot_id=None)
+                        result=None, error=None, snapshot_id=None,
+                        assets={"state": "pending"} if asset_job else None)
     thread = threading.Thread(
         target=_restore_job, name="drone-backup-restore", daemon=True,
-        args=(settings, row, chosen, mode, bool(include_machine_keys), runner or _run_restore, paths))
+        args=(settings, row, chosen, mode, bool(include_machine_keys), runner or _run_restore, paths, asset_job))
     thread.start()
     return restore_status()
 
 
 def _restore_job(settings: Any, row: dict, chosen: List[str], mode: str, include_machine_keys: bool,
-                 runner: Callable, paths: Optional[List[str]] = None) -> None:
+                 runner: Callable, paths: Optional[List[str]] = None, asset_job: Optional[tuple] = None) -> None:
     backup_id = row["backup_id"]
     try:
         snapshot = create_backup(
@@ -410,6 +502,114 @@ def _restore_job(settings: Any, row: dict, chosen: List[str], mode: str, include
         _notify(settings, row, result)
     except Exception as error:  # noqa: BLE001 - reported through restore_status
         _set_restore(state="error", stage="failed", finished_at=_archive.now_iso(), error=str(error) or error.__class__.__name__)
+        if asset_job:
+            _set_restore(assets={"state": "skipped", "error": "The restore failed, so no games or media were queued."})
+        return
+    if asset_job:
+        # Only reached after the configuration restore (and the EmulationStation restart) succeeded.
+        _set_restore(assets={"state": "queueing"})
+        _queue_assets(settings, row, *asset_job)
+
+
+# ------------------------------------------------------------------ asset restore
+
+ASSET_KIND_CHOICES = ("roms", "bios", "movies", "music")
+
+
+def _asset_restore():
+    try:
+        from . import asset_restore as _module
+    except ImportError:  # pragma: no cover - flat execution
+        from backups import asset_restore as _module  # type: ignore
+    return _module
+
+
+def _clean_asset_kinds(kinds: Any, include_bios: bool) -> List[str]:
+    if kinds is None:
+        chosen = ["roms", "movies", "music"]
+    elif isinstance(kinds, list) and all(isinstance(value, str) for value in kinds):
+        chosen = list(kinds)
+    else:
+        raise BackupError("Invalid asset kinds.")
+    if include_bios and "bios" not in chosen:
+        chosen.append("bios")
+    for value in chosen:
+        if value not in ASSET_KIND_CHOICES:
+            raise BackupError(f"Unknown asset kind {value!r}.")
+    return [value for value in ASSET_KIND_CHOICES if value in chosen]
+
+
+def plan_assets(settings: Any, backup_id: str, *, kinds: Any = None, include_bios: bool = False,
+                online_ids: Iterable[str] = (), manager: Any = None, fetch_page: Optional[Callable] = None) -> dict:
+    """Search the online paired Drones for what a local backup recorded and this Drone lacks."""
+    module = _asset_restore()
+    row = get_local(settings, backup_id)
+    chosen = _clean_asset_kinds(kinds, bool(include_bios))
+    document = load_assets(settings, backup_id)
+    hold = _peer_tools()[2]
+    try:
+        plan = module.build_plan(
+            settings, backup=row, document=document, kinds=chosen,
+            sources=module.online_sources(settings, online_ids, manager),
+            fetch_page=fetch_page or module.peer_inventory_fetcher(settings),
+            manager=manager, repository=getattr(manager, "repository", None))
+    except hold as error:
+        raise module.SwarmUnavailable() from error
+    return module.public_plan(plan, manager=manager)
+
+
+def fetch_assets(settings: Any, manager: Any, backup_id: str, selection: Any) -> dict:
+    """Queue the confirmed part of a plan ("Get missing games"); no configuration is restored."""
+    module = _asset_restore()
+    row = get_local(settings, backup_id)
+    plan = module.PLANS.get((selection or {}).get("plan_id") if isinstance(selection, dict) else None, backup_id)
+    items = module.resolve_selection(plan, selection)
+    if not items:
+        raise BackupError("Nothing is selected.", 400)
+    result = module.fetch_plan(settings, manager, plan, items, label=row["name"])
+    _notify_assets(settings, row, result)
+    return dict(result, job_ids=result["job_ids"][:500])
+
+
+def _prepare_asset_restore(settings: Any, backup_id: str, assets: Any, manager: Any) -> tuple:
+    module = _asset_restore()
+    if manager is None:
+        raise BackupError("The download queue is unavailable.", 503)
+    if not isinstance(assets, dict):
+        raise BackupError("Invalid asset selection.")
+    plan = module.PLANS.get(assets.get("plan_id"), backup_id)
+    items = module.resolve_selection(plan, assets)
+    module.ensure_space(settings, plan, items, manager)
+    return (manager, plan, items)
+
+
+def _queue_assets(settings: Any, row: dict, manager: Any, plan: dict, items: List[dict]) -> None:
+    module = _asset_restore()
+    try:
+        result = module.fetch_plan(settings, manager, plan, items, label=row["name"])
+        _notify_assets(settings, row, result)
+        _set_restore(assets={key: value for key, value in result.items() if key != "job_ids"} | {"state": "queued"})
+    except Exception as error:  # noqa: BLE001 - the configuration is already restored; report only
+        _set_restore(assets={"state": "error", "error": str(error) or error.__class__.__name__})
+
+
+def _notify_assets(settings: Any, row: dict, result: dict) -> None:
+    """Unavailable items are reported, never persisted: a bell entry when nothing could be queued
+    for them (the batch's own entries already carry the counts when downloads were queued)."""
+    if result.get("queued") or not result.get("unavailable"):
+        return
+    try:
+        try:
+            from ..device import notifications as _notifications
+        except ImportError:  # pragma: no cover - flat execution
+            from device import notifications as _notifications  # type: ignore
+        _notifications.record_event(
+            settings, "asset_transfer_finished", "Restoring from a backup finished",
+            f'Backup "{row.get("name")}": nothing was queued; {int(result["unavailable"])} item(s) are not '
+            "available on any online Drone. Run Get missing games again when more Drones are online.",
+            details={"label": row.get("name"), "unavailable": int(result["unavailable"]), "queued": 0})
+    except Exception:  # noqa: BLE001 - a notification never fails a restore
+        pass
 
 
 def _notify(settings: Any, row: dict, result: dict) -> None:
@@ -606,7 +806,7 @@ def peer_backup_detail(settings: Any, peer_id: str, backup_id: str) -> dict:
                                 PEER_MANIFEST_TIMEOUT, PEER_MANIFEST_MAX_BYTES)
     manifest = _archive.validate_manifest(payload, expected_id=backup_id)
     return {"backup": dict(_archive.summary(manifest), compatibility=compatibility(settings, manifest["source"])),
-            "files": manifest["files"], "skipped": manifest["skipped"]}
+            "files": manifest["files"], "skipped": manifest["skipped"], "assets": assets_overview(manifest)}
 
 
 def local_entries(settings: Any) -> List[dict]:
@@ -668,12 +868,16 @@ def enqueue_download(settings: Any, manager: Any, peer_id: str, backup_id: str) 
 def install_download(settings: Any, partial: Path, *, backup_id: str, expected_sha256: str, peer: dict) -> dict:
     """Verify a fully downloaded archive and register it; the partial file is consumed."""
     try:
-        manifest = _archive.verify_archive(partial, expected_id=backup_id, expected_sha256=expected_sha256)
+        carried: List[bytes] = []
+        manifest = _archive.verify_archive(partial, expected_id=backup_id, expected_sha256=expected_sha256,
+                                           assets_out=carried)
         if manifest["kind"] != "backup":
             raise BackupError("Snapshots cannot be shared between Drones.", 409)
         size = partial.stat().st_size
         os.replace(partial, archive_path(settings, backup_id))
         _archive.write_sidecar(manifest_path(settings, backup_id), manifest)
+        if carried:
+            _write_assets_sidecar(assets_path(settings, backup_id), carried[0])
     except BaseException:
         try:
             partial.unlink()

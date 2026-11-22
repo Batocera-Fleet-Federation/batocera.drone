@@ -879,8 +879,25 @@ def _schemas() -> Dict[str, Schema]:
                 "mode": _enum(("overlay", "exact")),
                 "include_machine_keys": _boolean("Also restore this machine's display/audio/network/hostname keys from batocera.conf"),
                 "acknowledge_warnings": _boolean("Required when the backup came from a different Batocera version, architecture or board"),
+                "assets": _ref("BackupAssetSelection"),
             },
             ("categories", "mode"),
+        ),
+        "BackupAssetPlanRequest": _object(
+            {
+                "kinds": _array(_enum(("roms", "bios", "movies", "music"))),
+                "include_bios": _boolean("Also look for BIOS files (verified by MD5)"),
+            },
+        ),
+        "BackupAssetSelection": _object(
+            {
+                "plan_id": _string("From the plan response; valid for 15 minutes"),
+                "selected": _array(_string()),
+                "deselected": _array(_string()),
+                "deselected_groups": _array(_string()),
+            },
+            ("plan_id",),
+            description="Defaults are every exact match; probable matches are never fetched unless listed in `selected`.",
         ),
         "BackupResult": _object(additional_properties=True),
         "TorrentUploadRequest": _object(
@@ -2596,6 +2613,10 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/backups/{backup_id}/delete": {"post": _operation("Delete a backup", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
             "/admin/backups/{backup_id}/plan": {"post": _operation("Preview what restoring would change", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupRestoreRequest"), parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
             "/admin/backups/{backup_id}/restore": {"post": _operation("Snapshot, then restore the chosen categories onto this Drone", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupRestoreRequest"), parameters=[_path_param("backup_id")], tags=["admin", "backups"])},
+            "/admin/backups/{backup_id}/assets/plan": {"post": _operation("Search the online Drones for the games and media a local backup recorded", {"200": _json_response("BackupResult")}, request_body=_json_request("BackupAssetPlanRequest"), parameters=[_path_param("backup_id")], tags=["admin", "backups"], error_codes=("400", "401", "403", "404", "409", "503"))},
+            "/admin/backups/{backup_id}/assets/fetch": {"post": _operation("Queue the confirmed part of an asset plan as one download batch", {"202": _json_response("BackupResult")}, request_body=_json_request("BackupAssetSelection"), parameters=[_path_param("backup_id")], tags=["admin", "backups"], error_codes=("400", "401", "403", "404", "409", "503"))},
+            "/admin/downloads/batches/{batch_id}": {"get": _operation("Progress of one download batch", {"200": _json_response("DownloadActionResponse")}, parameters=[_path_param("batch_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "500", "503"))},
+            "/admin/downloads/batches/{batch_id}/cancel": {"post": _operation("Cancel every queued or running job of one download batch", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Batch not found")}, parameters=[_path_param("batch_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))},
             "/peer/backups": {"get": _operation("mTLS: list this Drone's shareable backups", {"200": _json_response("BackupResult")}, tags=["peer", "backups"])},
             "/peer/backups/{backup_id}": {"get": _operation("mTLS: one backup's manifest", {"200": _json_response("BackupResult")}, parameters=[_path_param("backup_id")], tags=["peer", "backups"])},
             "/peer/backups/{backup_id}/archive": {"get": _operation("mTLS: download one backup archive", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}}, parameters=[_path_param("backup_id")], tags=["peer", "backups"])},

@@ -499,6 +499,10 @@ class ApiRoutesMixin:
                 self._handle_admin_downloads(query_params)
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "batches":
+                self._handle_admin_download_batch_status(parts[3])
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "uploads":
                 self._handle_admin_uploads()
                 return
@@ -1030,6 +1034,10 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "cancel":
                 self._handle_admin_download_cancel(parts[2])
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "batches" and parts[4] == "cancel":
+                self._handle_admin_download_batch_cancel(parts[3])
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "retry":
