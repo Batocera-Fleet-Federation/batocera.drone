@@ -974,7 +974,7 @@ class BackupsScreenTests(unittest.TestCase):
                 {"key": "r3", "kind": "roms", "system": "snes", "path": "Kirby.sfc", "size": 500, "action": ""},
             ],
             "sources": [{"drone_id": "peer-1", "name": "Den", "status": "ok", "matched": 4}],
-            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 500, "reserve": 100, "queued": 50, "group": "dev1"}},
+            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 600, "reserve": 100, "queued": 50, "group": "dev1"}},
         }
         client = _FakeApiClient(
             get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
@@ -999,7 +999,8 @@ class BackupsScreenTests(unittest.TestCase):
         pools = asset_space_pools(screen.dialog, asset_plan)
         self.assertEqual((pools[0]["required"], pools[0]["reserve"], pools[0]["fits"]), (450, 100, True))
         self.assertEqual(_asset_space_warnings(screen.dialog, asset_plan), [])
-        # Tick a probable match -> 700 + 50 + 100 = 850 > 500 -> does not fit and _restore refuses.
+        # Tick a probable match -> 700 + 50 + 100 = 850 required, 600 - 850 < 100
+        # reserve headroom -> does not fit and _restore refuses.
         toggle_probable_asset(screen.dialog, "r2", True)
         self.assertEqual(asset_selection_totals(screen.dialog), (4, 750))
         warnings = _asset_space_warnings(screen.dialog, asset_plan)

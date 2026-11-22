@@ -1068,7 +1068,10 @@ def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
     result: List[dict] = []
     for pool in pools.values():
         required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
-        fits = True if pool["selected_count"] == 0 else pool["free"] >= required
+        # Keep a full reserve free after the requirement is covered, matching the
+        # server gate in app/backups/asset_restore.py (growth margin + headroom
+        # for concurrent writers during a long restore).
+        fits = True if pool["selected_count"] == 0 else (pool["free"] - required) >= pool["reserve"]
         pool["required"] = required
         pool["needed"] = required
         pool["fits"] = fits

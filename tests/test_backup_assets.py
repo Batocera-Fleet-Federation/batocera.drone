@@ -496,8 +496,12 @@ class PlanTests(PlanFixture):
                              (5700, 200, 5900, False))
             self.assertEqual((by_group["2"]["selected"], by_group["2"]["reserve"], by_group["2"]["required"], by_group["2"]["fits"]),
                              (200, 200, 400, True))
+            # The gate keeps a full reserve free on top of the requirement: music
+            # alone (700 selected + 200 reserve) leaves only 100 headroom, so it
+            # no longer fits in 1000 free.
             only_music = asset_restore.resolve_selection(plan, {"deselected": [self.item(plan, "Zelda.sfc")["key"]]})
-            self.assertTrue(asset_restore.selection_space(plan, only_music)[0]["fits"])
+            only_pools = {p["group"]: p for p in asset_restore.selection_space(plan, only_music)}
+            self.assertFalse(only_pools["1"]["fits"])
             # Already-queued bytes on the same filesystem count toward required space.
             mgr = mock.Mock()
             mgr.queued_bytes_on_filesystem.return_value = 250
@@ -505,15 +509,16 @@ class PlanTests(PlanFixture):
             by_q = {p["group"]: p for p in with_queued}
             self.assertEqual(by_q["1"]["required"], 700 + 250 + 200)
             self.assertFalse(by_q["1"]["fits"])
-            # Exact boundary: selection + queued + reserve <= free fits; exceeding by 1 fails.
-            boundary_plan = {"space": {"roms": {"path": "/userdata/roms", "free": 1000, "group": "dev1"}}, "index": {}, "items": []}
+            # Exact boundary: free - required must still cover a full reserve, so
+            # exceeding the headroom by 1 byte fails.
+            boundary_plan = {"space": {"roms": {"path": "/userdata/roms", "free": 1300, "group": "dev1"}}, "index": {}, "items": []}
             item_500 = {"key": "r0", "kind": "roms", "system": "snes", "path": "G.sfc", "size": 500, "action": "download"}
-            item_601 = {"key": "r1", "kind": "roms", "system": "snes", "path": "H.sfc", "size": 601, "action": "download"}
+            item_501 = {"key": "r1", "kind": "roms", "system": "snes", "path": "H.sfc", "size": 501, "action": "download"}
             with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "400"}):
                 fit_pool = asset_restore.selection_space(boundary_plan, [item_500])[0]
                 self.assertEqual((fit_pool["needed"], fit_pool["reserve"], fit_pool["fits"]), (900, 400, True))
-                over_pool = asset_restore.selection_space(boundary_plan, [item_601])[0]
-                self.assertEqual((over_pool["needed"], over_pool["reserve"], over_pool["fits"]), (1001, 400, False))
+                over_pool = asset_restore.selection_space(boundary_plan, [item_501])[0]
+                self.assertEqual((over_pool["needed"], over_pool["reserve"], over_pool["fits"]), (901, 400, False))
 
     def test_unknown_size_items_are_unticked_by_default(self):
         document = self.document(roms=[{"system": "snes", "path": "Mystery.sfc", "size": 0, "fp": FP_ZELDA}])

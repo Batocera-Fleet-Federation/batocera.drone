@@ -1395,7 +1395,10 @@ function bkComputeAssetSelectionStats(state) {
   }
   const pools = Array.from(poolMap.values()).map((pool) => {
     const required = pool.selected + pool.queued + pool.staging + pool.reserve;
-    const fits = pool.selectedCount === 0 ? true : pool.free >= required;
+    // A full reserve must remain free after the requirement is covered, matching
+    // the server gate in asset_restore.selection_space (growth margin + headroom
+    // for concurrent writers during a long restore).
+    const fits = pool.selectedCount === 0 ? true : (pool.free - required) >= pool.reserve;
     return Object.assign({}, pool, { required, needed: required, fits, short: !fits });
   });
   return { selectedCount, selectedBytes, probableSelected, pools, fits: pools.every((p) => p.fits) };
