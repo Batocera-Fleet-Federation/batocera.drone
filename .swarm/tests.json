@@ -6343,39 +6343,6 @@
         "servers": []
       },
       "timeoutSeconds": 180
-    },
-    {
-      "command": [
-        "python3",
-        "scripts/run_security_tests.py",
-        "-s",
-        "tests",
-        "-p",
-        "test_backup_assets.py"
-      ],
-      "disruptive": false,
-      "enabled": true,
-      "id": "issue-760-backup-asset-restore-security-boundaries",
-      "name": "Issue #760: backup asset record sanitization, plan confinement, failover whitelist and identity hold",
-      "origin": "developer",
-      "requirements": {
-        "credentials": [],
-        "devices": [],
-        "executables": [
-          "python3"
-        ],
-        "files": [
-          "scripts/run_security_tests.py",
-          "app/backups/assets.py",
-          "app/backups/asset_restore.py",
-          "app/transfer/asset_enqueue.py",
-          "app/transfer/download_manager.py",
-          "tests/test_backup_assets.py"
-        ],
-        "mounts": [],
-        "servers": []
-      },
-      "timeoutSeconds": 180
     }
   ],
   "version": 1
