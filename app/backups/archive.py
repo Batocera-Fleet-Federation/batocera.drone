@@ -11,7 +11,11 @@ Manifest (``format`` ``batocera-drone-backup``, ``version`` 1)::
      "created_at", "source": {"drone_id", "drone_name", "hostname", "batocera_version",
      "architecture", "board"}, "files": [{"path", "category", "size", "sha256",
      "redacted"?: [[section, key], ...]}], "skipped_count", "skipped_bytes",
-     "skipped": [...], "snapshot_of"?: {...}}
+     "skipped": [...], "snapshot_of"?: {...}, "assets"?: {summary}}
+
+``assets`` (``backups/assets.py``) summarises the games/media the source Drone held. The
+entries themselves are the archive member ``assets.json.gz`` (not a file of the backup,
+so not in ``files``); ``verify_archive`` requires the member and the summary to agree.
 
 Archives from peers are untrusted. ``verify_archive`` streams the whole file once,
 checks its SHA-256 against the pinned peer's listing, refuses anything but regular
@@ -34,15 +38,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional
 
 try:
+    from . import assets as _assets
     from . import categories as _categories
     from . import confmerge as _confmerge
 except ImportError:  # pragma: no cover - flat execution
+    from backups import assets as _assets  # type: ignore
     from backups import categories as _categories  # type: ignore
     from backups import confmerge as _confmerge  # type: ignore
 
 FORMAT = "batocera-drone-backup"
 VERSION = 1
 MANIFEST_MEMBER = "manifest.json"
+ASSETS_MEMBER = _assets.ASSETS_MEMBER
 DATA_PREFIX = "data/"
 MAX_FILES = 200_000
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
@@ -162,6 +169,9 @@ def validate_manifest(raw: Any, *, expected_id: Optional[str] = None) -> dict:
         "skipped_bytes": raw.get("skipped_bytes") if isinstance(raw.get("skipped_bytes"), int) else 0,
         "skipped": skipped,
     }
+    recorded = _assets.clean_summary(raw.get("assets")) if kind == "backup" else None
+    if recorded:
+        manifest["assets"] = recorded
     if snapshot_of:
         restored = [value for value in snapshot_of.get("categories") or [] if _categories.valid_category(value)]
         manifest["snapshot_of"] = {
@@ -231,8 +241,12 @@ def build_archive(
     source: dict,
     snapshot_of: Optional[dict] = None,
     include_saves: bool = True,
+    assets_package: Optional[tuple] = None,
 ) -> dict:
-    """Write an archive atomically to ``destination``; returns its validated manifest."""
+    """Write an archive atomically to ``destination``; returns its validated manifest.
+
+    ``assets_package`` is ``assets.package(...)``'s ``(blob, summary)``; it is written as the
+    ``assets.json.gz`` member just before the manifest (never for snapshots)."""
     collection = _categories.collect(roots, categories, include_saves=include_saves)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
@@ -277,6 +291,10 @@ def build_archive(
             }
             if snapshot_of:
                 manifest["snapshot_of"] = snapshot_of
+            if assets_package is not None and kind == "backup":
+                blob, summary = assets_package
+                tar.addfile(_tar_info(ASSETS_MEMBER, len(blob), time.time()), io.BytesIO(blob))
+                manifest["assets"] = summary
             payload = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
             tar.addfile(_tar_info(MANIFEST_MEMBER, len(payload), time.time()), io.BytesIO(payload))
         os.replace(temporary, destination)
@@ -305,12 +323,15 @@ def iter_members(archive_path: Path):
 
 
 def verify_archive(archive_path: Path, *, expected_id: Optional[str] = None,
-                   expected_sha256: Optional[str] = None) -> dict:
-    """Prove an archive is a well-formed, self-consistent backup; returns its manifest."""
+                   expected_sha256: Optional[str] = None, assets_out: Optional[list] = None) -> dict:
+    """Prove an archive is a well-formed, self-consistent backup; returns its manifest.
+
+    A verified ``assets.json.gz`` member's bytes are appended to ``assets_out`` when given."""
     if expected_sha256 is not None and file_sha256(archive_path) != expected_sha256:
         raise BackupError("The downloaded backup does not match the listing of the source Drone.", 409)
     actual: Dict[str, tuple] = {}
     manifest_raw = None
+    assets_member: Optional[tuple] = None
     try:
         for member, handle in iter_members(archive_path):
             if manifest_raw is not None:
@@ -321,6 +342,12 @@ def verify_archive(archive_path: Path, *, expected_id: Optional[str] = None,
                 if member.size > MAX_MANIFEST_BYTES:
                     raise BackupError("Backup manifest is too large.")
                 manifest_raw = handle.read()
+                continue
+            if member.name == ASSETS_MEMBER:
+                if assets_member is not None or member.size > _assets.MAX_MEMBER_BYTES:
+                    raise BackupError("Invalid asset record in backup.")
+                blob = handle.read()
+                assets_member = (len(blob), hashlib.sha256(blob).hexdigest(), blob)
                 continue
             if not member.name.startswith(DATA_PREFIX):
                 raise BackupError("Unexpected file in backup.")
@@ -343,6 +370,15 @@ def verify_archive(archive_path: Path, *, expected_id: Optional[str] = None,
     listed = {item["path"]: (item["size"], item["sha256"]) for item in manifest["files"]}
     if listed != actual:
         raise BackupError("The backup contents do not match its manifest.", 409)
+    try:
+        _assets.check_member(manifest.get("assets"), assets_member[0] if assets_member else None,
+                             assets_member[1] if assets_member else None)
+        if assets_member:
+            _assets.decode(assets_member[2])
+            if assets_out is not None:
+                assets_out.append(assets_member[2])
+    except ValueError as error:
+        raise BackupError(str(error), 409) from error
     return manifest
 
 

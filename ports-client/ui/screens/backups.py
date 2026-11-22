@@ -36,8 +36,24 @@ from .base import Screen
 
 _LIST_HEIGHT = 380.0
 _RESTORE_POPUP = "Restore Backup"
+_MISSING_GAMES_POPUP = "Get Missing Games"
 _POLL_SECONDS = 1.5
 _TERMINAL_JOB_STATES = ("completed", "failed", "error", "cancelled")
+_ASSET_KINDS = (
+    ("roms", "Games & artwork"),
+    ("movies", "Movies & shows"),
+    ("music", "Music"),
+    ("bios", "BIOS (MD5-verified)"),
+)
+
+
+def _default_asset_kinds(backup: dict) -> set:
+    assets = backup.get("assets") if isinstance(backup.get("assets"), dict) else {}
+    counts = assets.get("counts") if isinstance(assets.get("counts"), dict) else None
+    if assets.get("recorded") and counts is not None:
+        chosen = {kind for kind in ("roms", "movies", "music") if int(counts.get(kind) or 0) > 0}
+        return chosen or {"roms"}
+    return {"roms", "movies", "music"}
 
 
 class BackupsScreen(Screen):
@@ -54,6 +70,9 @@ class BackupsScreen(Screen):
         self.copies: Dict[str, dict] = {}
         self.dialog: Optional[dict] = None
         self._dialog_just_opened = False
+        self.assets_dialog: Optional[dict] = None
+        self._assets_dialog_just_opened = False
+        self.active_batch: Optional[dict] = None
         self._open_after_copy: Optional[str] = None
         self._poller: Optional[threading.Thread] = None
 
@@ -182,8 +201,111 @@ class BackupsScreen(Screen):
             "trees": None,
             "picked": set(),
             "files_error": None,
+            # Asset restore ("Also fetch games & media"): BIOS is off by default.
+            "fetch_assets": False,
+            "asset_kinds": _default_asset_kinds(backup),
+            "asset_plan": None,
+            "asset_plan_error": None,
+            "asset_selected": set(),
+            "asset_deselected": set(),
+            "asset_deselected_groups": set(),
         }
         self._dialog_just_opened = True
+
+    def _open_missing_games(self, backup: dict) -> None:
+        self.assets_dialog = {
+            "backup": backup,
+            "fetch_assets": True,
+            "asset_kinds": _default_asset_kinds(backup),
+            "asset_plan": None,
+            "asset_plan_error": None,
+            "asset_selected": set(),
+            "asset_deselected": set(),
+            "asset_deselected_groups": set(),
+        }
+        self._assets_dialog_just_opened = True
+
+    def _plan_assets(self, target: Optional[dict] = None) -> None:
+        dialog = target if target is not None else self.dialog
+        if not dialog:
+            return
+        kinds = [kind for kind, _label in _ASSET_KINDS if kind in dialog.get("asset_kinds", set())]
+        if not kinds:
+            dialog["asset_plan"] = None
+            dialog["asset_plan_error"] = "Choose at least one asset kind to search for."
+            return
+        try:
+            dialog["asset_plan"] = endpoints.plan_backup_assets(
+                self.api_client,
+                dialog["backup"]["backup_id"],
+                kinds=kinds,
+                include_bios="bios" in kinds,
+            )
+            dialog["asset_plan_error"] = None
+            dialog["fetch_assets"] = True
+            dialog["asset_selected"] = set()
+            dialog["asset_deselected"] = set()
+            dialog["asset_deselected_groups"] = set()
+        except DroneApiError as error:
+            dialog["asset_plan"] = None
+            dialog["asset_plan_error"] = str(error)
+
+    def _plan_missing_games(self) -> None:
+        self._plan_assets(self.assets_dialog)
+
+    def _asset_selection_payload(self, target: Optional[dict]) -> Optional[dict]:
+        if not target or not target.get("fetch_assets") or not target.get("asset_plan"):
+            return None
+        count, _bytes = asset_selection_totals(target)
+        if count <= 0:
+            return None
+        return {
+            "plan_id": target["asset_plan"]["plan_id"],
+            "selected": sorted(target.get("asset_selected") or ()),
+            "deselected": sorted(target.get("asset_deselected") or ()),
+            "deselected_groups": sorted(target.get("asset_deselected_groups") or ()),
+        }
+
+    def _fetch_missing_games(self) -> None:
+        dialog = self.assets_dialog
+        if not dialog or not dialog.get("asset_plan"):
+            return
+        selection = self._asset_selection_payload(dialog)
+        if not selection:
+            dialog["asset_plan_error"] = "Nothing is selected."
+            return
+        if any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+            dialog["asset_plan_error"] = "Not enough free disk space. Untick items until it fits."
+            return
+        try:
+            result = endpoints.fetch_backup_assets(
+                self.api_client,
+                dialog["backup"]["backup_id"],
+                selection["plan_id"],
+                selected=selection["selected"],
+                deselected=selection["deselected"],
+                deselected_groups=selection["deselected_groups"],
+            ) or {}
+            queued = int(result.get("queued") or 0)
+            unavailable = int(result.get("unavailable") or 0)
+            self.active_batch = result if result.get("batch_id") and queued > 0 else None
+            note = f" ({unavailable} unavailable on online Drones)" if unavailable else ""
+            self.message = f"Queued {queued} download(s) from the swarm{note}."
+            self.assets_dialog = None
+        except DroneApiError as error:
+            dialog["asset_plan_error"] = f"Could not queue downloads: {error}"
+
+    def _cancel_batch(self, batch_id: str) -> None:
+        if not batch_id:
+            return
+        try:
+            result = endpoints.cancel_download_batch(self.api_client, batch_id) or {}
+            self.message = f"Cancelled {int(result.get('cancelled') or 0)} remaining download(s)."
+            if self.active_batch and self.active_batch.get("batch_id") == batch_id:
+                self.active_batch = None
+        except DroneApiError as error:
+            self.error = str(error)
+        self._load_local()
 
     def _load_files(self) -> None:
         dialog = self.dialog
@@ -226,12 +348,23 @@ class BackupsScreen(Screen):
         dialog = self.dialog
         if not dialog:
             return
+        if not dialog.get("rollback") and dialog.get("fetch_assets"):
+            if not dialog.get("asset_plan"):
+                self._plan_assets(dialog)
+                if not dialog.get("asset_plan"):
+                    return
+            selected_count, _ = asset_selection_totals(dialog)
+            if selected_count > 0 and any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+                dialog["asset_plan_error"] = "Not enough free disk space. Untick items until it fits."
+                return
         options = self._dialog_options()
+        assets_selection = None if dialog.get("rollback") else self._asset_selection_payload(dialog)
         try:
             endpoints.restore_backup(self.api_client, dialog["backup"]["backup_id"], options["categories"],
                                      mode=options["mode"], include_machine_keys=options["include_machine_keys"],
                                      acknowledge_warnings=bool(dialog.get("ack_warnings")),
-                                     paths=options.get("paths"))
+                                     paths=options.get("paths"),
+                                     assets=assets_selection)
             self.message = ("Restore started. A safety snapshot is taken first, then running games (including this app) "
                             "close and EmulationStation restarts.")
             self.dialog = None
@@ -263,11 +396,24 @@ class BackupsScreen(Screen):
             imgui.text_colored(WARNING_COLOR, f"Restoring {self.restore_state.get('backup_name') or 'a backup'}...")
         elif self.restore_state.get("state") == "error":
             imgui.text_colored(ERROR_COLOR, f"Last restore failed: {self.restore_state.get('error') or 'unknown error'}")
+        restore_assets = self.restore_state.get("assets") if isinstance(self.restore_state.get("assets"), dict) else None
+        batch_id = (restore_assets or {}).get("batch_id") or (self.active_batch or {}).get("batch_id")
+        if restore_assets and restore_assets.get("state") == "queued":
+            imgui.text_colored(
+                SUCCESS_COLOR,
+                f"Games & media: {int(restore_assets.get('queued') or 0)} queued"
+                + (f", {int(restore_assets['unavailable'])} unavailable" if restore_assets.get("unavailable") else ""),
+            )
+        if batch_id:
+            imgui.same_line()
+            if imgui.button(f"Cancel downloads##cancel_batch_{batch_id}"):
+                self.defer_action("Cancelling downloads...", lambda b=batch_id: self._cancel_batch(b))
         if self.message:
             imgui.text_wrapped(self.message)
         if self.error:
             imgui.text_colored(ERROR_COLOR, self.error)
         self._draw_restore_popup()
+        self._draw_missing_games_popup()
         if self.tab == "swarm":
             self._draw_swarm()
         else:
@@ -318,6 +464,10 @@ class BackupsScreen(Screen):
             local = self._find_local(backup_id) or backup
             if imgui.button(f"Restore here##restore_{drone_id}_{backup_id}"):
                 self._open_restore(local)
+            imgui.same_line()
+            if imgui.button(f"Get missing games##missing_{drone_id}_{backup_id}"):
+                self._open_missing_games(local)
+                self.defer_action("Searching swarm for games & media...", self._plan_missing_games)
         else:
             imgui.begin_disabled(busy)
             if imgui.button(f"Copy to this Drone##copy_{drone_id}_{backup_id}"):
@@ -361,6 +511,11 @@ class BackupsScreen(Screen):
             label = "Roll back" if rollback else "Restore"
             if imgui.button(f"{label}##local_{backup_id}"):
                 self._open_restore(backup, rollback=rollback)
+            if not rollback:
+                imgui.same_line()
+                if imgui.button(f"Get missing games##local_missing_{backup_id}"):
+                    self._open_missing_games(backup)
+                    self.defer_action("Searching swarm for games & media...", self._plan_missing_games)
         imgui.spacing()
 
     def _draw_restore_popup(self) -> None:
@@ -411,6 +566,14 @@ class BackupsScreen(Screen):
         changed, dialog["machine_keys"] = imgui.checkbox("Also restore display/audio/network/hostname settings", dialog["machine_keys"])
         if changed:
             self._reset_plan()
+        if not dialog["rollback"]:
+            imgui.spacing()
+            _, dialog["fetch_assets"] = imgui.checkbox(
+                "Also fetch games & media from the swarm after restoring settings##restore_fetch_assets",
+                bool(dialog.get("fetch_assets")),
+            )
+            if dialog.get("fetch_assets"):
+                self._draw_asset_plan_controls(dialog, "restore")
         imgui.spacing()
         if imgui.button("Preview changes##restore_preview"):
             self.defer_action("Comparing with this Drone...", self._preview)
@@ -431,7 +594,12 @@ class BackupsScreen(Screen):
         imgui.set_item_default_focus()
         cancel = imgui.button("Cancel##restore_cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
         imgui.same_line()
-        ready = bool(plan) and dialog["ack"] and (dialog["ack_warnings"] or not plan.get("warnings"))
+        assets_ready = True
+        if not dialog["rollback"] and dialog.get("fetch_assets") and dialog.get("asset_plan"):
+            sel_count, _ = asset_selection_totals(dialog)
+            if sel_count > 0 and any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+                assets_ready = False
+        ready = bool(plan) and dialog["ack"] and (dialog["ack_warnings"] or not plan.get("warnings")) and assets_ready
         imgui.begin_disabled(not ready)
         confirm = imgui.button("Restore##restore_confirm")
         imgui.end_disabled()
@@ -442,6 +610,112 @@ class BackupsScreen(Screen):
             imgui.close_current_popup()
             self.defer_action("Starting restore...", self._restore)
         imgui.end_popup()
+
+    def _draw_missing_games_popup(self) -> None:
+        if self._assets_dialog_just_opened:
+            imgui.open_popup(_MISSING_GAMES_POPUP)
+            self._assets_dialog_just_opened = False
+        dialog = self.assets_dialog
+        if dialog is None:
+            return
+        opened, _ = imgui.begin_popup_modal(_MISSING_GAMES_POPUP, flags=imgui.WindowFlags_.always_auto_resize.value)
+        if not opened:
+            return
+        backup = dialog["backup"]
+        imgui.text_colored(WARNING_COLOR, f"Get missing games: '{backup.get('name') or 'backup'}'")
+        imgui.text_colored(MUTED_COLOR, _details(backup))
+        self._draw_asset_plan_controls(dialog, "missing")
+        imgui.spacing()
+        cancel = imgui.button("Cancel##missing_cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
+        imgui.same_line()
+        selected_count, selected_bytes = asset_selection_totals(dialog)
+        plan = dialog.get("asset_plan")
+        fits = all(pool["fits"] for pool in asset_space_pools(dialog, plan)) if plan else False
+        ready = bool(plan) and selected_count > 0 and fits
+        imgui.begin_disabled(not ready)
+        confirm = imgui.button(f"Fetch {selected_count} item(s) ({_format_size(selected_bytes)})##missing_confirm")
+        imgui.end_disabled()
+        if cancel:
+            self.assets_dialog = None
+            imgui.close_current_popup()
+        elif confirm and ready:
+            imgui.close_current_popup()
+            self.defer_action("Queuing downloads from the swarm...", self._fetch_missing_games)
+        imgui.end_popup()
+
+    def _draw_asset_plan_controls(self, dialog: dict, prefix: str) -> None:
+        kinds = dialog.setdefault("asset_kinds", {"roms", "movies", "music"})
+        for index, (kind, label) in enumerate(_ASSET_KINDS):
+            if index > 0:
+                imgui.same_line()
+            changed, value = imgui.checkbox(f"{label}##{prefix}_ak_{kind}", kind in kinds)
+            if changed:
+                (kinds.add if value else kinds.discard)(kind)
+                dialog["asset_plan"] = None
+        if imgui.button(f"Search swarm##{prefix}_plan_assets"):
+            action = self._plan_missing_games if prefix == "missing" else self._plan_assets
+            self.defer_action("Searching swarm for games & media...", action)
+        if dialog.get("asset_plan_error"):
+            imgui.text_colored(ERROR_COLOR, str(dialog["asset_plan_error"]))
+        plan = dialog.get("asset_plan")
+        if not plan:
+            return
+        for line in _asset_plan_lines(dialog, plan):
+            imgui.text_wrapped(line)
+        pools = [pool for pool in asset_space_pools(dialog, plan) if pool["selected"] > 0 or not pool["fits"]]
+        for pool in pools:
+            free = max(0, pool["free"])
+            required = max(0, pool["required"])
+            ratio = min(1.0, required / free) if free > 0 else (1.0 if required > 0 else 0.0)
+            color = SUCCESS_COLOR if pool["fits"] else ERROR_COLOR
+            imgui.text_colored(
+                color,
+                f"{pool['mount']} ({', '.join(pool['kinds'])}): {_format_size(required)} required / {_format_size(free)} free"
+                + (f" (includes {_format_size(pool['reserve'])} reserve)" if pool["reserve"] else ""),
+            )
+            imgui.progress_bar(ratio, imgui.ImVec2(480, 0))
+        if any(not pool["fits"] for pool in pools):
+            imgui.text_colored(ERROR_COLOR, "! Not enough free space. Untick items until every disk fits.")
+            if imgui.button(f"Untick until it fits##{prefix}_untick_fit"):
+                untick_assets_until_fits(dialog, plan)
+        imgui.begin_child(f"{prefix}_asset_groups", imgui.ImVec2(640, 180), True)
+        for group in plan.get("groups") or []:
+            gkey = str(group.get("key") or "")
+            default_count = group.get("default_count")
+            has_default = default_count is None or int(default_count) > 0
+            checked = gkey not in dialog["asset_deselected_groups"] and (
+                has_default or any(str(i.get("key") or "") in dialog["asset_selected"] for i in group.get("items") or [])
+            )
+            label = f"{group.get('kind')} {group.get('system') or ''}".strip()
+            changed, value = imgui.checkbox(
+                f"{label}: {int(group.get('count') or 0)} available ({_format_size(int(group.get('bytes') or 0))})##{prefix}_grp_{gkey}",
+                checked,
+            )
+            if changed:
+                toggle_asset_group(dialog, group, value)
+            for item in group.get("items") or []:
+                if item.get("default_selected") is False:
+                    ikey = str(item.get("key") or "")
+                    ichecked = ikey in dialog["asset_selected"]
+                    ichanged, ivalue = imgui.checkbox(
+                        f"  {item.get('path')} (size unknown)##{prefix}_unk_{ikey}",
+                        ichecked,
+                    )
+                    if ichanged:
+                        toggle_probable_asset(dialog, ikey, ivalue)
+        for item in plan.get("probable") or []:
+            ikey = str(item.get("key") or "")
+            checked = ikey in dialog["asset_selected"]
+            size_text = "size unknown" if item.get("size_unknown") else _format_size(int(item.get("size") or 0))
+            changed, value = imgui.checkbox(
+                f"[Probable] {item.get('system') or item.get('kind')}: {item.get('path')} ({size_text})##{prefix}_prob_{ikey}",
+                checked,
+            )
+            if changed:
+                toggle_probable_asset(dialog, ikey, value)
+        for item in plan.get("unavailable") or []:
+            imgui.text_disabled(f"[Unavailable] {item.get('system') or item.get('kind')}: {item.get('path')}")
+        imgui.end_child()
 
 
     def _draw_tree_node(self, dialog: dict, node: "FileNode", label: Optional[str] = None) -> None:
@@ -682,3 +956,178 @@ def _format_size(size_bytes: int) -> str:
             return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}GB"
+
+
+def toggle_asset_group(dialog: dict, group: dict, selected: bool) -> None:
+    gkey = str(group.get("key") or "")
+    if selected:
+        dialog["asset_deselected_groups"].discard(gkey)
+    else:
+        dialog["asset_deselected_groups"].add(gkey)
+    for item in group.get("items") or []:
+        ikey = item.get("key")
+        dialog["asset_deselected"].discard(ikey)
+        if not selected and ikey:
+            dialog["asset_selected"].discard(ikey)
+
+
+def toggle_probable_asset(dialog: dict, item_key: str, selected: bool) -> None:
+    (dialog["asset_selected"].add if selected else dialog["asset_selected"].discard)(str(item_key))
+
+
+def _item_effective_bytes(item: dict) -> int:
+    base = int(item.get("size") or 0) if item.get("action") == "download" else 0
+    return base + int(item.get("artwork_bytes") or 0)
+
+
+def asset_selection_totals(dialog: dict):
+    plan = dialog.get("asset_plan") or {}
+    deselected_groups = dialog.get("asset_deselected_groups") or set()
+    deselected = dialog.get("asset_deselected") or set()
+    selected = dialog.get("asset_selected") or set()
+    count = 0
+    total_bytes = 0
+    for group in plan.get("groups") or []:
+        if group.get("key") in deselected_groups:
+            continue
+        default_count = group.get("default_count")
+        g_count = int(default_count) if default_count is not None else int(group.get("count") or 0)
+        g_bytes = int(group.get("bytes") or 0)
+        for item in group.get("items") or []:
+            ikey = item.get("key")
+            if item.get("default_selected") is False:
+                if ikey in selected:
+                    g_count += 1
+                    g_bytes += _item_effective_bytes(item)
+            elif ikey in deselected:
+                g_count = max(0, g_count - 1)
+                g_bytes = max(0, g_bytes - _item_effective_bytes(item))
+        count += g_count
+        total_bytes += g_bytes
+    for item in plan.get("probable") or []:
+        if item.get("key") in selected:
+            count += 1
+            total_bytes += _item_effective_bytes(item)
+    return count, total_bytes
+
+
+def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
+    space = plan.get("space") if isinstance(plan.get("space"), dict) else {}
+    if not space:
+        return []
+    deselected_groups = dialog.get("asset_deselected_groups") or set()
+    deselected = dialog.get("asset_deselected") or set()
+    selected = dialog.get("asset_selected") or set()
+    by_kind = {"roms": 0, "bios": 0, "movies": 0, "music": 0}
+    for group in plan.get("groups") or []:
+        if group.get("key") in deselected_groups:
+            continue
+        g_bytes = int(group.get("bytes") or 0)
+        for item in group.get("items") or []:
+            ikey = item.get("key")
+            if item.get("default_selected") is False:
+                if ikey in selected:
+                    g_bytes += _item_effective_bytes(item)
+            elif ikey in deselected:
+                g_bytes = max(0, g_bytes - _item_effective_bytes(item))
+        kind = str(group.get("kind") or "")
+        by_kind[kind] = by_kind.get(kind, 0) + g_bytes
+    for item in plan.get("probable") or []:
+        if item.get("key") in selected:
+            kind = str(item.get("kind") or "")
+            by_kind[kind] = by_kind.get(kind, 0) + _item_effective_bytes(item)
+    pools: Dict[str, dict] = {}
+    for kind, info in space.items():
+        if not isinstance(info, dict):
+            continue
+        pool_key = str(info.get("group") or kind)
+        pool = pools.setdefault(
+            pool_key,
+            {
+                "group": pool_key,
+                "mount": str(info.get("mount") or info.get("path") or kind),
+                "free": int(info.get("free") or 0),
+                "selected": 0,
+                "queued": int(info.get("queued") or 0),
+                "staging": int(info.get("staging") or 0),
+                "reserve": int(info.get("reserve") or 0),
+                "kinds": [],
+            },
+        )
+        pool["selected"] += int(by_kind.get(kind) or 0)
+        pool["kinds"].append(kind)
+    result: List[dict] = []
+    for pool in pools.values():
+        required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
+        fits = True if pool["selected"] == 0 else pool["free"] >= required
+        pool["required"] = required
+        pool["needed"] = required
+        pool["fits"] = fits
+        result.append(pool)
+    return result
+
+
+def untick_assets_until_fits(dialog: dict, plan: dict) -> None:
+    """Untick largest selected items on non-fitting disks until every affected disk fits."""
+    while True:
+        pools = asset_space_pools(dialog, plan)
+        bad_kinds = {kind for pool in pools if not pool["fits"] for kind in pool["kinds"]}
+        if not bad_kinds:
+            break
+        candidates = []
+        for item in plan.get("probable") or []:
+            ikey = str(item.get("key") or "")
+            if ikey in dialog["asset_selected"] and item.get("kind") in bad_kinds:
+                candidates.append(("selected", ikey, _item_effective_bytes(item)))
+        for group in plan.get("groups") or []:
+            if group.get("key") in dialog["asset_deselected_groups"] or group.get("kind") not in bad_kinds:
+                continue
+            for item in group.get("items") or []:
+                ikey = str(item.get("key") or "")
+                if item.get("default_selected") is False:
+                    if ikey in dialog["asset_selected"]:
+                        candidates.append(("selected", ikey, _item_effective_bytes(item)))
+                elif ikey not in dialog["asset_deselected"]:
+                    candidates.append(("deselected", ikey, _item_effective_bytes(item)))
+        if candidates:
+            candidates.sort(key=lambda entry: entry[2], reverse=True)
+            mode, key, _size = candidates[0]
+            if mode == "selected":
+                dialog["asset_selected"].discard(key)
+            else:
+                dialog["asset_deselected"].add(key)
+            continue
+        groups = [
+            group for group in plan.get("groups") or []
+            if group.get("key") not in dialog["asset_deselected_groups"] and group.get("kind") in bad_kinds
+        ]
+        if not groups:
+            break
+        groups.sort(key=lambda group: int(group.get("bytes") or 0), reverse=True)
+        dialog["asset_deselected_groups"].add(str(groups[0].get("key") or ""))
+
+
+def _asset_space_warnings(dialog: dict, plan: dict) -> List[str]:
+    warnings = []
+    for pool in asset_space_pools(dialog, plan):
+        if not pool["fits"]:
+            warnings.append(
+                f"Low free space for {', '.join(pool['kinds'])}: {_format_size(pool['required'])} required, "
+                f"{_format_size(pool['free'])} free. Untick items until it fits."
+            )
+    return warnings
+
+
+def _asset_plan_lines(dialog: dict, plan: dict) -> List[str]:
+    totals = plan.get("totals") or {}
+    selected_count, selected_bytes = asset_selection_totals(dialog)
+    lines = [
+        f"Already here: {int(totals.get('here') or 0)}, available: {int(totals.get('available') or 0)}, "
+        f"probable (unticked): {int(totals.get('probable') or 0)}, unavailable: {int(totals.get('unavailable') or 0)}.",
+        f"Selected to fetch: {selected_count} item(s) ({_format_size(selected_bytes)}).",
+    ]
+    sources = plan.get("sources") or []
+    if sources:
+        chips = [f"{s.get('name') or s.get('drone_id')}: {s.get('status')} ({int(s.get('matched') or 0)})" for s in sources]
+        lines.append("Sources: " + ", ".join(chips))
+    return lines

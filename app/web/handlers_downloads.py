@@ -6,6 +6,7 @@ cache. Composed onto ``RomRequestHandler``.
 """
 
 from typing import Optional
+from urllib.parse import unquote
 
 try:
     from ..common.runtime_state import _ROM_METADATA_WAKE
@@ -103,6 +104,23 @@ class HandlersDownloadsMixin:
         result = manager.cancel(job_id, "cancelled from Drone admin")
         status_code = 404 if result.get("status") == "not_found" else 200
         self._send_json(status_code, result)
+
+    def _handle_admin_download_batch_status(self, batch_id: str) -> None:
+        """Progress of one batch (counts, bytes, speed), for the transfer toast."""
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        self._send_json(200, manager.batch_status(unquote(str(batch_id))))
+
+    def _handle_admin_download_batch_cancel(self, batch_id: str) -> None:
+        """Cancel everything still queued or running in one batch (e.g. a backup's game restore)."""
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        result = manager.cancel_batch(unquote(str(batch_id)), "cancelled from Drone admin")
+        self._send_json(404 if result.get("status") == "not_found" else 200, result)
 
     def _handle_admin_download_retry(self, job_id: str) -> None:
         manager = _get_download_manager()

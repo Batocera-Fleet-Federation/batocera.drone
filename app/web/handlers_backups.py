@@ -11,6 +11,8 @@ Admin (session; loopback stays pre-authenticated so the Ports client works):
 * ``GET  /admin/backups/<id>`` / ``<id>/download``          -- local detail / archive download
 * ``POST /admin/backups``                                  -- create {name, description, categories}
 * ``POST /admin/backups/<id>/{rename,delete,plan,restore}``
+* ``POST /admin/backups/<id>/assets/plan``                 -- search online Drones for the games/media the backup recorded
+* ``POST /admin/backups/<id>/assets/fetch``                -- queue the confirmed part of that plan (one batch)
 * ``POST /admin/backups/swarm/<drone>/<backup>/download``  -- queue a pull from a paired Drone
 
 Peer (pinned mTLS, HTTPS only): ``GET /peer/backups``, ``/peer/backups/<id>``,
@@ -138,6 +140,12 @@ class HandlersBackupsMixin:
             elif len(parts) == 2 and parts[1] == "rename":
                 self._send_json(200, {"backup": _backups.rename(settings, parts[0], name=payload.get("name"),
                                                                 description=payload.get("description"))})
+            elif len(parts) == 3 and parts[1] == "assets" and parts[2] == "plan":
+                self._send_json(200, _backups.plan_assets(
+                    settings, parts[0], kinds=payload.get("kinds"), include_bios=payload.get("include_bios") is True,
+                    online_ids=self._media_online_peer_ids(), manager=_get_download_manager()))
+            elif len(parts) == 3 and parts[1] == "assets" and parts[2] == "fetch":
+                self._send_json(202, _backups.fetch_assets(settings, _get_download_manager(), parts[0], payload))
             elif len(parts) == 2 and parts[1] in ("plan", "restore"):
                 options = dict(categories=payload.get("categories") if isinstance(payload.get("categories"), list) else [],
                                mode=str(payload.get("mode") or "overlay"),
@@ -147,7 +155,8 @@ class HandlersBackupsMixin:
                     self._send_json(200, _backups.plan(settings, parts[0], **options))
                 else:
                     status = _backups.start_restore(settings, parts[0], acknowledge_warnings=payload.get("acknowledge_warnings") is True,
-                                                    **options)
+                                                    assets=payload.get("assets") if "assets" in payload else None,
+                                                    manager=_get_download_manager(), **options)
                     self._send_json(202, status)
             else:
                 self._send_json(404, {"error": "not found"})

@@ -1164,3 +1164,34 @@ private `.drone-save-*` staging/backups out of save inventories. Preserve comple
 per-game directories and state thumbnails. Absence means unknown support;
 shared multi-game memory cards must not be offered as one game's save. Test save
 and profile handling with `tests/test_game_saves.py`.
+
+## Backups and swarm asset restore (#760)
+
+Categorized backups (`app/backups/`, `web/handlers_backups.py`, `web/static/js/backups.js`,
+and `ports-client/ui/screens/backups.py`) live in both Admin → Backups (`#admin/backups`)
+and Assets → Backups (`#backups`). Every non-snapshot backup records the source Drone's
+ROMs (with folder-unit paths and present gamelist artwork field names), BIOS files, movies,
+and music from local caches without re-hashing in a separate `assets.json.gz` archive member
+(`backups/assets.py`), with a verified SHA-256/size summary in `manifest.json` and a local
+`<id>.assets.json.gz` sidecar; older backups fall back to archived `roms/<system>/gamelist.xml`
+`<path>` entries (`assets.legacy_from_gamelists`, rejecting `DOCTYPE`/`ENTITY`).
+
+Both restore wizards ("Restore here" and "Download & restore") include an "Also fetch games
+& media" step, and every local backup row/card offers a re-runnable "Get missing games"
+action (`POST /admin/backups/<id>/assets/plan`, `POST /admin/backups/<id>/assets/fetch`,
+plus optional `assets` on `POST /admin/backups/<id>/restore`). Planning queries online
+paired Drones' paged `/peer/inventory/{roms,bios,movies,music}` in parallel, classifies
+items as `here`, `available` (exact fingerprint/MD5 match), `probable` (same system, path,
+and size; unticked by default), or `unavailable` (read-only), unticks unknown-size items
+by default, enforces free space per filesystem (`st_dev`: selection + already-queued
+downloads + reserve `max(1 GiB, 5%)` / `DRONE_ASSET_RESTORE_RESERVE_BYTES`, refusing with
+409 `insufficient_space` at confirm and holding the batch on low space/`ENOSPC` during
+the run), and caches plans in memory (`PlanStore`, 15 min TTL).
+Confirmed items are spread across online peers (best transport tier first, then fewest
+assigned bytes, source Drone as tie-breaker) and queued through ` PeerAssetEnqueueMixin`
+(`transfer/asset_enqueue.py`, shared with `/admin/local-network/sync[-bulk]`) into one
+caller-named `TransferBatch` (`DownloadManager.named_batch`, `GET /admin/downloads/batches/<id>`,
+`POST /admin/downloads/batches/<id>/cancel`, `DroneTransferToast.trackBatch`). Config
+restores complete first before any asset downloads are queued; existing files and restored
+gamelist text fields are never overwritten (`overwrite=False`). Tests: `tests/test_backups.py`,
+`tests/test_backup_assets.py`.

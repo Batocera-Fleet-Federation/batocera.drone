@@ -688,3 +688,23 @@ private `.drone-save-*` staging/backups out of save inventories. Preserve comple
 per-game directories and state thumbnails. Absence means unknown support;
 shared multi-game memory cards must not be offered as one game's save. Test save
 and profile handling with `tests/test_game_saves.py`.
+
+## Backup asset restore source assignment & failover (#760)
+
+Backup asset restore (`backups/assets.py`, `backups/asset_restore.py`, `transfer/asset_enqueue.py`)
+treats a backup's `assets.json.gz` member (or legacy archived `gamelist.xml`) strictly as an
+untrusted wish list: every entry is sanitized and capped (`assets.sanitize`, `assets.decode`),
+and manifest fingerprints are matching hints only — every download still uses the peer's own
+reported inventory fingerprint/MD5 and goes through the existing pinned-mTLS `/peer/*` path
+(including signed ROM/BIOS content inventories and full-file SHA-256 / BIOS MD5 checks).
+
+For backup asset restore only, `assign_sources` automatically assigns each whole file to one
+candidate peer (best transport tier first: LAN/tailnet-direct before direct-public, then fewest
+bytes already assigned so concurrent workers pull from different Drones, with the backup's
+source Drone only as a tie-breaker) and attaches the remaining ordered candidates as `_failover`
+via `DownloadManager.failover_scope`. On transfer failure or content/fingerprint mismatch from
+a peer, `DownloadManager._failover_locked` re-queues the job against the next still-paired
+candidate using only whitelisted field overrides (`_FAILOVER_SET_KEYS`), and bounds retries on
+the final source (`FAILOVER_LAST_SOURCE_RETRIES`). User cancellation (`DownloadCancelled`) and
+`PeerIdentityHold` never fail over, and planning/fetching fail closed with 503 `SwarmUnavailable`
+when `swarm_networking_allowed()` is false. Tests: `tests/test_backup_assets.py`.

@@ -6,6 +6,11 @@ from typing import List, Optional, Sequence
 
 from .base import DownloadRequest, PeerTransport, TransferContext
 
+try:
+    from ..transfer.disk_space import is_enospc as _is_enospc
+except ImportError:  # pragma: no cover - flat execution
+    from transfer.disk_space import is_enospc as _is_enospc  # type: ignore
+
 
 class TransportSelector:
     """Holds transports in priority order and returns the first usable one.
@@ -53,6 +58,8 @@ class TransportSelector:
                 return transport.fetch(request, context)
             except Exception as error:  # noqa: BLE001 -- try the next transport
                 last_error = error
+                if _is_enospc(error):
+                    raise
                 cancel = context.cancellation_event
                 if cancel is not None and cancel.is_set():
                     raise
