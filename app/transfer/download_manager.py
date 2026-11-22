@@ -207,6 +207,16 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
     )
 
 
+def _is_identity_hold(error: Exception) -> bool:
+    """True for PeerIdentityHold: the Drone's own identity is unresolved, so no peer should be
+    tried at all (switching sources would not help and must not look like peer misbehaviour)."""
+    try:
+        from .peer_connectivity import PeerIdentityHold
+    except ImportError:  # pragma: no cover - flat execution
+        from transfer.peer_connectivity import PeerIdentityHold  # type: ignore
+    return isinstance(error, PeerIdentityHold)
+
+
 def _terminal_jobs_by_completion(jobs) -> list:
     """Finished jobs, oldest completion first.
 
@@ -228,6 +238,17 @@ def _peer_label(peer: dict) -> str:
     )
 
 
+# A job queued by backup asset restore may name fallback sources (the next peer that has the
+# same file). Only these job fields may be replaced when switching to one, and a job whose
+# fallbacks are used up gets this many reconnect retries on its last source before failing.
+FAILOVER_MAX_SOURCES = 8
+FAILOVER_LAST_SOURCE_RETRIES = 3
+_FAILOVER_SET_KEYS = frozenset({
+    "relative_path", "file_path", "file_name", "rom_name", "rom_path", "bios_name", "file_size", "total_bytes",
+    "_expected_fingerprint", "bios_md5", "_entry_type", "entry_type", "_marker_relative_path",
+})
+
+
 class DownloadManager:
     """Per-target Drone download queue with a small pool of worker threads.
 
@@ -243,8 +264,9 @@ class DownloadManager:
         # shared-tailnet peers) -> legacy direct-public (_download_*_from_peer, for
         # a port-forwarded peer). The selector tries each usable tier and falls
         # back to the next on failure.
+        self._lan_transport = LanDirectTransport(_directpublic_fetch, local_network=_local_network_snapshot)
         transports = [
-            LanDirectTransport(_directpublic_fetch, local_network=_local_network_snapshot),
+            self._lan_transport,
             DirectPublicTransport(_directpublic_fetch),
         ]
         self._selector = TransportSelector(transports)
@@ -295,12 +317,69 @@ class DownloadManager:
                 events = self._batch_events_locked(batch)
             self._emit_batch_events(events)
 
+    @contextmanager
+    def named_batch(self, *, batch_id: str, label: str, extra: Optional[dict] = None):
+        """Group the jobs this thread enqueues into one caller-named batch.
+
+        Unlike ``transfer_batch`` (one peer), the jobs may come from several peers: backup
+        asset restore spreads files across the swarm yet reports one bell entry
+        ("Restoring N games from backup X") and is cancelled as a whole by
+        ``cancel_batch``. ``extra`` carries counts the finished entry reports
+        (``unavailable``, ``skipped``). A nested block joins the outer batch."""
+        if getattr(self._batch_scope, "batch", None) is not None:
+            yield None
+            return
+        batch = _TransferBatch(str(batch_id), "download", label, label=label, extra=extra)
+        with self._lock:
+            self._batches[batch.batch_id] = batch
+        self._batch_scope.batch = batch
+        try:
+            # The caller may still update ``batch.extra`` (e.g. items skipped while queueing)
+            # before the block exits; the entries are only built once the batch is sealed.
+            yield batch
+        finally:
+            self._batch_scope.batch = None
+            with self._lock:
+                batch.sealed = True
+                events = self._batch_events_locked(batch)
+            self._emit_batch_events(events)
+
+    @contextmanager
+    def failover_scope(self, resolver):
+        """While active, every job this thread enqueues gets ``resolver(job)``'s ordered list of
+        fallback sources (``{"drone_id", "set": {job field overrides}}``). The resolver runs under
+        the queue lock, so it must be a cheap pure function."""
+        previous = getattr(self._batch_scope, "failover", None)
+        self._batch_scope.failover = resolver
+        try:
+            yield
+        finally:
+            self._batch_scope.failover = previous
+
+    def peer_tier(self, peer: dict) -> int:
+        """0 = reachable over the LAN or a shared tailnet (best), 1 = direct-public only."""
+        try:
+            return 0 if self._lan_transport.lan_url(peer or {}) else 1
+        except Exception:  # noqa: BLE001 - a tier guess never blocks a transfer
+            return 1
+
     def _attach_batch_locked(self, job: dict) -> None:
+        resolver = getattr(self._batch_scope, "failover", None)
+        if resolver is not None:
+            try:
+                fallbacks = resolver(job)
+            except Exception:  # noqa: BLE001 - no fallbacks is always safe
+                fallbacks = None
+            # Even with no fallbacks the job is a swarm-restore job: once its sources are used up it
+            # fails after a few retries instead of reconnecting forever.
+            job["_failover"] = [dict(item) for item in fallbacks or [] if isinstance(item, dict)][:FAILOVER_MAX_SOURCES]
+            job["_had_failover"] = True
         batch = getattr(self._batch_scope, "batch", None)
         if batch is None:
             return
         job["_batch_id"] = batch.batch_id
-        batch.add_selected(system=job.get("system"), total_bytes=job.get("total_bytes") or job.get("file_size"))
+        batch.add_selected(system=job.get("system"), total_bytes=job.get("total_bytes") or job.get("file_size"),
+                           file_type=job.get("file_type"))
 
     def _open_single_batch_locked(self, job: dict) -> list:
         """A retried job is a new user action, so it gets a batch of its own."""
@@ -908,6 +987,75 @@ class DownloadManager:
         self._wake.set()
         return {"status": snapshot.get("status"), "job": snapshot}
 
+    def cancel_batch(self, batch_id: str, reason: str = "cancelled with its batch") -> dict:
+        """Cancel every queued, paused, pending or running job of one batch (including jobs
+        waiting to be retried from another source)."""
+        batch_id = str(batch_id or "")
+        with self._lock:
+            ids = [
+                job_id for job_id, job in self._jobs.items()
+                if batch_id and job.get("_batch_id") == batch_id and job.get("status") not in DOWNLOAD_TERMINAL_STATUSES
+            ]
+        for job_id in ids:
+            self.cancel(job_id, reason)
+        return {"status": "cancelled" if ids else "not_found", "batch_id": batch_id, "cancelled": len(ids)}
+
+    def batch_status(self, batch_id: str) -> dict:
+        """Counts, bytes and speed of one batch's jobs, for a progress toast that follows a whole
+        run (thousands of jobs) without listing them."""
+        batch_id = str(batch_id or "")
+        stats = {"batch_id": batch_id, "files": 0, "done": 0, "failed": 0, "cancelled": 0, "bytes": 0, "total": 0,
+                 "speed": 0, "names": []}
+        with self._lock:
+            for job in self._jobs.values():
+                if not batch_id or job.get("_batch_id") != batch_id:
+                    continue
+                stats["files"] += 1
+                size = int(job.get("total_bytes") or job.get("file_size") or 0)
+                got = int(job.get("downloaded_bytes") or 0)
+                stats["total"] += size
+                status = job.get("status")
+                if status == "completed":
+                    stats["done"] += 1
+                    stats["bytes"] += size or got
+                elif status == "failed":
+                    stats["failed"] += 1
+                    stats["bytes"] += got
+                elif status == "cancelled":
+                    stats["cancelled"] += 1
+                else:
+                    stats["bytes"] += got
+                    if status == "downloading":
+                        stats["speed"] += int(job.get("transfer_speed_bps") or 0)
+                        if len(stats["names"]) < 3:
+                            stats["names"].append(str(job.get("file_name") or job.get("relative_path") or "file"))
+        finished = stats["done"] + stats["failed"] + stats["cancelled"]
+        stats["state"] = ("unknown" if not stats["files"] else "running" if finished < stats["files"]
+                          else "failed" if stats["failed"] else "cancelled" if stats["cancelled"] and not stats["done"] else "done")
+        return stats
+
+    def find_pending_asset(self, asset_type: str, relative_path: str, *, system: Optional[str] = None,
+                           expected_fingerprint: Optional[str] = None) -> Optional[dict]:
+        """An unfinished job for the same local target (or content), for any asset type."""
+        wanted_type = str(asset_type or "rom").strip().lower()
+        system_norm = str(system or "").strip().lower()
+        path_norm = str(relative_path or "").replace("\\", "/").strip().lstrip("./").lower()
+        fp_norm = str(expected_fingerprint or "").strip().lower()
+        with self._lock:
+            for job in self._jobs.values():
+                if job.get("status") in DOWNLOAD_TERMINAL_STATUSES:
+                    continue
+                job_type = str(job.get("_asset_type") or ("rom" if str(job.get("file_type") or "").upper() == "ROM" else "")).lower()
+                if job_type != wanted_type:
+                    continue
+                if system_norm and str(job.get("system") or "").strip().lower() != system_norm:
+                    continue
+                job_path = str(job.get("relative_path") or job.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                job_fp = str(job.get("_expected_fingerprint") or "").strip().lower()
+                if (path_norm and job_path == path_norm) or (fp_norm and job_fp == fp_norm):
+                    return self._public_job_locked(job)
+        return None
+
     def pause_job(self, job_id: str) -> dict:
         """Pause a single job. A queued/pending job is parked immediately (nothing
         is running for it); an in-flight download is asked to stop -- like cancel,
@@ -1188,6 +1336,8 @@ class DownloadManager:
 
     def _public_job_locked(self, job: dict) -> dict:
         public = {key: value for key, value in job.items() if not key.startswith("_")}
+        if job.get("_batch_id"):
+            public["batch_id"] = job["_batch_id"]
         downloaded = int(public.get("downloaded_bytes") or 0)
         total = public.get("total_bytes") or public.get("file_size")
         try:
@@ -1209,6 +1359,43 @@ class DownloadManager:
                 position += 1
             else:
                 job["queue_position"] = None
+
+    def _failover_locked(self, job: dict, error: Exception) -> bool:
+        """Re-point a failed job at its next fallback source. True when it was requeued."""
+        remaining = job.get("_failover")
+        if not isinstance(remaining, list):
+            return False
+        failed_peer = job.get("_peer") if isinstance(job.get("_peer"), dict) else {}
+        while remaining:
+            candidate = remaining.pop(0)
+            peer_id = str(candidate.get("drone_id") or "").strip() if isinstance(candidate, dict) else ""
+            peer = _local_network.get_paired_peer(self.settings, peer_id) if peer_id else None
+            if not isinstance(peer, dict) or not peer:
+                continue  # unpaired since the plan was made; try the next one
+            history = job.setdefault("failover_failed_sources", [])
+            history.append({"drone_id": str(job.get("source_drone_id") or ""), "error": str(error)[:300]})
+            job["source_drone_id"] = peer_id
+            job["_peer"] = peer
+            overrides = candidate.get("set") if isinstance(candidate.get("set"), dict) else {}
+            for key, value in overrides.items():
+                if key in _FAILOVER_SET_KEYS and (value is None or isinstance(value, (str, int, float, bool))):
+                    job[key] = value
+            job["status"] = "queued"
+            job["failover_count"] = int(job.get("failover_count") or 0) + 1
+            job["reconnect_attempts"] = 0
+            job["reconnect_after_epoch"] = None
+            job["resume_reason"] = f"{_peer_label(failed_peer)} could not supply this; trying {_peer_label(peer)}"
+            job["failure_reason"] = str(error)
+            job["error_message"] = str(error)
+            job["started_at"] = None
+            job["download_started_at"] = None
+            job["downloaded_bytes"] = 0
+            job["bytes_transferred"] = 0
+            job["percentage"] = 0
+            job["transfer_speed_bps"] = 0
+            job.pop("_started_mono", None)
+            return True
+        return False
 
     def _worker(self) -> None:
         while True:
@@ -1351,7 +1538,13 @@ class DownloadManager:
                 if current and current.get("pause_requested"):
                     self._land_paused_locked(current)
                 elif current:
-                    if self._is_reconnectable_error(error) and not current.get("cancellation_requested"):
+                    if (not current.get("cancellation_requested") and not _is_identity_hold(error)
+                            and self._failover_locked(current, error)):
+                        # Requeued against the next peer that has the file.
+                        pass
+                    elif (self._is_reconnectable_error(error) and not current.get("cancellation_requested")
+                          and not (current.get("_had_failover")
+                                   and int(current.get("reconnect_attempts") or 0) >= FAILOVER_LAST_SOURCE_RETRIES)):
                         attempt = int(current.get("reconnect_attempts") or 0) + 1
                         delay = self._reconnect_delay(attempt)
                         current["status"] = "queued"

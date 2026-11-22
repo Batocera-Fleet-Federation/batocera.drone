@@ -13,11 +13,19 @@ const BK = {
   inFlight: false,
   assets: { sources: [], selected: null, results: {}, query: "", group: "", token: 0 },
   wizard: null,
+  missing: null,
   restorePollTimer: null,
+  trackedBatchId: null,
 };
 const BK_ADMIN_HASH = "#admin/backups";
 const BK_ASSETS_HASH = "#backups";
 const BK_SLOW = { timeoutMs: 120000 };
+const BK_ASSET_KIND_LABELS = {
+  roms: "Games & artwork",
+  bios: "BIOS files (MD5-verified)",
+  movies: "Movies & shows",
+  music: "Music",
+};
 
 // ------------------------------------------------------------------ helpers
 
@@ -131,20 +139,75 @@ function stopBackupsAutoRefresh() {
   BK.inFlight = false;
 }
 
+function bkAssetsSummaryLine(assets) {
+  if (!assets) return "";
+  if (assets.recorded) {
+    const counts = assets.counts || {};
+    const roms = Number(counts.roms || 0);
+    const bios = Number(counts.bios || 0);
+    const movies = Number(counts.movies || 0);
+    const music = Number(counts.music || 0);
+    const mediaNote = assets.media_roms ? ` (${Number(assets.media_roms)} with artwork)` : "";
+    return `Records ${roms} game${roms === 1 ? "" : "s"}${mediaNote}, ${bios} BIOS, ${movies} movie${movies === 1 ? "" : "s"}, ${music} music track${music === 1 ? "" : "s"}${assets.truncated ? " (truncated)" : ""}`;
+  }
+  if (assets.legacy) {
+    return "Game list only (older backup)";
+  }
+  return "";
+}
+
+function bkRestoreAssetsBanner(status) {
+  const assets = status?.assets;
+  if (!assets || !assets.state) return "";
+  if (assets.state === "queued" && assets.batch_id && Number(assets.queued || 0) > 0 && BK.trackedBatchId !== assets.batch_id) {
+    BK.trackedBatchId = assets.batch_id;
+    if (window.DroneTransferToast?.trackBatch) {
+      window.DroneTransferToast.trackBatch(assets.batch_id, `Restoring from ${status.backup_name || "backup"}`);
+    }
+  }
+  if (assets.state === "pending" || assets.state === "queueing") {
+    return `<div class="small mt-1"><span class="spinner-border spinner-border-sm me-1"></span>Games &amp; media will be queued from the swarm as soon as the settings restore finishes…</div>`;
+  }
+  if (assets.state === "queued") {
+    const queued = Number(assets.queued || 0);
+    const skipped = Number(assets.skipped || 0);
+    const unavailable = Number(assets.unavailable || 0);
+    return `<div class="small mt-1 d-flex flex-wrap align-items-center gap-2">
+      <span><i class="bi bi-cloud-arrow-down me-1"></i><strong>Games &amp; media:</strong> ${queued} download(s) queued across paired Drones${skipped ? `, ${skipped} already here/skipped` : ""}${unavailable ? `, <strong>${unavailable} unavailable on online Drones</strong>` : ""}.</span>
+      ${assets.batch_id && queued > 0 ? `<button type="button" class="btn btn-sm btn-outline-light" onclick="bkCancelAssetBatch(${jsAttr(assets.batch_id)})">Cancel downloads</button>` : ""}
+    </div>`;
+  }
+  if (assets.state === "skipped" || assets.state === "error") {
+    return `<div class="small mt-1 text-warning"><i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(assets.error || "No games or media were queued.")}</div>`;
+  }
+  return "";
+}
+
+async function bkCancelAssetBatch(batchId) {
+  if (!batchId) return;
+  try {
+    const res = await apiPost(`/admin/downloads/batches/${encodeURIComponent(batchId)}/cancel`, {});
+    showToast(`Cancelled ${Number(res.cancelled || 0)} remaining download(s).`, "info");
+  } catch (err) {
+    showToast(escapeHtml(err.message || "Could not cancel the batch."), "danger");
+  }
+}
+
 function bkRestoreBanner(status) {
   if (!status || status.state === "idle" || !status.state) return "";
   if (status.state === "running") {
     const stage = status.stage === "snapshot" ? "Taking a safety snapshot" : "Restoring files (EmulationStation is restarting)";
-    return `<div class="alert alert-info d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span><div><strong>${escapeHtml(stage)}…</strong> ${escapeHtml(status.backup_name || "")}</div></div>`;
+    return `<div class="alert alert-info d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span><div><strong>${escapeHtml(stage)}…</strong> ${escapeHtml(status.backup_name || "")}${bkRestoreAssetsBanner(status)}</div></div>`;
   }
   if (status.state === "error") {
-    return `<div class="alert alert-danger"><strong>Restore failed:</strong> ${escapeHtml(status.error || "unknown error")}${status.snapshot_id ? " A safety snapshot was taken first; you can roll back from Safety snapshots below." : ""}</div>`;
+    return `<div class="alert alert-danger"><strong>Restore failed:</strong> ${escapeHtml(status.error || "unknown error")}${status.snapshot_id ? " A safety snapshot was taken first; you can roll back from Safety snapshots below." : ""}${bkRestoreAssetsBanner(status)}</div>`;
   }
   const result = status.result || {};
   const failed = Number(result.failed_count || 0);
   return `<div class="alert ${failed ? "alert-warning" : "alert-success"}"><strong>Restored ${escapeHtml(status.backup_name || "backup")}:</strong>
     ${Number(result.written || 0)} file(s) written, ${Number(result.unchanged || 0)} already identical, ${Number(result.removed || 0)} removed${failed ? `, <strong>${failed} failed</strong>` : ""}.
     ${result.warning ? `<div>${escapeHtml(result.warning)}</div>` : ""}
+    ${bkRestoreAssetsBanner(status)}
     ${failed ? `<details class="mt-1"><summary class="small">Show failures</summary><ul class="small mb-0">${(result.failed || []).map((f) => `<li><code>${escapeHtml(f.path)}</code>: ${escapeHtml(f.error)}</li>`).join("")}</ul></details>` : ""}</div>`;
 }
 
@@ -176,7 +239,7 @@ async function renderBackupsAdminPage() {
         </div>
       </div>
       <div class="card-body">
-        <p class="text-muted small mb-3">A backup holds the parts you choose: <code>batocera.conf</code>, EmulationStation settings and collections, controller mappings and RetroArch remaps, RetroArch and each standalone emulator's settings, cheats, game lists and custom scripts, plus per-system saves and save states if you tick them. Passwords, Wi-Fi keys and API tokens are never included. ROMs, BIOS files, firmware and caches are not backed up. Paired Drones can see and download your backups from their Backups page.</p>
+        <p class="text-muted small mb-3">A backup holds the parts you choose: <code>batocera.conf</code>, EmulationStation settings and collections, controller mappings and RetroArch remaps, RetroArch and each standalone emulator's settings, cheats, game lists and custom scripts, plus per-system saves and save states if you tick them. Passwords, Wi-Fi keys and API tokens are never included. ROMs, BIOS files, movies and music are not stored in the archive, but every backup records which ones this Drone had so missing games and media can be fetched from your paired Drones on restore or at any time with Get missing games. Firmware and caches are never backed up. Paired Drones can see and download your backups from their Backups page.</p>
         <div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table bff-stack">
           <thead><tr><th>Name</th><th>Created</th><th>Contents</th><th>Size</th><th class="download-actions">Actions</th></tr></thead>
           <tbody id="bkAdminBody">${bkAdminRows(payload.backups || [], false)}</tbody>
@@ -212,7 +275,8 @@ function bkAdminRows(rows, snapshots) {
     const actions = complete ? `
       ${snapshots
         ? `<button class="btn btn-sm btn-outline-warning" title="Roll back" aria-label="Roll back" onclick="bkOpenRestore(${jsAttr(id)}, true)"><i class="bi bi-arrow-counterclockwise"></i></button>`
-        : `<button class="btn btn-sm btn-outline-warning" title="Restore to this Drone" aria-label="Restore to this Drone" onclick="bkOpenRestore(${jsAttr(id)}, false)"><i class="bi bi-arrow-repeat"></i></button>`}
+        : `<button class="btn btn-sm btn-outline-warning" title="Restore to this Drone" aria-label="Restore to this Drone" onclick="bkOpenRestore(${jsAttr(id)}, false)"><i class="bi bi-arrow-repeat"></i></button>
+           <button class="btn btn-sm btn-outline-info" title="Get missing games" aria-label="Get missing games" onclick="bkOpenMissingGames(${jsAttr(id)})"><i class="bi bi-controller me-1"></i>Get missing games</button>`}
       <button class="btn btn-sm btn-outline-secondary" title="View contents" aria-label="View contents" onclick="bkOpenContents(null, ${jsAttr(id)})"><i class="bi bi-folder2-open"></i></button>
       <a class="btn btn-sm btn-outline-primary" title="Download file" aria-label="Download file" href="${escapeHtml(_apiRequestUrl(`/admin/backups/${id}/download`))}"><i class="bi bi-download"></i></a>
       ${snapshots ? "" : `<button class="btn btn-sm btn-outline-light" title="Rename" aria-label="Rename" onclick="bkOpenRename(${jsAttr(id)})"><i class="bi bi-pencil"></i></button>`}` : "";
@@ -391,11 +455,13 @@ async function bkOpenContents(droneId, backupId, preset = null) {
   if (trees.size === 1) BK.contents.open.add(trees.values().next().value.id);
   BK.pick = { whole: new Set(preset?.categories || []), files: new Set(preset?.paths || []) };
   const warnings = backup.compatibility?.warnings || [];
+  const assetsLine = bkAssetsSummaryLine(data.assets);
   const modal = document.getElementById("bkContentsModal");
   modal.querySelector(".modal-title").innerHTML = `<i class="bi bi-folder2-open me-2"></i>${escapeHtml(backup.name || "Backup")}`;
   modal.querySelector(".modal-body").innerHTML = `
     ${backup.description ? `<p class="mb-1">${escapeHtml(backup.description)}</p>` : ""}
-    <p class="small text-muted mb-2">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""} · ${files.length} files</p>
+    <p class="small text-muted mb-1">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""} · ${files.length} files</p>
+    ${assetsLine ? `<p class="small text-info mb-2"><i class="bi bi-controller me-1"></i>${escapeHtml(assetsLine)}</p>` : ""}
     ${warnings.map((w) => `<div class="alert alert-warning py-2 small mb-2">${escapeHtml(w)}</div>`).join("")}
     <p class="small text-muted mb-2">Tick whole parts or single files to restore only those.</p>
     <div class="d-flex flex-wrap gap-2 mb-2">
@@ -725,14 +791,25 @@ async function bkOpenRestore(backupId, rollback, preset = null) {
     if (!categories.some((c) => c.id === id)) categories = categories.concat([{ id, label: id, group: "other", group_label: "Previously empty", file_count: 0, size_bytes: 0 }]);
   }
   const picked = preset && (preset.paths || []).length ? preset : null;
-  BK.wizard = { backupId, rollback, backup, paths: picked ? picked.paths : null, presetCategories: picked ? picked.categories : null };
+  const assetsState = rollback ? null : bkInitAssetPlanState("wizard", backupId, backup.name || "backup", data.assets);
+  BK.wizard = {
+    backupId,
+    rollback,
+    backup,
+    assetsOverview: data.assets || null,
+    assetsState,
+    paths: picked ? picked.paths : null,
+    presetCategories: picked ? picked.categories : null,
+  };
   const checkedIds = preset ? new Set(preset.categories || []) : null;
   const title = rollback ? `Roll back: ${backup.snapshot_of?.name || backup.name}` : `Restore ${backup.name || "backup"}`;
+  const assetsLine = rollback ? "" : bkAssetsSummaryLine(data.assets);
   bkModal("bkRestoreModal", `
     <div class="modal-header"><h5 class="modal-title mb-0"><i class="bi ${rollback ? "bi-arrow-counterclockwise" : "bi-arrow-repeat"} me-2"></i>${escapeHtml(title)}</h5>
       <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body">
-      <p class="small text-muted mb-2">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""}</p>
+      <p class="small text-muted mb-1">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""}</p>
+      ${assetsLine ? `<p class="small text-info mb-2"><i class="bi bi-controller me-1"></i>${escapeHtml(assetsLine)}</p>` : ""}
       ${picked ? `<div class="alert alert-info py-2 small d-flex flex-wrap align-items-center gap-2 mb-3">
           <span><i class="bi bi-check2-square me-1"></i><strong>${Number(picked.fileCount || 0)} selected file(s)</strong>${(picked.categories || []).length ? ` (${picked.categories.length} whole part(s) plus single files)` : ""}. Only these are restored.</span>
           <button class="btn btn-sm btn-outline-light ms-auto" onclick="bkChangePicked()">Change selection</button>
@@ -750,13 +827,14 @@ async function bkOpenRestore(backupId, rollback, preset = null) {
       </div>
       <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="bkMachineKeys" onchange="bkResetPreview()">
         <label class="form-check-label small" for="bkMachineKeys">Also restore this machine's display, audio, network and hostname settings from <code>batocera.conf</code></label></div>
+      ${rollback ? "" : bkRenderWizardAssetsSection(assetsState)}
       <div id="bkPreview"></div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
       <button type="button" class="btn btn-outline-info" id="bkPreviewBtn" onclick="bkPreview()"><i class="bi bi-eye me-1"></i>Preview changes</button>
       <button type="button" class="btn btn-warning" id="bkRestoreBtn" onclick="bkConfirmRestore()" disabled><i class="bi bi-arrow-repeat me-1"></i>Restore</button>
-    </div>`);
+    </div>`, rollback ? "modal-lg" : "modal-xl");
 }
 
 function bkChangePicked() {
@@ -833,6 +911,10 @@ async function bkPreview() {
     ${warnings.length ? `<div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="bkAckWarnings" onchange="bkUpdateRestoreButton()"><label class="form-check-label small" for="bkAckWarnings">I understand the warnings above and want to restore anyway.</label></div>` : ""}
     <div class="form-check"><input class="form-check-input" type="checkbox" id="bkAckRestore" onchange="bkUpdateRestoreButton()">
       <label class="form-check-label small" for="bkAckRestore">A safety snapshot of these parts is taken first. Any running game is closed and EmulationStation restarts.</label></div>`;
+  const assetsState = BK.wizard.assetsState;
+  if (assetsState && assetsState.enabled && !assetsState.plan && !assetsState.loading) {
+    await bkPlanAssets("wizard");
+  }
   bkUpdateRestoreButton();
 }
 
@@ -847,6 +929,22 @@ function bkUpdateRestoreButton() {
 async function bkConfirmRestore() {
   const options = bkRestoreOptions();
   options.acknowledge_warnings = Boolean(document.getElementById("bkAckWarnings")?.checked);
+  const assetsState = BK.wizard?.assetsState;
+  if (assetsState && assetsState.enabled) {
+    if (!assetsState.plan) {
+      await bkPlanAssets("wizard");
+      if (!assetsState.plan) return;
+    }
+    const selection = bkBuildAssetSelection(assetsState);
+    if (selection && selection._selectedCount > 0) {
+      options.assets = {
+        plan_id: selection.plan_id,
+        selected: selection.selected,
+        deselected: selection.deselected,
+        deselected_groups: selection.deselected_groups,
+      };
+    }
+  }
   const button = document.getElementById("bkRestoreBtn");
   if (button) button.disabled = true;
   try {
@@ -1020,7 +1118,8 @@ function bkAssetCard(backup) {
   const actions = [
     `<button class="btn btn-sm btn-outline-secondary" onclick="bkOpenContents(${jsAttr(drone)}, ${jsAttr(id)})"><i class="bi bi-folder2-open me-1"></i>Contents</button>`,
     onThisDrone
-      ? `<button class="btn btn-sm btn-warning" onclick="bkOpenRestore(${jsAttr(id)}, false)"><i class="bi bi-arrow-repeat me-1"></i>Restore here</button>`
+      ? `<button class="btn btn-sm btn-warning" onclick="bkOpenRestore(${jsAttr(id)}, false)"><i class="bi bi-arrow-repeat me-1"></i>Restore here</button>
+         <button class="btn btn-sm btn-outline-info" onclick="bkOpenMissingGames(${jsAttr(id)})"><i class="bi bi-controller me-1"></i>Get missing games</button>`
       : `<button class="btn btn-sm btn-warning" onclick="bkDownloadFromDrone(${jsAttr(drone)}, ${jsAttr(id)}, true)"><i class="bi bi-arrow-repeat me-1"></i>Download &amp; restore</button>`,
     onThisDrone
       ? (local ? `<a class="btn btn-sm btn-outline-primary" href="${escapeHtml(_apiRequestUrl(`/admin/backups/${id}/download`))}" title="Save the archive file"><i class="bi bi-download"></i></a>` : "")
@@ -1082,5 +1181,524 @@ async function bkDownloadFromDrone(droneId, backupId, thenRestore, preset = null
     const pct = Number(job.percentage || 0);
     setProgress(job.status === "queued" ? "Waiting in the transfer queue…"
       : `<div class="progress" style="height: 6px"><div class="progress-bar" style="width:${pct}%"></div></div><span>${pct}% · ${formatBytes(job.downloaded_bytes || 0)} of ${formatBytes(job.total_bytes || 0)}</span>`);
+  }
+}
+
+// -------------------------------------------------- asset restore & missing games
+
+function bkDefaultAssetKinds(overview) {
+  const kinds = new Set();
+  if (overview?.recorded) {
+    const counts = overview.counts || {};
+    if (Number(counts.roms || 0) > 0) kinds.add("roms");
+    if (Number(counts.movies || 0) > 0) kinds.add("movies");
+    if (Number(counts.music || 0) > 0) kinds.add("music");
+    if (!kinds.size) kinds.add("roms");
+  } else {
+    kinds.add("roms");
+    kinds.add("movies");
+    kinds.add("music");
+  }
+  // BIOS is always opt-in at restore time (MD5-verified).
+  return kinds;
+}
+
+function bkInitAssetPlanState(scope, backupId, backupName, overview) {
+  return {
+    scope,
+    backupId,
+    backupName: backupName || "backup",
+    overview: overview || null,
+    enabled: scope === "missing",
+    kinds: bkDefaultAssetKinds(overview),
+    loading: false,
+    error: "",
+    plan: null,
+    selected: new Set(),
+    deselected: new Set(),
+    deselectedGroups: new Set(),
+  };
+}
+
+function bkGetAssetPlanState(scope) {
+  return scope === "wizard" ? BK.wizard?.assetsState : BK.missing;
+}
+
+function bkAssetKindCheckboxesHtml(state) {
+  const scope = state.scope;
+  const counts = state.overview?.recorded ? (state.overview.counts || {}) : null;
+  return ["roms", "movies", "music", "bios"].map((kind) => {
+    const checked = state.kinds.has(kind);
+    const countNote = counts ? ` <span class="text-muted">(${Number(counts[kind] || 0)})</span>` : "";
+    const id = `bkAssetKind-${scope}-${kind}`;
+    return `<div class="form-check form-check-inline">
+      <input class="form-check-input" type="checkbox" id="${id}" ${checked ? "checked" : ""} onchange="bkToggleAssetKind(${jsAttr(scope)}, ${jsAttr(kind)}, this.checked)">
+      <label class="form-check-label small" for="${id}">${escapeHtml(BK_ASSET_KIND_LABELS[kind] || kind)}${countNote}</label>
+    </div>`;
+  }).join("");
+}
+
+function bkRenderWizardAssetsSection(state) {
+  if (!state) return "";
+  const summary = bkAssetsSummaryLine(state.overview);
+  return `<div class="card log-card mb-3">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2 py-2">
+      <div class="form-check mb-0">
+        <input class="form-check-input" type="checkbox" id="bkFetchAssetsToggle" ${state.enabled ? "checked" : ""} onchange="bkToggleWizardFetchAssets(this.checked)">
+        <label class="form-check-label fw-semibold small" for="bkFetchAssetsToggle"><i class="bi bi-controller me-1"></i>Also fetch games &amp; media from the swarm</label>
+      </div>
+      ${summary ? `<span class="small text-muted">${escapeHtml(summary)}</span>` : ""}
+    </div>
+    <div class="card-body py-2" id="bkWizardAssetsBody" ${state.enabled ? "" : "hidden"}>
+      <p class="small text-muted mb-2">Settings and game lists are restored first; once EmulationStation restarts, missing games, artwork and media are queued from your online paired Drones (spread across peers, never overwriting existing files or restored game list descriptions).</p>
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <div id="bkAssetKinds-wizard">${bkAssetKindCheckboxesHtml(state)}</div>
+        <button type="button" class="btn btn-sm btn-outline-info ms-auto" onclick="bkPlanAssets('wizard')"><i class="bi bi-search me-1"></i>Search swarm</button>
+      </div>
+      <div id="bkAssetPlan-wizard">${bkRenderAssetPlanHtml(state)}</div>
+    </div>
+  </div>`;
+}
+
+function bkToggleWizardFetchAssets(checked) {
+  const state = bkGetAssetPlanState("wizard");
+  if (!state) return;
+  state.enabled = Boolean(checked);
+  const body = document.getElementById("bkWizardAssetsBody");
+  if (body) body.hidden = !state.enabled;
+  if (state.enabled && !state.plan && !state.loading) {
+    bkPlanAssets("wizard");
+  }
+}
+
+function bkToggleAssetKind(scope, kind, checked) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state) return;
+  if (checked) state.kinds.add(kind);
+  else state.kinds.delete(kind);
+  state.plan = null;
+  bkRefreshAssetPlanContainer(scope);
+  if (state.kinds.size && (scope === "missing" || state.enabled)) {
+    bkPlanAssets(scope);
+  }
+}
+
+async function bkPlanAssets(scope) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state) return;
+  const kinds = Array.from(state.kinds);
+  if (!kinds.length) {
+    state.error = "Choose at least one asset type to search for.";
+    state.plan = null;
+    bkRefreshAssetPlanContainer(scope);
+    return;
+  }
+  state.loading = true;
+  state.error = "";
+  bkRefreshAssetPlanContainer(scope);
+  try {
+    const plan = await apiPost(`/admin/backups/${encodeURIComponent(state.backupId)}/assets/plan`, {
+      kinds,
+      include_bios: state.kinds.has("bios"),
+    }, BK_SLOW);
+    state.plan = plan;
+    state.selected = new Set();
+    state.deselected = new Set();
+    state.deselectedGroups = new Set();
+  } catch (err) {
+    state.plan = null;
+    state.error = err.message || "Could not search the swarm for missing games and media.";
+  } finally {
+    state.loading = false;
+    bkRefreshAssetPlanContainer(scope);
+  }
+}
+
+function bkComputeAssetSelectionStats(state) {
+  const plan = state?.plan;
+  if (!plan) return { selectedCount: 0, selectedBytes: 0, probableSelected: 0, pools: [] };
+  let selectedCount = 0;
+  let selectedBytes = 0;
+  let probableSelected = 0;
+  const byKindBytes = { roms: 0, bios: 0, movies: 0, music: 0 };
+  for (const group of plan.groups || []) {
+    if (state.deselectedGroups.has(group.key)) continue;
+    let groupCount = Number(group.count || 0);
+    let groupBytes = Number(group.bytes || 0);
+    for (const item of group.items || []) {
+      if (state.deselected.has(item.key)) {
+        groupCount = Math.max(0, groupCount - 1);
+        if (item.action === "download") groupBytes = Math.max(0, groupBytes - Number(item.size || 0));
+      }
+    }
+    selectedCount += groupCount;
+    selectedBytes += groupBytes;
+    byKindBytes[group.kind] = (byKindBytes[group.kind] || 0) + groupBytes;
+  }
+  for (const item of plan.probable || []) {
+    if (!state.selected.has(item.key)) continue;
+    selectedCount += 1;
+    probableSelected += 1;
+    const size = item.action === "download" ? Number(item.size || 0) : 0;
+    selectedBytes += size;
+    byKindBytes[item.kind] = (byKindBytes[item.kind] || 0) + size;
+  }
+  const poolMap = new Map();
+  const space = plan.space || {};
+  for (const kind of Object.keys(space)) {
+    const info = space[kind];
+    if (!info) continue;
+    const key = info.group || kind;
+    if (!poolMap.has(key)) {
+      poolMap.set(key, { group: key, path: info.path || kind, free: Number(info.free || 0), needed: 0, kinds: [] });
+    }
+    const pool = poolMap.get(key);
+    pool.needed += Number(byKindBytes[kind] || 0);
+    pool.kinds.push(kind);
+  }
+  const pools = Array.from(poolMap.values()).map((pool) => Object.assign({}, pool, { short: pool.needed > pool.free }));
+  return { selectedCount, selectedBytes, probableSelected, pools };
+}
+
+function bkBuildAssetSelection(state) {
+  if (!state?.plan) return null;
+  const stats = bkComputeAssetSelectionStats(state);
+  return {
+    plan_id: state.plan.plan_id,
+    selected: Array.from(state.selected),
+    deselected: Array.from(state.deselected),
+    deselected_groups: Array.from(state.deselectedGroups),
+    _selectedCount: stats.selectedCount,
+  };
+}
+
+function bkSourceStatusChip(source) {
+  const status = source.status || "ok";
+  const badgeClass = status === "ok" ? "text-bg-success" : status === "timeout" ? "text-bg-warning" : status === "unsupported" ? "text-bg-secondary" : "text-bg-danger";
+  const detail = status === "ok" ? `${Number(source.matched || 0)} matched` : status;
+  return `<span class="badge ${badgeClass} me-1 mb-1" title="${escapeHtml(source.error || "")}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(source.name || source.drone_id)}: ${escapeHtml(detail)}</span>`;
+}
+
+function bkRenderAssetSpaceHtml(stats) {
+  if (!stats.pools.length) return "";
+  return stats.pools.map((pool) => {
+    const free = Math.max(0, pool.free);
+    const needed = Math.max(0, pool.needed);
+    const pct = free > 0 ? Math.min(100, Math.round((needed / free) * 100)) : (needed > 0 ? 100 : 0);
+    return `<div class="mb-2">
+      <div class="d-flex justify-content-between small mb-1">
+        <span>Free space on <code>${escapeHtml(pool.path)}</code> (${escapeHtml(pool.kinds.join(", "))})</span>
+        <span class="${pool.short ? "text-warning fw-semibold" : "text-muted"}">${formatBytes(needed)} selected / ${formatBytes(free)} free</span>
+      </div>
+      <div class="progress" style="height: 6px"><div class="progress-bar ${pool.short ? "bg-warning" : "bg-info"}" style="width: ${pct}%"></div></div>
+      ${pool.short ? `<div class="alert alert-warning py-1 px-2 small mt-1 mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Selected downloads (${formatBytes(needed)}) exceed free space (${formatBytes(free)}). Untick some items or systems below before starting.</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function bkRenderAssetPlanSummaryHtml(state) {
+  const plan = state.plan;
+  if (!plan) return "";
+  const totals = plan.totals || {};
+  const stats = bkComputeAssetSelectionStats(state);
+  const sources = (plan.sources || []).map(bkSourceStatusChip).join("") || '<span class="text-muted small">No online paired Drones responded.</span>';
+  return `<div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+      <span class="badge text-bg-secondary">Already here: ${Number(totals.here || 0)}</span>
+      <span class="badge text-bg-success">Available: ${Number(totals.available || 0)}</span>
+      <span class="badge text-bg-warning">Probable (unticked): ${Number(totals.probable || 0)}</span>
+      <span class="badge text-bg-dark">Unavailable: ${Number(totals.unavailable || 0)}</span>
+      ${plan.queued_already ? `<span class="badge text-bg-info">${Number(plan.queued_already)} already queued</span>` : ""}
+      <span class="small fw-semibold ms-auto">Selected to fetch: ${stats.selectedCount} item(s) · ${formatBytes(stats.selectedBytes)}</span>
+    </div>
+    ${plan.legacy ? '<div class="alert alert-info py-1 px-2 small mb-2"><i class="bi bi-info-circle me-1"></i>Game list only (older backup): matches are based on system and relative path, so they appear under Probable matches below and need a tick.</div>' : ""}
+    ${plan.truncated ? '<div class="alert alert-warning py-1 px-2 small mb-2">This backup reached the 200,000-item cap for at least one category.</div>' : ""}
+    <div class="mb-2"><span class="small text-muted me-1">Swarm sources:</span>${sources}</div>
+    ${bkRenderAssetSpaceHtml(stats)}`;
+}
+
+function bkRenderAssetPlanHtml(state) {
+  if (!state) return "";
+  if (state.loading) {
+    return '<div class="text-center py-3"><span class="spinner-border spinner-border-sm me-2"></span><span class="small">Searching online paired Drones for missing games &amp; media…</span></div>';
+  }
+  if (state.error) {
+    return `<div class="alert alert-warning py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(state.error)}</div>`;
+  }
+  const plan = state.plan;
+  if (!plan) {
+    return '<div class="small text-muted">Click <strong>Search swarm</strong> to check which missing games and media your online paired Drones have.</div>';
+  }
+  const scope = state.scope;
+  const accId = `bkAssetAcc-${scope}`;
+  const accordionItems = [];
+
+  (plan.groups || []).forEach((group, idx) => {
+    const groupChecked = !state.deselectedGroups.has(group.key);
+    const collapseId = `${accId}-g-${idx}`;
+    const kindLabel = BK_ASSET_KIND_LABELS[group.kind] || group.kind;
+    const title = group.system ? `${kindLabel} · ${group.system}` : kindLabel;
+    const rows = (group.items || []).map((item) => {
+      const checked = groupChecked && !state.deselected.has(item.key);
+      const artBadge = item.action === "artwork"
+        ? `<span class="badge text-bg-info ms-1">artwork only (${escapeHtml((item.artwork || []).join(", "))})</span>`
+        : (item.artwork || []).length ? `<span class="badge text-bg-secondary ms-1">+ artwork</span>` : "";
+      const peers = (item.peers || []).map((p) => `<span class="badge text-bg-dark me-1">${escapeHtml(p.name || p.drone_id)}</span>`).join("");
+      return `<tr>
+        <td style="width: 2rem"><input class="form-check-input bk-asset-exact" type="checkbox" data-group="${escapeHtml(group.key)}" data-key="${escapeHtml(item.key)}" ${checked ? "checked" : ""} onchange="bkToggleExactAssetItem(${jsAttr(scope)}, ${jsAttr(group.key)}, ${jsAttr(item.key)}, this.checked)"></td>
+        <td class="small"><div><strong>${escapeHtml(item.name || item.path)}</strong>${artBadge}</div><div class="text-muted"><code>${escapeHtml(item.path)}</code></div></td>
+        <td class="small">${peers}</td>
+        <td class="small text-end text-nowrap">${item.action === "artwork" ? "media only" : formatBytes(item.size || 0)}</td>
+      </tr>`;
+    }).join("");
+    accordionItems.push(`<div class="accordion-item">
+      <h2 class="accordion-header d-flex align-items-center">
+        <div class="form-check ms-3 me-1 my-0">
+          <input class="form-check-input bk-asset-group" type="checkbox" data-group="${escapeHtml(group.key)}" ${groupChecked ? "checked" : ""} aria-label="Select ${escapeHtml(title)}" onchange="bkToggleAssetGroup(${jsAttr(scope)}, ${jsAttr(group.key)}, this.checked)">
+        </div>
+        <button class="accordion-button collapsed py-2 small" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+          <span class="fw-semibold me-2">${escapeHtml(title)}</span>
+          <span class="badge text-bg-success me-2">${Number(group.count || 0)} available</span>
+          <span class="text-muted small">${formatBytes(group.bytes || 0)}</span>
+        </button>
+      </h2>
+      <div id="${collapseId}" class="accordion-collapse collapse" data-bs-parent="#${accId}">
+        <div class="accordion-body p-2">
+          <div class="table-responsive" style="max-height: 28vh; overflow:auto">
+            <table class="table table-sm align-middle themed-table mb-0">
+              <thead><tr><th></th><th>Item</th><th>Available on</th><th class="text-end">Size</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${group.omitted ? `<div class="small text-muted mt-1">…and ${Number(group.omitted)} more item(s) in this group (use the group checkbox to include or exclude them all).</div>` : ""}
+        </div>
+      </div>
+    </div>`);
+  });
+
+  if ((plan.probable || []).length) {
+    const collapseId = `${accId}-probable`;
+    const rows = plan.probable.map((item) => {
+      const checked = state.selected.has(item.key);
+      const artBadge = (item.artwork || []).length ? `<span class="badge text-bg-secondary ms-1">+ artwork</span>` : "";
+      const peers = (item.peers || []).map((p) => `<span class="badge text-bg-dark me-1">${escapeHtml(p.name || p.drone_id)}</span>`).join("");
+      return `<tr>
+        <td style="width: 2rem"><input class="form-check-input bk-asset-probable" type="checkbox" data-key="${escapeHtml(item.key)}" ${checked ? "checked" : ""} onchange="bkToggleProbableAssetItem(${jsAttr(scope)}, ${jsAttr(item.key)}, this.checked)"></td>
+        <td class="small"><div><span class="badge text-bg-warning me-1">Probable</span><strong>${escapeHtml(item.name || item.path)}</strong>${artBadge}</div>
+          <div class="text-muted">${item.system ? `<span class="me-1">${escapeHtml(item.system)}</span>· ` : ""}<code>${escapeHtml(item.path)}</code></div></td>
+        <td class="small">${peers}</td>
+        <td class="small text-end text-nowrap">${formatBytes(item.size || 0)}</td>
+      </tr>`;
+    }).join("");
+    accordionItems.push(`<div class="accordion-item">
+      <h2 class="accordion-header">
+        <button class="accordion-button collapsed py-2 small" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+          <span class="badge text-bg-warning me-2">Probable</span>
+          <span class="fw-semibold me-2">Probable matches (${plan.probable.length})</span>
+          <span class="text-muted small">Same system, path &amp; size — unticked by default, tick to include</span>
+        </button>
+      </h2>
+      <div id="${collapseId}" class="accordion-collapse collapse" data-bs-parent="#${accId}">
+        <div class="accordion-body p-2">
+          <div class="d-flex justify-content-end gap-2 mb-1">
+            <button type="button" class="btn btn-link btn-sm p-0" onclick="bkSetAllProbable(${jsAttr(scope)}, true)">Tick all probable</button>
+            <button type="button" class="btn btn-link btn-sm p-0" onclick="bkSetAllProbable(${jsAttr(scope)}, false)">Untick all</button>
+          </div>
+          <div class="table-responsive" style="max-height: 28vh; overflow:auto">
+            <table class="table table-sm align-middle themed-table mb-0">
+              <thead><tr><th></th><th>Item</th><th>Available on</th><th class="text-end">Size</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${plan.probable_omitted ? `<div class="small text-muted mt-1">…and ${Number(plan.probable_omitted)} more probable match(es).</div>` : ""}
+        </div>
+      </div>
+    </div>`);
+  }
+
+  if ((plan.unavailable || []).length) {
+    const collapseId = `${accId}-unavailable`;
+    const rows = plan.unavailable.map((item) => `<tr>
+      <td class="small"><div><strong>${escapeHtml(item.name || item.path)}</strong></div>
+        <div class="text-muted">${item.system ? `<span class="me-1">${escapeHtml(item.system)}</span>· ` : `<span>${escapeHtml(item.kind)}</span> · `}<code>${escapeHtml(item.path)}</code></div></td>
+      <td class="small text-end text-nowrap text-muted">${item.size ? formatBytes(item.size) : "–"}</td>
+    </tr>`).join("");
+    accordionItems.push(`<div class="accordion-item">
+      <h2 class="accordion-header">
+        <button class="accordion-button collapsed py-2 small" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+          <span class="badge text-bg-dark me-2">${Number(plan.totals?.unavailable || plan.unavailable.length)}</span>
+          <span class="fw-semibold me-2">Unavailable on online Drones</span>
+          <span class="text-muted small">Read-only — re-run Get missing games when more Drones are online</span>
+        </button>
+      </h2>
+      <div id="${collapseId}" class="accordion-collapse collapse" data-bs-parent="#${accId}">
+        <div class="accordion-body p-2">
+          <div class="table-responsive" style="max-height: 25vh; overflow:auto">
+            <table class="table table-sm align-middle themed-table mb-0">
+              <thead><tr><th>Item</th><th class="text-end">Size</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${plan.unavailable_omitted ? `<div class="small text-muted mt-1">…and ${Number(plan.unavailable_omitted)} more unavailable item(s).</div>` : ""}
+        </div>
+      </div>
+    </div>`);
+  }
+
+  return `<div id="bkAssetPlanSummary-${scope}">${bkRenderAssetPlanSummaryHtml(state)}</div>
+    ${accordionItems.length ? `<div class="accordion themed-accordion" id="${accId}">${accordionItems.join("")}</div>` : '<div class="small text-muted">Everything recorded in this backup for the selected categories is already on this Drone.</div>'}`;
+}
+
+function bkRefreshAssetPlanContainer(scope) {
+  const state = bkGetAssetPlanState(scope);
+  const host = document.getElementById(`bkAssetPlan-${scope}`);
+  if (host && state) host.innerHTML = bkRenderAssetPlanHtml(state);
+  bkUpdateMissingFetchButton();
+}
+
+function bkRefreshAssetPlanSummaryOnly(scope) {
+  const state = bkGetAssetPlanState(scope);
+  const host = document.getElementById(`bkAssetPlanSummary-${scope}`);
+  if (host && state) host.innerHTML = bkRenderAssetPlanSummaryHtml(state);
+  bkUpdateMissingFetchButton();
+}
+
+function bkToggleAssetGroup(scope, groupKey, checked) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state?.plan) return;
+  const group = (state.plan.groups || []).find((g) => g.key === groupKey);
+  if (checked) {
+    state.deselectedGroups.delete(groupKey);
+    for (const item of group?.items || []) state.deselected.delete(item.key);
+  } else {
+    state.deselectedGroups.add(groupKey);
+    for (const item of group?.items || []) state.deselected.delete(item.key);
+  }
+  const container = document.getElementById(`bkAssetPlan-${scope}`);
+  if (container) {
+    container.querySelectorAll(`.bk-asset-exact[data-group="${CSS.escape(groupKey)}"]`).forEach((box) => {
+      box.checked = Boolean(checked);
+    });
+  }
+  bkRefreshAssetPlanSummaryOnly(scope);
+}
+
+function bkToggleExactAssetItem(scope, groupKey, itemKey, checked) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state?.plan) return;
+  const group = (state.plan.groups || []).find((g) => g.key === groupKey);
+  if (state.deselectedGroups.has(groupKey)) {
+    state.deselectedGroups.delete(groupKey);
+    for (const item of group?.items || []) {
+      if (item.key !== itemKey) state.deselected.add(item.key);
+    }
+  }
+  if (checked) state.deselected.delete(itemKey);
+  else state.deselected.add(itemKey);
+  const container = document.getElementById(`bkAssetPlan-${scope}`);
+  if (container && group) {
+    const groupBox = container.querySelector(`.bk-asset-group[data-group="${CSS.escape(groupKey)}"]`);
+    if (groupBox) groupBox.checked = !state.deselectedGroups.has(groupKey) && !(group.items || []).every((i) => state.deselected.has(i.key));
+  }
+  bkRefreshAssetPlanSummaryOnly(scope);
+}
+
+function bkToggleProbableAssetItem(scope, itemKey, checked) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state?.plan) return;
+  if (checked) state.selected.add(itemKey);
+  else state.selected.delete(itemKey);
+  bkRefreshAssetPlanSummaryOnly(scope);
+}
+
+function bkSetAllProbable(scope, checked) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state?.plan) return;
+  for (const item of state.plan.probable || []) {
+    if (checked) state.selected.add(item.key);
+    else state.selected.delete(item.key);
+  }
+  const container = document.getElementById(`bkAssetPlan-${scope}`);
+  if (container) {
+    container.querySelectorAll(".bk-asset-probable").forEach((box) => { box.checked = Boolean(checked); });
+  }
+  bkRefreshAssetPlanSummaryOnly(scope);
+}
+
+function bkUpdateMissingFetchButton() {
+  const button = document.getElementById("bkMissingFetchBtn");
+  if (!button) return;
+  const state = BK.missing;
+  if (!state || state.loading || !state.plan) {
+    button.disabled = true;
+    return;
+  }
+  const stats = bkComputeAssetSelectionStats(state);
+  button.disabled = stats.selectedCount <= 0;
+  button.innerHTML = `<i class="bi bi-cloud-arrow-down me-1"></i>Fetch ${stats.selectedCount} item(s)${stats.selectedBytes ? ` (${formatBytes(stats.selectedBytes)})` : ""}`;
+}
+
+async function bkOpenMissingGames(backupId) {
+  bkModal("bkMissingGamesModal", `
+    <div class="modal-header"><h5 class="modal-title mb-0"><i class="bi bi-controller me-2"></i>Get missing games &amp; media</h5>
+      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body"><div class="text-center py-4"><span class="spinner-border"></span></div></div>`, "modal-xl");
+  let data;
+  try {
+    data = await api(`/admin/backups/${encodeURIComponent(backupId)}`, BK_SLOW);
+  } catch (err) {
+    document.querySelector("#bkMissingGamesModal .modal-body").innerHTML = `<div class="alert alert-danger mb-0">${escapeHtml(err.message || "Could not load the backup.")}</div>`;
+    return;
+  }
+  const backup = data.backup || {};
+  const state = bkInitAssetPlanState("missing", backupId, backup.name || "backup", data.assets);
+  BK.missing = state;
+  const assetsLine = bkAssetsSummaryLine(data.assets);
+  bkModal("bkMissingGamesModal", `
+    <div class="modal-header"><h5 class="modal-title mb-0"><i class="bi bi-controller me-2"></i>Get missing games: ${escapeHtml(backup.name || "Backup")}</h5>
+      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <p class="small text-muted mb-1">${bkSourceLine(backup)}${backup.created_at ? ` · ${escapeHtml(bkDate(backup.created_at))}` : ""}</p>
+      ${assetsLine ? `<p class="small text-info mb-2"><i class="bi bi-controller me-1"></i>${escapeHtml(assetsLine)}</p>` : ""}
+      <p class="small text-muted mb-2">Searches your online paired Drones for games, artwork and media recorded in this backup that are not on this Drone yet. Downloads are spread across peers and never overwrite existing files.</p>
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <div id="bkAssetKinds-missing">${bkAssetKindCheckboxesHtml(state)}</div>
+        <button type="button" class="btn btn-sm btn-outline-info ms-auto" onclick="bkPlanAssets('missing')"><i class="bi bi-arrow-clockwise me-1"></i>Search swarm again</button>
+      </div>
+      <div id="bkAssetPlan-missing">${bkRenderAssetPlanHtml(state)}</div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      <button type="button" class="btn btn-primary" id="bkMissingFetchBtn" onclick="bkSubmitMissingGames()" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Fetch selected</button>
+    </div>`, "modal-xl");
+  await bkPlanAssets("missing");
+}
+
+async function bkSubmitMissingGames() {
+  const state = BK.missing;
+  if (!state?.plan) return;
+  const selection = bkBuildAssetSelection(state);
+  if (!selection || selection._selectedCount <= 0) {
+    showToast("Select at least one item to fetch.", "warning");
+    return;
+  }
+  const button = document.getElementById("bkMissingFetchBtn");
+  if (button) button.disabled = true;
+  try {
+    const res = await apiPost(`/admin/backups/${encodeURIComponent(state.backupId)}/assets/fetch`, {
+      plan_id: selection.plan_id,
+      selected: selection.selected,
+      deselected: selection.deselected,
+      deselected_groups: selection.deselected_groups,
+    }, BK_SLOW);
+    bkHideModal("bkMissingGamesModal");
+    if (res.batch_id && Number(res.queued || 0) > 0 && window.DroneTransferToast?.trackBatch) {
+      BK.trackedBatchId = res.batch_id;
+      window.DroneTransferToast.trackBatch(res.batch_id, `Restoring from ${res.label || state.backupName}`);
+    }
+    const unavailableNote = res.unavailable ? ` (${Number(res.unavailable)} unavailable on online Drones)` : "";
+    showToast(`Queued ${Number(res.queued || 0)} download(s) from the swarm${unavailableNote}.`, res.queued ? "success" : "info");
+  } catch (err) {
+    showToast(escapeHtml(err.message || "Could not queue the downloads."), "danger");
+    if (button) button.disabled = false;
   }
 }

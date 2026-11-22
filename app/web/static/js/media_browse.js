@@ -18,7 +18,8 @@
 //   page or re-filtering does not ask every Batocera machine again.
 // * Playback/artwork of a peer's item is proxied through this Drone; Copy uses the same sync path
 //   as Swarm > Transfers (a game arrives with its artwork).  Also owns the persistent
-//   transfer-progress toast: DroneTransferToast.track(jobIds).
+//   transfer-progress toast: DroneTransferToast.track(jobIds), or .trackBatch(batchId) for a whole
+//   batch (backup game restore: thousands of jobs from several Drones, cancellable as one).
 // Relies on drone.js globals: api, apiPost, escapeHtml, formatBytes, showToast, ensureToastContainer,
 // dismissToast, content, adminEnabled.
 (function () {
@@ -54,7 +55,26 @@
   const STORE_KEY = "droneTransferToastJobs";
   const TERMINAL = new Set(["completed", "failed", "cancelled", "skipped"]);
   const Toast = {
-    ids: new Set(), label: "", el: null, timer: null, errors: 0,
+    ids: new Set(), label: "", el: null, timer: null, errors: 0, batchId: "",
+
+    // Follow one whole batch (GET /admin/downloads/batches/<id>) instead of listing its job ids.
+    trackBatch(batchId, label) {
+      if (!batchId) return;
+      this.batchId = String(batchId);
+      if (label) this.label = label;
+      this.persist();
+      this.render({ files: 0, done: 0, failed: 0, bytes: 0, total: 0, speed: 0, names: [], state: "running" });
+      this.start();
+    },
+    async cancelBatch() {
+      if (!this.batchId) return;
+      try {
+        await apiPost(`/admin/downloads/batches/${enc(this.batchId)}/cancel`, {});
+        showToast("Cancelling the remaining downloads…", "info");
+      } catch (e) {
+        showToast(esc(e.message || "Could not cancel."), "danger");
+      }
+    },
 
     track(jobIds, label) {
       (jobIds || []).forEach((id) => id && this.ids.add(String(id)));
@@ -64,25 +84,47 @@
       this.start();
     },
     persist() {
-      try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: [...this.ids], label: this.label })); } catch (e) { /* private mode */ }
+      try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: [...this.ids], label: this.label, batch: this.batchId })); } catch (e) { /* private mode */ }
     },
     restore() {
       try {
         const saved = JSON.parse(sessionStorage.getItem(STORE_KEY) || "null");
-        if (saved && Array.isArray(saved.ids) && saved.ids.length) this.track(saved.ids, saved.label);
+        if (saved && saved.batch) this.trackBatch(saved.batch, saved.label);
+        else if (saved && Array.isArray(saved.ids) && saved.ids.length) this.track(saved.ids, saved.label);
       } catch (e) { /* ignore */ }
     },
     start() {
       if (this.timer) return;
       const tick = async () => {
         this.timer = null;
-        if (!this.ids.size) return;
+        if (!this.ids.size && !this.batchId) return;
         await this.poll();
-        if (this.ids.size) this.timer = setTimeout(tick, POLL_MS);
+        if (this.ids.size || this.batchId) this.timer = setTimeout(tick, POLL_MS);
       };
       this.timer = setTimeout(tick, 300);
     },
+    async pollBatch() {
+      let status;
+      try {
+        status = await api(`/admin/downloads/batches/${enc(this.batchId)}`, { timeoutMs: 8000 });
+        this.errors = 0;
+      } catch (e) {
+        this.errors += 1;
+        if (this.el) this.el.querySelector(".tt-sub").textContent = "Reconnecting…";
+        return;
+      }
+      const stats = {
+        files: Number(status.files || 0), done: Number(status.done || 0), failed: Number(status.failed || 0) + Number(status.cancelled || 0),
+        bytes: Number(status.bytes || 0), total: Number(status.total || 0), speed: Number(status.speed || 0),
+        names: status.names || [], state: "running",
+      };
+      if (status.state === "done" || status.state === "unknown") stats.state = "done";
+      else if (status.state === "failed" || status.state === "cancelled") stats.state = "failed";
+      this.render(stats);
+      if (stats.state !== "running") this.finish(stats);
+    },
     async poll() {
+      if (this.batchId) { await this.pollBatch(); return; }
       let snap;
       try {
         snap = await api("/admin/downloads?compact=1", { timeoutMs: 8000 });
@@ -120,12 +162,14 @@
     },
     finish(stats) {
       this.ids.clear();
+      this.batchId = "";
       try { sessionStorage.removeItem(STORE_KEY); } catch (e) { /* ignore */ }
       if (stats.state === "done") setTimeout(() => this.close(), 6000);
       window.dispatchEvent(new CustomEvent("drone-transfer-finished", { detail: stats }));
     },
     close() {
       this.ids.clear();
+      this.batchId = "";
       if (this.timer) { clearTimeout(this.timer); this.timer = null; }
       try { sessionStorage.removeItem(STORE_KEY); } catch (e) { /* ignore */ }
       if (this.el) { dismissToast(this.el); this.el = null; }
@@ -143,8 +187,10 @@
         <div class="tt-sub"></div>
         <div class="progress tt-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar"></div></div>
         <div class="tt-meta"><span class="tt-files"></span><span class="tt-speed"></span></div>
-        <div class="tt-names"></div>`;
+        <div class="tt-names"></div>
+        <button type="button" class="btn btn-sm btn-outline-light tt-cancel mt-2" hidden>Cancel remaining downloads</button>`;
       el.querySelector(".tt-close").addEventListener("click", () => this.close());
+      el.querySelector(".tt-cancel").addEventListener("click", () => this.cancelBatch());
       ensureToastContainer().appendChild(el);
       this.el = el;
       return el;
@@ -170,6 +216,7 @@
       el.querySelector(".tt-speed").textContent = !finished && s.speed > 0 ? `${formatBytes(s.speed)}/s` : "";
       const names = s.names.slice(0, 2).join(", ");
       el.querySelector(".tt-names").textContent = !finished && names ? `${names}${s.names.length > 2 ? ` +${s.names.length - 2} more` : ""}` : "";
+      el.querySelector(".tt-cancel").hidden = finished || !this.batchId;
       // Allow dismissing the transfer toast at any time (especially on mobile).
     },
   };

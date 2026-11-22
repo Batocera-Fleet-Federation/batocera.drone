@@ -273,9 +273,12 @@ def plan_backup_restore(client: DroneApiClient, backup_id: str, categories, *, m
 
 
 def restore_backup(client: DroneApiClient, backup_id: str, categories, *, mode: str = "overlay",
-                   include_machine_keys: bool = False, acknowledge_warnings: bool = False, paths=None) -> dict:
+                   include_machine_keys: bool = False, acknowledge_warnings: bool = False, paths=None,
+                   assets: dict | None = None) -> dict:
     body = _restore_body(categories, mode, include_machine_keys, paths)
     body["acknowledge_warnings"] = bool(acknowledge_warnings)
+    if assets is not None:
+        body["assets"] = dict(assets)
     # Returns once the job is queued; the snapshot + restore run on the Drone.
     return client.post(f"/admin/backups/{quote(str(backup_id), safe='')}/restore", body,
                        timeout=_BACKUP_LIST_TIMEOUT_SECONDS)
@@ -283,3 +286,44 @@ def restore_backup(client: DroneApiClient, backup_id: str, categories, *, mode: 
 
 def backup_restore_status(client: DroneApiClient) -> dict:
     return client.get("/admin/backups/restore")
+
+
+def plan_backup_assets(client: DroneApiClient, backup_id: str, *, kinds=None, include_bios: bool = False) -> dict:
+    body: dict = {"include_bios": bool(include_bios)}
+    if kinds is not None:
+        body["kinds"] = list(kinds)
+    return client.post(
+        f"/admin/backups/{quote(str(backup_id), safe='')}/assets/plan",
+        body,
+        timeout=_BACKUP_SCAN_TIMEOUT_SECONDS,
+    )
+
+
+def fetch_backup_assets(
+    client: DroneApiClient,
+    backup_id: str,
+    plan_id: str,
+    *,
+    selected=(),
+    deselected=(),
+    deselected_groups=(),
+) -> dict:
+    body = {
+        "plan_id": str(plan_id),
+        "selected": list(selected),
+        "deselected": list(deselected),
+        "deselected_groups": list(deselected_groups),
+    }
+    return client.post(
+        f"/admin/backups/{quote(str(backup_id), safe='')}/assets/fetch",
+        body,
+        timeout=_BACKUP_SCAN_TIMEOUT_SECONDS,
+    )
+
+
+def download_batch_status(client: DroneApiClient, batch_id: str) -> dict:
+    return client.get(f"/admin/downloads/batches/{quote(str(batch_id), safe='')}")
+
+
+def cancel_download_batch(client: DroneApiClient, batch_id: str) -> dict:
+    return client.post(f"/admin/downloads/batches/{quote(str(batch_id), safe='')}/cancel", {})

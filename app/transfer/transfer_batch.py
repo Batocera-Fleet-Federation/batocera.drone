@@ -57,10 +57,16 @@ def _as_int(value: Any) -> int:
 
 
 class TransferBatch:
-    def __init__(self, batch_id: str, direction: str, peer_label: str) -> None:
+    def __init__(self, batch_id: str, direction: str, peer_label: str, *, label: Optional[str] = None,
+                 extra: Optional[dict] = None) -> None:
         self.batch_id = batch_id
         self.direction = direction  # "download" or "upload"
         self.peer_label = _clean_single_line_label(peer_label) or "a paired peer"
+        # A caller-named batch (backup asset restore) groups jobs from several peers; its
+        # entries speak of the label ("backup X") rather than one peer.
+        self.label = _clean_single_line_label(label) if label else None
+        self.extra = {key: _as_int(value) for key, value in (extra or {}).items()}
+        self.kind_counts = {"games": 0, "artwork": 0, "other": 0}
         self.selected = 0
         self.total_bytes = 0
         self.systems: set = set()
@@ -78,11 +84,13 @@ class TransferBatch:
     def open_count(self) -> int:
         return self.selected - self.completed - self.failed - self.cancelled
 
-    def add_selected(self, *, system: Any = None, total_bytes: Any = None) -> None:
+    def add_selected(self, *, system: Any = None, total_bytes: Any = None, file_type: Any = None) -> None:
         self.selected += 1
         self.total_bytes += _as_int(total_bytes)
         if system:
             self.systems.add(str(system))
+        kind = str(file_type or "").upper()
+        self.kind_counts["games" if kind == "ROM" else "artwork" if kind == "ARTWORK" else "other"] += 1
 
     def record_outcome(self, item_id: str, *, status: Any, name: Any, size_bytes: Any = None, system: Any = None) -> bool:
         """Count one item's terminal status once. Returns False for a repeat."""
@@ -117,6 +125,8 @@ class TransferBatch:
             }
         if not self.selected:
             return None
+        if self.label:
+            return self._labelled_started_event()
         noun = "asset" if self.selected == 1 else "assets"
         parts = []
         if self.systems:
@@ -138,7 +148,78 @@ class TransferBatch:
             },
         }
 
+    def _restore_summary(self) -> str:
+        games, artwork, other = (self.kind_counts[key] for key in ("games", "artwork", "other"))
+        pieces = []
+        if games:
+            pieces.append(f"{games} {'game' if games == 1 else 'games'}")
+        if other:
+            pieces.append(f"{other} other {'file' if other == 1 else 'files'}")
+        if artwork:
+            pieces.append(f"{artwork} artwork {'file' if artwork == 1 else 'files'}")
+        return " and ".join(pieces) if len(pieces) < 3 else f"{pieces[0]}, {pieces[1]} and {pieces[2]}"
+
+    def _labelled_started_event(self) -> dict:
+        parts = []
+        if self.systems:
+            parts.append(_systems_text(self.systems))
+        if self.total_bytes:
+            parts.append(format_size(self.total_bytes))
+        detail = f" ({', '.join(parts)})" if parts else ""
+        return {
+            "event_type": "asset_transfer_started",
+            "title": "Restoring games from a backup",
+            "message": f"Restoring {self._restore_summary()} from backup \"{self.label}\" using the paired Drones{detail}.",
+            "details": {
+                "direction": self.direction,
+                "peer": self.label,
+                "label": self.label,
+                "batch_id": self.batch_id,
+                "selected": self.selected,
+                "total_bytes": self.total_bytes,
+                "systems": sorted(self.systems),
+                "kind_counts": dict(self.kind_counts),
+                **self.extra,
+            },
+        }
+
+    def _labelled_finished_event(self) -> dict:
+        counts = f"{self.completed} completed, {self.failed} failed"
+        if self.cancelled:
+            counts += f", {self.cancelled} cancelled"
+        for key, word in (("unavailable", "unavailable on the swarm"), ("skipped", "skipped")):
+            if self.extra.get(key):
+                counts += f", {self.extra[key]} {word}"
+        size = f" ({format_size(self.completed_bytes)})" if self.completed_bytes else ""
+        message = f"Restoring from backup \"{self.label}\" finished: {counts}{size}."
+        if self.failed_names:
+            listed = ", ".join(self.failed_names)
+            hidden = self.failed - len(self.failed_names)
+            if hidden > 0:
+                listed += f", and {hidden} more"
+            message += f" Failed: {listed}."
+        return {
+            "event_type": "asset_transfer_finished",
+            "title": "Restoring from a backup finished",
+            "message": message,
+            "details": {
+                "direction": self.direction,
+                "peer": self.label,
+                "label": self.label,
+                "batch_id": self.batch_id,
+                "selected": self.selected,
+                "completed": self.completed,
+                "failed": self.failed,
+                "cancelled": self.cancelled,
+                "completed_bytes": self.completed_bytes,
+                "failed_names": list(self.failed_names),
+                **self.extra,
+            },
+        }
+
     def finished_event(self) -> dict:
+        if self.label:
+            return self._labelled_finished_event()
         counts = f"{self.completed} completed, {self.failed} failed"
         if self.cancelled:
             counts += f", {self.cancelled} cancelled"

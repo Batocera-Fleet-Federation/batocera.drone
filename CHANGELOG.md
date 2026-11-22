@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Backups: every new (non-snapshot) backup now records the source Drone's ROMs (with folder-unit
+  metadata and present gamelist artwork fields), BIOS files, movies and music in a bounded,
+  hash-verified `assets.json.gz` member (`backups/assets.py`), with older backups falling back to
+  their archived `gamelist.xml` files. Both restore wizards ("Restore here" and "Download & restore")
+  offer an "Also fetch games & media" step, and every local backup has a re-runnable "Get missing
+  games" action (`backups/asset_restore.py`, `POST /v1/api/admin/backups/<id>/assets/{plan,fetch}`)
+  with parity in the Ports client (`ports-client/ui/screens/backups.py`). Missing assets are matched
+  by content fingerprint (probable path+size matches are unticked by default), spread across online
+  paired Drones by transport tier and assigned bytes with per-item failover to the next candidate
+  peer, never overwrite existing files or restored gamelist text fields, and run as one cancellable
+  transfer batch (`GET /v1/api/admin/downloads/batches/<id>`,
+  `POST /v1/api/admin/downloads/batches/<id>/cancel`).
+
 - Admin → Fixes: add the **Switch 2 GameCube adapter guard**. Switch 2 emulators crash with
   "stack smashing detected" at launch while a Wii U GameCube adapter is connected; the guard stops
   the `wii-u-gc-adapter` daemon and unbinds the adapter for `switch2` games, then rebinds it and

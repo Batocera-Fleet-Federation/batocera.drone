@@ -253,9 +253,11 @@ failed update never leaves new credentials behind); a symlink is accepted wherev
 ## Transport layer (`app/transport/`) — the outbound-only networking
 
 This is **single-source P2P, not torrent-style swarming**: each transfer pulls the
-whole asset from **one** paired peer (`DownloadManager` keeps one active download)
-— no piece-level multi-peer fetch, no ranking of multiple candidate sources (the
-user picks the peer explicitly on the Swarm/Transfers page).
+whole asset from **one** paired peer (`DownloadManager` keeps a small pool of concurrent
+download workers, `DRONE_DOWNLOAD_CONCURRENCY`) — no piece-level multi-peer fetch, and
+outside backup asset restore (which automatically assigns whole files across online
+candidate peers and fails over to the next peer that has the file) the user picks the
+peer explicitly on the Swarm/Transfers or Assets page.
 
 The download path is **transport-agnostic**. `DownloadManager._run_job` calls
 `TransportSelector.fetch` (`selector.py`), which tries `PeerTransport`s best-first
@@ -392,24 +394,31 @@ Skill: `drone-multiplayer`. Depth: `docs/multiplayer.md`.
 
 Replaced the old single-archive Config Backups (`/admin/config-backups`, `config_backups` table left
 untouched, never reintroduce it). A backup is a gzip tar of `data/<root>/<path>` members (roots:
-system, roms (gamelist.xml only), saves, cheats) plus `manifest.json` last, with a sidecar
-`<id>.manifest.json` in `userdata/system/drone-app/backups/`; `backup_id` (32 hex) is the global
-identity and is kept when a peer copies it. Categories: `batocera`, `emulationstation`, `controllers`,
+system, roms (gamelist.xml only), saves, cheats), an `assets.json.gz` member (every non-snapshot
+backup's recorded wish list of ROMs, BIOS, movies and music from the local caches without
+re-hashing; `backups/assets.py`), and `manifest.json` last, with sidecars `<id>.manifest.json` and
+`<id>.assets.json.gz` in `userdata/system/drone-app/backups/`; `backup_id` (32 hex) is the global
+identity and is kept when a peer copies it. Keeping the asset entries in `assets.json.gz` (verified
+against the manifest's `assets` summary SHA-256 and size by `verify_archive`) keeps the manifest
+sidecar and `/peer/backups/<id>` well within `PEER_MANIFEST_MAX_BYTES` (48 MiB) even for huge
+libraries. Categories: `batocera`, `emulationstation`, `controllers`,
 `retroarch`, `emulator:<dir>`, `configs-misc`, `scripts`, `gamelists`, `cheats`, `saves:<system>`,
 `states:<system>`. Invariants:
 
 - **No secrets in archives.** `.cfg/.conf/.ini/.properties` are scrubbed (`confmerge.scrub`); redacted
   `(section, key)` pairs are recorded and the local values are kept on restore. `batocera.conf` merges
   key-by-key; machine keys (display/audio/network/hostname) stay local unless `include_machine_keys`.
-- **Verify before writing.** `validate_manifest` recomputes every category (`category == classify(path)`);
-  `verify_archive` rejects unlisted/linked/traversing members and per-file SHA-256 mismatches; a
-  peer download must match the listed archive SHA-256 (`install_download`).
+- **Verify before writing.** `validate_manifest` recomputes every category (`category == classify(path)`)
+  and sanitizes the `assets` summary; `verify_archive` rejects unlisted/linked/traversing members,
+  per-file SHA-256 mismatches, and any `assets.json.gz` mismatch; a peer download must match the
+  listed archive SHA-256 (`install_download`).
 - **Restore is local-only** (a peer can list/download, never restore). Selected files are staged and
   verified, directories opened `O_NOFOLLOW`, atomic `os.replace`; symlinks/special files are never
   replaced; Exact removals are limited to what the collector would collect. A synchronous safety
-  snapshot (`kind="snapshot"`, newest 5 kept, never shared) is taken first; rollback restores
+  snapshot (`kind="snapshot"`, newest 5 kept, never shared, no `assets` member) is taken first; rollback restores
   previously-empty categories via `with_extra_categories`. Non-root runs go through the privileged
   worker (`apply-backup.request`/`.result` in `service_bootstrap.sh`).
+- **Asset restore (`backups/asset_restore.py`, `transfer/asset_enqueue.py`):** local-only (`POST /admin/backups/<id>/assets/{plan,fetch}` and `assets` on `POST /admin/backups/<id>/restore`; no new `/peer/*` routes). Older backups without `assets.json.gz` fall back to archived `roms/<system>/gamelist.xml` `<path>` entries (`assets.legacy_from_gamelists`, `xml.etree` rejecting `DOCTYPE`/`ENTITY`). Planning drops items already here or pending in `DownloadManager`, queries online paired Drones' paged `/peer/inventory/{roms,bios,movies,music}` in parallel (timeouts/old peers become source status `ok|timeout|unsupported|offline`, never a plan failure; `RECOVERY_REQUIRED` / `PeerIdentityHold` returns 503 `SwarmUnavailable`), and classifies each item as `here`, `available` (exact fingerprint / BIOS MD5 match), `probable` (same system + relative path + size; unticked by default), or `unavailable` (name-only matches are never offered). Plans live in memory (`PlanStore`, 15 min TTL; no new persisted per-peer state, so `swarm_reset.py` is unchanged). Confirmed items are assigned whole-file-per-peer across the best transport tier by fewest assigned bytes (source Drone as tie-breaker only) and queued in one caller-named `TransferBatch` (`DownloadManager.named_batch`, `batch_status`, `cancel_batch`) with ordered candidate failover (`_failover`; retries the next peer on transport error or hash/fingerprint mismatch, never on cancel or `PeerIdentityHold`). Config restores first; downloads queue only after a successful config restore, never overwrite existing files (`overwrite=False`), and only fill missing artwork fields while keeping restored gamelist text fields.
 - **Defaults:** a create request without `categories` is settings-only (`collect(include_saves=False)`);
   saves/states move per game via the ROM Saves card and are opt-in in both create UIs. Emulator caches
   (`CACHE_FILE_NAMES`, yuzu-family `configs/<emu>/game_list`) are never collected.
@@ -421,8 +430,10 @@ identity and is kept when a peer copies it. Categories: `batocera`, `emulationst
   `acknowledge_warnings`; otherwise 409 with `warnings`.
 - Mutating admin routes need a session + same-origin; `/peer/backups*` is mTLS and HTTPS-only.
 - UI: Admin → Backups (`#admin/backups`, manage) and Assets → Backups (`#backups`, search/copy/restore
-  across online Drones); the Ports client's Backups screen mirrors the Assets flow.
-  Tests: `tests/test_backups.py`.
+  across online Drones), both with the "Also fetch games & media" restore wizard step and standalone
+  "Get missing games" action; the Ports client's Backups screen (`ports-client/ui/screens/backups.py`)
+  mirrors both flows.
+  Tests: `tests/test_backups.py`, `tests/test_backup_assets.py`.
 
 ## Multi-Drone media browsing (in place on `#systems`, `#movies`, `#music`)
 
