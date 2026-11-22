@@ -274,6 +274,9 @@ class BackupsScreen(Screen):
         if not selection:
             dialog["asset_plan_error"] = "Nothing is selected."
             return
+        if any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+            dialog["asset_plan_error"] = "Not enough free disk space. Untick items until it fits."
+            return
         try:
             result = endpoints.fetch_backup_assets(
                 self.api_client,
@@ -345,6 +348,15 @@ class BackupsScreen(Screen):
         dialog = self.dialog
         if not dialog:
             return
+        if not dialog.get("rollback") and dialog.get("fetch_assets"):
+            if not dialog.get("asset_plan"):
+                self._plan_assets(dialog)
+                if not dialog.get("asset_plan"):
+                    return
+            selected_count, _ = asset_selection_totals(dialog)
+            if selected_count > 0 and any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+                dialog["asset_plan_error"] = "Not enough free disk space. Untick items until it fits."
+                return
         options = self._dialog_options()
         assets_selection = None if dialog.get("rollback") else self._asset_selection_payload(dialog)
         try:
@@ -582,7 +594,12 @@ class BackupsScreen(Screen):
         imgui.set_item_default_focus()
         cancel = imgui.button("Cancel##restore_cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
         imgui.same_line()
-        ready = bool(plan) and dialog["ack"] and (dialog["ack_warnings"] or not plan.get("warnings"))
+        assets_ready = True
+        if not dialog["rollback"] and dialog.get("fetch_assets") and dialog.get("asset_plan"):
+            sel_count, _ = asset_selection_totals(dialog)
+            if sel_count > 0 and any(not pool["fits"] for pool in asset_space_pools(dialog, dialog["asset_plan"])):
+                assets_ready = False
+        ready = bool(plan) and dialog["ack"] and (dialog["ack_warnings"] or not plan.get("warnings")) and assets_ready
         imgui.begin_disabled(not ready)
         confirm = imgui.button("Restore##restore_confirm")
         imgui.end_disabled()
@@ -612,7 +629,9 @@ class BackupsScreen(Screen):
         cancel = imgui.button("Cancel##missing_cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
         imgui.same_line()
         selected_count, selected_bytes = asset_selection_totals(dialog)
-        ready = bool(dialog.get("asset_plan")) and selected_count > 0
+        plan = dialog.get("asset_plan")
+        fits = all(pool["fits"] for pool in asset_space_pools(dialog, plan)) if plan else False
+        ready = bool(plan) and selected_count > 0 and fits
         imgui.begin_disabled(not ready)
         confirm = imgui.button(f"Fetch {selected_count} item(s) ({_format_size(selected_bytes)})##missing_confirm")
         imgui.end_disabled()
@@ -643,12 +662,30 @@ class BackupsScreen(Screen):
             return
         for line in _asset_plan_lines(dialog, plan):
             imgui.text_wrapped(line)
-        for warning in _asset_space_warnings(dialog, plan):
-            imgui.text_colored(WARNING_COLOR, f"! {warning}")
+        pools = [pool for pool in asset_space_pools(dialog, plan) if pool["selected"] > 0 or not pool["fits"]]
+        for pool in pools:
+            free = max(0, pool["free"])
+            required = max(0, pool["required"])
+            ratio = min(1.0, required / free) if free > 0 else (1.0 if required > 0 else 0.0)
+            color = SUCCESS_COLOR if pool["fits"] else ERROR_COLOR
+            imgui.text_colored(
+                color,
+                f"{pool['mount']} ({', '.join(pool['kinds'])}): {_format_size(required)} required / {_format_size(free)} free"
+                + (f" (includes {_format_size(pool['reserve'])} reserve)" if pool["reserve"] else ""),
+            )
+            imgui.progress_bar(ratio, imgui.ImVec2(480, 0))
+        if any(not pool["fits"] for pool in pools):
+            imgui.text_colored(ERROR_COLOR, "! Not enough free space. Untick items until every disk fits.")
+            if imgui.button(f"Untick until it fits##{prefix}_untick_fit"):
+                untick_assets_until_fits(dialog, plan)
         imgui.begin_child(f"{prefix}_asset_groups", imgui.ImVec2(640, 180), True)
         for group in plan.get("groups") or []:
             gkey = str(group.get("key") or "")
-            checked = gkey not in dialog["asset_deselected_groups"]
+            default_count = group.get("default_count")
+            has_default = default_count is None or int(default_count) > 0
+            checked = gkey not in dialog["asset_deselected_groups"] and (
+                has_default or any(str(i.get("key") or "") in dialog["asset_selected"] for i in group.get("items") or [])
+            )
             label = f"{group.get('kind')} {group.get('system') or ''}".strip()
             changed, value = imgui.checkbox(
                 f"{label}: {int(group.get('count') or 0)} available ({_format_size(int(group.get('bytes') or 0))})##{prefix}_grp_{gkey}",
@@ -656,11 +693,22 @@ class BackupsScreen(Screen):
             )
             if changed:
                 toggle_asset_group(dialog, group, value)
+            for item in group.get("items") or []:
+                if item.get("default_selected") is False:
+                    ikey = str(item.get("key") or "")
+                    ichecked = ikey in dialog["asset_selected"]
+                    ichanged, ivalue = imgui.checkbox(
+                        f"  {item.get('path')} (size unknown)##{prefix}_unk_{ikey}",
+                        ichecked,
+                    )
+                    if ichanged:
+                        toggle_probable_asset(dialog, ikey, ivalue)
         for item in plan.get("probable") or []:
             ikey = str(item.get("key") or "")
             checked = ikey in dialog["asset_selected"]
+            size_text = "size unknown" if item.get("size_unknown") else _format_size(int(item.get("size") or 0))
             changed, value = imgui.checkbox(
-                f"[Probable] {item.get('system') or item.get('kind')}: {item.get('path')} ({_format_size(int(item.get('size') or 0))})##{prefix}_prob_{ikey}",
+                f"[Probable] {item.get('system') or item.get('kind')}: {item.get('path')} ({size_text})##{prefix}_prob_{ikey}",
                 checked,
             )
             if changed:
@@ -917,11 +965,19 @@ def toggle_asset_group(dialog: dict, group: dict, selected: bool) -> None:
     else:
         dialog["asset_deselected_groups"].add(gkey)
     for item in group.get("items") or []:
-        dialog["asset_deselected"].discard(item.get("key"))
+        ikey = item.get("key")
+        dialog["asset_deselected"].discard(ikey)
+        if not selected and ikey:
+            dialog["asset_selected"].discard(ikey)
 
 
 def toggle_probable_asset(dialog: dict, item_key: str, selected: bool) -> None:
     (dialog["asset_selected"].add if selected else dialog["asset_selected"].discard)(str(item_key))
+
+
+def _item_effective_bytes(item: dict) -> int:
+    base = int(item.get("size") or 0) if item.get("action") == "download" else 0
+    return base + int(item.get("artwork_bytes") or 0)
 
 
 def asset_selection_totals(dialog: dict):
@@ -934,24 +990,28 @@ def asset_selection_totals(dialog: dict):
     for group in plan.get("groups") or []:
         if group.get("key") in deselected_groups:
             continue
-        g_count = int(group.get("count") or 0)
+        default_count = group.get("default_count")
+        g_count = int(default_count) if default_count is not None else int(group.get("count") or 0)
         g_bytes = int(group.get("bytes") or 0)
         for item in group.get("items") or []:
-            if item.get("key") in deselected:
+            ikey = item.get("key")
+            if item.get("default_selected") is False:
+                if ikey in selected:
+                    g_count += 1
+                    g_bytes += _item_effective_bytes(item)
+            elif ikey in deselected:
                 g_count = max(0, g_count - 1)
-                if item.get("action") == "download":
-                    g_bytes = max(0, g_bytes - int(item.get("size") or 0))
+                g_bytes = max(0, g_bytes - _item_effective_bytes(item))
         count += g_count
         total_bytes += g_bytes
     for item in plan.get("probable") or []:
         if item.get("key") in selected:
             count += 1
-            if item.get("action") == "download":
-                total_bytes += int(item.get("size") or 0)
+            total_bytes += _item_effective_bytes(item)
     return count, total_bytes
 
 
-def _asset_space_warnings(dialog: dict, plan: dict) -> List[str]:
+def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
     space = plan.get("space") if isinstance(plan.get("space"), dict) else {}
     if not space:
         return []
@@ -964,28 +1024,96 @@ def _asset_space_warnings(dialog: dict, plan: dict) -> List[str]:
             continue
         g_bytes = int(group.get("bytes") or 0)
         for item in group.get("items") or []:
-            if item.get("key") in deselected and item.get("action") == "download":
-                g_bytes = max(0, g_bytes - int(item.get("size") or 0))
+            ikey = item.get("key")
+            if item.get("default_selected") is False:
+                if ikey in selected:
+                    g_bytes += _item_effective_bytes(item)
+            elif ikey in deselected:
+                g_bytes = max(0, g_bytes - _item_effective_bytes(item))
         kind = str(group.get("kind") or "")
         by_kind[kind] = by_kind.get(kind, 0) + g_bytes
     for item in plan.get("probable") or []:
-        if item.get("key") in selected and item.get("action") == "download":
+        if item.get("key") in selected:
             kind = str(item.get("kind") or "")
-            by_kind[kind] = by_kind.get(kind, 0) + int(item.get("size") or 0)
+            by_kind[kind] = by_kind.get(kind, 0) + _item_effective_bytes(item)
     pools: Dict[str, dict] = {}
     for kind, info in space.items():
         if not isinstance(info, dict):
             continue
         pool_key = str(info.get("group") or kind)
-        pool = pools.setdefault(pool_key, {"free": int(info.get("free") or 0), "needed": 0, "kinds": []})
-        pool["needed"] += int(by_kind.get(kind) or 0)
+        pool = pools.setdefault(
+            pool_key,
+            {
+                "group": pool_key,
+                "mount": str(info.get("mount") or info.get("path") or kind),
+                "free": int(info.get("free") or 0),
+                "selected": 0,
+                "queued": int(info.get("queued") or 0),
+                "staging": int(info.get("staging") or 0),
+                "reserve": int(info.get("reserve") or 0),
+                "kinds": [],
+            },
+        )
+        pool["selected"] += int(by_kind.get(kind) or 0)
         pool["kinds"].append(kind)
-    warnings = []
+    result: List[dict] = []
     for pool in pools.values():
-        if pool["needed"] > pool["free"]:
+        required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
+        fits = True if pool["selected"] == 0 else pool["free"] >= required
+        pool["required"] = required
+        pool["needed"] = required
+        pool["fits"] = fits
+        result.append(pool)
+    return result
+
+
+def untick_assets_until_fits(dialog: dict, plan: dict) -> None:
+    """Untick largest selected items on non-fitting disks until every affected disk fits."""
+    while True:
+        pools = asset_space_pools(dialog, plan)
+        bad_kinds = {kind for pool in pools if not pool["fits"] for kind in pool["kinds"]}
+        if not bad_kinds:
+            break
+        candidates = []
+        for item in plan.get("probable") or []:
+            ikey = str(item.get("key") or "")
+            if ikey in dialog["asset_selected"] and item.get("kind") in bad_kinds:
+                candidates.append(("selected", ikey, _item_effective_bytes(item)))
+        for group in plan.get("groups") or []:
+            if group.get("key") in dialog["asset_deselected_groups"] or group.get("kind") not in bad_kinds:
+                continue
+            for item in group.get("items") or []:
+                ikey = str(item.get("key") or "")
+                if item.get("default_selected") is False:
+                    if ikey in dialog["asset_selected"]:
+                        candidates.append(("selected", ikey, _item_effective_bytes(item)))
+                elif ikey not in dialog["asset_deselected"]:
+                    candidates.append(("deselected", ikey, _item_effective_bytes(item)))
+        if candidates:
+            candidates.sort(key=lambda entry: entry[2], reverse=True)
+            mode, key, _size = candidates[0]
+            if mode == "selected":
+                dialog["asset_selected"].discard(key)
+            else:
+                dialog["asset_deselected"].add(key)
+            continue
+        groups = [
+            group for group in plan.get("groups") or []
+            if group.get("key") not in dialog["asset_deselected_groups"] and group.get("kind") in bad_kinds
+        ]
+        if not groups:
+            break
+        groups.sort(key=lambda group: int(group.get("bytes") or 0), reverse=True)
+        dialog["asset_deselected_groups"].add(str(groups[0].get("key") or ""))
+
+
+def _asset_space_warnings(dialog: dict, plan: dict) -> List[str]:
+    warnings = []
+    for pool in asset_space_pools(dialog, plan):
+        if not pool["fits"]:
             warnings.append(
-                f"Low free space for {', '.join(pool['kinds'])}: {_format_size(pool['needed'])} selected, "
-                f"{_format_size(pool['free'])} free. Untick some items if needed."
+                f"Low free space for {', '.join(pool['kinds'])}: {_format_size(pool['required'])} required, "
+                f"{_format_size(pool['free'])} free. Untick items until it fits."
             )
     return warnings
 

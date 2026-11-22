@@ -40,6 +40,7 @@ import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -54,6 +55,12 @@ try:
     from ..storage import rom_metadata_store as _rom_store
     from ..transfer import local_network as _local_network
     from ..transfer.asset_enqueue import PeerAssetEnqueuer
+    from ..transfer.disk_space import (
+        ARTWORK_ALLOWANCE_BYTES,
+        probe_filesystem as _probe_filesystem,
+        reserve_bytes as _reserve_bytes,
+    )
+    from ..transfer.transfer_batch import format_size as _format_size
 except ImportError:  # pragma: no cover - flat execution
     from backups import assets as _assets  # type: ignore
     from backups.archive import BackupError  # type: ignore
@@ -64,6 +71,12 @@ except ImportError:  # pragma: no cover - flat execution
     from storage import rom_metadata_store as _rom_store  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.asset_enqueue import PeerAssetEnqueuer  # type: ignore
+    from transfer.disk_space import (  # type: ignore
+        ARTWORK_ALLOWANCE_BYTES,
+        probe_filesystem as _probe_filesystem,
+        reserve_bytes as _reserve_bytes,
+    )
+    from transfer.transfer_batch import format_size as _format_size  # type: ignore
 
 PLAN_TTL_SECONDS = 15 * 60
 MAX_PLANS = 8
@@ -252,12 +265,17 @@ def _row_digest(row: dict, *names: str) -> Optional[str]:
     return None
 
 
-def _row_size(row: dict) -> int:
+def _row_size_opt(row: dict) -> Optional[int]:
     for name in ("file_size", "byte_count", "size"):
         value = row.get(name)
         if type(value) is int and 0 <= value < 1 << 50:
             return value
-    return 0
+    return None
+
+
+def _row_size(row: dict) -> int:
+    value = _row_size_opt(row)
+    return value if value is not None else 0
 
 
 def _row_path(row: dict, *names: str) -> Optional[str]:
@@ -273,9 +291,29 @@ def _peer_artwork(row: dict) -> List[str]:
     return [field for field in ARTWORK_FIELDS if gamelist.get(field)]
 
 
+def _peer_artwork_sizes(row: dict) -> Dict[str, int]:
+    sizes: Dict[str, int] = {}
+    raw_sizes = row.get("artwork_sizes") if isinstance(row.get("artwork_sizes"), dict) else row.get("media_sizes")
+    if isinstance(raw_sizes, dict):
+        for field in ARTWORK_FIELDS:
+            val = raw_sizes.get(field)
+            if type(val) is int and 0 < val < 1 << 40:
+                sizes[field] = val
+    gamelist = row.get("gamelist") if isinstance(row.get("gamelist"), dict) else {}
+    for field in ARTWORK_FIELDS:
+        if field not in sizes:
+            val = gamelist.get(f"{field}_size")
+            if type(val) is int and 0 < val < 1 << 40:
+                sizes[field] = val
+    return sizes
+
+
 def _candidate(source: dict, wish: dict, row: dict, exact: bool) -> Optional[dict]:
     """One peer's copy of a wished asset, rebuilt from sanitized fields of its inventory row."""
     kind = wish["kind"]
+    reported_size = _row_size_opt(row)
+    size = reported_size if reported_size is not None else 0
+    size_known = reported_size is not None and reported_size > 0
     if kind == "roms":
         system = _assets.clean_system(row.get("system") or row.get("system_name"))
         path = _row_path(row, "relative_path", "rom_path", "file_path")
@@ -287,16 +325,18 @@ def _candidate(source: dict, wish: dict, row: dict, exact: bool) -> Optional[dic
         if entry_type == "folder" and not unit:
             entry_type = "file"
         return {"drone_id": source["drone_id"], "name": source["name"], "tier": source["tier"], "exact": exact,
-                "system": system, "path": path, "size": _row_size(row), "fp": _row_digest(row, "rom_fingerprint", "fingerprint"),
-                "type": entry_type, "unit": unit, "marker": marker or path, "artwork": _peer_artwork(row)}
+                "system": system, "path": path, "size": size, "size_known": size_known,
+                "fp": _row_digest(row, "rom_fingerprint", "fingerprint"),
+                "type": entry_type, "unit": unit, "marker": marker or path, "artwork": _peer_artwork(row),
+                "artwork_sizes": _peer_artwork_sizes(row)}
     path = _row_path(row, "relative_path", "file_path", "path")
     if path is None:
         return None
     digest = (_row_digest(row, "bios_md5", "md5") if kind == "bios"
               else _row_digest(row, f"{kind}_fingerprint", "fingerprint"))
     return {"drone_id": source["drone_id"], "name": source["name"], "tier": source["tier"], "exact": exact,
-            "system": "", "path": path, "size": _row_size(row), "fp": digest, "type": "file", "unit": None,
-            "marker": None, "artwork": []}
+            "system": "", "path": path, "size": size, "size_known": size_known, "fp": digest,
+            "type": "file", "unit": None, "marker": None, "artwork": [], "artwork_sizes": {}}
 
 
 def _index(wishes: List[dict]) -> Tuple[dict, dict]:
@@ -432,32 +472,115 @@ def online_sources(settings: Any, online_ids: Iterable[str], manager: Any = None
 
 # ------------------------------------------------------------------------ plan
 
-def space_report(settings: Any) -> Dict[str, dict]:
-    """Free space for each asset root; roots on one device share a ``group`` (one pool of space)."""
+def _queued_on_fs(manager: Any, group: str) -> int:
+    if manager is None or not group:
+        return 0
+    fn = getattr(manager, "queued_bytes_on_filesystem", None)
+    if not callable(fn):
+        return 0
+    try:
+        value = fn(group)
+    except Exception:  # noqa: BLE001
+        return 0
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _probe_root(root: Any, *, manager: Any = None, queued_cache: Optional[dict] = None) -> Optional[dict]:
+    fs = _probe_filesystem(root, usage_fn=shutil.disk_usage)
+    if fs is None:
+        return None
+    group = fs["group"]
+    if queued_cache is not None and group in queued_cache:
+        queued = queued_cache[group]
+    else:
+        queued = _queued_on_fs(manager, group)
+        if queued_cache is not None:
+            queued_cache[group] = queued
+    return {
+        "path": str(root),
+        "mount": fs["mount"],
+        "free": fs["free"],
+        "total": fs["total"],
+        "group": group,
+        "reserve": _reserve_bytes(fs["total"]),
+        "queued": queued,
+    }
+
+
+def space_report(settings: Any, *, manager: Any = None) -> Dict[str, dict]:
+    """Free space for each asset root; roots on one device share a ``group`` (one filesystem budget)."""
     report: Dict[str, dict] = {}
-    for kind, attribute in (("roms", "roms_root"), ("bios", "bios_root"), ("movies", "movies_root"), ("music", "music_root")):
+    queued_cache: Dict[str, int] = {}
+    for kind, attribute in (
+        ("roms", "roms_root"),
+        ("bios", "bios_root"),
+        ("movies", "movies_root"),
+        ("music", "music_root"),
+        ("shows", "shows_root"),
+    ):
         root = getattr(settings, attribute, None)
         if root is None:
             continue
-        probe = os.path.abspath(str(root))
-        while probe and not os.path.exists(probe) and os.path.dirname(probe) != probe:
-            probe = os.path.dirname(probe)
-        try:
-            usage = shutil.disk_usage(probe)
-            group = str(os.stat(probe).st_dev)
-        except OSError:
-            continue
-        report[kind] = {"path": str(root), "free": int(usage.free), "group": group}
+        info = _probe_root(root, manager=manager, queued_cache=queued_cache)
+        if info is not None:
+            report[kind] = info
     return report
+
+
+def _extra_space_report(settings: Any, systems: Iterable[str], *, manager: Any = None) -> Dict[str, dict]:
+    """Probe per-system ROM and artwork folders in case any system or artwork directory is on another mount."""
+    roms_root = getattr(settings, "roms_root", None)
+    if roms_root is None:
+        return {}
+    extra: Dict[str, dict] = {}
+    queued_cache: Dict[str, int] = {}
+    for system in sorted({str(s) for s in systems if s}):
+        sys_dir = Path(str(roms_root)) / system
+        sys_info = _probe_root(sys_dir, manager=manager, queued_cache=queued_cache)
+        if sys_info is not None:
+            extra[f"roms:{system}"] = sys_info
+        art_dir = sys_dir / "images"
+        art_info = _probe_root(art_dir, manager=manager, queued_cache=queued_cache)
+        if art_info is not None:
+            extra[f"artwork:{system}"] = art_info
+    return extra
+
+
+def _artwork_bytes(candidates: List[dict], artwork: List[str]) -> int:
+    if not artwork:
+        return 0
+    total = 0
+    for field in artwork:
+        reported = max((int((c.get("artwork_sizes") or {}).get(field) or 0) for c in candidates), default=0)
+        total += reported if reported > 0 else ARTWORK_ALLOWANCE_BYTES
+    return total
 
 
 def _item_view(wish: dict, status: str, action: str, candidates: List[dict], artwork: List[str]) -> dict:
     exact = [c for c in candidates if c["exact"]]
+    if action == "download":
+        known_sizes = [int(c["size"]) for c in candidates if c.get("size_known")]
+        size_unknown = not known_sizes
+        size = max(known_sizes) if known_sizes else 0
+        default_selected = bool(exact) and not size_unknown
+        size_display = "size unknown" if size_unknown else ""
+    elif action == "artwork":
+        size_unknown = False
+        size = 0
+        default_selected = True
+        size_display = "media only"
+    else:
+        size = int(wish.get("size") or 0)
+        size_unknown = size <= 0
+        default_selected = False
+        size_display = "size unknown" if size_unknown else ""
     return {
         "key": wish["key"], "kind": wish["kind"], "system": wish["system"], "path": wish["path"],
-        "name": wish["name"] or wish["path"].rsplit("/", 1)[-1], "size": wish["size"] or max((c["size"] for c in candidates), default=0),
+        "name": wish["name"] or wish["path"].rsplit("/", 1)[-1],
+        "size": size, "size_unknown": size_unknown, "size_display": size_display,
+        "artwork_bytes": _artwork_bytes(candidates, artwork) if action in ("download", "artwork") else 0,
         "status": status, "action": action, "artwork": artwork, "exact": bool(exact) or status == "here",
-        "default_selected": action != "" and bool(exact),
+        "default_selected": default_selected,
         "peers": [{"drone_id": c["drone_id"], "name": c["name"], "exact": c["exact"], "tier": c["tier"]} for c in candidates],
         "_candidates": candidates,
     }
@@ -528,10 +651,11 @@ def build_plan(settings: Any, *, backup: dict, document: dict, kinds: Iterable[s
         per_kind[wish["kind"]][status] += 1
         action = "download" if candidates else ""
         item = _item_view(wish, status, action, candidates, offered if candidates else [])
-        if status == "available":
+        if status == "available" and not item.get("size_unknown"):
             per_kind[wish["kind"]]["bytes"] += item["size"]
         items.append(item)
     plan_id = secrets.token_hex(16)
+    rom_systems = {wish["system"] for wish in wishes if wish["kind"] == "roms" and wish.get("system")}
     plan = {
         "plan_id": plan_id, "backup_id": backup["backup_id"], "backup_name": backup.get("name") or "",
         "created_at": time.time(), "legacy": bool(document.get("legacy")), "truncated": bool(document.get("truncated")),
@@ -539,7 +663,8 @@ def build_plan(settings: Any, *, backup: dict, document: dict, kinds: Iterable[s
         "sources": [{"drone_id": r["drone_id"], "name": r["name"], "status": r["status"], "error": r.get("error", ""),
                      "matched": r["matched"], "tier": r["tier"]} for r in source_results],
         "source_drone_id": str((backup.get("source") or {}).get("drone_id") or ""),
-        "space": space_report(settings),
+        "space": space_report(settings, manager=manager),
+        "_extra_space": _extra_space_report(settings, rom_systems, manager=manager),
         "queued_already": sum(1 for wish in here if wish.get("local") == "queued"),
         "wished": len(wishes),
     }
@@ -555,11 +680,14 @@ def _public_item(item: dict) -> dict:
     return {key: value for key, value in item.items() if not key.startswith("_")}
 
 
-def public_plan(plan: dict) -> dict:
+def public_plan(plan: dict, *, manager: Any = None) -> dict:
     """The JSON the browser and Ports client get: counts for everything, bounded item lists."""
     groups: "OrderedDict[str, dict]" = OrderedDict()
     probable, unavailable = [], []
+    default_items: List[dict] = []
     for item in plan["items"]:
+        if item.get("default_selected"):
+            default_items.append(item)
         if item["status"] == "unavailable":
             if len(unavailable) < UNAVAILABLE_LISTED:
                 unavailable.append(_public_item(item))
@@ -570,20 +698,29 @@ def public_plan(plan: dict) -> dict:
             continue
         key = group_key(item)
         group = groups.setdefault(key, {"key": key, "kind": item["kind"], "system": item["system"], "count": 0,
-                                        "bytes": 0, "items": [], "omitted": 0})
+                                        "default_count": 0, "unknown_size_count": 0, "bytes": 0, "items": [], "omitted": 0})
         group["count"] += 1
-        group["bytes"] += item["size"] if item["action"] == "download" else 0
+        if item.get("default_selected"):
+            group["default_count"] += 1
+            if item["action"] == "download":
+                group["bytes"] += int(item.get("size") or 0)
+            group["bytes"] += int(item.get("artwork_bytes") or 0)
+        if item.get("size_unknown"):
+            group["unknown_size_count"] += 1
         if len(group["items"]) < GROUP_ITEMS_LISTED:
             group["items"].append(_public_item(item))
         else:
             group["omitted"] += 1
+    filesystems = selection_space(plan, default_items, manager=manager)
     return {
         "plan_id": plan["plan_id"], "backup_id": plan["backup_id"], "backup_name": plan["backup_name"],
         "legacy": plan["legacy"], "truncated": plan["truncated"], "totals": plan["totals"], "kinds": plan["kinds"],
         "groups": list(groups.values()), "probable": probable, "unavailable": unavailable,
         "unavailable_omitted": max(0, plan["totals"]["unavailable"] - len(unavailable)),
         "probable_omitted": max(0, plan["totals"]["probable"] - len(probable)),
-        "sources": plan["sources"], "space": plan["space"], "queued_already": plan["queued_already"],
+        "sources": plan["sources"], "space": plan["space"], "filesystems": filesystems,
+        "fits": all(fs["fits"] for fs in filesystems),
+        "queued_already": plan["queued_already"],
         "swarm_available": True, "expires_in": PLAN_TTL_SECONDS,
     }
 
@@ -622,20 +759,114 @@ def resolve_selection(plan: dict, selection: Any) -> List[dict]:
     return list(chosen.values())
 
 
-def selection_space(plan: dict, items: List[dict]) -> List[dict]:
-    """Per storage pool: bytes the chosen downloads need vs. free space (a warning, never a refusal)."""
+def _root_for_item(item: dict, space: dict, extra_space: dict, *, art: bool = False) -> Optional[dict]:
+    kind = str(item.get("kind") or "")
+    system = str(item.get("system") or "")
+    if art or item.get("action") == "artwork":
+        return extra_space.get(f"artwork:{system}") or extra_space.get(f"roms:{system}") or space.get("roms")
+    if kind == "roms":
+        return extra_space.get(f"roms:{system}") or space.get("roms")
+    if kind == "movies" and str(item.get("path") or "").lower().startswith("shows/") and "shows" in space:
+        return space.get("shows")
+    return space.get(kind)
+
+
+def selection_space(plan: dict, items: List[dict], *, manager: Any = None, fresh: bool = False,
+                    settings: Any = None) -> List[dict]:
+    """Per filesystem: required bytes (selection + queued + staging + reserve) vs. free space."""
+    if fresh and settings is not None:
+        space = space_report(settings, manager=manager)
+        rom_systems = {item.get("system") for item in items if item.get("kind") == "roms" and item.get("system")}
+        extra_space = _extra_space_report(settings, rom_systems, manager=manager)
+    else:
+        space = plan.get("space") or {}
+        extra_space = plan.get("_extra_space") or {}
     pools: Dict[str, dict] = {}
+    queued_cache: Dict[str, int] = {}
+
+    def _pool_for(root: dict, kind: str) -> dict:
+        group = str(root.get("group") or kind)
+        if group not in pools:
+            total = root.get("total")
+            total_int = total if isinstance(total, int) and not isinstance(total, bool) else 0
+            reserve = root.get("reserve")
+            reserve_int = (reserve if isinstance(reserve, int) and not isinstance(reserve, bool)
+                           else _reserve_bytes(total_int))
+            if manager is not None:
+                if group not in queued_cache:
+                    queued_cache[group] = _queued_on_fs(manager, group)
+                queued = queued_cache[group]
+            else:
+                queued = int(root.get("queued") or 0)
+            pools[group] = {
+                "group": group,
+                "mount": str(root.get("mount") or root.get("path") or ""),
+                "path": str(root.get("path") or root.get("mount") or ""),
+                "free": int(root.get("free") or 0),
+                "selected": 0,
+                "queued": queued,
+                "staging": 0,
+                "reserve": reserve_int,
+                "needed": 0,
+                "required": 0,
+                "fits": True,
+                "short": False,
+                "kinds": [],
+            }
+        pool = pools[group]
+        if kind and kind not in pool["kinds"]:
+            pool["kinds"].append(kind)
+        return pool
+
     for item in items:
-        if item["action"] != "download":
+        action = item.get("action")
+        if action not in ("download", "artwork"):
             continue
-        root = plan["space"].get(item["kind"])
-        if not root:
-            continue
-        pool = pools.setdefault(root["group"], {"free": root["free"], "needed": 0, "kinds": []})
-        pool["needed"] += int(item["size"] or 0)
-        if item["kind"] not in pool["kinds"]:
-            pool["kinds"].append(item["kind"])
-    return [dict(pool, short=pool["needed"] > pool["free"]) for pool in pools.values()]
+        kind = str(item.get("kind") or "")
+        if action == "download":
+            root = _root_for_item(item, space, extra_space, art=False)
+            if root:
+                _pool_for(root, kind)["selected"] += int(item.get("size") or 0)
+        art_bytes = int(item.get("artwork_bytes") or 0)
+        if action == "artwork" and art_bytes <= 0 and item.get("artwork"):
+            art_bytes = len(item["artwork"]) * ARTWORK_ALLOWANCE_BYTES
+        if art_bytes > 0:
+            art_root = _root_for_item(item, space, extra_space, art=True)
+            if art_root:
+                _pool_for(art_root, kind)["selected"] += art_bytes
+
+    out: List[dict] = []
+    for pool in pools.values():
+        required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
+        fits = pool["free"] >= required
+        pool["required"] = required
+        pool["needed"] = required
+        pool["fits"] = fits
+        pool["short"] = not fits
+        out.append(pool)
+    return out
+
+
+def ensure_space(settings: Any, plan: dict, items: List[dict], manager: Any = None) -> List[dict]:
+    """Recompute per-filesystem space and raise 409 ``insufficient_space`` if any affected disk doesn't fit."""
+    pools = selection_space(plan, items, manager=manager, fresh=True, settings=settings)
+    short_pools = [pool for pool in pools if not pool["fits"]]
+    if short_pools:
+        summary = "; ".join(
+            f"{p['mount'] or p['path'] or p['group']}: need {_format_size(p['required'])}, {_format_size(p['free'])} free"
+            for p in short_pools
+        )
+        raise BackupError(
+            f"Not enough free disk space ({summary}). Untick some items or free disk space before confirming.",
+            409,
+            {
+                "error_code": "insufficient_space",
+                "insufficient_space": True,
+                "filesystems": pools,
+                "space": pools,
+            },
+        )
+    return pools
 
 
 # ------------------------------------------------------------------- assignment
@@ -718,6 +949,7 @@ def fetch_plan(settings: Any, manager: Any, plan: dict, items: List[dict], *, ba
     if manager is None:
         raise BackupError("The download queue is unavailable.", 503)
     chosen = [item for item in items if item["_candidates"]]
+    pools = ensure_space(settings, plan, chosen, manager)
     assign_sources(chosen, plan.get("source_drone_id", ""))
     batch_id = batch_id or secrets.token_hex(16)
     label = label or plan.get("backup_name") or "backup"
@@ -740,7 +972,7 @@ def fetch_plan(settings: Any, manager: Any, plan: dict, items: List[dict], *, ba
         if batch is not None:
             batch.extra["skipped"] = skipped
     return {"batch_id": batch_id, "label": label, "queued": len(job_ids), "job_ids": job_ids, "skipped": skipped,
-            "unavailable": unavailable, "selected": len(chosen), "space": selection_space(plan, chosen)}
+            "unavailable": unavailable, "selected": len(chosen), "space": pools, "filesystems": pools}
 
 
 def _enqueue_item(settings: Any, manager: Any, enqueuer: Any, item: dict, index_cache: dict, artwork_cache: dict) -> Optional[List[str]]:

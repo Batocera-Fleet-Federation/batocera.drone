@@ -428,21 +428,55 @@ class PlanTests(PlanFixture):
         plan = self.plan(document)
         self.assertEqual(plan["totals"]["unavailable"], 1)
 
-    def test_free_space_is_checked_per_storage_pool_and_only_warns(self):
+    def test_free_space_is_checked_per_filesystem_with_reserve_queued_and_enforced(self):
         document = self.document(roms=[{"system": "snes", "path": "Zelda.sfc", "size": 5000, "fp": FP_ZELDA}],
-                                 music=[{"path": "Artist/New.mp3", "size": 700, "fp": "7" * 32}])
+                                 music=[{"path": "Artist/New.mp3", "size": 700, "fp": "7" * 32}],
+                                 bios=[{"path": "new.bin", "size": 200, "md5": MD5_BIOS}])
         self.rows("p1", "roms", peer_rom("snes", "Zelda.sfc", FP_ZELDA, 5000))
         self.rows("p1", "music", {"file_path": "Artist/New.mp3", "file_size": 700, "fingerprint": "7" * 32})
-        usage = mock.Mock(free=1000)
-        with mock.patch("app.backups.asset_restore.shutil.disk_usage", return_value=usage):
-            plan = self.plan(document, kinds=("roms", "music"))
-        items = asset_restore.resolve_selection(plan, {})
-        space = asset_restore.selection_space(plan, items)
-        self.assertEqual(len(space), 1)  # one device -> one pool
-        self.assertEqual((space[0]["needed"], space[0]["free"], space[0]["short"]), (5700, 1000, True))
-        self.assertEqual(len(items), 2)  # still selectable: the user decides what to untick
-        only_music = asset_restore.resolve_selection(plan, {"deselected": [self.item(plan, "Zelda.sfc")["key"]]})
-        self.assertFalse(asset_restore.selection_space(plan, only_music)[0]["short"])
+        self.rows("p1", "bios", {"relative_path": "new.bin", "file_size": 200, "bios_md5": MD5_BIOS})
+        usage = mock.Mock(free=1000, total=10000)
+
+        def fake_stat(path):
+            st = mock.Mock()
+            st.st_dev = 2 if "bios" in str(path) else 1
+            return st
+
+        with mock.patch("app.backups.asset_restore.shutil.disk_usage", return_value=usage), \
+                mock.patch("app.transfer.disk_space.os.stat", side_effect=fake_stat), \
+                mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "200"}):
+            plan = self.plan(document, kinds=("roms", "music", "bios"))
+            items = asset_restore.resolve_selection(plan, {})
+            space = asset_restore.selection_space(plan, items)
+            self.assertEqual(len(space), 2)  # roms+music share st_dev=1; bios is on st_dev=2
+            by_group = {p["group"]: p for p in space}
+            self.assertEqual((by_group["1"]["selected"], by_group["1"]["reserve"], by_group["1"]["required"], by_group["1"]["fits"]),
+                             (5700, 200, 5900, False))
+            self.assertEqual((by_group["2"]["selected"], by_group["2"]["reserve"], by_group["2"]["required"], by_group["2"]["fits"]),
+                             (200, 200, 400, True))
+            only_music = asset_restore.resolve_selection(plan, {"deselected": [self.item(plan, "Zelda.sfc")["key"]]})
+            self.assertTrue(asset_restore.selection_space(plan, only_music)[0]["fits"])
+            # Already-queued bytes on the same filesystem count toward required space.
+            mgr = mock.Mock()
+            mgr.queued_bytes_on_filesystem.return_value = 250
+            with_queued = asset_restore.selection_space(plan, only_music, manager=mgr)
+            by_q = {p["group"]: p for p in with_queued}
+            self.assertEqual(by_q["1"]["required"], 700 + 250 + 200)
+            self.assertFalse(by_q["1"]["fits"])
+
+    def test_unknown_size_items_are_unticked_by_default(self):
+        document = self.document(roms=[{"system": "snes", "path": "Mystery.sfc", "size": 0, "fp": FP_ZELDA}])
+        self.rows("p1", "roms", {"system": "snes", "relative_path": "Mystery.sfc", "rom_fingerprint": FP_ZELDA, "entry_type": "file"})
+        plan = self.plan(document, kinds=("roms",))
+        item = self.item(plan, "Mystery.sfc")
+        self.assertEqual(item["status"], "available")
+        self.assertFalse(item["default_selected"])
+        self.assertTrue(item["size_unknown"])
+        self.assertEqual(item["size_display"], "size unknown")
+        self.assertEqual(asset_restore.resolve_selection(plan, {}), [])
+        pub = asset_restore.public_plan(plan)
+        self.assertEqual(pub["groups"][0]["default_count"], 0)
+        self.assertEqual(pub["groups"][0]["items"][0]["size_display"], "size unknown")
 
     def test_probable_items_need_a_tick_and_selection_is_confined_to_the_plan(self):
         document = self.document(roms=[{"system": "snes", "path": "Metroid.sfc", "size": 300, "fp": FP_METROID_BACKUP},
@@ -848,6 +882,51 @@ class FailoverTests(FetchFixture):
         self.assertEqual((moved["relative_path"], moved["status"], moved["_overwrite"]), ("alt/Zelda.sfc", "queued", False))
         self.assertNotIn("x", moved["_config"])
 
+    def test_job_start_space_recheck_holds_batch_without_failover(self):
+        document = self.document(roms=[{"system": "snes", "path": f"G{i}.sfc", "size": 500, "fp": f"{i + 1:032x}"} for i in range(2)])
+        for peer in ("p1", "p2"):
+            self.rows(peer, "roms", *[peer_rom("snes", f"G{i}.sfc", f"{i + 1:032x}", 500) for i in range(2)])
+        plan = self.plan(document, kinds=("roms",))
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            self.fetch_items(plan)
+        jobs = self.jobs()
+        fetch = mock.Mock(side_effect=AssertionError("must not start download when space is short"))
+        with mock.patch("app.transfer.download_manager.shutil.disk_usage", return_value=mock.Mock(free=200, total=2000)), \
+                mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "100"}):
+            self.run_job(jobs[0]["job_id"], fetch)
+        fetch.assert_not_called()
+        for job in self.jobs():
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["failure_reason"], "insufficient_space")
+        self.assertEqual(self.events[-1][0], "asset_transfer_finished")
+        self.assertIn("insufficient disk space", self.events[-1][1])
+        self.assertGreaterEqual(self.events[-1][2]["space_needed_bytes"], 1100)
+
+    def test_enospc_removes_partial_and_holds_batch_without_failover(self):
+        import errno
+        document = self.document(roms=[{"system": "snes", "path": f"G{i}.sfc", "size": 500, "fp": f"{i + 1:032x}"} for i in range(2)])
+        for peer in ("p1", "p2"):
+            self.rows(peer, "roms", *[peer_rom("snes", f"G{i}.sfc", f"{i + 1:032x}", 500) for i in range(2)])
+        plan = self.plan(document, kinds=("roms",))
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            self.fetch_items(plan)
+        jobs = self.jobs()
+        first_job = jobs[0]
+        part = self.userdata / "roms" / "snes" / f"{first_job['relative_path']}.part"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"partial-bytes")
+
+        def fail_enospc(request, context):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            self.run_job(first_job["job_id"], fail_enospc)
+        self.assertFalse(part.exists(), "ENOSPC must remove leftover partial file")
+        for job in self.jobs():
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["failure_reason"], "insufficient_space")
+        self.assertNotIn("failover_count", self.manager._jobs[first_job["job_id"]])
+
 
 def asset_failover_retries():
     from app.transfer import download_manager
@@ -952,6 +1031,22 @@ class RestoreFlowTests(PlanFixture):
             service._notify_assets(self.settings, self.row, {"queued": 0, "unavailable": 0})
         self.assertEqual(len(recorded), 1)
         self.assertIn("4 item(s) are not available", recorded[0][3])
+
+    def test_fetch_and_restore_reject_409_insufficient_space_without_modifying_state(self):
+        plan = self.make_plan()
+        with mock.patch("app.backups.asset_restore.shutil.disk_usage", return_value=mock.Mock(free=5, total=1000)), \
+                mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "100"}):
+            with self.assertRaises(archive.BackupError) as raised:
+                service.fetch_assets(self.settings, self.manager, self.row["backup_id"], {"plan_id": plan["plan_id"]})
+            self.assertEqual(raised.exception.status, 409)
+            self.assertEqual(raised.exception.details.get("error_code"), "insufficient_space")
+            runner = mock.Mock()
+            with self.assertRaises(archive.BackupError) as raised_restore:
+                service.start_restore(self.settings, self.row["backup_id"], categories=["batocera"], mode="overlay",
+                                      runner=runner, assets={"plan_id": plan["plan_id"]}, manager=self.manager)
+            self.assertEqual(raised_restore.exception.status, 409)
+            self.assertEqual(raised_restore.exception.details.get("error_code"), "insufficient_space")
+            runner.assert_not_called()
 
 
 class HandlerTests(PlanFixture):
@@ -1100,6 +1195,7 @@ const fn = new Function(code + `; return {
   bkBuildAssetSelection,
   bkToggleProbableAssetItem,
   bkToggleAssetGroup,
+  bkUntickUntilFits,
   BK,
 };`)();
 
@@ -1177,12 +1273,19 @@ assert.strictEqual(stats.selectedCount, 1);
 assert.strictEqual(stats.selectedBytes, 200);
 assert.strictEqual(stats.pools[0].short, false);
 
-// Tick the probable match -> 500 B > 250 B free -> space warning triggers.
+// Tick the probable match -> 500 B > 250 B free -> space check fails and Untick until it fits resolves it.
 fn.bkToggleProbableAssetItem("missing", "r1", true);
 stats = fn.bkComputeAssetSelectionStats(state);
 assert.strictEqual(stats.selectedCount, 2);
 assert.strictEqual(stats.selectedBytes, 500);
 assert.strictEqual(stats.pools[0].short, true);
+assert.strictEqual(stats.pools[0].fits, false);
+assert.strictEqual(stats.fits, false);
+fn.bkUntickUntilFits("missing");
+stats = fn.bkComputeAssetSelectionStats(state);
+assert.strictEqual(stats.fits, true);
+assert.strictEqual(stats.selectedCount, 1);
+fn.bkToggleProbableAssetItem("missing", "r1", true);
 const sel = fn.bkBuildAssetSelection(state);
 assert.deepStrictEqual(sel.selected, ["r1"]);
 """

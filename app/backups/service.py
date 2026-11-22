@@ -447,7 +447,7 @@ def start_restore(settings: Any, backup_id: str, *, categories: Any, mode: str, 
     row = get_local(settings, backup_id)
     asset_job = None
     if assets is not None:
-        asset_job = _prepare_asset_restore(backup_id, assets, manager)
+        asset_job = _prepare_asset_restore(settings, backup_id, assets, manager)
     manifest = _selectable(local_manifest(settings, backup_id), row)
     selection = _restore.resolve_selection(manifest, categories or [], mode, paths)
     chosen, paths = selection.categories, selection.paths
@@ -555,7 +555,7 @@ def plan_assets(settings: Any, backup_id: str, *, kinds: Any = None, include_bio
             manager=manager, repository=getattr(manager, "repository", None))
     except hold as error:
         raise module.SwarmUnavailable() from error
-    return module.public_plan(plan)
+    return module.public_plan(plan, manager=manager)
 
 
 def fetch_assets(settings: Any, manager: Any, backup_id: str, selection: Any) -> dict:
@@ -571,7 +571,7 @@ def fetch_assets(settings: Any, manager: Any, backup_id: str, selection: Any) ->
     return dict(result, job_ids=result["job_ids"][:500])
 
 
-def _prepare_asset_restore(backup_id: str, assets: Any, manager: Any) -> tuple:
+def _prepare_asset_restore(settings: Any, backup_id: str, assets: Any, manager: Any) -> tuple:
     module = _asset_restore()
     if manager is None:
         raise BackupError("The download queue is unavailable.", 503)
@@ -579,6 +579,7 @@ def _prepare_asset_restore(backup_id: str, assets: Any, manager: Any) -> tuple:
         raise BackupError("Invalid asset selection.")
     plan = module.PLANS.get(assets.get("plan_id"), backup_id)
     items = module.resolve_selection(plan, assets)
+    module.ensure_space(settings, plan, items, manager)
     return (manager, plan, items)
 
 

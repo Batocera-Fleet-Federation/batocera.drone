@@ -922,7 +922,15 @@ function bkUpdateRestoreButton() {
   const button = document.getElementById("bkRestoreBtn");
   if (!button) return;
   const needsWarnings = (BK.wizard?.plan?.warnings || []).length > 0;
-  const ok = document.getElementById("bkAckRestore")?.checked && (!needsWarnings || document.getElementById("bkAckWarnings")?.checked);
+  let ok = Boolean(document.getElementById("bkAckRestore")?.checked) && (!needsWarnings || Boolean(document.getElementById("bkAckWarnings")?.checked));
+  const assetsState = BK.wizard?.assetsState;
+  if (ok && assetsState && assetsState.enabled) {
+    if (assetsState.loading) ok = false;
+    else if (assetsState.plan) {
+      const stats = bkComputeAssetSelectionStats(assetsState);
+      if (stats.selectedCount > 0 && !stats.fits) ok = false;
+    }
+  }
   button.disabled = !ok;
 }
 
@@ -934,6 +942,12 @@ async function bkConfirmRestore() {
     if (!assetsState.plan) {
       await bkPlanAssets("wizard");
       if (!assetsState.plan) return;
+    }
+    const stats = bkComputeAssetSelectionStats(assetsState);
+    if (stats.selectedCount > 0 && !stats.fits) {
+      showToast("Free disk space is too low for the selected downloads. Untick some items first.", "warning");
+      bkUpdateRestoreButton();
+      return;
     }
     const selection = bkBuildAssetSelection(assetsState);
     if (selection && selection._selectedCount > 0) {
@@ -1268,6 +1282,8 @@ function bkToggleWizardFetchAssets(checked) {
   if (body) body.hidden = !state.enabled;
   if (state.enabled && !state.plan && !state.loading) {
     bkPlanAssets("wizard");
+  } else {
+    bkUpdateRestoreButton();
   }
 }
 
@@ -1316,19 +1332,25 @@ async function bkPlanAssets(scope) {
 
 function bkComputeAssetSelectionStats(state) {
   const plan = state?.plan;
-  if (!plan) return { selectedCount: 0, selectedBytes: 0, probableSelected: 0, pools: [] };
+  if (!plan) return { selectedCount: 0, selectedBytes: 0, probableSelected: 0, pools: [], fits: true };
   let selectedCount = 0;
   let selectedBytes = 0;
   let probableSelected = 0;
   const byKindBytes = { roms: 0, bios: 0, movies: 0, music: 0 };
   for (const group of plan.groups || []) {
     if (state.deselectedGroups.has(group.key)) continue;
-    let groupCount = Number(group.count || 0);
+    let groupCount = group.default_count !== undefined ? Number(group.default_count) : Number(group.count || 0);
     let groupBytes = Number(group.bytes || 0);
     for (const item of group.items || []) {
-      if (state.deselected.has(item.key)) {
+      const itemBytes = (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0);
+      if (item.default_selected === false) {
+        if (state.selected.has(item.key)) {
+          groupCount += 1;
+          groupBytes += itemBytes;
+        }
+      } else if (state.deselected.has(item.key)) {
         groupCount = Math.max(0, groupCount - 1);
-        if (item.action === "download") groupBytes = Math.max(0, groupBytes - Number(item.size || 0));
+        groupBytes = Math.max(0, groupBytes - itemBytes);
       }
     }
     selectedCount += groupCount;
@@ -1339,9 +1361,9 @@ function bkComputeAssetSelectionStats(state) {
     if (!state.selected.has(item.key)) continue;
     selectedCount += 1;
     probableSelected += 1;
-    const size = item.action === "download" ? Number(item.size || 0) : 0;
-    selectedBytes += size;
-    byKindBytes[item.kind] = (byKindBytes[item.kind] || 0) + size;
+    const itemBytes = (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0);
+    selectedBytes += itemBytes;
+    byKindBytes[item.kind] = (byKindBytes[item.kind] || 0) + itemBytes;
   }
   const poolMap = new Map();
   const space = plan.space || {};
@@ -1350,14 +1372,28 @@ function bkComputeAssetSelectionStats(state) {
     if (!info) continue;
     const key = info.group || kind;
     if (!poolMap.has(key)) {
-      poolMap.set(key, { group: key, path: info.path || kind, free: Number(info.free || 0), needed: 0, kinds: [] });
+      poolMap.set(key, {
+        group: key,
+        mount: info.mount || info.path || kind,
+        path: info.path || kind,
+        free: Number(info.free || 0),
+        selected: 0,
+        queued: Number(info.queued || 0),
+        staging: Number(info.staging || 0),
+        reserve: Number(info.reserve || 0),
+        kinds: [],
+      });
     }
     const pool = poolMap.get(key);
-    pool.needed += Number(byKindBytes[kind] || 0);
+    pool.selected += Number(byKindBytes[kind] || 0);
     pool.kinds.push(kind);
   }
-  const pools = Array.from(poolMap.values()).map((pool) => Object.assign({}, pool, { short: pool.needed > pool.free }));
-  return { selectedCount, selectedBytes, probableSelected, pools };
+  const pools = Array.from(poolMap.values()).map((pool) => {
+    const required = pool.selected + pool.queued + pool.staging + pool.reserve;
+    const fits = pool.selected === 0 ? true : pool.free >= required;
+    return Object.assign({}, pool, { required, needed: required, fits, short: !fits });
+  });
+  return { selectedCount, selectedBytes, probableSelected, pools, fits: pools.every((p) => p.fits) };
 }
 
 function bkBuildAssetSelection(state) {
@@ -1379,19 +1415,23 @@ function bkSourceStatusChip(source) {
   return `<span class="badge ${badgeClass} me-1 mb-1" title="${escapeHtml(source.error || "")}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(source.name || source.drone_id)}: ${escapeHtml(detail)}</span>`;
 }
 
-function bkRenderAssetSpaceHtml(stats) {
-  if (!stats.pools.length) return "";
-  return stats.pools.map((pool) => {
+function bkRenderAssetSpaceHtml(stats, scope) {
+  const activePools = (stats.pools || []).filter((p) => p.selected > 0 || !p.fits);
+  if (!activePools.length) return "";
+  return activePools.map((pool) => {
     const free = Math.max(0, pool.free);
-    const needed = Math.max(0, pool.needed);
-    const pct = free > 0 ? Math.min(100, Math.round((needed / free) * 100)) : (needed > 0 ? 100 : 0);
+    const required = Math.max(0, pool.required);
+    const pct = free > 0 ? Math.min(100, Math.round((required / free) * 100)) : (required > 0 ? 100 : 0);
+    const parts = [`${formatBytes(pool.selected)} selected`];
+    if (pool.queued) parts.push(`${formatBytes(pool.queued)} queued`);
+    if (pool.reserve) parts.push(`${formatBytes(pool.reserve)} reserve`);
     return `<div class="mb-2">
       <div class="d-flex justify-content-between small mb-1">
-        <span>Free space on <code>${escapeHtml(pool.path)}</code> (${escapeHtml(pool.kinds.join(", "))})</span>
-        <span class="${pool.short ? "text-warning fw-semibold" : "text-muted"}">${formatBytes(needed)} selected / ${formatBytes(free)} free</span>
+        <span>Disk <code>${escapeHtml(pool.mount || pool.path)}</code> (${escapeHtml(pool.kinds.join(", "))})</span>
+        <span class="${!pool.fits ? "text-danger fw-semibold" : "text-muted"}">${parts.join(" + ")} = ${formatBytes(required)} / ${formatBytes(free)} free</span>
       </div>
-      <div class="progress" style="height: 6px"><div class="progress-bar ${pool.short ? "bg-warning" : "bg-info"}" style="width: ${pct}%"></div></div>
-      ${pool.short ? `<div class="alert alert-warning py-1 px-2 small mt-1 mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Selected downloads (${formatBytes(needed)}) exceed free space (${formatBytes(free)}). Untick some items or systems below before starting.</div>` : ""}
+      <div class="progress" style="height: 6px"><div class="progress-bar ${!pool.fits ? "bg-danger" : "bg-info"}" style="width: ${pct}%"></div></div>
+      ${!pool.fits ? `<div class="alert alert-danger py-1 px-2 small mt-1 mb-0 d-flex flex-wrap align-items-center gap-2"><span><i class="bi bi-exclamation-octagon me-1"></i>Not enough free space (${formatBytes(required)} required, ${formatBytes(free)} free). Untick items until it fits.</span><button type="button" class="btn btn-sm btn-outline-light ms-auto" onclick="bkUntickUntilFits(${jsAttr(scope)})">Untick until it fits</button></div>` : ""}
     </div>`;
   }).join("");
 }
@@ -1413,7 +1453,7 @@ function bkRenderAssetPlanSummaryHtml(state) {
     ${plan.legacy ? '<div class="alert alert-info py-1 px-2 small mb-2"><i class="bi bi-info-circle me-1"></i>Game list only (older backup): matches are based on system and relative path, so they appear under Probable matches below and need a tick.</div>' : ""}
     ${plan.truncated ? '<div class="alert alert-warning py-1 px-2 small mb-2">This backup reached the 200,000-item cap for at least one category.</div>' : ""}
     <div class="mb-2"><span class="small text-muted me-1">Swarm sources:</span>${sources}</div>
-    ${bkRenderAssetSpaceHtml(stats)}`;
+    ${bkRenderAssetSpaceHtml(stats, state.scope)}`;
 }
 
 function bkRenderAssetPlanHtml(state) {
@@ -1433,21 +1473,24 @@ function bkRenderAssetPlanHtml(state) {
   const accordionItems = [];
 
   (plan.groups || []).forEach((group, idx) => {
-    const groupChecked = !state.deselectedGroups.has(group.key);
+    const groupDefault = group.default_count !== undefined ? Number(group.default_count) : Number(group.count || 0);
+    const groupChecked = !state.deselectedGroups.has(group.key) && (groupDefault > 0 || (group.items || []).some((i) => state.selected.has(i.key)));
     const collapseId = `${accId}-g-${idx}`;
     const kindLabel = BK_ASSET_KIND_LABELS[group.kind] || group.kind;
     const title = group.system ? `${kindLabel} · ${group.system}` : kindLabel;
     const rows = (group.items || []).map((item) => {
-      const checked = groupChecked && !state.deselected.has(item.key);
+      const checked = item.default_selected === false ? state.selected.has(item.key) : (!state.deselectedGroups.has(group.key) && !state.deselected.has(item.key));
       const artBadge = item.action === "artwork"
         ? `<span class="badge text-bg-info ms-1">artwork only (${escapeHtml((item.artwork || []).join(", "))})</span>`
         : (item.artwork || []).length ? `<span class="badge text-bg-secondary ms-1">+ artwork</span>` : "";
+      const unknownBadge = item.size_unknown ? `<span class="badge text-bg-secondary ms-1">size unknown</span>` : "";
       const peers = (item.peers || []).map((p) => `<span class="badge text-bg-dark me-1">${escapeHtml(p.name || p.drone_id)}</span>`).join("");
+      const sizeCell = item.action === "artwork" ? "media only" : (item.size_unknown ? escapeHtml(item.size_display || "size unknown") : formatBytes(item.size || 0));
       return `<tr>
         <td style="width: 2rem"><input class="form-check-input bk-asset-exact" type="checkbox" data-group="${escapeHtml(group.key)}" data-key="${escapeHtml(item.key)}" ${checked ? "checked" : ""} onchange="bkToggleExactAssetItem(${jsAttr(scope)}, ${jsAttr(group.key)}, ${jsAttr(item.key)}, this.checked)"></td>
-        <td class="small"><div><strong>${escapeHtml(item.name || item.path)}</strong>${artBadge}</div><div class="text-muted"><code>${escapeHtml(item.path)}</code></div></td>
+        <td class="small"><div><strong>${escapeHtml(item.name || item.path)}</strong>${artBadge}${unknownBadge}</div><div class="text-muted"><code>${escapeHtml(item.path)}</code></div></td>
         <td class="small">${peers}</td>
-        <td class="small text-end text-nowrap">${item.action === "artwork" ? "media only" : formatBytes(item.size || 0)}</td>
+        <td class="small text-end text-nowrap">${sizeCell}</td>
       </tr>`;
     }).join("");
     accordionItems.push(`<div class="accordion-item">
@@ -1553,6 +1596,7 @@ function bkRefreshAssetPlanContainer(scope) {
   const host = document.getElementById(`bkAssetPlan-${scope}`);
   if (host && state) host.innerHTML = bkRenderAssetPlanHtml(state);
   bkUpdateMissingFetchButton();
+  bkUpdateRestoreButton();
 }
 
 function bkRefreshAssetPlanSummaryOnly(scope) {
@@ -1560,6 +1604,49 @@ function bkRefreshAssetPlanSummaryOnly(scope) {
   const host = document.getElementById(`bkAssetPlanSummary-${scope}`);
   if (host && state) host.innerHTML = bkRenderAssetPlanSummaryHtml(state);
   bkUpdateMissingFetchButton();
+  bkUpdateRestoreButton();
+}
+
+function bkUntickUntilFits(scope) {
+  const state = bkGetAssetPlanState(scope);
+  if (!state?.plan) return;
+  let stats = bkComputeAssetSelectionStats(state);
+  const badKinds = () => new Set((stats.pools || []).filter((p) => !p.fits).flatMap((p) => p.kinds || []));
+  while (!stats.fits) {
+    const targetKinds = badKinds();
+    const candidates = [];
+    for (const item of state.plan.probable || []) {
+      if (state.selected.has(item.key) && targetKinds.has(item.kind)) {
+        candidates.push({ type: "probable", key: item.key, bytes: (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0) });
+      }
+    }
+    for (const group of state.plan.groups || []) {
+      if (state.deselectedGroups.has(group.key) || !targetKinds.has(group.kind)) continue;
+      for (const item of group.items || []) {
+        if (item.default_selected === false) {
+          if (state.selected.has(item.key)) {
+            candidates.push({ type: "probable", key: item.key, bytes: (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0) });
+          }
+        } else if (!state.deselected.has(item.key)) {
+          candidates.push({ type: "exact", key: item.key, bytes: (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0) });
+        }
+      }
+    }
+    if (candidates.length) {
+      candidates.sort((a, b) => b.bytes - a.bytes);
+      const pick = candidates[0];
+      if (pick.type === "probable") state.selected.delete(pick.key);
+      else state.deselected.add(pick.key);
+      stats = bkComputeAssetSelectionStats(state);
+      continue;
+    }
+    const groups = (state.plan.groups || []).filter((g) => !state.deselectedGroups.has(g.key) && targetKinds.has(g.kind));
+    if (!groups.length) break;
+    groups.sort((a, b) => Number(b.bytes || 0) - Number(a.bytes || 0));
+    state.deselectedGroups.add(groups[0].key);
+    stats = bkComputeAssetSelectionStats(state);
+  }
+  bkRefreshAssetPlanContainer(scope);
 }
 
 function bkToggleAssetGroup(scope, groupKey, checked) {
@@ -1571,12 +1658,16 @@ function bkToggleAssetGroup(scope, groupKey, checked) {
     for (const item of group?.items || []) state.deselected.delete(item.key);
   } else {
     state.deselectedGroups.add(groupKey);
-    for (const item of group?.items || []) state.deselected.delete(item.key);
+    for (const item of group?.items || []) {
+      state.deselected.delete(item.key);
+      state.selected.delete(item.key);
+    }
   }
   const container = document.getElementById(`bkAssetPlan-${scope}`);
   if (container) {
     container.querySelectorAll(`.bk-asset-exact[data-group="${CSS.escape(groupKey)}"]`).forEach((box) => {
-      box.checked = Boolean(checked);
+      const item = (group?.items || []).find((i) => i.key === box.dataset.key);
+      box.checked = item?.default_selected === false ? state.selected.has(box.dataset.key) : Boolean(checked);
     });
   }
   bkRefreshAssetPlanSummaryOnly(scope);
@@ -1586,10 +1677,21 @@ function bkToggleExactAssetItem(scope, groupKey, itemKey, checked) {
   const state = bkGetAssetPlanState(scope);
   if (!state?.plan) return;
   const group = (state.plan.groups || []).find((g) => g.key === groupKey);
+  const item = (group?.items || []).find((i) => i.key === itemKey);
+  if (item && item.default_selected === false) {
+    if (checked) {
+      state.deselectedGroups.delete(groupKey);
+      state.selected.add(itemKey);
+    } else {
+      state.selected.delete(itemKey);
+    }
+    bkRefreshAssetPlanSummaryOnly(scope);
+    return;
+  }
   if (state.deselectedGroups.has(groupKey)) {
     state.deselectedGroups.delete(groupKey);
-    for (const item of group?.items || []) {
-      if (item.key !== itemKey) state.deselected.add(item.key);
+    for (const entry of group?.items || []) {
+      if (entry.default_selected !== false && entry.key !== itemKey) state.deselected.add(entry.key);
     }
   }
   if (checked) state.deselected.delete(itemKey);
@@ -1597,7 +1699,7 @@ function bkToggleExactAssetItem(scope, groupKey, itemKey, checked) {
   const container = document.getElementById(`bkAssetPlan-${scope}`);
   if (container && group) {
     const groupBox = container.querySelector(`.bk-asset-group[data-group="${CSS.escape(groupKey)}"]`);
-    if (groupBox) groupBox.checked = !state.deselectedGroups.has(groupKey) && !(group.items || []).every((i) => state.deselected.has(i.key));
+    if (groupBox) groupBox.checked = !state.deselectedGroups.has(groupKey) && !(group.items || []).filter((i) => i.default_selected !== false).every((i) => state.deselected.has(i.key));
   }
   bkRefreshAssetPlanSummaryOnly(scope);
 }
@@ -1633,7 +1735,7 @@ function bkUpdateMissingFetchButton() {
     return;
   }
   const stats = bkComputeAssetSelectionStats(state);
-  button.disabled = stats.selectedCount <= 0;
+  button.disabled = stats.selectedCount <= 0 || !stats.fits;
   button.innerHTML = `<i class="bi bi-cloud-arrow-down me-1"></i>Fetch ${stats.selectedCount} item(s)${stats.selectedBytes ? ` (${formatBytes(stats.selectedBytes)})` : ""}`;
 }
 
@@ -1676,9 +1778,15 @@ async function bkOpenMissingGames(backupId) {
 async function bkSubmitMissingGames() {
   const state = BK.missing;
   if (!state?.plan) return;
+  const stats = bkComputeAssetSelectionStats(state);
   const selection = bkBuildAssetSelection(state);
   if (!selection || selection._selectedCount <= 0) {
     showToast("Select at least one item to fetch.", "warning");
+    return;
+  }
+  if (!stats.fits) {
+    showToast("Free disk space is too low for the selected downloads. Untick items until it fits.", "warning");
+    bkUpdateMissingFetchButton();
     return;
   }
   const button = document.getElementById("bkMissingFetchBtn");

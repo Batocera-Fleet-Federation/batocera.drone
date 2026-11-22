@@ -198,6 +198,13 @@ class TransferBatch:
             if hidden > 0:
                 listed += f", and {hidden} more"
             message += f" Failed: {listed}."
+        if self.extra.get("insufficient_space"):
+            needed = self.extra.get("space_needed_bytes") or 0
+            free = self.extra.get("space_free_bytes") or 0
+            message += (
+                f" Held: insufficient disk space ({format_size(needed)} needed, {format_size(free)} free). "
+                "Free space and re-run Get missing games."
+            )
         return {
             "event_type": "asset_transfer_finished",
             "title": "Restoring from a backup finished",
@@ -232,6 +239,13 @@ class TransferBatch:
             if hidden > 0:
                 listed += f", and {hidden} more"
             message += f" Failed: {listed}."
+        if self.extra.get("insufficient_space"):
+            needed = self.extra.get("space_needed_bytes") or 0
+            free = self.extra.get("space_free_bytes") or 0
+            message += (
+                f" Held: insufficient disk space ({format_size(needed)} needed, {format_size(free)} free). "
+                "Free space and re-run Get missing games."
+            )
         return {
             "event_type": "asset_transfer_finished",
             "title": f"Asset {self._verb.lower()} finished",
@@ -246,6 +260,7 @@ class TransferBatch:
                 "cancelled": self.cancelled,
                 "completed_bytes": self.completed_bytes,
                 "failed_names": list(self.failed_names),
+                **self.extra,
             },
         }
 

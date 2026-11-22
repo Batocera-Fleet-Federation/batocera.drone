@@ -7,7 +7,9 @@ legacy direct-public). ``_directpublic_fetch`` is the direct-public tier callbac
 (``_DOWNLOAD_MANAGER`` / ``_get_download_manager``) stays in ``drone_api``.
 """
 
+import errno
 import os
+import shutil
 import time
 import uuid
 from contextlib import contextmanager
@@ -31,8 +33,14 @@ try:
     from ..transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector
     from ..transport.lan import LanDirectTransport
     from . import local_network as _local_network
+    from .disk_space import (
+        ARTWORK_ALLOWANCE_BYTES as _ARTWORK_ALLOWANCE_BYTES,
+        is_enospc as _is_enospc,
+        probe_filesystem as _probe_filesystem,
+        reserve_bytes as _reserve_bytes,
+    )
     from .download_errors import DownloadCancelled
-    from .transfer_batch import TransferBatch as _TransferBatch
+    from .transfer_batch import TransferBatch as _TransferBatch, format_size as _format_size
     from .network_identity import local_network_snapshot as _local_network_snapshot
     from .peer_download import (
         _download_artwork_from_peer,
@@ -57,8 +65,14 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector  # type: ignore
     from transport.lan import LanDirectTransport  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
+    from transfer.disk_space import (  # type: ignore
+        ARTWORK_ALLOWANCE_BYTES as _ARTWORK_ALLOWANCE_BYTES,
+        is_enospc as _is_enospc,
+        probe_filesystem as _probe_filesystem,
+        reserve_bytes as _reserve_bytes,
+    )
     from transfer.download_errors import DownloadCancelled  # type: ignore
-    from transfer.transfer_batch import TransferBatch as _TransferBatch  # type: ignore
+    from transfer.transfer_batch import TransferBatch as _TransferBatch, format_size as _format_size  # type: ignore
     from transfer.network_identity import local_network_snapshot as _local_network_snapshot  # type: ignore
     from transfer.peer_download import (  # type: ignore
         _download_artwork_from_peer,
@@ -537,6 +551,8 @@ class DownloadManager:
     @staticmethod
     def _is_reconnectable_error(error: Exception) -> bool:
         if isinstance(error, ValueError):
+            return False
+        if (isinstance(error, OSError) and getattr(error, "errno", None) == errno.ENOSPC) or _is_enospc(error):
             return False
         if isinstance(error, HTTPError):
             return error.code in {408, 425, 429} or error.code >= 500
@@ -1034,6 +1050,205 @@ class DownloadManager:
                           else "failed" if stats["failed"] else "cancelled" if stats["cancelled"] and not stats["done"] else "done")
         return stats
 
+    def _job_target_root(self, job: dict) -> Optional[Path]:
+        """Target directory on disk for ``job`` (for filesystem free-space accounting)."""
+        asset_type = str(job.get("_asset_type") or "").strip().lower()
+        if not asset_type:
+            file_type = str(job.get("file_type") or "").strip().upper()
+            asset_type = "rom" if file_type == "ROM" else file_type.lower()
+        system = str(job.get("system") or "").strip()
+        rel = str(job.get("relative_path") or job.get("file_path") or "").strip()
+        if asset_type in ("rom", "roms", "artwork"):
+            root = getattr(self.settings, "roms_root", None)
+            if root is None:
+                return None
+            return Path(root) / system if system else Path(root)
+        if asset_type == "bios":
+            root = getattr(self.settings, "bios_root", None)
+            return Path(root) if root is not None else None
+        if asset_type == "movies":
+            shows_root = getattr(self.settings, "shows_root", None)
+            movies_root = getattr(self.settings, "movies_root", None)
+            if shows_root is not None and rel.lower().startswith("shows/"):
+                return Path(shows_root)
+            return Path(movies_root) if movies_root is not None else None
+        if asset_type == "music":
+            root = getattr(self.settings, "music_root", None)
+            return Path(root) if root is not None else None
+        if asset_type == "saves":
+            root = getattr(self.settings, "saves_root", None)
+            if root is None:
+                return None
+            return Path(root) / system if system else Path(root)
+        if asset_type == "backups":
+            userdata = getattr(self.settings, "userdata_root", None)
+            return Path(userdata) / "system" / "drone-app" / "backups" if userdata is not None else None
+        return None
+
+    @staticmethod
+    def _job_remaining_bytes(job: dict) -> int:
+        total = int(job.get("total_bytes") or job.get("file_size") or 0)
+        downloaded = int(job.get("downloaded_bytes") or 0)
+        if total > 0:
+            return max(0, total - downloaded)
+        asset_type = str(job.get("_asset_type") or job.get("file_type") or "").strip().lower()
+        if asset_type == "artwork":
+            return _ARTWORK_ALLOWANCE_BYTES
+        return 0
+
+    def queued_bytes_on_filesystem(self, filesystem_key) -> int:
+        """Bytes still to download for queued or active jobs targeting ``filesystem_key`` (``st_dev``)."""
+        target_dev = str(filesystem_key or "")
+        if not target_dev:
+            return 0
+        total_remaining = 0
+        dev_cache: Dict[str, Optional[str]] = {}
+        with self._lock:
+            for job in self._jobs.values():
+                if job.get("status") not in {"queued", "downloading", "pending"}:
+                    continue
+                target_root = self._job_target_root(job)
+                if target_root is None:
+                    continue
+                cache_key = str(target_root)
+                if cache_key not in dev_cache:
+                    fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage)
+                    dev_cache[cache_key] = fs["group"] if fs else None
+                if dev_cache[cache_key] == target_dev:
+                    total_remaining += self._job_remaining_bytes(job)
+        return total_remaining
+
+    def _check_job_space_locked(self, job: dict) -> Optional[dict]:
+        """Re-check free space on ``job``'s target filesystem against remaining bytes + reserve."""
+        target_root = self._job_target_root(job)
+        if target_root is None:
+            return None
+        fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage)
+        if fs is None:
+            return None
+        remaining = self._job_remaining_bytes(job)
+        reserve = _reserve_bytes(fs["total"])
+        needed = remaining + reserve
+        if fs["free"] < needed:
+            return {
+                "needed": needed,
+                "remaining": remaining,
+                "free": fs["free"],
+                "reserve": reserve,
+                "mount": fs["mount"],
+                "st_dev": fs["st_dev"],
+                "group": fs["group"],
+            }
+        return None
+
+    def _build_enospc_issue_locked(self, job: dict) -> dict:
+        target_root = self._job_target_root(job)
+        fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage) if target_root is not None else None
+        remaining = self._job_remaining_bytes(job)
+        total = fs["total"] if fs else 0
+        free = fs["free"] if fs else 0
+        reserve = _reserve_bytes(total)
+        return {
+            "needed": remaining + reserve,
+            "remaining": remaining,
+            "free": free,
+            "reserve": reserve,
+            "mount": fs["mount"] if fs else str(target_root or ""),
+            "st_dev": fs["st_dev"] if fs else None,
+            "group": fs["group"] if fs else "",
+        }
+
+    def _hold_insufficient_space_locked(self, trigger_job: dict, space_issue: dict, *, record_trigger: bool = True) -> list:
+        """Hold ``trigger_job`` and any remaining queued jobs in its batch with ``failure_reason='insufficient_space'``."""
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        batch_id = str(trigger_job.get("_batch_id") or "")
+        batch = self._batches.get(batch_id) if batch_id else None
+        reserve = int(space_issue.get("reserve") or 0)
+        free_bytes = int(space_issue.get("free") or 0)
+        group = str(space_issue.get("group") or "")
+        total_remaining_on_fs = self._job_remaining_bytes(trigger_job)
+
+        held_others: List[dict] = []
+        if batch_id:
+            for other in self._jobs.values():
+                if other is trigger_job or other.get("_batch_id") != batch_id:
+                    continue
+                if other.get("status") not in {"queued", "pending", "paused"}:
+                    continue
+                other_root = self._job_target_root(other)
+                other_fs = _probe_filesystem(other_root, usage_fn=shutil.disk_usage) if other_root is not None else None
+                if not group or (other_fs and other_fs["group"] == group):
+                    total_remaining_on_fs += self._job_remaining_bytes(other)
+                held_others.append(other)
+
+        batch_needed = max(int(space_issue.get("needed") or 0), total_remaining_on_fs + reserve)
+        mount = space_issue.get("mount") or ""
+        message = (
+            f"Not enough free disk space on {mount or 'target disk'}: "
+            f"need {_format_size(batch_needed)}, {_format_size(free_bytes)} free."
+        )
+
+        def _park(job_dict: dict) -> None:
+            job_dict["status"] = "failed"
+            job_dict["failure_reason"] = "insufficient_space"
+            job_dict["error_message"] = message
+            job_dict["completed_at"] = now
+            job_dict["download_completed_at"] = now
+            job_dict["queue_position"] = None
+            job_dict["reconnect_after_epoch"] = None
+            job_dict.pop("_failover", None)
+
+        _park(trigger_job)
+        events: list = []
+        for other in held_others:
+            _park(other)
+            events.extend(self._record_batch_outcome_locked(other))
+
+        if batch is not None:
+            batch.extra["insufficient_space"] = 1
+            batch.extra["space_needed_bytes"] = batch_needed
+            batch.extra["space_free_bytes"] = free_bytes
+            batch.extra["space_shortfall_bytes"] = max(0, batch_needed - free_bytes)
+
+        if record_trigger:
+            events.extend(self._record_batch_outcome_locked(trigger_job))
+        return events
+
+    def _cleanup_partial_for_job(self, job: dict) -> None:
+        """Remove any leftover ``.part`` file(s) for ``job`` (defensive cleanup after ``ENOSPC``)."""
+        target_root = self._job_target_root(job)
+        if target_root is None:
+            return
+        asset_type = str(job.get("_asset_type") or job.get("file_type") or "").strip().lower()
+        rel = str(job.get("relative_path") or job.get("file_path") or "").strip().replace("\\", "/").lstrip("/")
+        if not rel:
+            return
+        if asset_type == "backups":
+            part = target_root / f".drone-backup-dl-{rel}.part"
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        if asset_type == "artwork":
+            return
+        try:
+            root_resolved = target_root.resolve()
+            candidate = (root_resolved / rel).resolve()
+            if root_resolved not in candidate.parents:
+                return
+            entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
+            if entry_type == "folder" and candidate.is_dir():
+                for part in candidate.rglob("*.part"):
+                    if part.is_file():
+                        part.unlink(missing_ok=True)
+            else:
+                part = candidate.with_name(f"{candidate.name}.part")
+                if part.is_file():
+                    part.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def find_pending_asset(self, asset_type: str, relative_path: str, *, system: Optional[str] = None,
                            expected_fingerprint: Optional[str] = None) -> Optional[dict]:
         """An unfinished job for the same local target (or content), for any asset type."""
@@ -1428,25 +1643,41 @@ class DownloadManager:
             self._wake.clear()
 
     def _run_job(self, job_id: str) -> None:
+        space_events: list = []
+        held_snapshot = None
+        held_peer = {}
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
                 return
-            config = job.get("_config") or {}
-            peer = job.get("_peer") or {}
-            system = str(job.get("system") or "")
-            rel = str(job.get("relative_path") or job.get("file_path") or "")
-            rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
-            artwork_type = str(job.get("artwork_type") or "")
-            artwork_local_rom_path = job.get("_local_rom_path")
-            expected_size = job.get("file_size") or job.get("total_bytes")
-            expected_fingerprint = job.get("_expected_fingerprint")
-            entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
-            marker_relative_path = job.get("_marker_relative_path")
-            cancel_event = self._cancel_events.get(job_id) or Event()
-            asset_type = str(job.get("_asset_type") or "rom").lower()
-            overwrite = bool(job.get("_overwrite")) if "_overwrite" in job else asset_type == "saves"
-            rom_artwork_types = list(job.get("_artwork_types") or [])
+            space_issue = self._check_job_space_locked(job)
+            if space_issue is not None:
+                space_events = self._hold_insufficient_space_locked(job, space_issue)
+                self._update_queue_positions_locked()
+                self._persist_state_locked()
+                held_snapshot = self._public_job_locked(job)
+                held_peer = job.get("_peer") or {}
+            else:
+                config = job.get("_config") or {}
+                peer = job.get("_peer") or {}
+                system = str(job.get("system") or "")
+                rel = str(job.get("relative_path") or job.get("file_path") or "")
+                rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
+                artwork_type = str(job.get("artwork_type") or "")
+                artwork_local_rom_path = job.get("_local_rom_path")
+                expected_size = job.get("file_size") or job.get("total_bytes")
+                expected_fingerprint = job.get("_expected_fingerprint")
+                entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
+                marker_relative_path = job.get("_marker_relative_path")
+                cancel_event = self._cancel_events.get(job_id) or Event()
+                asset_type = str(job.get("_asset_type") or "rom").lower()
+                overwrite = bool(job.get("_overwrite")) if "_overwrite" in job else asset_type == "saves"
+                rom_artwork_types = list(job.get("_artwork_types") or [])
+        if held_snapshot is not None:
+            self._emit_batch_events(space_events)
+            if _local_network.is_local_mode(self.settings):
+                _local_network.record_activity(self.settings, held_snapshot)
+            return
 
         def progress(downloaded: int, total: Optional[int]) -> None:
             should_persist = False
@@ -1533,10 +1764,18 @@ class DownloadManager:
                     current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     current["download_completed_at"] = current["completed_at"]
         except Exception as error:
+            enospc = (isinstance(error, OSError) and getattr(error, "errno", None) == errno.ENOSPC) or _is_enospc(error)
+            if enospc:
+                with self._lock:
+                    snapshot_for_cleanup = dict(self._jobs.get(job_id) or {})
+                self._cleanup_partial_for_job(snapshot_for_cleanup)
             with self._lock:
                 current = self._jobs.get(job_id)
                 if current and current.get("pause_requested"):
                     self._land_paused_locked(current)
+                elif current and enospc:
+                    space_issue = self._build_enospc_issue_locked(current)
+                    self._hold_insufficient_space_locked(current, space_issue, record_trigger=False)
                 elif current:
                     if (not current.get("cancellation_requested") and not _is_identity_hold(error)
                             and self._failover_locked(current, error)):

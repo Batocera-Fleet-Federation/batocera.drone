@@ -1182,8 +1182,11 @@ action (`POST /admin/backups/<id>/assets/plan`, `POST /admin/backups/<id>/assets
 plus optional `assets` on `POST /admin/backups/<id>/restore`). Planning queries online
 paired Drones' paged `/peer/inventory/{roms,bios,movies,music}` in parallel, classifies
 items as `here`, `available` (exact fingerprint/MD5 match), `probable` (same system, path,
-and size; unticked by default), or `unavailable` (read-only), checks free space per storage
-pool (warns without refusing), and caches plans in memory (`PlanStore`, 15 min TTL).
+and size; unticked by default), or `unavailable` (read-only), unticks unknown-size items
+by default, enforces free space per filesystem (`st_dev`: selection + already-queued
+downloads + reserve `max(1 GiB, 5%)` / `DRONE_ASSET_RESTORE_RESERVE_BYTES`, refusing with
+409 `insufficient_space` at confirm and holding the batch on low space/`ENOSPC` during
+the run), and caches plans in memory (`PlanStore`, 15 min TTL).
 Confirmed items are spread across online peers (best transport tier first, then fewest
 assigned bytes, source Drone as tie-breaker) and queued through ` PeerAssetEnqueueMixin`
 (`transfer/asset_enqueue.py`, shared with `/admin/local-network/sync[-bulk]`) into one

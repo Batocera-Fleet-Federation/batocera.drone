@@ -930,20 +930,29 @@ class BackupsScreenTests(unittest.TestCase):
         self.assertEqual(_format_size(2048), "2.0KB")
 
     def test_restore_wizard_also_fetch_games_and_media_step(self) -> None:
-        from ui.screens.backups import _asset_space_warnings, asset_selection_totals, toggle_asset_group, toggle_probable_asset
+        from ui.screens.backups import (
+            _asset_space_warnings,
+            asset_selection_totals,
+            asset_space_pools,
+            toggle_asset_group,
+            toggle_probable_asset,
+            untick_assets_until_fits,
+        )
         asset_plan = {
             "plan_id": "plan-123",
-            "totals": {"here": 2, "available": 3, "probable": 1, "unavailable": 1},
+            "totals": {"here": 2, "available": 4, "probable": 1, "unavailable": 1},
             "groups": [
                 {
                     "key": "roms:snes",
                     "kind": "roms",
                     "system": "snes",
-                    "count": 2,
+                    "count": 3,
+                    "default_count": 2,
                     "bytes": 300,
                     "items": [
                         {"key": "r0", "kind": "roms", "system": "snes", "path": "Zelda.sfc", "size": 200, "action": "download"},
                         {"key": "r1", "kind": "roms", "system": "snes", "path": "Mario.sfc", "size": 100, "action": "download"},
+                        {"key": "r9", "kind": "roms", "system": "snes", "path": "Unknown.sfc", "size": 0, "size_unknown": True, "default_selected": False, "action": "download"},
                     ],
                 },
                 {
@@ -951,6 +960,7 @@ class BackupsScreenTests(unittest.TestCase):
                     "kind": "music",
                     "system": "",
                     "count": 1,
+                    "default_count": 1,
                     "bytes": 50,
                     "items": [
                         {"key": "m0", "kind": "music", "system": "", "path": "Song.mp3", "size": 50, "action": "download"},
@@ -964,7 +974,7 @@ class BackupsScreenTests(unittest.TestCase):
                 {"key": "r3", "kind": "roms", "system": "snes", "path": "Kirby.sfc", "size": 500, "action": ""},
             ],
             "sources": [{"drone_id": "peer-1", "name": "Den", "status": "ok", "matched": 4}],
-            "space": {"roms": {"path": "/userdata/roms", "free": 500, "group": "dev1"}},
+            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 500, "reserve": 100, "queued": 50, "group": "dev1"}},
         }
         client = _FakeApiClient(
             get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
@@ -984,19 +994,27 @@ class BackupsScreenTests(unittest.TestCase):
             (f"/admin/backups/{_BACKUP_ID}/assets/plan", {"kinds": ["roms", "movies", "music"], "include_bios": False}),
         )
         self.assertTrue(screen.dialog["fetch_assets"])
-        # Exact matches are selected by default; probable matches are unticked by default.
+        # Exact known-size matches are selected by default; unknown-size and probable matches are unticked.
         self.assertEqual(asset_selection_totals(screen.dialog), (3, 350))
+        pools = asset_space_pools(screen.dialog, asset_plan)
+        self.assertEqual((pools[0]["required"], pools[0]["reserve"], pools[0]["fits"]), (450, 100, True))
         self.assertEqual(_asset_space_warnings(screen.dialog, asset_plan), [])
-        # Tick a probable match -> exceeds free space (300 + 400 = 700 > 500) -> warns, never refuses.
+        # Tick a probable match -> 700 + 50 + 100 = 850 > 500 -> does not fit and _restore refuses.
         toggle_probable_asset(screen.dialog, "r2", True)
         self.assertEqual(asset_selection_totals(screen.dialog), (4, 750))
         warnings = _asset_space_warnings(screen.dialog, asset_plan)
         self.assertEqual(len(warnings), 1)
-        self.assertIn("Low free space", warnings[0])
-        # Untick the music group.
-        toggle_asset_group(screen.dialog, asset_plan["groups"][1], False)
-        self.assertEqual(asset_selection_totals(screen.dialog), (3, 700))
         screen._preview()
+        screen._restore()
+        self.assertEqual(client.post_calls[-1][0], f"/admin/backups/{_BACKUP_ID}/plan")
+        self.assertIn("Not enough free disk space", screen.dialog["asset_plan_error"])
+        # "Untick until it fits" drops the largest item (r2) so the selection fits again.
+        untick_assets_until_fits(screen.dialog, asset_plan)
+        self.assertEqual(asset_selection_totals(screen.dialog), (3, 350))
+        self.assertTrue(all(p["fits"] for p in asset_space_pools(screen.dialog, asset_plan)))
+        # Untick the music group, then restore succeeds.
+        toggle_asset_group(screen.dialog, asset_plan["groups"][1], False)
+        self.assertEqual(asset_selection_totals(screen.dialog), (2, 300))
         screen._restore()
         restore_call = client.post_calls[-1]
         self.assertEqual(restore_call[0], f"/admin/backups/{_BACKUP_ID}/restore")
@@ -1004,7 +1022,7 @@ class BackupsScreenTests(unittest.TestCase):
             restore_call[1]["assets"],
             {
                 "plan_id": "plan-123",
-                "selected": ["r2"],
+                "selected": [],
                 "deselected": [],
                 "deselected_groups": ["music:"],
             },
