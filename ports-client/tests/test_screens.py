@@ -974,7 +974,7 @@ class BackupsScreenTests(unittest.TestCase):
                 {"key": "r3", "kind": "roms", "system": "snes", "path": "Kirby.sfc", "size": 500, "action": ""},
             ],
             "sources": [{"drone_id": "peer-1", "name": "Den", "status": "ok", "matched": 4}],
-            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 500, "reserve": 100, "queued": 50, "group": "dev1"}},
+            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 600, "reserve": 100, "queued": 50, "group": "dev1"}},
         }
         client = _FakeApiClient(
             get_responses={"/admin/backups": {"backups": [], "snapshots": []}},
@@ -999,7 +999,8 @@ class BackupsScreenTests(unittest.TestCase):
         pools = asset_space_pools(screen.dialog, asset_plan)
         self.assertEqual((pools[0]["required"], pools[0]["reserve"], pools[0]["fits"]), (450, 100, True))
         self.assertEqual(_asset_space_warnings(screen.dialog, asset_plan), [])
-        # Tick a probable match -> 700 + 50 + 100 = 850 > 500 -> does not fit and _restore refuses.
+        # Tick a probable match -> 700 + 50 + 100 = 850 required, 600 - 850 < 100
+        # reserve headroom -> does not fit and _restore refuses.
         toggle_probable_asset(screen.dialog, "r2", True)
         self.assertEqual(asset_selection_totals(screen.dialog), (4, 750))
         warnings = _asset_space_warnings(screen.dialog, asset_plan)
@@ -1027,6 +1028,38 @@ class BackupsScreenTests(unittest.TestCase):
                 "deselected_groups": ["music:"],
             },
         )
+
+    def test_asset_space_pools_checks_zero_byte_item_against_reserve_and_queued(self) -> None:
+        from ui.screens.backups import asset_space_pools, toggle_probable_asset, untick_assets_until_fits
+        plan = {
+            "plan_id": "plan-unk",
+            "groups": [{
+                "key": "roms:snes",
+                "kind": "roms",
+                "system": "snes",
+                "count": 1,
+                "default_count": 0,
+                "bytes": 0,
+                "items": [{
+                    "key": "r0", "kind": "roms", "system": "snes", "path": "Mystery.sfc",
+                    "size": 0, "size_unknown": True, "default_selected": False, "action": "download",
+                }],
+            }],
+            "probable": [],
+            "space": {"roms": {"path": "/userdata/roms", "mount": "/userdata", "free": 500, "reserve": 400, "queued": 200, "group": "dev1"}},
+        }
+        dialog = {
+            "asset_selected": set(),
+            "asset_deselected": set(),
+            "asset_deselected_groups": set(),
+        }
+        self.assertTrue(all(p["fits"] for p in asset_space_pools(dialog, plan)))
+        toggle_probable_asset(dialog, "r0", True)
+        pools = asset_space_pools(dialog, plan)
+        self.assertFalse(pools[0]["fits"])
+        self.assertEqual(pools[0]["required"], 600)
+        untick_assets_until_fits(dialog, plan)
+        self.assertTrue(all(p["fits"] for p in asset_space_pools(dialog, plan)))
 
     def test_get_missing_games_standalone_and_batch_cancel(self) -> None:
         asset_plan = {

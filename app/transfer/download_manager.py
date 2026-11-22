@@ -1096,48 +1096,68 @@ class DownloadManager:
             return _ARTWORK_ALLOWANCE_BYTES
         return 0
 
+    def _remaining_bytes_on_filesystem_locked(
+        self,
+        target_dev: str,
+        statuses: set,
+        *,
+        exclude_job: Optional[dict] = None,
+        dev_cache: Optional[Dict[str, Optional[str]]] = None,
+    ) -> int:
+        if not target_dev:
+            return 0
+        cache = dev_cache if dev_cache is not None else {}
+        total_remaining = 0
+        for job in self._jobs.values():
+            if job is exclude_job or job.get("status") not in statuses:
+                continue
+            target_root = self._job_target_root(job)
+            if target_root is None:
+                continue
+            cache_key = str(target_root)
+            if cache_key not in cache:
+                fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage)
+                cache[cache_key] = fs["group"] if fs else None
+            if cache[cache_key] == target_dev:
+                total_remaining += self._job_remaining_bytes(job)
+        return total_remaining
+
     def queued_bytes_on_filesystem(self, filesystem_key) -> int:
         """Bytes still to download for queued or active jobs targeting ``filesystem_key`` (``st_dev``)."""
         target_dev = str(filesystem_key or "")
         if not target_dev:
             return 0
-        total_remaining = 0
-        dev_cache: Dict[str, Optional[str]] = {}
         with self._lock:
-            for job in self._jobs.values():
-                if job.get("status") not in {"queued", "downloading", "pending"}:
-                    continue
-                target_root = self._job_target_root(job)
-                if target_root is None:
-                    continue
-                cache_key = str(target_root)
-                if cache_key not in dev_cache:
-                    fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage)
-                    dev_cache[cache_key] = fs["group"] if fs else None
-                if dev_cache[cache_key] == target_dev:
-                    total_remaining += self._job_remaining_bytes(job)
-        return total_remaining
+            return self._remaining_bytes_on_filesystem_locked(target_dev, {"queued", "downloading", "pending"})
 
     def _check_job_space_locked(self, job: dict) -> Optional[dict]:
-        """Re-check free space on ``job``'s target filesystem against remaining bytes + reserve."""
+        """Re-check free space on ``job``'s target filesystem against remaining + in-flight peers + reserve."""
         target_root = self._job_target_root(job)
         if target_root is None:
             return None
         fs = _probe_filesystem(target_root, usage_fn=shutil.disk_usage)
         if fs is None:
             return None
+        target_group = fs["group"]
+        in_flight = self._remaining_bytes_on_filesystem_locked(
+            target_group,
+            {"downloading"},
+            exclude_job=job,
+            dev_cache={str(target_root): target_group},
+        )
         remaining = self._job_remaining_bytes(job)
         reserve = _reserve_bytes(fs["total"])
-        needed = remaining + reserve
+        needed = remaining + in_flight + reserve
         if fs["free"] < needed:
             return {
                 "needed": needed,
                 "remaining": remaining,
+                "in_flight": in_flight,
                 "free": fs["free"],
                 "reserve": reserve,
                 "mount": fs["mount"],
                 "st_dev": fs["st_dev"],
-                "group": fs["group"],
+                "group": target_group,
             }
         return None
 
@@ -1232,6 +1252,10 @@ class DownloadManager:
             return
         if asset_type == "artwork":
             return
+        if asset_type == "movies" and getattr(self.settings, "shows_root", None) is not None and rel.lower().startswith("shows/"):
+            rel = rel[len("shows/"):].lstrip("/")
+            if not rel:
+                return
         try:
             root_resolved = target_root.resolve()
             candidate = (root_resolved / rel).resolve()

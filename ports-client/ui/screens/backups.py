@@ -662,7 +662,7 @@ class BackupsScreen(Screen):
             return
         for line in _asset_plan_lines(dialog, plan):
             imgui.text_wrapped(line)
-        pools = [pool for pool in asset_space_pools(dialog, plan) if pool["selected"] > 0 or not pool["fits"]]
+        pools = [pool for pool in asset_space_pools(dialog, plan) if pool["selected"] > 0 or pool.get("selected_count", 0) > 0 or not pool["fits"]]
         for pool in pools:
             free = max(0, pool["free"])
             required = max(0, pool["required"])
@@ -1019,23 +1019,30 @@ def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
     deselected = dialog.get("asset_deselected") or set()
     selected = dialog.get("asset_selected") or set()
     by_kind = {"roms": 0, "bios": 0, "movies": 0, "music": 0}
+    by_kind_count = {"roms": 0, "bios": 0, "movies": 0, "music": 0}
     for group in plan.get("groups") or []:
         if group.get("key") in deselected_groups:
             continue
+        default_count = group.get("default_count")
+        g_count = int(default_count) if default_count is not None else int(group.get("count") or 0)
         g_bytes = int(group.get("bytes") or 0)
         for item in group.get("items") or []:
             ikey = item.get("key")
             if item.get("default_selected") is False:
                 if ikey in selected:
+                    g_count += 1
                     g_bytes += _item_effective_bytes(item)
             elif ikey in deselected:
+                g_count = max(0, g_count - 1)
                 g_bytes = max(0, g_bytes - _item_effective_bytes(item))
         kind = str(group.get("kind") or "")
         by_kind[kind] = by_kind.get(kind, 0) + g_bytes
+        by_kind_count[kind] = by_kind_count.get(kind, 0) + g_count
     for item in plan.get("probable") or []:
         if item.get("key") in selected:
             kind = str(item.get("kind") or "")
             by_kind[kind] = by_kind.get(kind, 0) + _item_effective_bytes(item)
+            by_kind_count[kind] = by_kind_count.get(kind, 0) + 1
     pools: Dict[str, dict] = {}
     for kind, info in space.items():
         if not isinstance(info, dict):
@@ -1048,6 +1055,7 @@ def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
                 "mount": str(info.get("mount") or info.get("path") or kind),
                 "free": int(info.get("free") or 0),
                 "selected": 0,
+                "selected_count": 0,
                 "queued": int(info.get("queued") or 0),
                 "staging": int(info.get("staging") or 0),
                 "reserve": int(info.get("reserve") or 0),
@@ -1055,11 +1063,15 @@ def asset_space_pools(dialog: dict, plan: dict) -> List[dict]:
             },
         )
         pool["selected"] += int(by_kind.get(kind) or 0)
+        pool["selected_count"] += int(by_kind_count.get(kind) or 0)
         pool["kinds"].append(kind)
     result: List[dict] = []
     for pool in pools.values():
         required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
-        fits = True if pool["selected"] == 0 else pool["free"] >= required
+        # Keep a full reserve free after the requirement is covered, matching the
+        # server gate in app/backups/asset_restore.py (growth margin + headroom
+        # for concurrent writers during a long restore).
+        fits = True if pool["selected_count"] == 0 else (pool["free"] - required) >= pool["reserve"]
         pool["required"] = required
         pool["needed"] = required
         pool["fits"] = fits

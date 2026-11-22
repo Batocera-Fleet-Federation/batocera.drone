@@ -773,7 +773,16 @@ def _root_for_item(item: dict, space: dict, extra_space: dict, *, art: bool = Fa
 
 def selection_space(plan: dict, items: List[dict], *, manager: Any = None, fresh: bool = False,
                     settings: Any = None) -> List[dict]:
-    """Per filesystem: required bytes (selection + queued + staging + reserve) vs. free space."""
+    """Per filesystem: required bytes (selection + queued + staging + reserve) vs. free space.
+
+    A pool fits only when a full reserve still remains free after the requirement is
+    covered (``free - required >= reserve``). The reserve inside ``required`` is the
+    operation's own growth margin (sizes are peer-reported estimates); the headroom on
+    top protects concurrent writers (saves, logs, the metadata poller, other batches)
+    during a long multi-file restore. This matches the per-job recheck in
+    ``DownloadManager``, which holds a job unless ``free >= remaining + in-flight +
+    reserve``.
+    """
     if fresh and settings is not None:
         space = space_report(settings, manager=manager)
         rom_systems = {item.get("system") for item in items if item.get("kind") == "roms" and item.get("system")}
@@ -838,7 +847,7 @@ def selection_space(plan: dict, items: List[dict], *, manager: Any = None, fresh
     out: List[dict] = []
     for pool in pools.values():
         required = pool["selected"] + pool["queued"] + pool["staging"] + pool["reserve"]
-        fits = pool["free"] >= required
+        fits = (pool["free"] - required) >= pool["reserve"]
         pool["required"] = required
         pool["needed"] = required
         pool["fits"] = fits
