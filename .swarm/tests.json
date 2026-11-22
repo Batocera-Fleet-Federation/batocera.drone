@@ -6343,6 +6343,39 @@
         "servers": []
       },
       "timeoutSeconds": 180
+    },
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/adversarial",
+        "-p",
+        "test_issue_760_asset_space_enforcement.py"
+      ],
+      "disruptive": false,
+      "enabled": true,
+      "id": "adversarial-issue-760-asset-space-enforcement",
+      "name": "Issue #760: backup asset restore enforces free-space before and during fetch",
+      "origin": "adversarial",
+      "requirements": {
+        "credentials": [],
+        "devices": [],
+        "executables": [
+          "python3"
+        ],
+        "files": [
+          "app/backups/asset_restore.py",
+          "app/backups/service.py",
+          "app/transfer/download_manager.py",
+          "tests/adversarial/test_issue_760_asset_space_enforcement.py"
+        ],
+        "mounts": [],
+        "servers": []
+      },
+      "timeoutSeconds": 300
     }
   ],
   "version": 1
