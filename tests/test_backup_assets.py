@@ -273,13 +273,32 @@ class HostileAssetTests(unittest.TestCase):
 
         bomb = (b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]>'
                 b"<gameList><game><path>./Bomb.sfc</path><name>&b;</name></game></gameList>")
+        bomb_utf16 = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<!DOCTYPE lolz [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]>'
+            '<gameList><game><path>./Bomb16.sfc</path><name>&b;</name></game></gameList>'
+        ).encode("utf-16")
+        bomb_latin1 = (
+            '<?xml version="1.0" encoding="ISO-8859-1"?>'
+            '<!DOCTYPE lolz [<!ENTITY a "aaaa">]>'
+            '<gameList><game><path>./BombL1.sfc</path><name>&a;</name></game></gameList>'
+        ).encode("iso-8859-1")
+        valid_utf16 = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<gameList><game><path>./Clean16.sfc</path><name>Clean &amp; Safe</name></game></gameList>'
+        ).encode("utf-16")
         evil = (b"<gameList><game><path>/etc/passwd</path></game><game><path>../up.sfc</path></game>"
                 b"<game><path>./Fine.sfc</path><name>Fine</name><image>./i.png</image></game></gameList>")
-        members = [member("data/roms/snes/gamelist.xml", bomb), member("data/roms/gba/gamelist.xml", evil),
+        members = [member("data/roms/snes/gamelist.xml", bomb),
+                   member("data/roms/nes/gamelist.xml", bomb_utf16),
+                   member("data/roms/md/gamelist.xml", bomb_latin1),
+                   member("data/roms/gb/gamelist.xml", valid_utf16),
+                   member("data/roms/gba/gamelist.xml", evil),
                    member("data/roms/../etc/gamelist.xml", evil), member("data/roms/psx/sub/gamelist.xml", evil),
                    member("data/roms/n64/gamelist.xml", b"<gameList><broken")]
         document = assets.legacy_from_gamelists(members)
-        self.assertEqual([(i["system"], i["path"]) for i in document["roms"]], [("gba", "Fine.sfc")])
+        self.assertEqual([(i["system"], i["path"]) for i in document["roms"]],
+                         [("gb", "Clean16.sfc"), ("gba", "Fine.sfc")])
 
 
 class PlanFixture(Fixture):

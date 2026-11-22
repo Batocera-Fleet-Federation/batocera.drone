@@ -31,7 +31,7 @@ every list, and the fingerprints are only ever *matching hints* -- content is ve
 by the transfer path (signed inventory + full SHA-256 / BIOS MD5), never by this file.
 
 Older backups have no ``assets`` summary; ``legacy_from_gamelists`` rebuilds a path-only
-ROM list from the gamelists they archived (``xml.etree`` with DOCTYPE/ENTITY rejected).
+ROM list from the gamelists they archived (``xml.parsers.expat`` rejecting any DTD/entity).
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ import json
 import re
 import zlib
 import xml.etree.ElementTree as ET
+import xml.parsers.expat as expat
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
@@ -303,17 +304,54 @@ def collect(settings: Any) -> dict:
 
 # ---------------------------------------------------------------- legacy lists
 
-def _has_dtd(data: bytes) -> bool:
-    head = data.upper()
-    return b"<!DOCTYPE" in head or b"<!ENTITY" in head
+def _parse_xml_no_dtd(data: bytes) -> ET.Element:
+    """Parse XML bytes with expat while forbidding any DTD, DOCTYPE, or ENTITY construct.
+
+    Rejecting via expat handlers rather than scanning raw bytes applies uniformly across
+    every XML encoding expat supports (UTF-8, UTF-16 with BOM, ISO-8859-1, etc.).
+    """
+    parser = expat.ParserCreate(None, "}")
+    target = ET.TreeBuilder()
+
+    def _forbid(*_args: Any, **_kwargs: Any) -> None:
+        raise ValueError("DTD declarations are not allowed in gamelist.xml")
+
+    parser.StartDoctypeDeclHandler = _forbid
+    parser.EndDoctypeDeclHandler = _forbid
+    parser.EntityDeclHandler = _forbid
+    parser.UnparsedEntityDeclHandler = _forbid
+    parser.NotationDeclHandler = _forbid
+    parser.ExternalEntityRefHandler = _forbid
+    parser.ElementDeclHandler = _forbid
+    parser.AttlistDeclHandler = _forbid
+    parser.SkippedEntityHandler = _forbid
+    parser.buffer_text = 1
+
+    def _start(tag: str, attrs: Dict[str, str]) -> None:
+        if "}" in tag:
+            tag = "{" + tag
+        if attrs:
+            attrs = {("{" + k if "}" in k else k): v for k, v in attrs.items()}
+        target.start(tag, attrs)
+
+    def _end(tag: str) -> None:
+        if "}" in tag:
+            tag = "{" + tag
+        target.end(tag)
+
+    parser.StartElementHandler = _start
+    parser.EndElementHandler = _end
+    parser.CharacterDataHandler = target.data
+    parser.Parse(data, True)
+    return target.close()
 
 
 def legacy_from_gamelists(members: Iterable) -> dict:
     """A path-only ROM list from archived ``roms/<system>/gamelist.xml`` files.
 
     ``members`` yields ``(tar member, file object)`` like ``archive.iter_members``. Files are
-    read with a size cap, a DOCTYPE/ENTITY declaration rejects the whole file (``xml.etree``
-    would otherwise expand internal entities), and parse errors skip the file.
+    read with a size cap, any DTD/DOCTYPE/ENTITY declaration rejects the whole file in any
+    encoding, and parse errors skip the file.
     """
     roms: List[dict] = []
     truncated = False
@@ -326,11 +364,11 @@ def legacy_from_gamelists(members: Iterable) -> dict:
         if system is None or int(getattr(member, "size", 0) or 0) > MAX_GAMELIST_BYTES:
             continue
         data = handle.read(MAX_GAMELIST_BYTES + 1)
-        if len(data) > MAX_GAMELIST_BYTES or _has_dtd(data):
+        if len(data) > MAX_GAMELIST_BYTES:
             continue
         try:
-            root = ET.fromstring(data)
-        except (ET.ParseError, ValueError):
+            root = _parse_xml_no_dtd(data)
+        except (expat.ExpatError, ET.ParseError, ValueError):
             continue
         for game in root.findall("game"):
             path_text = (game.findtext("path") or "").strip().replace("\\", "/")
