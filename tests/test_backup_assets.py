@@ -289,8 +289,31 @@ class HostileAssetTests(unittest.TestCase):
         ).encode("utf-16")
         evil = (b"<gameList><game><path>/etc/passwd</path></game><game><path>../up.sfc</path></game>"
                 b"<game><path>./Fine.sfc</path><name>Fine</name><image>./i.png</image></game></gameList>")
+        bomb_utf16le_nobom = (
+            '<?xml version="1.0" encoding="UTF-16LE"?>'
+            '<!DOCTYPE lolz [<!ENTITY a "aaaa">]>'
+            '<gameList><game><path>./Bomb16LE.sfc</path><name>&a;</name></game></gameList>'
+        ).encode("utf-16-le")
+        bomb_utf16be_nobom = (
+            '<?xml version="1.0" encoding="UTF-16BE"?>'
+            '<!DOCTYPE lolz [<!ENTITY a "aaaa">]>'
+            '<gameList><game><path>./Bomb16BE.sfc</path><name>&a;</name></game></gameList>'
+        ).encode("utf-16-be")
+        bomb_utf8_bom = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE lolz [<!ENTITY a "aaaa">]>'
+            '<gameList><game><path>./Bomb8BOM.sfc</path><name>&a;</name></game></gameList>'
+        ).encode("utf-8-sig")
+        undef_entity_utf16 = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<gameList><game><path>./Undef16.sfc</path><name>&evil;</name></game></gameList>'
+        ).encode("utf-16")
         members = [member("data/roms/snes/gamelist.xml", bomb),
                    member("data/roms/nes/gamelist.xml", bomb_utf16),
+                   member("data/roms/sms/gamelist.xml", bomb_utf16le_nobom),
+                   member("data/roms/pce/gamelist.xml", bomb_utf16be_nobom),
+                   member("data/roms/lynx/gamelist.xml", bomb_utf8_bom),
+                   member("data/roms/ngp/gamelist.xml", undef_entity_utf16),
                    member("data/roms/md/gamelist.xml", bomb_latin1),
                    member("data/roms/gb/gamelist.xml", valid_utf16),
                    member("data/roms/gba/gamelist.xml", evil),
@@ -482,6 +505,15 @@ class PlanTests(PlanFixture):
             by_q = {p["group"]: p for p in with_queued}
             self.assertEqual(by_q["1"]["required"], 700 + 250 + 200)
             self.assertFalse(by_q["1"]["fits"])
+            # Exact boundary: selection + queued + reserve <= free fits; exceeding by 1 fails.
+            boundary_plan = {"space": {"roms": {"path": "/userdata/roms", "free": 1000, "group": "dev1"}}, "index": {}, "items": []}
+            item_500 = {"key": "r0", "kind": "roms", "system": "snes", "path": "G.sfc", "size": 500, "action": "download"}
+            item_601 = {"key": "r1", "kind": "roms", "system": "snes", "path": "H.sfc", "size": 601, "action": "download"}
+            with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "400"}):
+                fit_pool = asset_restore.selection_space(boundary_plan, [item_500])[0]
+                self.assertEqual((fit_pool["needed"], fit_pool["reserve"], fit_pool["fits"]), (900, 400, True))
+                over_pool = asset_restore.selection_space(boundary_plan, [item_601])[0]
+                self.assertEqual((over_pool["needed"], over_pool["reserve"], over_pool["fits"]), (1001, 400, False))
 
     def test_unknown_size_items_are_unticked_by_default(self):
         document = self.document(roms=[{"system": "snes", "path": "Mystery.sfc", "size": 0, "fp": FP_ZELDA}])
@@ -946,6 +978,64 @@ class FailoverTests(FetchFixture):
             self.assertEqual(job["failure_reason"], "insufficient_space")
         self.assertNotIn("failover_count", self.manager._jobs[first_job["job_id"]])
 
+    def test_job_start_space_recheck_counts_concurrent_downloading_jobs_on_same_filesystem(self):
+        document = self.document(
+            roms=[{"system": "snes", "path": f"G{i}.sfc", "size": 500, "fp": f"{i + 1:032x}"} for i in range(2)],
+            bios=[{"path": "b.bin", "size": 500, "md5": MD5_BIOS}],
+        )
+        self.rows("p1", "roms", *[peer_rom("snes", f"G{i}.sfc", f"{i + 1:032x}", 500) for i in range(2)])
+        self.rows("p1", "bios", {"relative_path": "b.bin", "file_size": 500, "bios_md5": MD5_BIOS})
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            plan = self.plan(document, kinds=("roms", "bios"))
+            self.fetch_items(plan)
+        jobs = self.jobs()
+        rom_jobs = [j for j in jobs if j["file_type"] == "ROM"]
+        bios_job = next(j for j in jobs if j["file_type"] == "BIOS")
+        # Simulate Worker 1 actively downloading rom_jobs[0] (500 bytes remaining).
+        with self.manager._lock:
+            self.manager._jobs[rom_jobs[0]["job_id"]]["status"] = "downloading"
+
+        def fake_stat(path):
+            st = mock.Mock()
+            st.st_dev = 2 if "bios" in str(path) else 1
+            return st
+
+        fetch = mock.Mock(return_value={"status": "completed", "relative_path": "b.bin", "asset_type": "bios",
+                                        "downloaded_bytes": 500, "total_bytes": 500})
+        # Free is 900 with 100 reserve: bios_job (on st_dev=2) fits (500+100<=900),
+        # while rom_jobs[1] (on st_dev=1) sees 500 + 500 in-flight + 100 reserve = 1100 > 900.
+        with mock.patch("app.transfer.download_manager.shutil.disk_usage", return_value=mock.Mock(free=900, total=5000)), \
+                mock.patch("app.transfer.disk_space.os.stat", side_effect=fake_stat), \
+                mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "100"}):
+            self.run_job(bios_job["job_id"], fetch)
+            self.assertEqual(self.manager._jobs[bios_job["job_id"]]["status"], "completed")
+            fetch.reset_mock()
+            fetch.side_effect = AssertionError("must not start second ROM job when in-flight + remaining exceeds free")
+            self.run_job(rom_jobs[1]["job_id"], fetch)
+        fetch.assert_not_called()
+        self.assertEqual(self.manager._jobs[rom_jobs[1]["job_id"]]["status"], "failed")
+        self.assertEqual(self.manager._jobs[rom_jobs[1]["job_id"]]["failure_reason"], "insufficient_space")
+
+    def test_enospc_removes_partial_for_shows_under_shows_root(self):
+        import errno
+        document = self.document(movies=[{"path": "shows/Cartoon/ep01.mp4", "size": 500, "fp": "7" * 32}])
+        self.rows("p1", "movies", {"file_path": "shows/Cartoon/ep01.mp4", "file_size": 500, "movies_fingerprint": "7" * 32})
+        plan = self.plan(document, kinds=("movies",))
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            self.fetch_items(plan)
+        job = self.jobs()[0]
+        part = self.userdata / "shows" / "Cartoon" / "ep01.mp4.part"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"partial-show")
+
+        def fail_enospc(request, context):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch.dict("os.environ", {"DRONE_ASSET_RESTORE_RESERVE_BYTES": "0"}):
+            self.run_job(job["job_id"], fail_enospc)
+        self.assertFalse(part.exists(), "ENOSPC must remove leftover partial file under shows_root")
+        self.assertEqual(self.manager._jobs[job["job_id"]]["failure_reason"], "insufficient_space")
+
 
 def asset_failover_retries():
     from app.transfer import download_manager
@@ -1213,6 +1303,7 @@ const fn = new Function(code + `; return {
   bkComputeAssetSelectionStats,
   bkBuildAssetSelection,
   bkToggleProbableAssetItem,
+  bkToggleExactAssetItem,
   bkToggleAssetGroup,
   bkUntickUntilFits,
   BK,
@@ -1307,6 +1398,29 @@ assert.strictEqual(stats.selectedCount, 1);
 fn.bkToggleProbableAssetItem("missing", "r1", true);
 const sel = fn.bkBuildAssetSelection(state);
 assert.deepStrictEqual(sel.selected, ["r1"]);
+
+// Ticking a 0-byte / unknown-size item on a disk below reserve+queued must fail fits and Untick until it fits resolves it.
+const unkState = fn.bkInitAssetPlanState("missing", "b2", "Unknown Backup", { recorded: true, counts: { roms: 1 } });
+unkState.plan = {
+  plan_id: "p2",
+  totals: { here: 0, available: 1, probable: 0, unavailable: 0 },
+  groups: [{
+    key: "roms:snes", kind: "roms", system: "snes", count: 1, default_count: 0, bytes: 0,
+    items: [{ key: "u0", kind: "roms", system: "snes", path: "Mystery.sfc", size: 0, size_unknown: true, default_selected: false, action: "download", artwork: [], peers: [] }],
+  }],
+  probable: [],
+  unavailable: [],
+  sources: [],
+  space: { roms: { path: "/userdata/roms", free: 500, reserve: 400, queued: 200, group: "g1" } },
+};
+assert.strictEqual(fn.bkComputeAssetSelectionStats(unkState).fits, true);
+fn.BK.missing = unkState;
+fn.bkToggleExactAssetItem("missing", "roms:snes", "u0", true);
+let unkStats = fn.bkComputeAssetSelectionStats(unkState);
+assert.strictEqual(unkStats.selectedCount, 1);
+assert.strictEqual(unkStats.fits, false);
+fn.bkUntickUntilFits("missing");
+assert.strictEqual(fn.bkComputeAssetSelectionStats(unkState).fits, true);
 """
         result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1],
                                 capture_output=True, text=True, timeout=30)

@@ -1337,6 +1337,7 @@ function bkComputeAssetSelectionStats(state) {
   let selectedBytes = 0;
   let probableSelected = 0;
   const byKindBytes = { roms: 0, bios: 0, movies: 0, music: 0 };
+  const byKindCount = { roms: 0, bios: 0, movies: 0, music: 0 };
   for (const group of plan.groups || []) {
     if (state.deselectedGroups.has(group.key)) continue;
     let groupCount = group.default_count !== undefined ? Number(group.default_count) : Number(group.count || 0);
@@ -1356,6 +1357,7 @@ function bkComputeAssetSelectionStats(state) {
     selectedCount += groupCount;
     selectedBytes += groupBytes;
     byKindBytes[group.kind] = (byKindBytes[group.kind] || 0) + groupBytes;
+    byKindCount[group.kind] = (byKindCount[group.kind] || 0) + groupCount;
   }
   for (const item of plan.probable || []) {
     if (!state.selected.has(item.key)) continue;
@@ -1364,6 +1366,7 @@ function bkComputeAssetSelectionStats(state) {
     const itemBytes = (item.action === "download" ? Number(item.size || 0) : 0) + Number(item.artwork_bytes || 0);
     selectedBytes += itemBytes;
     byKindBytes[item.kind] = (byKindBytes[item.kind] || 0) + itemBytes;
+    byKindCount[item.kind] = (byKindCount[item.kind] || 0) + 1;
   }
   const poolMap = new Map();
   const space = plan.space || {};
@@ -1378,6 +1381,7 @@ function bkComputeAssetSelectionStats(state) {
         path: info.path || kind,
         free: Number(info.free || 0),
         selected: 0,
+        selectedCount: 0,
         queued: Number(info.queued || 0),
         staging: Number(info.staging || 0),
         reserve: Number(info.reserve || 0),
@@ -1386,11 +1390,12 @@ function bkComputeAssetSelectionStats(state) {
     }
     const pool = poolMap.get(key);
     pool.selected += Number(byKindBytes[kind] || 0);
+    pool.selectedCount += Number(byKindCount[kind] || 0);
     pool.kinds.push(kind);
   }
   const pools = Array.from(poolMap.values()).map((pool) => {
     const required = pool.selected + pool.queued + pool.staging + pool.reserve;
-    const fits = pool.selected === 0 ? true : pool.free >= required;
+    const fits = pool.selectedCount === 0 ? true : pool.free >= required;
     return Object.assign({}, pool, { required, needed: required, fits, short: !fits });
   });
   return { selectedCount, selectedBytes, probableSelected, pools, fits: pools.every((p) => p.fits) };
@@ -1416,7 +1421,7 @@ function bkSourceStatusChip(source) {
 }
 
 function bkRenderAssetSpaceHtml(stats, scope) {
-  const activePools = (stats.pools || []).filter((p) => p.selected > 0 || !p.fits);
+  const activePools = (stats.pools || []).filter((p) => p.selected > 0 || p.selectedCount > 0 || !p.fits);
   if (!activePools.length) return "";
   return activePools.map((pool) => {
     const free = Math.max(0, pool.free);
