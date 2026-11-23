@@ -5182,7 +5182,7 @@ function renderSindenRecoilOptions(fix) {
             aria-label="Search light-gun games" placeholder="Search light-gun games" aria-autocomplete="list"
             aria-expanded="false" aria-controls="sindenRecoilResults" aria-describedby="sindenRecoilSearchStatus"
             oninput="queueSindenRecoilSearch(this)" onfocus="queueSindenRecoilSearch(this)"
-            onblur="closeSindenRecoilSearch(this)" onkeydown="handleSindenRecoilSearchKey(event)">
+            onblur="closeSindenRecoilSearch(this, false)" onkeydown="handleSindenRecoilSearchKey(event)">
         <div class="list-group sinden-recoil-results" id="sindenRecoilResults" role="listbox" aria-label="Matching light-gun games"
             onmousedown="event.preventDefault()" onclick="selectSindenRecoilResult(event.target.closest('[role=option]'))" hidden></div>
       </div>
@@ -5192,7 +5192,7 @@ function renderSindenRecoilOptions(fix) {
   `;
 }
 
-function closeSindenRecoilSearch(field) {
+function closeSindenRecoilSearch(field, clearStatus = true) {
   clearTimeout(sindenSearchTimer);
   sindenSearchRequest += 1;
   field.setAttribute("aria-expanded", "false");
@@ -5200,7 +5200,9 @@ function closeSindenRecoilSearch(field) {
   const results = field.parentElement.querySelector(".sinden-recoil-results");
   results.hidden = true;
   results.replaceChildren();
-  field.closest(".sinden-recoil").querySelector(".sinden-recoil-status").textContent = "";
+  // On blur the status stays put: clearing it would shift the rows below
+  // mid-click and swallow taps on their controls.
+  if (clearStatus) field.closest(".sinden-recoil").querySelector(".sinden-recoil-status").textContent = "";
 }
 
 function queueSindenRecoilSearch(field) {
@@ -5221,9 +5223,13 @@ async function loadSindenRecoilGames(field, query, request) {
     const params = new URLSearchParams({ q: query, trait: "lightgun", limit: "100" });
     const data = await api(`/roms?${params}`);
     if (!field.isConnected || field.disabled || request !== sindenSearchRequest) return;
+    const fix = adminFixesById.get("sinden-recoil");
+    const listed = new Set([...Object.keys(fix?.recoil_profiles || {}), ...sindenPendingGames]);
+    let skipped = 0;
     for (const game of data.roms || []) {
       if (!game.system || !game.relative_path) continue;
       const key = `${game.system}/${game.relative_path}`;
+      if (listed.has(key)) { skipped += 1; continue; }
       const option = document.createElement("div");
       option.className = "list-group-item list-group-item-action small";
       option.id = `sindenRecoilMatch-${results.childElementCount}`;
@@ -5235,7 +5241,8 @@ async function loadSindenRecoilGames(field, query, request) {
     }
     results.hidden = !results.childElementCount;
     field.setAttribute("aria-expanded", String(!results.hidden));
-    status.textContent = results.hidden ? "No matching light-gun games." : "";
+    status.textContent = !results.hidden ? ""
+      : (skipped ? "All matching light-gun games are already listed." : "No matching light-gun games.");
   } catch (error) {
     if (field.isConnected && request === sindenSearchRequest) {
       status.textContent = error.message || "Unable to search light-gun games.";
