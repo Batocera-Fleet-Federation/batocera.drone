@@ -5177,11 +5177,15 @@ function renderSindenRecoilOptions(fix) {
       </form>
       <p id="sindenRecoilSearchStatus" class="sinden-recoil-status text-muted small" role="status"></p>
       ${profiles.length ? `<div class="admin-fix-game-list sinden-recoil-profiles">
-        ${profiles.map(([key, preset]) => `<label class="sinden-recoil-profile">
+        ${profiles.map(([key, preset]) => `<div class="sinden-recoil-profile">
           <span class="small">${escapeHtml(key)}</span>
           <select class="form-select form-select-sm" aria-label="Recoil preset for ${escapeHtml(key)}"
               onchange="saveSindenRecoilPreset(${jsAttr(key)}, this.value)">${sindenPresetOptions(fix, preset)}</select>
-        </label>`).join("")}
+          <button type="button" class="btn btn-sm btn-outline-danger sinden-recoil-remove" title="Remove preset"
+              aria-label="Remove recoil preset for ${escapeHtml(key)}" onclick="saveSindenRecoilPreset(${jsAttr(key)}, '')">
+            <i class="bi bi-trash" aria-hidden="true"></i>
+          </button>
+        </div>`).join("")}
       </div>` : ""}
     </div>
   `;
@@ -5441,7 +5445,11 @@ async function updateAdminFix(fixId, payload) {
   try {
     const response = await apiPost(`/admin/fixes/${encodeURIComponent(fixId)}`, payload);
     adminFixesById.set(fixId, response.fix);
-    showToast(payload.recoil_profile ? "Recoil preset saved." : `${escapeHtml(response.fix.name)} ${response.fix.enabled ? "enabled" : "disabled"}.`, "success");
+    let message = `${escapeHtml(response.fix.name)} ${response.fix.enabled ? "enabled" : "disabled"}.`;
+    if (payload.recoil_profile) {
+      message = payload.recoil_profile.preset ? "Recoil preset saved." : "Recoil preset removed.";
+    }
+    showToast(message, "success");
     await renderAdminFixesPage();
   } catch (error) {
     showToast(`Could not update fix: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);

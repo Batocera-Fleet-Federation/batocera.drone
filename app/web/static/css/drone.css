@@ -1468,12 +1468,18 @@
     .sinden-recoil-status:empty { display: none; }
     .sinden-recoil .sinden-recoil-profiles { padding: 0 0.5rem; }
     .sinden-recoil-profile {
-      grid-template-columns: minmax(0, 1fr) min(44%, 14.5rem);
+      grid-template-columns: minmax(0, 1fr) min(44%, 14.5rem) 2rem;
       padding: 0.35rem 0;
       margin: 0;
     }
     .sinden-recoil-profile + .sinden-recoil-profile { border-top: 1px solid var(--admin-border); }
     .sinden-recoil-profile > span { overflow-wrap: anywhere; }
+    .sinden-recoil-remove {
+      display: grid;
+      place-items: center;
+      min-height: 2rem;
+      padding: 0;
+    }
     @container (max-width: 31rem) {
       .sinden-recoil-assign { grid-template-columns: minmax(0, 1fr) auto; }
       .sinden-recoil-game { grid-column: 1 / -1; }
