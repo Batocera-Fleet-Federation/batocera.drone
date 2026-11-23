@@ -5160,7 +5160,7 @@ function renderSindenRecoilOptions(fix) {
   return `
     <div class="admin-fix-options sinden-recoil mt-2" data-fix-options="sinden-recoil" data-bs-theme="dark">
       <form class="sinden-recoil-search" onsubmit="event.preventDefault(); loadSindenRecoilGames(this)">
-        <input class="form-control form-control-sm" name="query" type="search" aria-label="Search local games" placeholder="Search local games">
+        <input class="form-control form-control-sm" name="query" type="search" aria-label="Search light-gun games" placeholder="Search light-gun games">
         <button class="btn btn-sm btn-outline-secondary" type="submit">Search</button>
       </form>
       <form class="sinden-recoil-assign" id="sindenRecoilAssign" onchange="syncSindenRecoilAssign(this)"
@@ -5207,7 +5207,7 @@ async function loadSindenRecoilGames(form) {
   button.disabled = true;
   status.textContent = "Searching…";
   try {
-    const params = new URLSearchParams({ q: query, limit: "100" });
+    const params = new URLSearchParams({ q: query, trait: "lightgun", limit: "100" });
     const data = await api(`/roms?${params}`);
     for (const game of data.roms || []) {
       if (!game.system || !game.relative_path) continue;
@@ -5215,9 +5215,9 @@ async function loadSindenRecoilGames(form) {
       field.add(new Option(`${game.rom_name || game.relative_path} (${key})`, key));
     }
     field.disabled = field.options.length === 1;
-    status.textContent = field.disabled ? "No matching games." : data.has_more ? "First 100 results. Narrow the search to see more specific matches." : "";
+    status.textContent = field.disabled ? "No matching light-gun games." : data.has_more ? "First 100 results. Narrow the search to see more specific matches." : "";
   } catch (error) {
-    status.textContent = error.message || "Unable to search local games.";
+    status.textContent = error.message || "Unable to search light-gun games.";
   } finally {
     syncSindenRecoilAssign(assignment);
     button.disabled = false;
