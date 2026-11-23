@@ -1435,6 +1435,50 @@
     .admin-fix-game:last-child { border-bottom: 0; }
     .admin-fix-game-list.scope-all { opacity: 0.62; }
 
+    .sinden-recoil {
+      display: grid;
+      gap: 0.5rem;
+      container-type: inline-size;
+    }
+    .sinden-recoil-search,
+    .sinden-recoil-assign,
+    .sinden-recoil-profile {
+      display: grid;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .sinden-recoil-search { grid-template-columns: minmax(0, 1fr) auto; }
+    .sinden-recoil-assign { grid-template-columns: minmax(0, 1fr) 14.5rem auto; }
+    .sinden-recoil form { margin: 0; }
+    .sinden-recoil .btn { white-space: nowrap; }
+    .sinden-recoil .form-select {
+      min-width: 0;
+      text-overflow: ellipsis;
+      background-image: var(--bs-form-select-bg-img);
+      background-position: right 0.55rem center;
+      background-repeat: no-repeat;
+      background-size: 12px 9px;
+      padding-right: 1.6rem;
+    }
+    .sinden-recoil .form-select:disabled {
+      background-color: var(--admin-bg);
+      color: var(--admin-muted);
+    }
+    .sinden-recoil-status { margin: 0; }
+    .sinden-recoil-status:empty { display: none; }
+    .sinden-recoil .sinden-recoil-profiles { padding: 0 0.5rem; }
+    .sinden-recoil-profile {
+      grid-template-columns: minmax(0, 1fr) min(44%, 14.5rem);
+      padding: 0.35rem 0;
+      margin: 0;
+    }
+    .sinden-recoil-profile + .sinden-recoil-profile { border-top: 1px solid var(--admin-border); }
+    .sinden-recoil-profile > span { overflow-wrap: anywhere; }
+    @container (max-width: 31rem) {
+      .sinden-recoil-assign { grid-template-columns: minmax(0, 1fr) auto; }
+      .sinden-recoil-game { grid-column: 1 / -1; }
+    }
+
     /* Movie player modal title: a long filename must stay on one line and
        truncate with an ellipsis instead of wrapping or pushing the close
        button out of the header. min-width:0 is the actual fix -- a flex

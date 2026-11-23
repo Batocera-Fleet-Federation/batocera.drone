@@ -5149,34 +5149,37 @@ async function renderAdminMenu() {
 
 let adminFixesById = new Map();
 
-function sindenPresetOptions(fix, selected) {
+function sindenPresetOptions(fix, selected, includeDefault = true) {
   const presets = fix.recoil_presets || [];
-  return `<option value="">Use Batocera setting</option>
+  return `${includeDefault ? '<option value="">Use Batocera setting</option>' : ""}
     ${presets.map(({ id, name }) => `<option value="${escapeHtml(id)}" ${id === selected ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}`;
 }
 
 function renderSindenRecoilOptions(fix) {
   const profiles = Object.entries(fix.recoil_profiles || {});
   return `
-    <div class="admin-fix-options mt-3" data-fix-options="sinden-recoil">
-      <form class="d-flex gap-2 mb-2" onsubmit="event.preventDefault(); loadSindenRecoilGames(this)">
+    <div class="admin-fix-options sinden-recoil mt-2" data-fix-options="sinden-recoil" data-bs-theme="dark">
+      <form class="sinden-recoil-search" onsubmit="event.preventDefault(); loadSindenRecoilGames(this)">
         <input class="form-control form-control-sm" name="query" type="search" aria-label="Search local games" placeholder="Search local games">
         <button class="btn btn-sm btn-outline-secondary" type="submit">Search</button>
       </form>
-      <form class="d-flex flex-wrap gap-2" onsubmit="event.preventDefault(); saveSindenRecoilPreset(this.elements.game.value, this.elements.preset.value)">
-        <select class="form-select form-select-sm" name="game" id="sindenRecoilGame" aria-label="Game" required disabled>
+      <form class="sinden-recoil-assign" id="sindenRecoilAssign" onchange="syncSindenRecoilAssign(this)"
+          onsubmit="event.preventDefault(); saveSindenRecoilPreset(this.elements.game.value, this.elements.preset.value)">
+        <select class="form-select form-select-sm sinden-recoil-game" name="game" aria-label="Game"
+            aria-describedby="sindenRecoilSearchStatus" required disabled>
           <option value="">Search for a game</option>
         </select>
-        <div class="d-flex gap-2">
-          <select class="form-select form-select-sm" name="preset" aria-label="Recoil preset" required>${sindenPresetOptions(fix, "")}</select>
-          <button class="btn btn-sm btn-primary" type="submit">Assign preset</button>
-        </div>
+        <select class="form-select form-select-sm" name="preset" aria-label="Recoil preset" required disabled>
+          <option value="" selected disabled>Choose a preset</option>
+          ${sindenPresetOptions(fix, "", false)}
+        </select>
+        <button class="btn btn-sm btn-primary" type="submit" disabled>Assign</button>
       </form>
-      <p id="sindenRecoilSearchStatus" class="text-muted small mb-1" role="status"></p>
-      ${profiles.length ? `<div class="admin-fix-game-list mt-3">
-        ${profiles.map(([key, preset]) => `<label class="d-flex flex-wrap align-items-center justify-content-between gap-2 p-2">
-          <span class="small text-break">${escapeHtml(key)}</span>
-          <select class="form-select form-select-sm w-auto" aria-label="Recoil preset for ${escapeHtml(key)}"
+      <p id="sindenRecoilSearchStatus" class="sinden-recoil-status text-muted small" role="status"></p>
+      ${profiles.length ? `<div class="admin-fix-game-list sinden-recoil-profiles">
+        ${profiles.map(([key, preset]) => `<label class="sinden-recoil-profile">
+          <span class="small">${escapeHtml(key)}</span>
+          <select class="form-select form-select-sm" aria-label="Recoil preset for ${escapeHtml(key)}"
               onchange="saveSindenRecoilPreset(${jsAttr(key)}, this.value)">${sindenPresetOptions(fix, preset)}</select>
         </label>`).join("")}
       </div>` : ""}
@@ -5185,7 +5188,8 @@ function renderSindenRecoilOptions(fix) {
 }
 
 async function loadSindenRecoilGames(form) {
-  const field = document.getElementById("sindenRecoilGame");
+  const assignment = document.getElementById("sindenRecoilAssign");
+  const field = assignment.elements.game;
   const status = document.getElementById("sindenRecoilSearchStatus");
   const button = form.querySelector("button");
   const query = form.elements.query.value.trim();
@@ -5195,6 +5199,7 @@ async function loadSindenRecoilGames(form) {
   }
   field.replaceChildren(new Option("Choose a game", ""));
   field.disabled = true;
+  syncSindenRecoilAssign(assignment);
   button.disabled = true;
   status.textContent = "Searching…";
   try {
@@ -5210,8 +5215,15 @@ async function loadSindenRecoilGames(form) {
   } catch (error) {
     status.textContent = error.message || "Unable to search local games.";
   } finally {
+    syncSindenRecoilAssign(assignment);
     button.disabled = false;
   }
+}
+
+function syncSindenRecoilAssign(form) {
+  const { game, preset } = form.elements;
+  preset.disabled = game.disabled || !game.value;
+  form.querySelector('button[type="submit"]').disabled = preset.disabled || !preset.value;
 }
 
 async function saveSindenRecoilPreset(key, preset) {
@@ -5277,7 +5289,7 @@ function renderAdminFixCard(fix) {
               <label class="form-check-label" for="fixToggle-${escapeHtml(fix.id)}">${stateLabel}</label>
             </div>
           </div>
-          <p class="mt-3 mb-0">${escapeHtml(fix.summary || "")}</p>
+          <p class="${fix.id === "sinden-recoil" ? "small text-muted mt-2" : "mt-3"} mb-0">${escapeHtml(fix.summary || "")}</p>
           ${fix.status === "modified" ? `<div class="alert alert-warning py-2 small mt-3 mb-0 d-flex align-items-center justify-content-between gap-2 flex-wrap"><span>A legacy or modified version is active.</span><button type="button" class="btn btn-sm btn-warning" onclick="repairAdminFix('${fix.id}')"><i class="bi bi-arrow-repeat me-1"></i>Migrate / repair</button></div>` : ""}
           ${renderAdminFixOptions(fix)}
         </div>
