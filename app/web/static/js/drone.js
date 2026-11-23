@@ -5148,36 +5148,21 @@ async function renderAdminMenu() {
 }
 
 let adminFixesById = new Map();
+const sindenPendingGames = new Set();
+let sindenSearchTimer;
+let sindenSearchRequest = 0;
 
-function sindenPresetOptions(fix, selected, includeDefault = true) {
+function sindenPresetOptions(fix, selected) {
   const presets = fix.recoil_presets || [];
-  return `${includeDefault ? '<option value="">Use Batocera setting</option>' : ""}
+  return `<option value="">Use Batocera setting</option>
     ${presets.map(({ id, name }) => `<option value="${escapeHtml(id)}" ${id === selected ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}`;
 }
 
-function renderSindenRecoilOptions(fix) {
-  const profiles = Object.entries(fix.recoil_profiles || {});
-  return `
-    <div class="admin-fix-options sinden-recoil mt-2" data-fix-options="sinden-recoil" data-bs-theme="dark">
-      <form class="sinden-recoil-search" onsubmit="event.preventDefault(); loadSindenRecoilGames(this)">
-        <input class="form-control form-control-sm" name="query" type="search" aria-label="Search light-gun games" placeholder="Search light-gun games">
-        <button class="btn btn-sm btn-outline-secondary" type="submit">Search</button>
-      </form>
-      <form class="sinden-recoil-assign" id="sindenRecoilAssign" onchange="syncSindenRecoilAssign(this)"
-          onsubmit="event.preventDefault(); saveSindenRecoilPreset(this.elements.game.value, this.elements.preset.value)">
-        <select class="form-select form-select-sm sinden-recoil-game" name="game" aria-label="Game"
-            aria-describedby="sindenRecoilSearchStatus" required disabled>
-          <option value="">Search for a game</option>
-        </select>
-        <select class="form-select form-select-sm" name="preset" aria-label="Recoil preset" required disabled>
-          <option value="" selected disabled>Choose a preset</option>
-          ${sindenPresetOptions(fix, "", false)}
-        </select>
-        <button class="btn btn-sm btn-primary" type="submit" disabled>Assign</button>
-      </form>
-      <p id="sindenRecoilSearchStatus" class="sinden-recoil-status text-muted small" role="status"></p>
-      ${profiles.length ? `<div class="admin-fix-game-list sinden-recoil-profiles">
-        ${profiles.map(([key, preset]) => `<div class="sinden-recoil-profile">
+function renderSindenRecoilProfiles(fix) {
+  const saved = Object.entries(fix.recoil_profiles || {});
+  for (const [key] of saved) sindenPendingGames.delete(key);
+  return [...saved, ...Array.from(sindenPendingGames, key => [key, ""])].map(([key, preset]) => `
+        <div class="sinden-recoil-profile" data-sinden-game="${escapeHtml(key)}">
           <span class="small">${escapeHtml(key)}</span>
           <select class="form-select form-select-sm" aria-label="Recoil preset for ${escapeHtml(key)}"
               onchange="saveSindenRecoilPreset(${jsAttr(key)}, this.value)">${sindenPresetOptions(fix, preset)}</select>
@@ -5185,52 +5170,127 @@ function renderSindenRecoilOptions(fix) {
               aria-label="Remove recoil preset for ${escapeHtml(key)}" onclick="saveSindenRecoilPreset(${jsAttr(key)}, '')">
             <i class="bi bi-trash" aria-hidden="true"></i>
           </button>
-        </div>`).join("")}
-      </div>` : ""}
+        </div>`).join("");
+}
+
+function renderSindenRecoilOptions(fix) {
+  const rows = renderSindenRecoilProfiles(fix);
+  return `
+    <div class="admin-fix-options sinden-recoil mt-2" data-fix-options="sinden-recoil" data-bs-theme="dark">
+      <div class="sinden-recoil-search">
+        <input class="form-control form-control-sm" id="sindenRecoilSearch" type="search" role="combobox" autocomplete="off"
+            aria-label="Search light-gun games" placeholder="Search light-gun games" aria-autocomplete="list"
+            aria-expanded="false" aria-controls="sindenRecoilResults" aria-describedby="sindenRecoilSearchStatus"
+            oninput="queueSindenRecoilSearch(this)" onfocus="queueSindenRecoilSearch(this)"
+            onblur="closeSindenRecoilSearch(this)" onkeydown="handleSindenRecoilSearchKey(event)">
+        <div class="list-group sinden-recoil-results" id="sindenRecoilResults" role="listbox" aria-label="Matching light-gun games"
+            onmousedown="event.preventDefault()" onclick="selectSindenRecoilResult(event.target.closest('[role=option]'))" hidden></div>
+      </div>
+      <p id="sindenRecoilSearchStatus" class="sinden-recoil-status text-muted small" role="status"></p>
+      <div class="admin-fix-game-list sinden-recoil-profiles" id="sindenRecoilProfiles" ${rows ? "" : "hidden"}>${rows}</div>
     </div>
   `;
 }
 
-async function loadSindenRecoilGames(form) {
-  const assignment = document.getElementById("sindenRecoilAssign");
-  const field = assignment.elements.game;
-  const status = document.getElementById("sindenRecoilSearchStatus");
-  const button = form.querySelector("button");
-  const query = form.elements.query.value.trim();
-  if (!query) {
-    status.textContent = "Enter a game title or ROM filename.";
-    return;
+function closeSindenRecoilSearch(field) {
+  clearTimeout(sindenSearchTimer);
+  sindenSearchRequest += 1;
+  field.setAttribute("aria-expanded", "false");
+  field.removeAttribute("aria-activedescendant");
+  const results = field.parentElement.querySelector(".sinden-recoil-results");
+  results.hidden = true;
+  results.replaceChildren();
+  field.closest(".sinden-recoil").querySelector(".sinden-recoil-status").textContent = "";
+}
+
+function queueSindenRecoilSearch(field) {
+  closeSindenRecoilSearch(field);
+  const query = field.value.trim();
+  if (query) {
+    const request = sindenSearchRequest;
+    sindenSearchTimer = setTimeout(() => loadSindenRecoilGames(field, query, request), 200);
   }
-  field.replaceChildren(new Option("Choose a game", ""));
-  field.disabled = true;
-  syncSindenRecoilAssign(assignment);
-  button.disabled = true;
+}
+
+async function loadSindenRecoilGames(field, query, request) {
+  if (!field.isConnected || field.disabled || request !== sindenSearchRequest) return;
+  const status = document.getElementById("sindenRecoilSearchStatus");
+  const results = document.getElementById("sindenRecoilResults");
   status.textContent = "Searching…";
   try {
     const params = new URLSearchParams({ q: query, trait: "lightgun", limit: "100" });
     const data = await api(`/roms?${params}`);
+    if (!field.isConnected || field.disabled || request !== sindenSearchRequest) return;
     for (const game of data.roms || []) {
       if (!game.system || !game.relative_path) continue;
       const key = `${game.system}/${game.relative_path}`;
-      field.add(new Option(`${game.rom_name || game.relative_path} (${key})`, key));
+      const option = document.createElement("div");
+      option.className = "list-group-item list-group-item-action small";
+      option.id = `sindenRecoilMatch-${results.childElementCount}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", "false");
+      option.dataset.sindenGame = key;
+      option.textContent = `${game.rom_name || game.relative_path} (${key})`;
+      results.append(option);
     }
-    field.disabled = field.options.length === 1;
-    status.textContent = field.disabled ? "No matching light-gun games." : data.has_more ? "First 100 results. Narrow the search to see more specific matches." : "";
+    results.hidden = !results.childElementCount;
+    field.setAttribute("aria-expanded", String(!results.hidden));
+    status.textContent = results.hidden ? "No matching light-gun games." : "";
   } catch (error) {
-    status.textContent = error.message || "Unable to search light-gun games.";
-  } finally {
-    syncSindenRecoilAssign(assignment);
-    button.disabled = false;
+    if (field.isConnected && request === sindenSearchRequest) {
+      status.textContent = error.message || "Unable to search light-gun games.";
+    }
   }
 }
 
-function syncSindenRecoilAssign(form) {
-  const { game, preset } = form.elements;
-  preset.disabled = game.disabled || !game.value;
-  form.querySelector('button[type="submit"]').disabled = preset.disabled || !preset.value;
+function handleSindenRecoilSearchKey(event) {
+  if (event.isComposing) return;
+  const field = event.currentTarget;
+  const results = document.getElementById("sindenRecoilResults");
+  if (event.key === "Escape" && !results.hidden) {
+    event.preventDefault();
+    closeSindenRecoilSearch(field);
+    return;
+  }
+  const options = Array.from(results.children);
+  if (!options.length) return;
+  const active = options.findIndex(option => option.id === field.getAttribute("aria-activedescendant"));
+  if (event.key === "Enter") {
+    event.preventDefault();
+    selectSindenRecoilResult(options[Math.max(active, 0)]);
+  } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const next = event.key === "ArrowDown" ? Math.min(active + 1, options.length - 1)
+      : (active < 0 ? options.length - 1 : Math.max(active - 1, 0));
+    options[active]?.setAttribute("aria-selected", "false");
+    options[next].setAttribute("aria-selected", "true");
+    field.setAttribute("aria-activedescendant", options[next].id);
+    options[next].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function selectSindenRecoilResult(option) {
+  const field = document.getElementById("sindenRecoilSearch");
+  const fix = adminFixesById.get("sinden-recoil");
+  if (!option || !fix || field.disabled) return;
+  const key = option.dataset.sindenGame;
+  sindenPendingGames.add(key);
+  const list = document.getElementById("sindenRecoilProfiles");
+  list.innerHTML = renderSindenRecoilProfiles(fix);
+  list.hidden = false;
+  field.value = "";
+  closeSindenRecoilSearch(field);
+  list.querySelector(`[data-sinden-game="${CSS.escape(key)}"] select`).focus();
 }
 
 async function saveSindenRecoilPreset(key, preset) {
+  if (!preset && sindenPendingGames.delete(key)) {
+    const row = document.querySelector(`.sinden-recoil-profile[data-sinden-game="${CSS.escape(key)}"]`);
+    const list = row.parentElement;
+    row.remove();
+    list.hidden = !list.childElementCount;
+    return;
+  }
   const separator = key.indexOf("/");
   if (separator < 1) return;
   const id = "sinden-recoil";
