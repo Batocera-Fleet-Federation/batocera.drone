@@ -1345,6 +1345,7 @@ def _schemas() -> Dict[str, Schema]:
         "WifiRecoveryUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "WifiRecoveryResponse": _object({"wifi_recovery": _ref("WifiRecoveryConfig")}, ("wifi_recovery",)),
         "AdminFixGame": _object({"id": _string(), "name": _string(), "path": _string()}, ("id", "name", "path")),
+        "SindenRecoilPreset": _enum(("single", "machinegun", "machinegun-quiet", "gun", "gun-quiet", "off")),
         "AdminFix": _object(
             {
                 "id": _string(),
@@ -1360,6 +1361,8 @@ def _schemas() -> Dict[str, Schema]:
                 "scope": _enum(("all", "selected")),
                 "selected_games": _array(_string()),
                 "games": _array(_ref("AdminFixGame")),
+                "recoil_profiles": _object(additional_properties=_ref("SindenRecoilPreset")),
+                "recoil_presets": _array(_object({"id": _ref("SindenRecoilPreset"), "name": _string()}, ("id", "name"))),
                 "legacy_detected": _boolean(),
                 "installed_path": _string(),
                 "log_path": _string(),
@@ -1406,6 +1409,11 @@ def _schemas() -> Dict[str, Schema]:
                 "enabled": _boolean(),
                 "scope": _enum(("all", "selected")),
                 "selected_games": _array(_string()),
+                "recoil_profile": _object({
+                    "system": _string(),
+                    "rom": _string("Path relative to the ROM’s Batocera system folder"),
+                    "preset": _enum(("single", "machinegun", "machinegun-quiet", "gun", "gun-quiet", "off", "")),
+                }, ("system", "rom", "preset"), description="Set one Sinden recoil preset. An empty preset restores inheritance."),
             },
             ("enabled",),
         ),

@@ -80,6 +80,7 @@ class HandlersSystemMixin:
                 enabled,
                 scope=str(payload.get("scope") or "selected"),
                 selected_games=selected_games,
+                recoil_profile=payload.get("recoil_profile"),
             )
         except KeyError:
             self._send_json(404, {"error": "unknown admin fix"})

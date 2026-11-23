@@ -5149,7 +5149,82 @@ async function renderAdminMenu() {
 
 let adminFixesById = new Map();
 
+function sindenPresetOptions(fix, selected) {
+  const presets = fix.recoil_presets || [];
+  return `<option value="">Use Batocera setting</option>
+    ${presets.map(({ id, name }) => `<option value="${escapeHtml(id)}" ${id === selected ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}`;
+}
+
+function renderSindenRecoilOptions(fix) {
+  const profiles = Object.entries(fix.recoil_profiles || {});
+  return `
+    <div class="admin-fix-options mt-3" data-fix-options="sinden-recoil">
+      <form class="d-flex gap-2 mb-2" onsubmit="event.preventDefault(); loadSindenRecoilGames(this)">
+        <input class="form-control form-control-sm" name="query" type="search" aria-label="Search local games" placeholder="Search local games">
+        <button class="btn btn-sm btn-outline-secondary" type="submit">Search</button>
+      </form>
+      <form class="d-flex flex-wrap gap-2" onsubmit="event.preventDefault(); saveSindenRecoilPreset(this.elements.game.value, this.elements.preset.value)">
+        <select class="form-select form-select-sm" name="game" id="sindenRecoilGame" aria-label="Game" required disabled>
+          <option value="">Search for a game</option>
+        </select>
+        <div class="d-flex gap-2">
+          <select class="form-select form-select-sm" name="preset" aria-label="Recoil preset" required>${sindenPresetOptions(fix, "")}</select>
+          <button class="btn btn-sm btn-primary" type="submit">Assign preset</button>
+        </div>
+      </form>
+      <p id="sindenRecoilSearchStatus" class="text-muted small mb-1" role="status"></p>
+      ${profiles.length ? `<div class="admin-fix-game-list mt-3">
+        ${profiles.map(([key, preset]) => `<label class="d-flex flex-wrap align-items-center justify-content-between gap-2 p-2">
+          <span class="small text-break">${escapeHtml(key)}</span>
+          <select class="form-select form-select-sm w-auto" aria-label="Recoil preset for ${escapeHtml(key)}"
+              onchange="saveSindenRecoilPreset(${jsAttr(key)}, this.value)">${sindenPresetOptions(fix, preset)}</select>
+        </label>`).join("")}
+      </div>` : ""}
+    </div>
+  `;
+}
+
+async function loadSindenRecoilGames(form) {
+  const field = document.getElementById("sindenRecoilGame");
+  const status = document.getElementById("sindenRecoilSearchStatus");
+  const button = form.querySelector("button");
+  const query = form.elements.query.value.trim();
+  if (!query) {
+    status.textContent = "Enter a game title or ROM filename.";
+    return;
+  }
+  field.replaceChildren(new Option("Choose a game", ""));
+  field.disabled = true;
+  button.disabled = true;
+  status.textContent = "Searching…";
+  try {
+    const params = new URLSearchParams({ q: query, limit: "100" });
+    const data = await api(`/roms?${params}`);
+    for (const game of data.roms || []) {
+      if (!game.system || !game.relative_path) continue;
+      const key = `${game.system}/${game.relative_path}`;
+      field.add(new Option(`${game.rom_name || game.relative_path} (${key})`, key));
+    }
+    field.disabled = field.options.length === 1;
+    status.textContent = field.disabled ? "No matching games." : data.has_more ? "First 100 results. Narrow the search to see more specific matches." : "";
+  } catch (error) {
+    status.textContent = error.message || "Unable to search local games.";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveSindenRecoilPreset(key, preset) {
+  const separator = key.indexOf("/");
+  if (separator < 1) return;
+  const id = "sinden-recoil";
+  const payload = adminFixPayload(id);
+  payload.recoil_profile = { system: key.slice(0, separator), rom: key.slice(separator + 1), preset };
+  await updateAdminFix(id, payload);
+}
+
 function renderAdminFixOptions(fix) {
+  if (fix.id === "sinden-recoil") return renderSindenRecoilOptions(fix);
   if (fix.id !== "switch-gui-autoload") return "";
   const selected = new Set(Array.isArray(fix.selected_games) ? fix.selected_games : []);
   const games = Array.isArray(fix.games) ? fix.games : [];
@@ -5336,10 +5411,12 @@ async function renderAdminFixesPage() {
 function adminFixPayload(fixId, enabledOverride = null) {
   const fix = adminFixesById.get(fixId) || {};
   const toggle = document.getElementById(`fixToggle-${fixId}`);
+  const enabled = enabledOverride === null ? Boolean(toggle?.checked) : Boolean(enabledOverride);
+  if (fixId !== "switch-gui-autoload") return { enabled };
   const scope = document.querySelector('input[name="switch-fix-scope"]:checked')?.value || fix.scope || "selected";
   const selectedGames = Array.from(document.querySelectorAll(".switch-fix-game:checked")).map((node) => node.value);
   return {
-    enabled: enabledOverride === null ? Boolean(toggle?.checked) : Boolean(enabledOverride),
+    enabled,
     scope,
     selected_games: selectedGames,
   };
@@ -5347,12 +5424,12 @@ function adminFixPayload(fixId, enabledOverride = null) {
 
 async function updateAdminFix(fixId, payload) {
   const card = document.querySelector(`[data-fix-id="${fixId}"]`);
-  const controls = card ? card.querySelectorAll("input") : [];
+  const controls = card ? card.querySelectorAll("input, select, button") : [];
   controls.forEach((control) => { control.disabled = true; });
   try {
     const response = await apiPost(`/admin/fixes/${encodeURIComponent(fixId)}`, payload);
     adminFixesById.set(fixId, response.fix);
-    showToast(`${escapeHtml(response.fix.name)} ${response.fix.enabled ? "enabled" : "disabled"}.`, "success");
+    showToast(payload.recoil_profile ? "Recoil preset saved." : `${escapeHtml(response.fix.name)} ${response.fix.enabled ? "enabled" : "disabled"}.`, "success");
     await renderAdminFixesPage();
   } catch (error) {
     showToast(`Could not update fix: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);

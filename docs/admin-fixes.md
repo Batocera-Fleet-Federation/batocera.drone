@@ -12,6 +12,14 @@ It acts only on `lindbergh` launches. When `/sys/class/input/js*` exceeds eight 
 
 Configuration and the rotating activity log are stored under `/userdata/system/input-device-guard` and `/userdata/system/logs/input-device-guard.log`. Disabling the fix restores any active adapter before removing the Drone-owned hook.
 
+## Sinden recoil per game
+
+Open **Admin → Fixes → Sinden recoil per game**. Search the local library for a game and assign **Single Shot**, **Machine Gun**, **Gun (Delayed Repeat)**, their quiet variants where available, or **No Recoil**. To remove an assignment, select **Use Batocera setting** on its row. Enable the fix to apply the presets. The preset controls the recoil solenoid on compatible Sinden guns. In-game autofire comes from the game or emulator.
+
+On Batocera v43.1 and v44 the hook matches the launching system and the original ROM path. It changes only recoil values in each running Sinden driver's temporary configuration and restarts the driver with the same virtual input device. A gun connected after the game starts uses Batocera's settings until the next launch. The hook restores the prior recoil values on game exit. A detached watchdog also restores them if the launcher dies, and the next launch retries any pending restoration. Rebooting runs Batocera's normal Sinden initialization.
+
+Presets are stored in `/userdata/system/sinden-recoil/config.json`. The hook is `/userdata/system/scripts/drone-sinden-recoil.py` and writes to `/userdata/system/logs/sinden-recoil.log`. Disabling the fix restores active settings before removing the hook and retains saved presets.
+
 ## Switch 2 GameCube adapter guard
 
 The Switch 2 emulators (eglantine, orchid and lichii through RGS) can abort with `stack smashing detected` while setting up controllers when a Wii U GameCube adapter (`057e:0337`) is connected. The launch returns to EmulationStation a few seconds later, and unplugging the adapter avoids it. The Lindbergh guard cannot help here: Batocera drives the adapter with the userspace `wii-u-gc-adapter` daemon, whose four ports are virtual (uinput) joysticks with no USB parent to group by. The guard is installed as:
@@ -49,5 +57,6 @@ The first enable stores a pristine generator copy under `/userdata/system/backup
 
 - `GET /v1/api/admin/fixes` lists the catalog, live install state, and Switch library.
 - `POST /v1/api/admin/fixes/{fix_id}` accepts `enabled`, plus optional `scope` (`all` or `selected`) and `selected_games`.
+- For `sinden-recoil`, the same endpoint accepts an optional `recoil_profile` with `system`, `rom` (relative to that system folder), and `preset`. An empty preset removes the assignment.
 
 Both endpoints require the ordinary authenticated admin session and respect `ADMIN_ENABLED`.

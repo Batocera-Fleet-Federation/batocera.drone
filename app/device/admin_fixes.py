@@ -5,9 +5,12 @@ import json
 import os
 import subprocess
 import tempfile
+from threading import Lock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .fix_assets import sinden_recoil
 
 try:
     from ..common.settings import Settings
@@ -21,11 +24,15 @@ CRASH_NOTIFIER_ID = "game-crash-notifier"
 CRASH_NOTIFIER_HOOK_FILENAME = "drone-game-crash-notifier.py"
 SWITCH2_GAMECUBE_GUARD_ID = "switch2-gamecube-adapter-guard"
 SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME = "drone-switch2-gamecube-guard.py"
+SINDEN_RECOIL_ID = "sinden-recoil"
+SINDEN_RECOIL_HOOK_FILENAME = "drone-sinden-recoil.py"
 HOOK_FILENAME = "drone-lindbergh-input-device-guard.py"
 ASSET_ROOT = Path(__file__).resolve().parent / "fix_assets"
 ASSET_PATH = ASSET_ROOT / "lindbergh_input_guard.py"
 CRASH_NOTIFIER_ASSET = ASSET_ROOT / "game_crash_notifier.py"
 SWITCH2_GAMECUBE_GUARD_ASSET = ASSET_ROOT / "switch2_gamecube_guard.py"
+SINDEN_RECOIL_ASSET = ASSET_ROOT / "sinden_recoil.py"
+_SINDEN_CONFIG_LOCK = Lock()
 SWITCH_LAUNCHER_ASSET = ASSET_ROOT / "switch_gui_launcher.py"
 SWITCH_WRAPPER_ASSET = ASSET_ROOT / "switch_gui_autoload.sh"
 SWITCH_GENERATOR_MARKER_START = "# >>> drone switch-gui-autoload fix"
@@ -33,6 +40,22 @@ SWITCH_GENERATOR_MARKER_END = "# <<< drone switch-gui-autoload fix"
 SWITCH_EMULATOR_CONDITION = "if emulator in ('eden', 'eden-legacy', 'eden-pgo', 'citron', 'citron-legacy'):"
 
 FIX_CATALOG = (
+    {
+        "id": SINDEN_RECOIL_ID,
+        "name": "Sinden recoil per game",
+        "summary": "Choose a recoil preset for individual games and return to Batocera’s settings when the game closes.",
+        "applies_to": "Sinden recoil light guns on Batocera v43.1 and v44",
+        "details": [
+            "Assign a preset below. Games without a preset inherit the current Batocera recoil setting.",
+            "The launch hook applies recoil to the Sinden drivers while keeping their virtual input devices active. A watchdog restores the saved recoil after an unexpected launcher exit.",
+        ],
+        "changes": [
+            f"Installs /userdata/system/scripts/{SINDEN_RECOIL_HOOK_FILENAME}",
+            "Stores presets in /userdata/system/sinden-recoil/config.json",
+            "Writes activity to /userdata/system/logs/sinden-recoil.log",
+        ],
+        "caution": "This controls physical recoil. A configured launch can pause briefly while the Sinden driver restarts.",
+    },
     {
         "id": LINDBERGH_INPUT_GUARD_ID,
         "name": "Lindbergh input-device guard",
@@ -121,6 +144,9 @@ def _paths(settings: Settings) -> Dict[str, Path]:
         "gc_hook": system_root / "scripts" / SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME,
         "gc_config": system_root / "switch2-gamecube-guard" / "config.json",
         "gc_log": system_root / "logs" / "switch2-gamecube-guard.log",
+        "sinden_hook": system_root / "scripts" / SINDEN_RECOIL_HOOK_FILENAME,
+        "sinden_config": system_root / "sinden-recoil" / "config.json",
+        "sinden_log": system_root / "logs" / "sinden-recoil.log",
         "switch_config": system_root / "switch-gui-workaround" / "config.json",
         "switch_backup": system_root / "backups" / "hotfixes" / "drone-switch-gui-workaround",
         "switch_generator": system_root / "rgs" / "generators" / "yuzu" / "yuzuMainlineGenerator.py",
@@ -163,6 +189,8 @@ def _fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str, Any]:
         hook_key, asset, log_key = "crash_hook", CRASH_NOTIFIER_ASSET, "crash_log"
     elif metadata["id"] == SWITCH2_GAMECUBE_GUARD_ID:
         hook_key, asset, log_key = "gc_hook", SWITCH2_GAMECUBE_GUARD_ASSET, "gc_log"
+    elif metadata["id"] == SINDEN_RECOIL_ID:
+        hook_key, asset, log_key = "sinden_hook", SINDEN_RECOIL_ASSET, "sinden_log"
     installed = paths[hook_key].is_file()
     managed = installed and _sha256(paths[hook_key]) == _sha256(asset)
     payload = dict(metadata)
@@ -175,7 +203,56 @@ def _fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str, Any]:
             "log_path": str(paths[log_key]),
         }
     )
+    if metadata["id"] == SINDEN_RECOIL_ID:
+        try:
+            config = _read_sinden_config(paths["sinden_config"])
+        except (OSError, ValueError):
+            config = {}
+        enabled = installed and config.get("enabled") is True
+        payload.update(
+            enabled=enabled, managed=managed,
+            status="enabled" if enabled and managed else ("modified" if installed else "disabled"),
+            recoil_profiles=config.get("profiles", {}),
+            recoil_presets=[{"id": key, "name": preset[0]} for key, preset in sinden_recoil.PRESETS.items()],
+        )
     return payload
+
+
+def _read_sinden_config(path: Path) -> Dict[str, Any]:
+    data = sinden_recoil.read_json(path, {})
+    if not isinstance(data, dict) or not isinstance(data.get("profiles", {}), dict):
+        raise ValueError("Invalid Sinden recoil configuration")
+    return data
+
+
+def _configure_sinden_recoil(settings: Settings, enabled: bool, profile: Optional[Dict[str, Any]]) -> None:
+    paths = _paths(settings)
+    config_path, hook = paths["sinden_config"], paths["sinden_hook"]
+    with _SINDEN_CONFIG_LOCK:
+        config = _read_sinden_config(config_path)
+        profiles = config.get("profiles", {})
+        if profile is not None:
+            if not isinstance(profile, dict):
+                raise ValueError("recoil_profile must contain system, rom and preset")
+            key = sinden_recoil.game_key(profile.get("system"), profile.get("rom"))
+            preset = profile.get("preset")
+            if preset == "":
+                profiles.pop(key, None)
+            elif not isinstance(preset, str) or preset not in sinden_recoil.PRESETS:
+                raise ValueError("Unknown Sinden recoil preset")
+            else:
+                profiles[key] = preset
+        if enabled and (not hook.is_file() or _sha256(hook) != _sha256(SINDEN_RECOIL_ASSET)):
+            _atomic_write(hook, SINDEN_RECOIL_ASSET.read_bytes(), 0o755)
+        data = {"enabled": enabled, "roms_root": str(settings.roms_root), "profiles": profiles}
+        _atomic_write(config_path, (json.dumps(data, indent=2, sort_keys=True) + "\n").encode(), 0o644)
+        if not enabled and hook.is_file():
+            if settings.userdata_root.resolve() == Path("/userdata"):
+                try:
+                    subprocess.run([str(hook), "restore"], timeout=60, check=True)
+                except subprocess.SubprocessError as error:
+                    raise OSError("Sinden recoil restoration is pending. The recovery hook is still installed.") from error
+            hook.unlink(missing_ok=True)
 
 
 def _read_switch_config(settings: Settings) -> Dict[str, Any]:
@@ -518,6 +595,7 @@ def set_fix_enabled(
     *,
     scope: str = "selected",
     selected_games: Optional[List[str]] = None,
+    recoil_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     selected_games = selected_games if isinstance(selected_games, list) else []
     if scope not in {"all", "selected"}:
@@ -537,6 +615,8 @@ def set_fix_enabled(
             _enable_switch2_gamecube_guard(settings)
         else:
             _disable_switch2_gamecube_guard(settings)
+    elif fix_id == SINDEN_RECOIL_ID:
+        _configure_sinden_recoil(settings, enabled, recoil_profile)
     elif fix_id == SWITCH_GUI_WORKAROUND_ID:
         if enabled:
             _enable_switch_gui_workaround(settings, scope, selected_games)

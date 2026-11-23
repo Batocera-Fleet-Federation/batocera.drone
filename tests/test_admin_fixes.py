@@ -706,7 +706,36 @@ class AdminFixHandlerTests(unittest.TestCase):
                 admin_fixes.SWITCH2_GAMECUBE_GUARD_ID,
                 admin_fixes.CRASH_NOTIFIER_ID,
                 admin_fixes.SWITCH_GUI_WORKAROUND_ID,
+                admin_fixes.SINDEN_RECOIL_ID,
             })
+
+    def test_sinden_profiles_can_be_saved_disabled_enabled_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handler = build_handler(build_settings(root))
+            fix = admin_fixes.SINDEN_RECOIL_ID
+            hook = root / "system" / "scripts" / admin_fixes.SINDEN_RECOIL_HOOK_FILENAME
+            profile = {"system": "mame", "rom": "custom/area51.zip", "preset": "single"}
+            handler._handle_admin_fix_update(fix, {"enabled": False, "recoil_profile": profile})
+            self.assertEqual(handler.response[0], 200)
+            self.assertEqual(handler.response[1]["fix"]["recoil_profiles"], {"mame/custom/area51.zip": "single"})
+            self.assertFalse(hook.exists())
+
+            handler._handle_admin_fix_update(fix, {"enabled": True})
+            self.assertEqual(handler.response[0], 200)
+            self.assertTrue(handler.response[1]["fix"]["enabled"])
+            self.assertTrue(hook.stat().st_mode & 0o100)
+
+            handler._handle_admin_fix_update(fix, {"enabled": True, "recoil_profile": {**profile, "rom": "../other.zip"}})
+            self.assertEqual(handler.response[0], 400)
+            handler._handle_admin_fix_update(fix, {"enabled": True, "recoil_profile": {**profile, "preset": "unknown"}})
+            self.assertEqual(handler.response[0], 400)
+
+            handler._handle_admin_fix_update(fix, {"enabled": False})
+            self.assertEqual(handler.response[1]["fix"]["recoil_profiles"], {"mame/custom/area51.zip": "single"})
+            self.assertFalse(hook.exists())
+            handler._handle_admin_fix_update(fix, {"enabled": False, "recoil_profile": {**profile, "preset": ""}})
+            self.assertEqual(handler.response[1]["fix"]["recoil_profiles"], {})
 
 
 class AdminFixUiContractTests(unittest.TestCase):
