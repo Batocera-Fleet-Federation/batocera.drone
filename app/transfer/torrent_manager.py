@@ -530,6 +530,18 @@ _ENTRY_LIVE_DEFAULTS = {
 _STATUS_DISPLAY_PRIORITY = {"downloading": 0, "queued": 1, "error": 2, "complete": 3}
 
 MOVE_RECENT_LOCATIONS_MAX = 8
+# A move must not shutil.move files aria2 still holds open: on a FUSE source
+# (NTFS/exFAT `fuseblk`) unlinking an open file only renames it to
+# `.fuse_hiddenXXXX`, so the source folder can never be deleted (issue #766).
+# _move_tick therefore stops every aria2 registration of the torrent first and
+# waits for aria2 to confirm. If aria2 stays unreachable for this many move
+# ticks (~2 s apart) the move proceeds anyway -- the GID/info-hash tombstones
+# keep draining the registration and the source-folder cleanup is retried.
+MOVE_SEEDING_STOP_MAX_ATTEMPTS = 30
+# Back-off between retries of a move+cleanup source folder that could not be
+# removed yet (e.g. aria2 still releasing handles, a busy file).
+PAYLOAD_CLEANUP_RETRY_SECONDS = 30.0
+PAYLOAD_CLEANUP_MAX_PENDING = 256
 CLEAR_SCOPES = ("completed", "all")
 
 
@@ -733,9 +745,11 @@ def _torrent_root_dir(entry: dict, known_files: List[Path]) -> Optional[Path]:
     return None
 
 
-def _remove_downloaded_payload(entry: dict) -> bool:
+def _remove_downloaded_payload(entry: dict, failed_roots: Optional[List[Path]] = None) -> bool:
     """Best-effort removal of everything this torrent downloaded. Returns
-    True when we're confident nothing belonging to the torrent is left."""
+    True when we're confident nothing belonging to the torrent is left.
+    When ``failed_roots`` is given, a dedicated torrent folder whose
+    ``rmtree`` failed is appended to it so the caller can retry later."""
     known_files = _resolve_known_files(entry)
     torrent_root = _torrent_root_dir(entry, known_files)
     removed_ok = True
@@ -747,6 +761,8 @@ def _remove_downloaded_payload(entry: dict) -> bool:
         except OSError as error:
             print(f"Torrent payload cleanup failed for {torrent_root}: {error}", file=sys.stderr, flush=True)
             removed_ok = False
+            if failed_roots is not None:
+                failed_roots.append(torrent_root)
     # Always sweep the individual paths too. During a failed staged
     # migration ``known_files`` can span both source and destination; a
     # dedicated root cleanup on one disk must not strand the staged copy on
@@ -862,6 +878,15 @@ class TorrentManager:
         # entry. Kept out of _pending_removal_torrent_files itself so that
         # field stays the plain path list callers/tests expect.
         self._pending_removal_torrent_file_fingerprints: Dict[str, Optional[Tuple[int, int, int, int]]] = {}
+        # Dedicated torrent folders ({"path", "download_dir"}) whose
+        # move+cleanup rmtree failed -- e.g. aria2 had not yet released the
+        # files, leaving FUSE `.fuse_hidden*` placeholders (issue #766). The
+        # torrent itself is already finalized; only the folder deletion is
+        # retried by _retry_pending_payload_cleanup. Persisted like the
+        # pending .torrent unlinks above.
+        self._pending_payload_cleanup: List[Dict[str, str]] = []
+        # path -> time.monotonic() of the next retry (in-memory back-off).
+        self._payload_cleanup_next_attempt: Dict[str, float] = {}
         # Info-hashes we've already fired a torrent_completed notification
         # for this process's lifetime -- belt-and-suspenders against a
         # source-less duplicate entry (see _deduplicate_shared_gid_entries_
@@ -939,7 +964,17 @@ class TorrentManager:
         # at the same path (issue #77).
         for path in self._pending_removal_torrent_files:
             self._pending_removal_torrent_file_fingerprints.setdefault(path, None)
-        entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
+        pending_cleanup = stored.get("pending_payload_cleanup")
+        self._pending_payload_cleanup = []
+        if isinstance(pending_cleanup, list):
+            for item in pending_cleanup[:PAYLOAD_CLEANUP_MAX_PENDING]:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                download_dir = str(item.get("download_dir") or "").strip()
+                if path and download_dir:
+                    self._pending_payload_cleanup.append({"path": path, "download_dir": download_dir})
+        entries =stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
                 continue
@@ -1074,6 +1109,7 @@ class TorrentManager:
                     self._pending_removal_fingerprint_payload(path)
                     for path in self._pending_removal_torrent_files
                 ],
+                "pending_payload_cleanup": [dict(item) for item in self._pending_payload_cleanup],
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -1740,7 +1776,10 @@ class TorrentManager:
             return None
         return self._find_existing_gid_for_infohash(rpc, match.group(1))
 
-    def _find_existing_gid_for_infohash(self, rpc, info_hash: str) -> Optional[str]:
+    def _registrations_for_infohash(self, rpc, info_hash: str) -> Optional[List[dict]]:
+        """Every active/waiting aria2 registration whose infoHash matches,
+        or ``None`` when aria2 could not provide a complete inventory (an
+        RPC failure must never be mistaken for "no registration")."""
         keys = ["gid", "infoHash", "completedLength"]
         candidates: List[dict] = []
         try:
@@ -1748,7 +1787,15 @@ class TorrentManager:
             candidates.extend(rpc.call("aria2.tellWaiting", [0, 1000, keys]) or [])
         except Aria2RpcError:
             return None
-        matches = [c for c in candidates if str(c.get("infoHash") or "").lower() == info_hash.lower()]
+        wanted = str(info_hash or "").strip().lower()
+        return [
+            c
+            for c in candidates
+            if isinstance(c, dict) and c.get("gid") and str(c.get("infoHash") or "").lower() == wanted
+        ]
+
+    def _find_existing_gid_for_infohash(self, rpc, info_hash: str) -> Optional[str]:
+        matches = self._registrations_for_infohash(rpc, info_hash)
         if not matches:
             return None
         best = max(matches, key=lambda c: int(c.get("completedLength") or 0))
@@ -2886,7 +2933,186 @@ class TorrentManager:
         candidates.sort(key=lambda entry: (int(entry["move_job"].get("sequence") or 0), entry.get("id") or ""))
         return candidates[0]
 
+    def _stop_seeding_for_move(self, gid: Optional[str], info_hash: str) -> bool:
+        """Remove every aria2 registration of a torrent about to be moved.
+
+        Returns True once aria2 has confirmed that neither the tracked GID nor
+        any active/waiting GID with the same info-hash remains (so no file
+        handle is still open), False if aria2 could not confirm that yet.
+        Covers an entry that lost track of the GID actually seeding (``gid``
+        None after a magnet hand-off or a hidden twin, issue #69/#766).
+        """
+        rpc = self._rpc_if_running()
+        if rpc is None:
+            # No aria2 process of ours is running, so none holds the files.
+            return True
+        if gid and not self._remove_from_aria2(gid, rpc):
+            return False
+        if not info_hash:
+            return True
+        matches = self._registrations_for_infohash(rpc, info_hash)
+        if matches is None:
+            return False
+        if not matches:
+            return True
+        for match in matches:
+            if not self._remove_from_aria2(str(match.get("gid")), rpc):
+                return False
+        # _remove_from_aria2 only succeeds once removeDownloadResult has
+        # landed, but re-read the inventory so a registration that appeared
+        # concurrently is caught before any file is moved.
+        remaining = self._registrations_for_infohash(rpc, info_hash)
+        return remaining is not None and not remaining
+
+    def _move_prepare_seeding_stop(self) -> bool:
+        """First phase of a move job: stop aria2 seeding the torrent.
+
+        Returns True when the caller should end this tick (still waiting
+        for aria2, or nothing to do), False when the job's files may move.
+        """
+        with self._lock:
+            entry = self._next_move_job_entry_locked()
+            if entry is None:
+                return True
+            move_job = entry["move_job"]
+            if move_job.get("seeding_stopped"):
+                return False
+            entry_id = entry["id"]
+            # The GID is detached from the entry on the first attempt, so a
+            # retry must remember it on the job to keep removing it.
+            gid = str(entry.get("gid") or move_job.get("seeding_stop_gid") or "") or None
+            move_job["seeding_stop_gid"] = gid
+            info_hash = str(entry.get("info_hash") or "").strip().lower()
+            # Detach the GID and tombstone the GID and info-hash under the
+            # lock, exactly like a terminal removal, so the poll thread can
+            # neither re-query the GID nor adopt/retarget a same-hash twin
+            # while this stop is in flight. The tombstones are drained by
+            # _retry_pending_removals; a complete entry with no GID is never
+            # re-added to aria2.
+            entry["gid"] = None
+            entry["seeding"] = False
+            entry["upload_speed_bps"] = 0
+            entry["download_speed_bps"] = 0
+            entry["message"] = "Stopping seeding before moving files…"
+            self._begin_terminal_removal_locked(gid, info_hash)
+            self._persist_locked()
+
+        stopped = self._stop_seeding_for_move(gid, info_hash)
+
+        with self._lock:
+            live_entry = self._torrents.get(entry_id)
+            if live_entry is None or live_entry.get("move_job") is not move_job:
+                return True
+            if stopped:
+                if gid in self._pending_removal_gids:
+                    self._pending_removal_gids.remove(gid)
+                if self._rpc_if_running() is None:
+                    # Nothing to drain; don't keep a tombstone that would
+                    # start aria2 just to look for it.
+                    normalized = info_hash
+                    if normalized in self._pending_removal_info_hashes:
+                        self._pending_removal_info_hashes.remove(normalized)
+                move_job["seeding_stopped"] = True
+                live_entry["message"] = "Moving files…"
+                self._persist_locked()
+                return False
+            attempts = int(move_job.get("seeding_stop_attempts") or 0) + 1
+            move_job["seeding_stop_attempts"] = attempts
+            if attempts >= MOVE_SEEDING_STOP_MAX_ATTEMPTS:
+                print(
+                    f"Torrent move: aria2 did not confirm stopping {live_entry.get('name') or entry_id} "
+                    f"after {attempts} attempts; moving anyway (removal and cleanup will be retried)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                move_job["seeding_stopped"] = True
+                live_entry["message"] = "Moving files…"
+                self._persist_locked()
+                return False
+            move_job["updated_at"] = _now_iso()
+            self._persist_locked()
+        # Still registered in aria2: retry on the next move tick (~2 s).
+        return True
+
+    def _queue_pending_payload_cleanup_locked(self, root: Path, download_dir: str) -> None:
+        try:
+            download_dir_resolved = str(Path(download_dir).resolve())
+        except OSError:
+            return
+        path = str(root)
+        if any(item.get("path") == path for item in self._pending_payload_cleanup):
+            return
+        if len(self._pending_payload_cleanup) >= PAYLOAD_CLEANUP_MAX_PENDING:
+            print(f"Torrent payload cleanup queue full; not retrying {path}", file=sys.stderr, flush=True)
+            return
+        self._pending_payload_cleanup.append({"path": path, "download_dir": download_dir_resolved})
+        self._payload_cleanup_next_attempt[path] = time.monotonic() + PAYLOAD_CLEANUP_RETRY_SECONDS
+
+    def _retry_pending_payload_cleanup(self) -> None:
+        """Retry deleting move+cleanup source folders that failed earlier.
+
+        Only ever removes a dedicated per-torrent folder recorded by
+        _finalize_move_job_locked: it must still be a direct, non-symlink
+        child of the recorded download directory, and it is dropped (never
+        deleted) once a tracked torrent owns that folder again.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if not self._pending_payload_cleanup:
+                return
+            due = [
+                dict(item)
+                for item in self._pending_payload_cleanup
+                if self._payload_cleanup_next_attempt.get(item["path"], 0.0) <= now
+            ]
+            if not due:
+                return
+            entries = [dict(entry) for entry in self._torrents.values()]
+        owned_roots: Set[str] = set()
+        for entry in entries:
+            root = _torrent_root_dir(entry, _resolve_known_files(entry))
+            if root is not None:
+                owned_roots.add(str(root))
+        finished: Set[str] = set()
+        retry: Set[str] = set()
+        for item in due:
+            path = Path(item["path"])
+            download_dir = Path(item["download_dir"])
+            if (
+                str(path) in owned_roots
+                or path.parent != download_dir
+                or path == download_dir
+                or not path.is_absolute()
+            ):
+                finished.add(item["path"])
+                continue
+            try:
+                if path.is_symlink():
+                    finished.add(item["path"])
+                    continue
+                shutil.rmtree(path)
+                finished.add(item["path"])
+            except FileNotFoundError:
+                finished.add(item["path"])
+            except OSError as error:
+                print(f"Torrent payload cleanup retry failed for {path}: {error}", file=sys.stderr, flush=True)
+                retry.add(item["path"])
+        with self._lock:
+            before = len(self._pending_payload_cleanup)
+            self._pending_payload_cleanup = [
+                item for item in self._pending_payload_cleanup if item["path"] not in finished
+            ]
+            for path_str in finished:
+                self._payload_cleanup_next_attempt.pop(path_str, None)
+            for path_str in retry:
+                self._payload_cleanup_next_attempt[path_str] = time.monotonic() + PAYLOAD_CLEANUP_RETRY_SECONDS
+            if len(self._pending_payload_cleanup) != before:
+                self._persist_locked()
+
     def _move_tick(self) -> None:
+        self._retry_pending_payload_cleanup()
+        if self._move_prepare_seeding_stop():
+            return
         with self._lock:
             entry = self._next_move_job_entry_locked()
             if entry is None:
@@ -2896,6 +3122,10 @@ class TorrentManager:
             move_job = entry["move_job"]
             remaining = move_job.get("remaining_files") or []
             if not remaining:
+                return
+            if not move_job.get("seeding_stopped"):
+                # A different (newer-sequence-tied) job was picked between
+                # the two locked sections; prepare it on the next tick.
                 return
             source_str = remaining[0]
             # If this exact path was already `current_file` before this
@@ -2940,6 +3170,7 @@ class TorrentManager:
                     move_job["current_file"] = ""
                     move_job["completed_at"] = _now_iso()
                     move_job["updated_at"] = _now_iso()
+                    live_entry["message"] = "Move failed: destination is no longer available"
                     self._persist_locked()
             _notifications.record_event(
                 self.settings,
@@ -3027,13 +3258,23 @@ class TorrentManager:
         moved_sources = move_job.get("moved_sources") or []
         errors = move_job.get("errors") or []
         all_succeeded = not errors
+        cleanup_requested = bool(move_job.get("cleanup")) and all_succeeded
         cleanup_performed = False
-        if move_job.get("cleanup") and all_succeeded:
-            cleanup_performed = _remove_downloaded_payload(entry)
+        cleanup_pending = False
+        if cleanup_requested:
+            failed_roots: List[Path] = []
+            cleanup_performed = _remove_downloaded_payload(entry, failed_roots)
+            # Every requested file moved, so the torrent is finalized even if
+            # the source folder could not be deleted yet (issue #766): only
+            # the folder deletion goes to the retry queue. Leaving the row
+            # behind pointed at files that are already gone.
+            for root in failed_roots:
+                self._queue_pending_payload_cleanup_locked(root, str(entry.get("download_dir") or ""))
+            cleanup_pending = bool(failed_roots)
 
         removed_from_list = False
         removed_gid = None
-        if cleanup_performed:
+        if cleanup_requested:
             removed_gid = entry.get("gid")
             # Delete the watched .torrent file here, under the lock and
             # atomically with dropping the entry. If it were left for the
@@ -3058,6 +3299,14 @@ class TorrentManager:
         elif moved_sources:
             moved_set = set(moved_sources)
             entry["files"] = [p for p in (entry.get("files") or []) if p not in moved_set]
+            total = int(move_job.get("total_files") or len(moved_sources))
+            entry["message"] = (
+                f"Moved {len(moved_sources)} of {total} file(s); {len(errors)} could not be moved"
+                if errors
+                else f"Moved {len(moved_sources)} file(s)"
+            )
+        else:
+            entry["message"] = "Move failed; no files were moved"
         if all_succeeded:
             self._remember_recent_location_locked(str(move_job.get("destination") or ""))
 
@@ -3087,6 +3336,7 @@ class TorrentManager:
                 "moved": len(moved_sources),
                 "errors": len(errors),
                 "cleanup_performed": cleanup_performed,
+                "cleanup_pending": cleanup_pending,
             },
         }
 

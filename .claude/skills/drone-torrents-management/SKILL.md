@@ -599,6 +599,36 @@ subfolder to remove -- cleanup only unlinks the specific known files, **never**
 This same `_remove_downloaded_payload` helper backs `delete()` and `clear()`
 below.
 
+**Seeding is stopped before any file moves (issue #766).** On a FUSE source
+(NTFS/exFAT `fuseblk`), unlinking a file aria2 still has open only renames it
+to `.fuse_hiddenXXXX`, so `rmtree` of the source folder fails with
+`ENOTEMPTY`. `_move_tick` therefore runs `_move_prepare_seeding_stop()` first
+for **every** move job (cleanup or not). It detaches the entry's GID,
+tombstones the GID and info-hash (`_begin_terminal_removal_locked`, so the poll
+thread can neither re-query nor adopt or retarget a twin), and calls
+`_stop_seeding_for_move`. That removes the tracked GID (remembered on the job
+as `seeding_stop_gid`) **and** every active or waiting GID with the same info
+hash (`_registrations_for_infohash`, shared with
+`_find_existing_gid_for_infohash`), so a row that lost its GID (`gid: None`)
+still stops the registration that is actually seeding. No file moves until
+aria2 confirms (`move_job["seeding_stopped"]`). After
+`MOVE_SEEDING_STOP_MAX_ATTEMPTS` failed ticks it moves anyway, and the
+tombstones keep draining the registration. If no aria2 daemon is running there
+is nothing to stop. A complete entry with no GID is never re-added, so a moved
+torrent stops seeding.
+
+**A fully moved cleanup job always finalizes.** If every requested file moved,
+the entry is dropped from the list, its `.torrent` is unlinked and aria2 is
+drained even when `rmtree` fails. Only the folder delete is queued in
+`_pending_payload_cleanup` (persisted as `pending_payload_cleanup`, bounded by
+`PAYLOAD_CLEANUP_MAX_PENDING`). `_retry_pending_payload_cleanup` retries it at
+the start of each move tick with a `PAYLOAD_CLEANUP_RETRY_SECONDS` back-off. It
+only removes a non-symlink direct child of the recorded `download_dir`, and it
+drops (never deletes) a folder that a tracked torrent owns again. The finish
+notification reports `cleanup_pending`. FUSE behaviour can't be mocked, so a
+change here needs a live check with a `fuseblk` source and a destination on a
+different device.
+
 A destination the user picks is remembered in `self._recent_move_locations`
 (module constant `MOVE_RECENT_LOCATIONS_MAX = 8`, most-recent-first, deduped,
 persisted as a top-level `recent_move_locations` snapshot field) -- the

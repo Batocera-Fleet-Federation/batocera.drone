@@ -3075,6 +3075,232 @@ class TorrentMoveJobAsyncTests(unittest.TestCase):
             self.assertFalse(Path(row["torrent_file"]).exists())
 
 
+class _InventoryRpc(FakeRpc):
+    """FakeRpc whose forceRemove also drops the GID from the active/waiting
+    inventory, like a real aria2c once the removal has landed."""
+
+    def call(self, method, params=None, timeout=None):
+        result = super().call(method, params, timeout)
+        if method == "aria2.forceRemove" and params:
+            self.active = [item for item in self.active if item.get("gid") != params[0]]
+            self.waiting = [item for item in self.waiting if item.get("gid") != params[0]]
+        return result
+
+
+class TorrentMoveStopsSeedingTests(unittest.TestCase):
+    """Issue #766: a move must stop aria2 seeding before any file moves, and
+    a move+cleanup whose source folder can't be deleted yet still finalizes
+    the torrent and retries only the folder deletion."""
+
+    INFO_HASH = "ab" * 20
+
+    def _pack(self, root: Path):
+        subfolder = root / "watch" / "pack"
+        subfolder.mkdir(parents=True)
+        file1 = subfolder / "one.bin"
+        file2 = subfolder / "two.bin"
+        file1.write_bytes(b"one")
+        file2.write_bytes(b"two")
+        return subfolder, file1, file2
+
+    def _record_first_move(self, rpc):
+        state = {"calls_before_first_move": None}
+        real_move = shutil.move
+
+        def recording_move(src, dst, *args, **kwargs):
+            if state["calls_before_first_move"] is None:
+                state["calls_before_first_move"] = list(rpc.calls)
+            return real_move(src, dst, *args, **kwargs)
+
+        return state, recording_move
+
+    def test_cleanup_move_removes_tracked_and_same_hash_gids_before_first_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = _InventoryRpc()
+            subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+                manager._torrents[entry["id"]]["info_hash"] = self.INFO_HASH
+            rpc.statuses["twin-gid"] = {"gid": "twin-gid", "status": "active"}
+            rpc.active = [{"gid": "twin-gid", "infoHash": self.INFO_HASH.upper(), "completedLength": "6"}]
+            state, recording_move = self._record_first_move(rpc)
+            dest = root / "moved"
+            result = manager.move_files(entry["id"], [str(file1), str(file2)], str(dest), cleanup=True)
+            self.assertEqual(result["status"], "queued")
+            with mock.patch.object(torrent_manager.shutil, "move", side_effect=recording_move):
+                _drain_move_jobs(manager)
+            removed_before_move = [params[0] for method, params in state["calls_before_first_move"] if method == "aria2.forceRemove"]
+            self.assertIn(gid, removed_before_move)
+            self.assertIn("twin-gid", removed_before_move)
+            self.assertTrue((dest / "one.bin").exists())
+            self.assertTrue((dest / "two.bin").exists())
+            self.assertFalse(subfolder.exists())
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
+    def test_move_without_cleanup_also_stops_seeding_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = _InventoryRpc()
+            _subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+            state, recording_move = self._record_first_move(rpc)
+            manager.move_files(entry["id"], [str(file1)], str(root / "moved"), cleanup=False)
+            with mock.patch.object(torrent_manager.shutil, "move", side_effect=recording_move):
+                _drain_move_jobs(manager)
+            removed_before_move = [params[0] for method, params in state["calls_before_first_move"] if method == "aria2.forceRemove"]
+            self.assertIn(gid, removed_before_move)
+            with manager._lock:
+                live = manager._torrents[entry["id"]]
+                self.assertIsNone(live["gid"])
+                self.assertEqual(live["status"], "complete")
+                self.assertEqual(live["message"], "Moved 1 file(s)")
+            # The completed, now GID-less entry is never re-added to aria2.
+            adds_before = len(rpc.method_calls("aria2.addTorrent"))
+            manager._tick()
+            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), adds_before)
+
+    def test_untracked_gid_seeding_same_info_hash_is_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = _InventoryRpc()
+            subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                live = manager._torrents[entry["id"]]
+                live["gid"] = None
+                live["info_hash"] = self.INFO_HASH
+                live["message"] = "Fetching torrent metadata…"
+            rpc.statuses["seeding-gid"] = {"gid": "seeding-gid", "status": "active"}
+            rpc.active = [{"gid": "seeding-gid", "infoHash": self.INFO_HASH, "completedLength": "6"}]
+            state, recording_move = self._record_first_move(rpc)
+            manager.move_files(entry["id"], [str(file1), str(file2)], str(root / "moved"), cleanup=True)
+            with mock.patch.object(torrent_manager.shutil, "move", side_effect=recording_move):
+                _drain_move_jobs(manager)
+            removed_before_move = [params[0] for method, params in state["calls_before_first_move"] if method == "aria2.forceRemove"]
+            self.assertIn("seeding-gid", removed_before_move)
+            self.assertFalse(subfolder.exists())
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
+    def test_move_waits_while_aria2_cannot_confirm_the_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = _InventoryRpc()
+            _subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            manager.move_files(entry["id"], [str(file1), str(file2)], str(root / "moved"), cleanup=True)
+            rpc.remove_error = "aria2 busy"
+            manager._move_tick()
+            manager._move_tick()
+            self.assertTrue(file1.exists())
+            self.assertTrue(file2.exists())
+            with manager._lock:
+                live = manager._torrents[entry["id"]]
+                self.assertEqual(live["message"], "Stopping seeding before moving files…")
+                self.assertFalse(live["move_job"].get("seeding_stopped"))
+            rpc.remove_error = None
+            _drain_move_jobs(manager)
+            self.assertFalse(file1.exists())
+            self.assertTrue((root / "moved" / "one.bin").exists())
+
+    def test_cleanup_failure_still_finalizes_and_retries_folder_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = _InventoryRpc()
+            subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, rpc, {"pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            torrent_file = Path(entry["torrent_file"])
+            real_rmtree = shutil.rmtree
+            attempts = {"count": 0}
+
+            def flaky_rmtree(path, *args, **kwargs):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    # What FUSE leaves behind for a file unlinked while open.
+                    (Path(path) / ".fuse_hidden0006753600000005").write_bytes(b"x")
+                    raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+                return real_rmtree(path, *args, **kwargs)
+
+            manager.move_files(entry["id"], [str(file1), str(file2)], str(root / "moved"), cleanup=True)
+            with mock.patch.object(torrent_manager.shutil, "rmtree", side_effect=flaky_rmtree), mock.patch(
+                "app.transfer.torrent_manager._notifications.record_event"
+            ) as record_event:
+                _drain_move_jobs(manager)
+                # All files moved: the torrent is gone from the list and its
+                # .torrent file removed even though the folder is still there.
+                self.assertEqual(manager.snapshot()["torrents"], [])
+                self.assertFalse(torrent_file.exists())
+                self.assertTrue(subfolder.exists())
+                self.assertEqual(
+                    manager._pending_payload_cleanup,
+                    [{"path": str(subfolder.resolve()), "download_dir": str(subfolder.parent.resolve())}],
+                )
+                finished = [c for c in record_event.call_args_list if c.args[1] == "torrent_move_finished"]
+                self.assertTrue(finished[-1].kwargs["details"]["cleanup_pending"])
+
+                # Survives a restart.
+                restarted = TorrentManager(manager.settings, start_worker=False)
+                self.assertEqual(restarted._pending_payload_cleanup, manager._pending_payload_cleanup)
+
+                # Not before the back-off ...
+                manager._move_tick()
+                self.assertTrue(subfolder.exists())
+                # ... but on a later tick once it has elapsed.
+                with mock.patch.object(torrent_manager, "PAYLOAD_CLEANUP_RETRY_SECONDS", 0.0):
+                    manager._payload_cleanup_next_attempt.clear()
+                    manager._move_tick()
+            self.assertFalse(subfolder.exists())
+            self.assertEqual(manager._pending_payload_cleanup, [])
+
+    def test_pending_cleanup_never_removes_unexpected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            download_dir = root / "downloads"
+            nested = download_dir / "a" / "b"
+            nested.mkdir(parents=True)
+            other = root / "elsewhere"
+            other.mkdir()
+            target = root / "target"
+            target.mkdir()
+            link = download_dir / "link"
+            link.symlink_to(target, target_is_directory=True)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            with manager._lock:
+                manager._pending_payload_cleanup = [
+                    {"path": str(nested), "download_dir": str(download_dir)},
+                    {"path": str(other), "download_dir": str(download_dir)},
+                    {"path": str(download_dir), "download_dir": str(download_dir)},
+                    {"path": str(link), "download_dir": str(download_dir)},
+                ]
+            manager._move_tick()
+            self.assertTrue(nested.exists())
+            self.assertTrue(other.exists())
+            self.assertTrue(download_dir.exists())
+            self.assertTrue(target.exists())
+            self.assertEqual(manager._pending_payload_cleanup, [])
+
+    def test_pending_cleanup_skips_folder_owned_by_a_live_torrent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subfolder, file1, file2 = self._pack(root)
+            manager, _ = _completed_torrent_manager(root, _InventoryRpc(), {"pack": [file1, file2]})
+            with manager._lock:
+                manager._pending_payload_cleanup = [
+                    {"path": str(subfolder.resolve()), "download_dir": str(subfolder.parent.resolve())}
+                ]
+            manager._move_tick()
+            self.assertTrue(file1.exists())
+            self.assertEqual(manager._pending_payload_cleanup, [])
+
+
 class TorrentQueueControlTests(unittest.TestCase):
     def test_pause_sets_flag_pauses_aria2_and_blocks_scheduling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
