@@ -151,7 +151,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(registry.cards()[0]['health'], 'error')
 
     def test_shipped_registry_contains_the_reviewed_integrations(self):
-        self.assertEqual(build_integration_registry(None, None).ids(), ['streamdeck', 'media-keys'])
+        self.assertEqual(build_integration_registry(None, None).ids(), ['streamdeck', 'media-keys', 'controller-assignments'])
 
 
 class ConfigTests(TemporaryPaths):

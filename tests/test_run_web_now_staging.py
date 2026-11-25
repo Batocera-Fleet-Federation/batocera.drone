@@ -62,6 +62,8 @@ def _complete_install_members(members=(), *, version="v0.1.245"):
         "app/integrations/registry.py": b"class IntegrationRegistry:\n    pass\n",
         "app/integrations/streamdeck/manager.py": b"class StreamDeckManager:\n    pass\n",
         "app/integrations/media_keys/manager.py": b"class MediaKeysIntegration:\n    pass\n",
+        "app/integrations/controller_assignments/manager.py": b"class ControllerAssignmentsIntegration:\n    pass\n",
+        "app/integrations/controller_assignments/launch_order.py": b"def main():\n    pass\n",
         "app/web/static/js/multiplayer.js": b"function renderMultiplayerPage() {}\n",
         "app/web/handlers_multiplayer.py": b"# multiplayer handlers\n",
         "app/multiplayer/__init__.py": b"# multiplayer\n",

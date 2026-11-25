@@ -1830,3 +1830,357 @@ function mkBindHandlers() {
     if (mkState.holdTimer && (name === "pointerup" || event.target.closest && event.target.closest("[data-mk-hold]"))) mkCancelHold();
   }, true));
 }
+
+// ------------------------------------------- controller assignments page
+// Player order for EmulationStation launches. Every list auto-saves; edits
+// apply to the next game. Batocera's own player assignments always win.
+const CA_API = "/admin/integrations/controller-assignments";
+let caState = { status: null, pollTimer: null, searchTimer: null, searchRequest: 0, addSystem: "" };
+let caHandlersBound = false;
+
+function caGet(path) { return api(`${CA_API}${path}`); }
+function caPost(path, body = {}) { return apiPost(`${CA_API}${path}`, body); }
+
+function stopControllerAssignmentsAutoRefresh() {
+  if (caState.pollTimer) clearInterval(caState.pollTimer);
+  caState.pollTimer = null;
+}
+
+async function renderControllerAssignmentsPage() {
+  caBindHandlers();
+  stopControllerAssignmentsAutoRefresh();
+  titleNode.textContent = "Controller Assignments";
+  subtitleNode.textContent = "Choose which controllers become Players 1–8 for each system or game";
+  content.innerHTML = `<div class="text-center py-5"><div class="spinner-border" role="status"></div></div>`;
+  try {
+    caState.status = await caGet("/status");
+  } catch (error) {
+    content.innerHTML = `<div class="alert alert-danger">${sdEsc(error.message)}</div>`;
+    return;
+  }
+  caRender();
+  caState.pollTimer = setInterval(async () => {
+    if (document.hidden || window.location.hash !== "#admin/integrations/controller-assignments") return;
+    if (document.querySelector(".modal.show") || (document.activeElement && document.activeElement.closest("#caPage input, #caPage select"))) return;
+    try { caState.status = await caGet("/status"); caRenderLive(); } catch (error) { /* transient */ }
+  }, 5000);
+}
+
+function caTypeLabel(id) {
+  const found = ((caState.status || {}).types || []).find((item) => item.id === id);
+  return found ? found.label : id;
+}
+
+function caPortLabel(port) {
+  if (!port) return "";
+  if (port.startsWith("usb:")) return `USB port ${port.slice(4)}`;
+  if (port.startsWith("bt:")) return `Bluetooth ${port.slice(3)}`;
+  return port;
+}
+
+function caSelectorLabel(selector) {
+  if (selector.kind === "type") return `<i class="bi bi-collection me-1"></i>Any ${sdEsc(caTypeLabel(selector.type))} controller`;
+  const port = caPortLabel(selector.port);
+  return `<i class="bi bi-controller me-1"></i>${sdEsc(selector.name)}${port ? ` <span class="text-muted small">(${sdEsc(port)})</span>` : ""}`;
+}
+
+function caEditorOrder(editor) {
+  const s = caState.status || {};
+  if (editor === "default") return s.default || [];
+  if (editor.startsWith("system:")) {
+    const rule = (s.systems_rules || []).find((row) => row.system === editor.slice(7));
+    return rule ? rule.order : [];
+  }
+  if (editor.startsWith("game:")) {
+    const rule = (s.games_rules || []).find((row) => row.game === editor.slice(5));
+    return rule ? rule.order : [];
+  }
+  return [];
+}
+
+function caAddOptions() {
+  const s = caState.status || {};
+  const types = (s.types || []).map((item) => `<option value="type:${sdEsc(item.id)}">Any ${sdEsc(item.label)} controller</option>`).join("");
+  const devices = (s.controllers || []).map((item, index) => `<option value="device:${index}">${sdEsc(item.name)}${item.port ? ` — ${sdEsc(caPortLabel(item.port))}` : ""}</option>`).join("");
+  return `<option value="">Add to this order…</option><optgroup label="Controller types">${types}</optgroup>${devices ? `<optgroup label="Connected controllers">${devices}</optgroup>` : ""}`;
+}
+
+function caOrderEditor(editor, emptyText) {
+  const order = caEditorOrder(editor);
+  const rows = order.map((selector, index) => `<li class="list-group-item d-flex align-items-center gap-2">
+      <span class="badge text-bg-secondary">${index + 1}</span><span class="flex-grow-1">${caSelectorLabel(selector)}</span>
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-ca-action="move" data-editor="${sdEsc(editor)}" data-index="${index}" data-delta="-1" ${index === 0 ? "disabled" : ""} aria-label="Move up"><i class="bi bi-arrow-up"></i></button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-ca-action="move" data-editor="${sdEsc(editor)}" data-index="${index}" data-delta="1" ${index === order.length - 1 ? "disabled" : ""} aria-label="Move down"><i class="bi bi-arrow-down"></i></button>
+      <button type="button" class="btn btn-sm btn-outline-danger" data-ca-action="remove-entry" data-editor="${sdEsc(editor)}" data-index="${index}" aria-label="Remove"><i class="bi bi-x-lg"></i></button></li>`).join("");
+  return `<ol class="list-group list-group-numbered-none mb-2">${rows || `<li class="list-group-item text-muted small">${sdEsc(emptyText)}</li>`}</ol>
+    <select class="form-select form-select-sm" data-ca-change="add-entry" data-editor="${sdEsc(editor)}" aria-label="Add a controller or type">${caAddOptions()}</select>`;
+}
+
+function caStatusHtml() {
+  const s = caState.status || {};
+  const restart = s.restart_needed
+    ? `<div class="alert alert-warning small d-flex flex-wrap align-items-center gap-2 mt-2 mb-2"><i class="bi bi-arrow-repeat"></i><span class="flex-grow-1">EmulationStation needs one restart to pick up the launch override.</span>
+        <button type="button" class="btn btn-sm btn-warning" data-ca-action="restart-es"><i class="bi bi-arrow-repeat me-1"></i>Restart EmulationStation</button></div>` : "";
+  return `<div class="d-flex flex-wrap gap-2 mb-2">${sdBadge(s.enabled ? "Enabled" : "Disabled", s.enabled ? "success" : "secondary")}
+      ${sdBadge(`Health: ${s.health}`, sdHealthTone(s.health))}
+      ${sdBadge(s.overlay_applied ? `Override: ${s.wrapped_systems} systems` : "Override not applied", s.overlay_applied ? "success" : "secondary")}</div>
+    <div class="small mb-2">${sdEsc(s.health_message)}</div>${restart}
+    <div class="d-flex flex-wrap gap-2">
+      ${s.enabled
+        ? `<button type="button" class="btn btn-outline-warning" data-ca-action="disable"><i class="bi bi-pause-circle me-1"></i>Disable</button>`
+        : `<button type="button" class="btn btn-success" data-ca-action="enable"><i class="bi bi-play-circle me-1"></i>Enable Controller Assignments</button>`}
+      <button type="button" class="btn btn-outline-secondary" data-ca-action="repair"><i class="bi bi-wrench me-1"></i>Repair</button>
+      <button type="button" class="btn btn-outline-danger" data-ca-action="remove"><i class="bi bi-trash me-1"></i>Remove</button></div>`;
+}
+
+function caSettingsHtml() {
+  const s = caState.status || {};
+  const pins = (s.batocera_assignments || []).map((pin) => `<li><strong>P${sdEsc(pin.slot)}</strong> ${sdEsc(pin.name)}</li>`).join("");
+  return `<div class="form-check form-switch mb-2">
+      <input class="form-check-input" type="checkbox" role="switch" id="caAuto" data-ca-change="auto" ${s.auto ? "checked" : ""}>
+      <label class="form-check-label" for="caAuto"><strong>Best-effort matching for every game</strong></label></div>
+    <p class="small text-muted mb-3">When a game has no game or system rule, the Drone scores each controller for the system being played (controller family, analog stick, button count) and fills the open player slots best match first. Your default order below breaks ties. Systems it does not recognise use the default order.</p>
+    <h3 class="h6">Batocera player assignments <span class="text-muted small">(always win)</span></h3>
+    ${pins ? `<ul class="small mb-1">${pins}</ul><p class="small text-muted mb-0">These slots keep their controller whenever it is connected; the Drone only fills the other slots. Change them in EmulationStation → Controller &amp; Bluetooth Settings.</p>`
+      : `<p class="small text-muted mb-0">None set — the Drone can fill every slot.</p>`}`;
+}
+
+function caControllersHtml() {
+  const rows = ((caState.status || {}).controllers || []).map((item) => `<tr><td>${sdEsc(item.name)}</td><td>${sdBadge(caTypeLabel(item.type), item.type === "generic" ? "secondary" : "info")}</td>
+      <td class="small text-muted">${sdEsc(caPortLabel(item.port) || "—")}</td><td class="small text-muted"><code>${sdEsc(item.vendor || "?")}:${sdEsc(item.product || "?")}</code></td></tr>`).join("");
+  return `<div class="table-responsive"><table class="table table-sm align-middle themed-table mb-0"><thead><tr><th>Controller</th><th>Detected as</th><th>Port</th><th>USB ID</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="4" class="text-muted small">No controllers detected. Light guns, keyboards and mice are not listed.</td></tr>'}</tbody></table></div>`;
+}
+
+function caPresetsHtml() {
+  return ((caState.status || {}).presets || []).map((preset) => `<div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" role="switch" id="caPreset-${sdEsc(preset.id)}" data-ca-change="preset" data-id="${sdEsc(preset.id)}" ${preset.enabled ? "checked" : ""}>
+      <label class="form-check-label" for="caPreset-${sdEsc(preset.id)}">${sdEsc(preset.label)}
+        <div class="small text-muted">Prefers ${sdEsc(preset.types.map(caTypeLabel).join(" → "))}. Systems: ${sdEsc(preset.systems.join(", "))}</div></label></div>`).join("");
+}
+
+function caSystemsHtml() {
+  const s = caState.status || {};
+  const used = new Set((s.systems_rules || []).map((row) => row.system));
+  const options = (s.systems || []).filter((name) => !used.has(name)).map((name) => `<option value="${sdEsc(name)}">${sdEsc(name)}</option>`).join("");
+  const rules = (s.systems_rules || []).map((rule) => `<div class="border rounded p-2 mb-2"><div class="d-flex align-items-center mb-2"><strong>${sdEsc(rule.system)}</strong>
+      <button type="button" class="btn btn-sm btn-outline-danger ms-auto" data-ca-action="delete-system" data-system="${sdEsc(rule.system)}"><i class="bi bi-trash me-1"></i>Remove rule</button></div>
+      ${caOrderEditor(`system:${rule.system}`, "Empty: keeps EmulationStation's order for this system.")}</div>`).join("");
+  return `${rules || '<p class="small text-muted">No system rules yet.</p>'}
+    <div class="input-group input-group-sm"><select class="form-select" id="caAddSystem" aria-label="System"><option value="">Choose a system…</option>${options}</select>
+      <button type="button" class="btn btn-primary" data-ca-action="add-system"><i class="bi bi-plus-lg me-1"></i>Add system rule</button></div>`;
+}
+
+function caGamesHtml() {
+  const rules = ((caState.status || {}).games_rules || []).map((rule) => `<div class="border rounded p-2 mb-2"><div class="d-flex align-items-center mb-2"><div><strong>${sdEsc(rule.name || rule.game)}</strong><div class="small text-muted">${sdEsc(rule.game)}</div></div>
+      <button type="button" class="btn btn-sm btn-outline-danger ms-auto" data-ca-action="delete-game" data-game="${sdEsc(rule.game)}"><i class="bi bi-trash me-1"></i>Remove rule</button></div>
+      ${caOrderEditor(`game:${rule.game}`, "Empty: keeps EmulationStation's order for this game.")}</div>`).join("");
+  return `${rules || '<p class="small text-muted">No game rules yet.</p>'}
+    <div class="position-relative"><input class="form-control form-control-sm" id="caGameSearch" type="search" autocomplete="off" placeholder="Search your games to add a rule…" aria-label="Search games">
+      <div id="caGameResults" class="list-group position-absolute w-100 shadow" style="z-index:20;max-height:16rem;overflow:auto" hidden></div></div>
+    <p id="caGameStatus" class="small text-muted mb-0 mt-1" role="status"></p>`;
+}
+
+function caLastLaunchHtml() {
+  const report = (caState.status || {}).last_launch;
+  if (!report) return `<p class="small text-muted mb-0">No game has launched through the Drone yet.</p>`;
+  const rows = (report.players || []).map((player) => `<tr><td><strong>P${sdEsc(player.slot)}</strong></td><td>${sdEsc(player.name)}</td><td>${sdEsc(caTypeLabel(player.type))}</td>
+      <td class="small">${player.lock ? sdBadge(`Kept: ${player.lock}`, "secondary") : ""}</td></tr>`).join("");
+  const warnings = (report.warnings || []).map((text) => `<div class="small text-warning"><i class="bi bi-exclamation-triangle me-1"></i>${sdEsc(text)}</div>`).join("");
+  return `<div class="small mb-2"><code>${sdEsc(report.game)}</code> · rule: <strong>${sdEsc(report.rule)}</strong> · ${report.changed ? "order changed" : "order unchanged"} · ${sdEsc(sdTime(report.at))}</div>
+    <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-1"><tbody>${rows || '<tr><td class="text-muted small">No controllers were passed.</td></tr>'}</tbody></table></div>${warnings}`;
+}
+
+function caRenderLive() {
+  const map = { caStatus: caStatusHtml, caControllers: caControllersHtml, caLastLaunch: caLastLaunchHtml };
+  Object.entries(map).forEach(([id, render]) => { const node = document.getElementById(id); if (node) node.innerHTML = render(); });
+}
+
+function caRenderRules() {
+  const map = { caSettings: caSettingsHtml, caDefault: () => caOrderEditor("default", "Empty: EmulationStation's order is kept unless a preset, best effort, or a rule applies."),
+    caPresets: caPresetsHtml, caSystems: caSystemsHtml, caGames: caGamesHtml };
+  Object.entries(map).forEach(([id, render]) => { const node = document.getElementById(id); if (node) node.innerHTML = render(); });
+}
+
+function caCard(title, id, help) {
+  return `<section class="card mb-3"><div class="card-body"><h2 class="h6">${title}</h2>${help ? `<p class="small text-muted">${help}</p>` : ""}<div id="${id}"></div></div></section>`;
+}
+
+function caRender() {
+  content.innerHTML = `<div id="caPage"><div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-ca-action="back"><i class="bi bi-arrow-left me-1"></i>Integrations</button>
+      <span class="badge text-bg-dark border"><i class="bi bi-house-door me-1"></i>This machine only</span></div>
+    <div class="alert alert-info small"><i class="bi bi-info-circle me-2"></i>EmulationStation still chooses which controllers a game gets (up to 8). The Drone reorders them just before launch: Batocera's own player assignments keep their slots, light guns are never moved, and your rules fill the remaining slots. Most specific wins: game rule → system rule → preset → best effort → default order.</div>
+    <div class="row g-3"><div class="col-xl-5">${caCard("Status", "caStatus")}${caCard("Matching", "caSettings")}${caCard("Last launch", "caLastLaunch")}</div>
+      <div class="col-xl-7">${caCard("Connected controllers", "caControllers")}
+        ${caCard("Default order", "caDefault", "Used for every system without a more specific rule, and to break ties in best-effort matching.")}
+        ${caCard("Presets", "caPresets", "Turn on best-effort matching for one family of systems, even when the global setting is off.")}
+        ${caCard("System rules", "caSystems", "An exact order for every game of one system.")}
+        ${caCard("Game rules", "caGames", "An exact order for one game. Beats every other rule.")}</div></div>
+    <section class="card mb-3"><div class="card-body"><h2 class="h6">Help</h2><div class="accordion themed-accordion" id="caHelp">
+      <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#caHelp1">What does this change on Batocera?</button></h3>
+        <div id="caHelp1" class="accordion-collapse collapse" data-bs-parent="#caHelp"><div class="accordion-body small">One file, <code>es_systems_zzz_drone_controllers.cfg</code>, in <code>/userdata/system/configs/emulationstation/</code>. It only puts the Drone's launcher in front of each system's existing launch command; paths, emulators and themes still come from Batocera. Disabling removes it (one EmulationStation restart), and if anything goes wrong the launcher starts the game with the original order.</div></div></div>
+      <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#caHelp2">How are controllers recognised?</button></h3>
+        <div id="caHelp2" class="accordion-collapse collapse" data-bs-parent="#caHelp"><div class="accordion-body small">By USB maker and model first (for example <code>057e:0337</code> is the GameCube adapter), then by name (8BitDo, Retro-bit, Mayflash, raphnet, Nintendo Switch Online pads…), then by maker. Best effort also checks that the controller has an analog stick when the system needs one, and enough buttons. To pin one exact controller, add it from "Connected controllers" in an order; identical controllers are told apart by USB port.</div></div></div>
+      <div class="accordion-item"><h3 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#caHelp3">A controller is missing from a game</button></h3>
+        <div id="caHelp3" class="accordion-collapse collapse" data-bs-parent="#caHelp"><div class="accordion-body small">EmulationStation passes at most 8 controllers. The Drone can reorder those but cannot add one it left out; "Last launch" warns when that happens. Unplug unused controllers, or use EmulationStation's player assignment to make sure it is included.</div></div></div>
+    </div></div></section></div>`;
+  caRenderLive();
+  caRenderRules();
+}
+
+async function caRefresh(message) {
+  try { caState.status = await caGet("/status"); } catch (error) { sdError(error); }
+  caRenderLive();
+  caRenderRules();
+  if (message) sdToast(message);
+}
+
+async function caSaveOrder(editor, order) {
+  try {
+    if (editor === "default") await caPost("/default", { order });
+    else if (editor.startsWith("system:")) await caPost("/systems", { system: editor.slice(7), order });
+    else if (editor.startsWith("game:")) {
+      const rule = ((caState.status || {}).games_rules || []).find((row) => row.game === editor.slice(5));
+      await caPost("/games", { game: editor.slice(5), order, name: rule ? rule.name : "" });
+    }
+    await caRefresh("Saved. It applies to the next game you launch.");
+  } catch (error) {
+    sdError(error);
+    await caRefresh();
+  }
+}
+
+async function caLifecycle(path, body = {}) {
+  try {
+    const result = await caPost(path, body);
+    sdToast(result.message || "Done.");
+  } catch (error) {
+    sdError(error);
+  }
+  await caRefresh();
+}
+
+async function caSearchGames(field) {
+  const request = ++caState.searchRequest;
+  const results = document.getElementById("caGameResults");
+  const status = document.getElementById("caGameStatus");
+  const query = field.value.trim();
+  results.innerHTML = "";
+  results.hidden = true;
+  if (query.length < 2) { status.textContent = ""; return; }
+  status.textContent = "Searching…";
+  try {
+    const data = await api(`/roms?${new URLSearchParams({ q: query, limit: "50" })}`);
+    if (request !== caState.searchRequest) return;
+    const listed = new Set(((caState.status || {}).games_rules || []).map((row) => row.game));
+    for (const game of data.roms || []) {
+      if (!game.system || !game.relative_path) continue;
+      const key = `${game.system}/${game.relative_path}`;
+      if (listed.has(key)) continue;
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "list-group-item list-group-item-action small";
+      option.dataset.caAction = "add-game";
+      option.dataset.game = key;
+      option.dataset.name = game.rom_name || game.relative_path;
+      option.textContent = `${game.rom_name || game.relative_path} (${key})`;
+      results.append(option);
+    }
+    results.hidden = !results.childElementCount;
+    status.textContent = results.childElementCount ? "" : "No matching games without a rule.";
+  } catch (error) {
+    if (request === caState.searchRequest) status.textContent = error.message || "Unable to search games.";
+  }
+}
+
+async function caOnAction(action, element) {
+  const editor = element.dataset.editor || "";
+  switch (action) {
+    case "back": setHash("#admin/integrations"); return;
+    case "enable": await caLifecycle("/enable"); return;
+    case "disable":
+      if (await sdConfirm("Disable Controller Assignments?", "<p>The launch override is removed (one EmulationStation restart) and EmulationStation's normal player order returns. Your rules are kept.</p>", "Disable", "warning")) await caLifecycle("/disable");
+      return;
+    case "repair": await caLifecycle("/repair"); return;
+    case "remove":
+      if (await sdConfirm("Remove Controller Assignments?", "<p>Removes the launch override and the Drone's <code>integrations/controller-assignments/</code> folder, including your rules. Nothing else is touched.</p>", "Remove everything")) await caLifecycle("/remove", { include_configuration: true });
+      return;
+    case "restart-es":
+      if (!(await sdConfirm("Restart EmulationStation?", "<p>EmulationStation closes and starts again (about a minute). A running game is closed.</p>", "Restart", "warning"))) return;
+      try { await apiPost("/admin/system/restart-emulationstation", {}); sdToast("EmulationStation restarted."); } catch (error) { sdError(error); }
+      await caRefresh();
+      return;
+    case "move": {
+      const order = [...caEditorOrder(editor)];
+      const index = Number(element.dataset.index);
+      const target = index + Number(element.dataset.delta);
+      if (target < 0 || target >= order.length) return;
+      [order[index], order[target]] = [order[target], order[index]];
+      await caSaveOrder(editor, order);
+      return;
+    }
+    case "remove-entry": {
+      const order = [...caEditorOrder(editor)];
+      order.splice(Number(element.dataset.index), 1);
+      await caSaveOrder(editor, order);
+      return;
+    }
+    case "add-system": {
+      const system = document.getElementById("caAddSystem").value;
+      if (!system) return;
+      try { await caPost("/systems", { system, order: [] }); await caRefresh("System rule added. Add controllers to its order."); } catch (error) { sdError(error); }
+      return;
+    }
+    case "delete-system":
+      try { await caPost("/systems/delete", { system: element.dataset.system }); await caRefresh("System rule removed."); } catch (error) { sdError(error); }
+      return;
+    case "add-game":
+      try { await caPost("/games", { game: element.dataset.game, name: element.dataset.name, order: [] }); await caRefresh("Game rule added. Add controllers to its order."); } catch (error) { sdError(error); }
+      return;
+    case "delete-game":
+      try { await caPost("/games/delete", { game: element.dataset.game }); await caRefresh("Game rule removed."); } catch (error) { sdError(error); }
+      return;
+    default:
+  }
+}
+
+async function caOnChange(kind, element) {
+  if (kind === "auto") {
+    try { await caPost("/auto", { enabled: element.checked }); await caRefresh(element.checked ? "Best-effort matching is on." : "Best-effort matching is off."); } catch (error) { sdError(error); await caRefresh(); }
+  } else if (kind === "preset") {
+    try { await caPost(`/presets/${encodeURIComponent(element.dataset.id)}`, { enabled: element.checked }); await caRefresh("Preset saved."); } catch (error) { sdError(error); await caRefresh(); }
+  } else if (kind === "add-entry") {
+    const value = element.value;
+    if (!value) return;
+    const editor = element.dataset.editor;
+    let selector = null;
+    if (value.startsWith("type:")) selector = { kind: "type", type: value.slice(5) };
+    else if (value.startsWith("device:")) {
+      const device = ((caState.status || {}).controllers || [])[Number(value.slice(7))];
+      if (device) selector = { kind: "device", name: device.name, guid: device.guid, port: device.port };
+    }
+    if (selector) await caSaveOrder(editor, [...caEditorOrder(editor), selector]);
+  }
+}
+
+function caBindHandlers() {
+  if (caHandlersBound) return;
+  caHandlersBound = true;
+  document.addEventListener("click", (event) => {
+    const element = event.target.closest("[data-ca-action]");
+    if (!element || element.disabled) return;
+    event.preventDefault();
+    caOnAction(element.dataset.caAction, element).catch(sdError);
+  });
+  document.addEventListener("change", (event) => {
+    const element = event.target.closest("[data-ca-change]");
+    if (!element) return;
+    caOnChange(element.dataset.caChange, element).catch(sdError);
+  });
+  document.addEventListener("input", (event) => {
+    if (event.target.id !== "caGameSearch") return;
+    clearTimeout(caState.searchTimer);
+    caState.searchTimer = setTimeout(() => caSearchGames(event.target), 250);
+  });
+}

@@ -26,6 +26,9 @@ OVERLAY_FILENAME = "es_systems_zz_drone_network.cfg"
 OVERLAY_OWNER_ATTRIBUTE = "data-drone-owned"
 OVERLAY_OWNER_VALUE = "network-reference"
 PARSE_GAMELIST_SETTING = "ParseGamelistOnly"
+# Drone overlays that only rewrite <command> (see
+# integrations/controller_assignments/es_overlay.py OVERLAY_FILENAME).
+COMMAND_ONLY_OVERLAYS = frozenset({"es_systems_zzz_drone_controllers.cfg"})
 
 
 def overlay_path(settings: Settings) -> Path:
@@ -80,10 +83,24 @@ def _effective_system_nodes(settings: Settings) -> dict[str, ET.Element]:
         overlays = []
     owned_overlay = overlay_path(settings)
     for candidate in overlays:
-        if candidate == owned_overlay or not candidate.is_file():
+        # The Controller Assignments command overlay sorts after this one and
+        # only replaces <command>; copying its wrapped command here would
+        # freeze it in place after that integration is disabled.
+        if candidate == owned_overlay or candidate.name in COMMAND_ONLY_OVERLAYS or not candidate.is_file():
             continue
         for node in _parse_system_nodes(candidate):
-            by_name[str(node.findtext("name") or "").strip()] = copy.deepcopy(node)
+            name = str(node.findtext("name") or "").strip()
+            existing = by_name.get(name)
+            if existing is None:
+                by_name[name] = copy.deepcopy(node)
+                continue
+            # EmulationStation merges overlay children into the existing
+            # definition, so a partial node keeps every other field.
+            for child in list(node):
+                for old in existing.findall(child.tag):
+                    existing.remove(old)
+                existing.append(copy.deepcopy(child))
+            existing.attrib.update(node.attrib)
     return by_name
 
 

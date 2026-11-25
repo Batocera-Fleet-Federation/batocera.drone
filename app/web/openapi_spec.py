@@ -1965,6 +1965,9 @@ def _schemas() -> Dict[str, Schema]:
         "MediaKeysStatusResponse": _object({"id": _string(), "enabled": _boolean(), "installed": _boolean(), "health": _string(), "health_message": _string(), "hotkeygen_running": _boolean(), "overrides_applied": _boolean(), "keyboards": _array(freeform), "bindings": _array(freeform), "builtins": _array(freeform), "paths": freeform, "scope": _enum(["local-only"])}, ("enabled", "bindings"), description="Media Keys status: detected keyboards, hotkeygen state, and the five managed key bindings."),
         "MediaKeysBindingRequest": _object({"action_type": _enum(["builtin", "script", "none"]), "action_id": _string(), "script_id": _string(), "hold_seconds": _integer(minimum=0), "confirm": _boolean("Test only: confirm a reboot/shutdown")}, description="A typed reference to a built-in or script -- never a command."),
         "MediaKeysBindingResponse": _object({"status": _string(), "error": _string(), "binding": freeform}, ("status",)),
+        "ControllerAssignmentsStatusResponse": _object({"id": _string(), "enabled": _boolean(), "installed": _boolean(), "health": _string(), "health_message": _string(), "overlay_applied": _boolean(), "overlay_in_sync": _boolean(), "restart_needed": _boolean(), "wrapped_systems": _integer(minimum=0), "auto": _boolean(), "controllers": _array(freeform), "batocera_assignments": _array(freeform), "types": _array(freeform), "presets": _array(freeform), "profiles": _array(freeform), "default": _array(freeform), "systems_rules": _array(freeform), "games_rules": _array(freeform), "systems": _array(_string()), "last_launch": freeform, "paths": freeform, "scope": _enum(["local-only"])}, ("enabled",), description="Controller Assignments status: connected controllers, Batocera's own player assignments, rules, presets, and the last launch."),
+        "ControllerAssignmentsRequest": _object({"enabled": _boolean(), "order": _array(freeform), "system": _string(), "game": _string("<system>/<path relative to the system folder>"), "name": _string(), "include_configuration": _boolean()}, description="Order entries are {kind: type, type} or {kind: device, name, guid, port}."),
+        "ControllerAssignmentsResponse": _object({"status": _string(), "message": _string(), "restart_needed": _boolean()}, ("status",)),
         "StreamDeckLifecycleRequest": _object({"reinstall": _boolean("Repair only: reinstall integration-owned tooling"), "include_configuration": _boolean("Remove only: also delete profiles, scripts, images, and logs")}, description="Lifecycle options."),
         "StreamDeckLifecycleResponse": _object({"status": _string(), "message": _string(), "job": _ref("StreamDeckJob"), "removed": _array(_string()), "kept": _array(_string()), "configuration_removed": _boolean()}, ("status",), description="Lifecycle result; enable/repair return a job to poll."),
         "StreamDeckDevice": _object({"id": _string(), "model": _string(), "serial": _string(), "firmware": _string(), "key_count": _integer(), "rows": _integer(), "columns": _integer(), "key_image_size": _array(_integer()), "has_key_images": _boolean(), "connected": _boolean(), "runtime_state": _string(), "source": _enum(["runtime", "usb", "remembered"]), "active_profile_id": _string(), "brightness": _integer(), "startup_profile_id": _string(), "usb_id": _string()}, ("id", "model"), description="A Stream Deck described through the device abstraction (never library objects)."),
@@ -3103,6 +3106,29 @@ def _integration_paths() -> Dict[str, Schema]:
         f"{mk}/scripts/{{script_id}}/update": mpost("Edit a script", "StreamDeckScript", "StreamDeckScriptRequest", parameters=[_path_param("script_id")]),
         f"{mk}/scripts/{{script_id}}/duplicate": mpost("Duplicate a script", "StreamDeckScript", code="201", parameters=[_path_param("script_id")]),
         f"{mk}/scripts/{{script_id}}/delete": mpost("Delete an unassigned script", "StreamDeckLifecycleResponse", parameters=[_path_param("script_id")]),
+    })
+
+    ca = "/admin/integrations/controller-assignments"
+    ctags = ["admin", "integrations", "controller-assignments"]
+
+    def cpost(summary: str) -> Schema:
+        return {"post": _operation(summary, {"200": _json_response("ControllerAssignmentsResponse")}, tags=ctags,
+                                   error_codes=errors,
+                                   request_body=_json_request("ControllerAssignmentsRequest", required=False))}
+
+    paths.update({
+        f"{ca}/status": {"get": _operation("Controller Assignments status, rules, and last launch", {"200": _json_response("ControllerAssignmentsStatusResponse")}, tags=ctags)},
+        f"{ca}/enable": cpost("Enable: write the launcher and the EmulationStation command overlay"),
+        f"{ca}/disable": cpost("Disable: remove the overlay, keep rules"),
+        f"{ca}/repair": cpost("Rewrite the launcher, runtime rules, and overlay"),
+        f"{ca}/remove": cpost("Remove the overlay and the integration's files"),
+        f"{ca}/auto": cpost("Turn best-effort matching for every game on or off"),
+        f"{ca}/default": cpost("Set the default controller order"),
+        f"{ca}/presets/{{preset_id}}": {"post": {**cpost("Turn a system-family preset on or off")["post"], "parameters": [_path_param("preset_id")]}},
+        f"{ca}/systems": cpost("Create or replace a system rule"),
+        f"{ca}/systems/delete": cpost("Delete a system rule"),
+        f"{ca}/games": cpost("Create or replace a game rule"),
+        f"{ca}/games/delete": cpost("Delete a game rule"),
     })
     return paths
 

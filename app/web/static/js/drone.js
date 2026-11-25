@@ -12206,6 +12206,9 @@ async function router(retryDepth = 0) {
     if (hash !== "#admin/integrations/media-keys" && typeof stopMediaKeysAutoRefresh === "function") {
       stopMediaKeysAutoRefresh();
     }
+    if (hash !== "#admin/integrations/controller-assignments" && typeof stopControllerAssignmentsAutoRefresh === "function") {
+      stopControllerAssignmentsAutoRefresh();
+    }
     // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
     // parallel duplicate set -- the class name predates this page but the
@@ -12371,6 +12374,12 @@ async function router(retryDepth = 0) {
         return;
       }
       await renderMediaKeysPage();
+    } else if (hash === "#admin/integrations/controller-assignments") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderControllerAssignmentsPage();
     } else if (hash === "#multiplayer" || hash.startsWith("#multiplayer/")) {
       if (!adminEnabled) {
         setHash("");

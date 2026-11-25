@@ -867,7 +867,7 @@ class HttpRoutesTests(unittest.TestCase):
     def test_integration_routes_end_to_end(self):
         status, cards = self.call("")
         self.assertEqual(status, 200)
-        self.assertEqual([card["id"] for card in cards["integrations"]], ["streamdeck", "media-keys"])
+        self.assertEqual([card["id"] for card in cards["integrations"]], ["streamdeck", "media-keys", "controller-assignments"])
         self.assertEqual(cards["scope"], "local-only")
         self.assertFalse(cards["integrations"][0]["enabled"])
         self.assertEqual(self.call("/streamdeck/status", cookie=False)[0], 401)  # loopback is not enough

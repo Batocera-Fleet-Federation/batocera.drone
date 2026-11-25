@@ -23,6 +23,7 @@ try:
     from ..integrations.streamdeck.paths import OwnershipError
     from ..integrations.streamdeck.scripts import ScriptInUseError
     from ..integrations.media_keys.manager import get_media_keys_integration
+    from ..integrations.controller_assignments.manager import get_controller_assignments_integration
 except ImportError:  # pragma: no cover - flat execution
     from common.multipart import boundary_from_content_type, parse_multipart_file_parts  # type: ignore
     from integrations.registry import build_integration_registry  # type: ignore
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover - flat execution
     from integrations.streamdeck.paths import OwnershipError  # type: ignore
     from integrations.streamdeck.scripts import ScriptInUseError  # type: ignore
     from integrations.media_keys.manager import get_media_keys_integration  # type: ignore
+    from integrations.controller_assignments.manager import get_controller_assignments_integration  # type: ignore
 
 
 _UPLOAD_OVERHEAD = 64 * 1024
@@ -67,6 +69,9 @@ class HandlersIntegrationsMixin:
 
     def _media_keys(self):
         return get_media_keys_integration(self.settings, self.repository)
+
+    def _controller_assignments(self):
+        return get_controller_assignments_integration(self.settings, self.repository)
 
     def _integration_actor(self) -> str:
         try:
@@ -115,6 +120,11 @@ class HandlersIntegrationsMixin:
             return
         if parts[0] == "media-keys":
             self._dispatch_media_keys_get(parts[1:])
+            return
+        if parts[0] == "controller-assignments":
+            if parts[1:] not in ([], ["status"]):
+                raise KeyError("not found")
+            self._send_json(200, self._controller_assignments().get_status())
             return
         if parts[0] != "streamdeck":
             raise KeyError("unknown integration")
@@ -202,6 +212,9 @@ class HandlersIntegrationsMixin:
     def _dispatch_integrations_post(self, parts: list, is_upload: bool) -> None:
         if parts and parts[0] == "media-keys" and len(parts) >= 2:
             self._dispatch_media_keys_post(parts[1:])
+            return
+        if parts and parts[0] == "controller-assignments" and len(parts) >= 2:
+            self._dispatch_controller_assignments_post(parts[1:])
             return
         if not parts or parts[0] != "streamdeck" or len(parts) < 2:
             raise KeyError("not found")
@@ -298,6 +311,37 @@ class HandlersIntegrationsMixin:
             script_id = hex_id(sub[1], "script id")
             manager.scripts.delete(script_id, manager.script_references(script_id), noun="key binding")
             self._send_json(200, {"status": "deleted", "id": script_id})
+        else:
+            raise KeyError("not found")
+
+    def _dispatch_controller_assignments_post(self, sub: list) -> None:
+        manager = self._controller_assignments()
+        actor = self._integration_actor()
+        body = self._read_json_body()
+        if sub == ["enable"]:
+            self._send_json(200, manager.enable(requested_by=actor))
+        elif sub == ["disable"]:
+            self._send_json(200, manager.disable(requested_by=actor))
+        elif sub == ["repair"]:
+            self._send_json(200, manager.repair(requested_by=actor))
+        elif sub == ["remove"]:
+            self._send_json(200, manager.remove(include_configuration=body.get("include_configuration") is True,
+                                                requested_by=actor))
+        elif sub == ["default"]:
+            self._send_json(200, manager.set_default(body.get("order"), requested_by=actor))
+        elif sub == ["auto"]:
+            self._send_json(200, manager.set_auto(body.get("enabled"), requested_by=actor))
+        elif len(sub) == 2 and sub[0] == "presets":
+            self._send_json(200, manager.set_preset(sub[1], body.get("enabled"), requested_by=actor))
+        elif sub == ["systems"]:
+            self._send_json(200, manager.set_system(body.get("system"), body.get("order"), requested_by=actor))
+        elif sub == ["systems", "delete"]:
+            self._send_json(200, manager.delete_system(body.get("system"), requested_by=actor))
+        elif sub == ["games"]:
+            self._send_json(200, manager.set_game(body.get("game"), body.get("order"), body.get("name"),
+                                                  requested_by=actor))
+        elif sub == ["games", "delete"]:
+            self._send_json(200, manager.delete_game(body.get("game"), requested_by=actor))
         else:
             raise KeyError("not found")
 

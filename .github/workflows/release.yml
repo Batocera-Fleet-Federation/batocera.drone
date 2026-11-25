@@ -129,6 +129,8 @@ jobs:
             app/integrations/registry.py \
             app/integrations/streamdeck/manager.py \
             app/integrations/media_keys/manager.py \
+            app/integrations/controller_assignments/manager.py \
+            app/integrations/controller_assignments/launch_order.py \
             app/web/static/js/multiplayer.js \
             app/web/handlers_multiplayer.py \
             app/multiplayer/__init__.py \

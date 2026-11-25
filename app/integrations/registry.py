@@ -118,7 +118,15 @@ def build_integration_registry(settings: Any, repository: Any) -> IntegrationReg
     except ImportError:  # pragma: no cover - flat execution
         from integrations.media_keys.manager import DESCRIPTOR as MEDIA_KEYS, get_media_keys_integration  # type: ignore
 
+    try:
+        from .controller_assignments.manager import (DESCRIPTOR as CONTROLLER_ASSIGNMENTS,
+                                                      get_controller_assignments_integration)
+    except ImportError:  # pragma: no cover - flat execution
+        from integrations.controller_assignments.manager import (  # type: ignore
+            DESCRIPTOR as CONTROLLER_ASSIGNMENTS, get_controller_assignments_integration)
+
     registry = IntegrationRegistry()
     registry.register(STREAMDECK, lambda: get_streamdeck_integration(settings, repository))
     registry.register(MEDIA_KEYS, lambda: get_media_keys_integration(settings, repository))
+    registry.register(CONTROLLER_ASSIGNMENTS, lambda: get_controller_assignments_integration(settings, repository))
     return registry

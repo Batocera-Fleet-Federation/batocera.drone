@@ -498,7 +498,7 @@ def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
     return None
 
 
-def _parse_es_systems_cfg(path: Path) -> List[dict]:
+def _parse_es_systems_cfg(path: Path, partial: bool = False) -> List[dict]:
     if not path.exists() or not path.is_file():
         return []
     try:
@@ -518,7 +518,8 @@ def _parse_es_systems_cfg(path: Path) -> List[dict]:
         hidden_node = system_node.find("hidden")
         hidden_text = hidden_node.text.strip() if hidden_node is not None and hidden_node.text else ""
         hidden_value = (hidden_attr or hidden_text or "").strip().lower()
-        data["hidden"] = hidden_value in ("1", "true", "yes", "on")
+        if not partial or hidden_attr is not None or hidden_node is not None:
+            data["hidden"] = hidden_value in ("1", "true", "yes", "on")
         if data.get("name"):
             systems.append(data)
     return systems
@@ -543,11 +544,17 @@ def _resolve_es_systems_effective(settings: Settings) -> Tuple[Optional[Path], L
 
     by_name = {item.get("name"): item for item in systems if item.get("name")}
     for overlay in overlays:
-        for item in _parse_es_systems_cfg(overlay):
+        # Batocera's EmulationStation merges an overlay's child elements into
+        # the existing definition, so a partial node (for example only
+        # <command>, or only <hardware>) keeps every other field.
+        for item in _parse_es_systems_cfg(overlay, partial=True):
             name = item.get("name")
             if not name:
                 continue
-            by_name[name] = item
+            merged_item = dict(by_name.get(name) or {})
+            merged_item.update(item)
+            merged_item.setdefault("hidden", False)
+            by_name[name] = merged_item
 
     merged = list(by_name.values())
     merged.sort(key=lambda item: str(item.get("name", "")).lower())

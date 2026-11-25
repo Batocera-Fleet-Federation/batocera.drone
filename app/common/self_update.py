@@ -74,6 +74,8 @@ DRONE_INTEGRATIONS_REQUIRED_FILES = (
     Path("app/integrations/registry.py"),
     Path("app/integrations/streamdeck/manager.py"),
     Path("app/integrations/media_keys/manager.py"),
+    Path("app/integrations/controller_assignments/manager.py"),
+    Path("app/integrations/controller_assignments/launch_order.py"),
     # Multiplayer ships as UI + peer/admin handlers + orchestrator; a release without any one is incomplete.
     Path("app/web/static/js/multiplayer.js"),
     Path("app/web/handlers_multiplayer.py"),

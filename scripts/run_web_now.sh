@@ -109,6 +109,8 @@ INTEGRATIONS_INIT_PATH="$APP_DIR/integrations/__init__.py"
 INTEGRATIONS_REGISTRY_PATH="$APP_DIR/integrations/registry.py"
 STREAMDECK_MANAGER_PATH="$APP_DIR/integrations/streamdeck/manager.py"
 MEDIA_KEYS_MANAGER_PATH="$APP_DIR/integrations/media_keys/manager.py"
+CONTROLLER_ASSIGNMENTS_MANAGER_PATH="$APP_DIR/integrations/controller_assignments/manager.py"
+CONTROLLER_ASSIGNMENTS_LAUNCHER_PATH="$APP_DIR/integrations/controller_assignments/launch_order.py"
 MULTIPLAYER_JS_PATH="$STATIC_DIR/js/multiplayer.js"
 MULTIPLAYER_HANDLER_PATH="$APP_DIR/web/handlers_multiplayer.py"
 MULTIPLAYER_INIT_PATH="$APP_DIR/multiplayer/__init__.py"
@@ -315,6 +317,8 @@ validate_staged_payload() {
     "$INTEGRATIONS_REGISTRY_PATH" \
     "$STREAMDECK_MANAGER_PATH" \
     "$MEDIA_KEYS_MANAGER_PATH" \
+    "$CONTROLLER_ASSIGNMENTS_MANAGER_PATH" \
+    "$CONTROLLER_ASSIGNMENTS_LAUNCHER_PATH" \
     "$MULTIPLAYER_JS_PATH" \
     "$MULTIPLAYER_HANDLER_PATH" \
     "$MULTIPLAYER_INIT_PATH" \
@@ -452,6 +456,8 @@ if [[ "$using_stage" != "1" ]]; then
     "$INTEGRATIONS_REGISTRY_PATH" \
     "$STREAMDECK_MANAGER_PATH" \
     "$MEDIA_KEYS_MANAGER_PATH" \
+    "$CONTROLLER_ASSIGNMENTS_MANAGER_PATH" \
+    "$CONTROLLER_ASSIGNMENTS_LAUNCHER_PATH" \
     "$MULTIPLAYER_JS_PATH" \
     "$MULTIPLAYER_HANDLER_PATH" \
     "$MULTIPLAYER_INIT_PATH" \

@@ -339,6 +339,16 @@ volume/mute/exit/reboot to a generated launcher that runs a standalone dispatche
 `integrations/shared/` (ProcessRunner, `ScriptStore`, `BatoceraControl` built-in
 catalog, file helpers) with Stream Deck. See `drone-integrations-streamdeck`.
 
+**Controller Assignments** (`integrations/controller_assignments/`) reorders the players
+EmulationStation passes to `emulatorlauncher`. It writes one marker-checked, command-only overlay
+`es_systems_zzz_drone_controllers.cfg` that prefixes each system's effective command with the
+self-contained `launch_order.py` wrapper. That wrapper is copied to `bin/`, is stdlib-only, never imports
+the app, and on any error execs the original command. Batocera's own `INPUT P<n>` assignments and
+light guns keep their slots; rules (game → system → preset → global best effort → default) fill the
+open ones. Overlay changes need one EmulationStation restart, and rule edits apply on the next launch.
+Both Drone es_systems mergers merge partial overlay nodes field by field, as EmulationStation does.
+See `docs/integrations-controller-assignments.md`.
+
 **Stream Deck** is the first. Its third-party deps (`streamdeck==0.10.0`, Pillow)
 are installed into the integration's private `lib/` (venv/bundled pip, `--target`,
 never global pip/setuptools, no `batocera-save-overlay`) and imported **only** by a

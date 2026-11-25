@@ -75,6 +75,28 @@ Routes: `/admin/integrations/media-keys/...` (status, enable/disable/repair/remo
 (`mk*` functions at the end of `integrations.js`). Release gates name
 `integrations/media_keys/manager.py` too. Tests: `tests/test_media_keys.py`.
 
+## Controller Assignments integration (`app/integrations/controller_assignments/`)
+
+Third registered integration (`controller-assignments`). Read
+`docs/integrations-controller-assignments.md` first. Invariants:
+
+- `launch_order.py` is the launch wrapper **and** a library. Keep it self-contained (stdlib only,
+  no package-relative imports): the manager copies its bytes to `bin/drone-controller-order`.
+  Any failure must exec the original command unchanged.
+- The only outside file is `es_systems_zzz_drone_controllers.cfg`, which has partial `<name>`+`<command>`
+  nodes, the `data-drone-owned` marker, and sorts last. Never write full system nodes there, and never
+  let another Drone overlay copy its command (`network_es_overlay.COMMAND_ONLY_OVERLAYS`).
+- Authority: Batocera `INPUT P<n>` pins and light guns keep their slot; rules fill open slots only;
+  nobody is dropped; slot numbers are unchanged.
+- Classification order: exact USB id → name pattern → vendor. Add new pads to `_KNOWN_IDS` only
+  when the id is certain; otherwise add a name pattern. System → family fit lives in
+  `SYSTEM_PROFILES` / `SYSTEM_PROFILE_BY_SYSTEM` (presets reuse them).
+- Disable/remove while EmulationStation still runs the wrapped command: keep `bin/` and a disabled
+  `runtime.json` (pass-through) until EmulationStation restarts (`remove` returns `pending-restart`).
+- Routes: `/admin/integrations/controller-assignments/{status,enable,disable,repair,remove,auto,default,
+  presets/<id>,systems,systems/delete,games,games/delete}`; page `ca*` functions at the end of
+  `integrations.js`. Tests: `tests/test_controller_assignments.py`.
+
 ## Stream Deck shape
 
 - Drone process (stdlib only): `manager.py` (lifecycle jobs, supervisor, status,
