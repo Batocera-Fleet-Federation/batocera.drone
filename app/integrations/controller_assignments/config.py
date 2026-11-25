@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .launch_order import (BEST_EFFORT_MODES, CONTROLLER_TYPES, NATIVE_FAMILY_COUNT, SYSTEM_PROFILE_BY_SYSTEM,
-                           SYSTEM_PROFILES, TYPE_IDS)
+                           SYSTEM_PROFILES, TYPE_IDS, default_starter_file)
 from .paths import ControllerAssignmentsPaths
 
 try:
@@ -151,7 +151,7 @@ def validate_order(value: Any) -> List[dict]:
 
 def default_config() -> dict:
     return {"version": CONFIG_VERSION, "enabled": False, "auto": False, "best_effort_mode": "closest",
-            "default": [], "presets": {}, "systems": {}, "games": {}}
+            "starter_type": False, "default": [], "presets": {}, "systems": {}, "games": {}}
 
 
 def valid_best_effort_mode(value: Any) -> str:
@@ -169,6 +169,7 @@ def normalize(raw: Any) -> dict:
     config["auto"] = raw.get("auto") is True
     if raw.get("best_effort_mode") in BEST_EFFORT_MODES:
         config["best_effort_mode"] = raw["best_effort_mode"]
+    config["starter_type"] = raw.get("starter_type") is True
     try:
         config["default"] = validate_order(raw.get("default") or [])
     except ValueError:
@@ -223,6 +224,9 @@ class ConfigStore:
         clean = valid_best_effort_mode(mode)
         return self.update(lambda config: config.__setitem__("best_effort_mode", clean))
 
+    def set_starter_type(self, enabled: Any) -> dict:
+        return self.update(lambda config: config.__setitem__("starter_type", enabled is True))
+
     def set_default(self, order: Any) -> dict:
         clean = validate_order(order)
         return self.update(lambda config: config.__setitem__("default", clean))
@@ -262,7 +266,8 @@ class ConfigStore:
         return self.update(lambda config: config["games"].pop(key, None))
 
 
-def compile_runtime(config: dict, *, es_settings_file: Path, roms_root: Path, report_file: Path) -> dict:
+def compile_runtime(config: dict, *, es_settings_file: Path, roms_root: Path, report_file: Path,
+                    starter_file: str = "") -> dict:
     """Everything the launch wrapper needs, with presets folded into systems."""
     systems: Dict[str, dict] = {}
     for preset_id in PRESETS:
@@ -276,6 +281,8 @@ def compile_runtime(config: dict, *, es_settings_file: Path, roms_root: Path, re
         "enabled": bool(config["enabled"]),
         "auto": bool(config["auto"]),
         "best_effort_mode": config["best_effort_mode"],
+        "starter_type": bool(config.get("starter_type")),
+        "starter_file": starter_file or default_starter_file(),
         "es_settings_file": str(es_settings_file),
         "roms_root": str(roms_root),
         "report_file": str(report_file),

@@ -17,7 +17,7 @@ from ..registry import Integration, IntegrationDescriptor
 from . import es_overlay
 from .config import ConfigStore, compile_runtime, preset_catalog, profile_catalog, type_catalog
 from .devices import connected_controllers
-from .launch_order import read_batocera_pins
+from .launch_order import default_starter_file, read_batocera_pins
 from .paths import ControllerAssignmentsPaths, default_integration_root
 
 try:
@@ -68,10 +68,11 @@ class ControllerAssignmentsIntegration(Integration):
         return self.paths.state_dir / "overlay.json"
 
     # ------------------------------------------------------------ plumbing
-    def _write_runtime(self, config: Optional[dict] = None) -> None:
+    def _write_runtime(self, config: Optional[dict] = None, starter_file: str = "") -> None:
         config = config or self.config.load()
         runtime = compile_runtime(config, es_settings_file=Path(self.settings.es_settings_file),
-                                  roms_root=Path(self.settings.roms_root), report_file=self.paths.report_file)
+                                  roms_root=Path(self.settings.roms_root), report_file=self.paths.report_file,
+                                  starter_file=starter_file or default_starter_file())
         self.paths.ensure(self.paths.state_dir)
         atomic_write_json(self.paths.assert_owned(self.paths.runtime_file), runtime, mode=0o644)
 
@@ -91,6 +92,11 @@ class ControllerAssignmentsIntegration(Integration):
     def _after_change(self, config: dict) -> None:
         if self.paths.root.is_dir():
             self._write_runtime(config)
+            if not self._wrapper_current() and self.paths.bin_dir.is_dir():
+                try:
+                    self._write_wrapper()
+                except OSError:
+                    pass
 
     # -------------------------------------------------------------- status
     def _health(self, enabled: bool, applied: bool, in_sync: bool, restart: bool, wrapper_ok: bool) -> tuple:
@@ -149,6 +155,7 @@ class ControllerAssignmentsIntegration(Integration):
             "presets": preset_catalog(config["presets"]),
             "auto": config["auto"],
             "best_effort_mode": config["best_effort_mode"],
+            "starter_type": config["starter_type"],
             "profiles": profile_catalog(),
             "default": config["default"],
             "systems_rules": [{"system": key, **value} for key, value in sorted(config["systems"].items())],
@@ -256,6 +263,10 @@ class ControllerAssignmentsIntegration(Integration):
     def set_best_effort_mode(self, mode: Any, requested_by: str = "") -> dict:
         return self._edit(lambda: self.config.set_best_effort_mode(mode), "best-effort-mode-updated", requested_by,
                           mode=str(mode))
+
+    def set_starter_type(self, enabled: Any, requested_by: str = "") -> dict:
+        return self._edit(lambda: self.config.set_starter_type(enabled), "starter-type-updated", requested_by,
+                          enabled=enabled is True)
 
     def set_default(self, order: Any, requested_by: str = "") -> dict:
         return self._edit(lambda: self.config.set_default(order), "default-updated", requested_by)

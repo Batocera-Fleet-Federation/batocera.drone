@@ -21,7 +21,10 @@ Behaviour, in order of authority:
    PATH`` in ``es_settings.cfg``) and that EmulationStation actually passed
    stays exactly where EmulationStation put it.
 2. Light guns are never moved (they are ignored by the integration).
-3. Every other controller is ordered by the most specific matching rule
+3. When "use the starter type" is on and a button was pressed within the
+   last few seconds, every controller of that type moves ahead of the rest
+   (usual order kept within the type); the rest of the ordering is unchanged.
+4. Every other controller is ordered by the most specific matching rule
    into the slots that remain open: a game rule, then a system rule, then an
    enabled preset, then (when the global "best effort" setting is on) best
    effort, then the default order alone. Best effort has two modes:
@@ -52,6 +55,70 @@ _USB_PORT = re.compile(r"^\d+-\d+(?:\.\d+)*$")
 _GUN_NAME = re.compile(r"lightgun|light gun|sinden|gun4ir|aimtrak|guncon|g-con|wiimote ir", re.IGNORECASE)
 MAX_PLAYERS = 8
 LOG_PREFIX = "[drone-controller-order]"
+
+# The controller that starts the game: the privileged input monitor records
+# "<epoch> <devicepath>" for the last button press next to the activity file.
+# A press counts only when the game starts soon after (ES launch animation).
+STARTER_DEVICE_FILENAME = "last-input-device"
+STARTER_MAX_AGE_SECONDS = 15.0
+STARTER_DEVICE_ENV = "DRONE_INPUT_DEVICE_FILE"
+STARTER_ACTIVITY_ENV = "DRONE_INPUT_ACTIVITY_FILE"
+STARTER_CONTROL_ENV = "DRONE_SERVICE_CONTROL_DIR"
+STARTER_CONTROL_DEFAULT = "/userdata/system/drone-app/control"
+
+
+def default_starter_file():
+    """Where the launch wrapper looks for the last pressed input device."""
+    override = os.environ.get(STARTER_DEVICE_ENV)
+    if override:
+        return override
+    activity = os.environ.get(STARTER_ACTIVITY_ENV)
+    if activity:
+        return str(Path(activity).parent / STARTER_DEVICE_FILENAME)
+    control = os.environ.get(STARTER_CONTROL_ENV) or STARTER_CONTROL_DEFAULT
+    return str(Path(control) / STARTER_DEVICE_FILENAME)
+
+
+def read_starter_device(path):
+    """``(epoch, devicepath)`` from the monitor's starter file, or ``(None, "")``."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None, ""
+    if not text:
+        return None, ""
+    epoch_text, _, device = text.partition(" ")
+    # Old monitor writes only the epoch; that carries no device, so ignore it.
+    if not device.strip():
+        return None, ""
+    try:
+        return float(epoch_text), device.strip()
+    except ValueError:
+        return None, ""
+
+
+def starter_type_for(controllers, devicepath):
+    """Controller family of the last pressed device; "" when unknown or a gun."""
+    if not devicepath:
+        return ""
+    for controller in controllers:
+        if controller.get("devicepath") == devicepath and not controller.get("gun"):
+            return controller.get("type") or ""
+    return ""
+
+
+def apply_starter_type(ordered, starter_type):
+    """Stable partition: every controller of ``starter_type`` first (option B).
+
+    Within the type the usual order is kept, so a left arcade stick stays P1
+    even when the right stick started the game. Anything else follows after.
+    """
+    if not starter_type:
+        return list(ordered)
+    front = [c for c in ordered if c.get("type") == starter_type]
+    if not front:
+        return list(ordered)
+    return front + [c for c in ordered if c.get("type") != starter_type]
 
 # Ordered most specific first: the first matching family wins.
 CONTROLLER_TYPES = (
@@ -513,17 +580,38 @@ def plan(argv, runtime, *, sys_root="/sys", udev_root="/run/udev/data"):
     report = {"system": system, "game": game_key, "rule": source, "changed": False,
               "profile": SYSTEM_PROFILE_BY_SYSTEM.get(system, "") if ranked else "",
               "matching": mode if ranked else "",
-              "before": [_public(c) for c in controllers], "players": [], "warnings": []}
-    if not runtime.get("enabled") or source == "none" or not controllers:
+              "before": [_public(c) for c in controllers], "players": [], "warnings": [],
+              "starter_type": "", "starter_device": "", "starter_applied": False}
+    if not runtime.get("enabled") or not controllers:
         report["players"] = [dict(_public(c), lock="") for c in controllers]
         return argv, report
     pins = read_batocera_pins(runtime.get("es_settings_file") or "")
+    starter_enabled = bool(runtime.get("starter_type"))
+    starter_type = ""
+    starter_device = ""
+    if starter_enabled:
+        epoch, device = read_starter_device(runtime.get("starter_file") or default_starter_file())
+        starter_device = device
+        report["starter_device"] = device
+        if epoch is not None and time.time() - epoch <= STARTER_MAX_AGE_SECONDS:
+            starter_type = starter_type_for(controllers, device)
+        report["starter_type"] = starter_type
+    if source == "none" and not starter_type:
+        report["players"] = [dict(_public(c), lock="") for c in controllers]
+        return argv, report
     ranker = None
     if ranked and mode == "priority":
         ranker = lambda free: priority_order(free, system, order)  # noqa: E731
     elif ranked:
         ranker = lambda free: best_effort_order(free, system, order)  # noqa: E731
     assignment, locks = compute_assignment(controllers, order, pins, ranker)
+    if starter_type:
+        open_slots = sorted(slot for slot in assignment if slot not in locks)
+        promoted = apply_starter_type([assignment[slot] for slot in open_slots], starter_type)
+        if [c["slot"] for c in promoted] != [assignment[slot]["slot"] for slot in open_slots]:
+            report["starter_applied"] = True
+        for slot, controller in zip(open_slots, promoted):
+            assignment[slot] = controller
     new_players = {slot: players[controller["slot"]] for slot, controller in assignment.items()}
     report["players"] = [dict(_public(assignment[slot]), slot=slot, lock=locks.get(slot, ""))
                          for slot in sorted(assignment)]

@@ -345,6 +345,100 @@ class OrderingTests(unittest.TestCase):
                               dict(runtime, best_effort_mode="bogus"))
         self.assertEqual(report["matching"], "closest")
 
+    def _starter_runtime(self, device, epoch=None, **extra):
+        import time as _time
+        starter = Path(self.tmp.name) / "last-input-device"
+        starter.write_text(f"{int(epoch if epoch is not None else _time.time())} {device}\n")
+        runtime = dict(self.runtime, starter_type=True, starter_file=str(starter))
+        runtime.update(extra)
+        return runtime
+
+    def test_starter_type_promotes_the_whole_pressed_type(self):
+        # User's example: N64 game, arcade stick used to start -> sticks first.
+        runtime = self._starter_runtime("/dev/input/event24", auto=True)
+        new_argv, report = self.plan(argv_for(self.players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        names = order_names(new_argv)
+        self.assertEqual(names[:4], ["DragonRise Inc.   Generic   USB  Joystick  "] * 4)
+        self.assertEqual(report["starter_type"], "arcade")
+        self.assertTrue(report["starter_applied"])
+
+    def test_starter_type_keeps_the_usual_order_within_the_type(self):
+        # Option B: the right-hand stick starts, but the left stick stays P1.
+        runtime = self._starter_runtime("/dev/input/event26", auto=True)
+        new_argv, _ = self.plan(argv_for(self.players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        _, _, players = lo.parse_players(new_argv)
+        self.assertEqual([players[slot]["devicepath"] for slot in (1, 2, 3, 4)],
+                         ["/dev/input/event24", "/dev/input/event25",
+                          "/dev/input/event26", "/dev/input/event27"])
+
+    def test_starter_type_applies_on_top_of_a_game_rule(self):
+        players = {1: self.players[5], 2: self.players[6], 3: self.players[1]}
+        runtime = self._starter_runtime("/dev/input/event19", auto=True,
+                                        games={"gamecube/Game.iso": {"order": [{"kind": "type",
+                                                                                "type": "playstation"}]}})
+        new_argv, report = self.plan(argv_for(players, "gamecube", "/userdata/roms/gamecube/Game.iso"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "Wii U GameCube Adapter Port 1")
+        self.assertEqual(report["starter_type"], "gamecube")
+        self.assertTrue(report["starter_applied"])
+
+    def test_starter_type_applies_when_nothing_else_matches(self):
+        players = {1: self.players[6], 2: self.players[5], 3: self.players[1]}
+        runtime = self._starter_runtime("/dev/input/event24")
+        new_argv, report = self.plan(argv_for(players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "DragonRise Inc.   Generic   USB  Joystick  ")
+        self.assertTrue(report["starter_applied"])
+
+    def test_stale_unknown_and_gun_presses_fall_back_to_normal_rules(self):
+        import time as _time
+        runtime = self._starter_runtime("/dev/input/event24", epoch=_time.time() - 120, auto=True)
+        new_argv, report = self.plan(argv_for(self.players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "Wii U GameCube Adapter Port 1")
+        self.assertFalse(report["starter_applied"])
+        runtime = self._starter_runtime("/dev/input/event99", auto=True)
+        new_argv, report = self.plan(argv_for(self.players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        self.assertFalse(report["starter_applied"])
+        self.assertEqual(order_names(new_argv)[0], "Wii U GameCube Adapter Port 1")
+        # A light-gun press never promotes anything.
+        self.fs.add("event40", "16c0", "0f01", port="9", gun=True, minor=300)
+        players = dict(self.players)
+        players[2] = pad(2, "Sinden lightgun", "03000000c0160000010f000000010000", "event40")
+        runtime = self._starter_runtime("/dev/input/event40", auto=True)
+        new_argv, report = self.plan(argv_for(players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        self.assertEqual(report["starter_type"], "")
+        self.assertFalse(report["starter_applied"])
+        self.assertEqual(report["players"][1]["lock"], "light gun")
+
+    def test_starter_type_leaves_batocera_pins_alone(self):
+        self.es_settings.write_text(
+            '<config><string name="INPUT P1GUID" value="%s"/><string name="INPUT P1NAME" '
+            'value="DragonRise Inc.   Generic   USB  Joystick  "/></config>' % DRAGON)
+        players = {1: self.players[1], 2: self.players[6], 3: self.players[5]}
+        runtime = self._starter_runtime(
+            "/dev/input/event19", auto=True,
+            games={"gamecube/Game.iso": {"order": [{"kind": "type", "type": "playstation"}]}})
+        new_argv, report = self.plan(argv_for(players, "gamecube", "/userdata/roms/gamecube/Game.iso"), runtime)
+        names = order_names(new_argv)
+        self.assertEqual(names[0], "DragonRise Inc.   Generic   USB  Joystick  ")
+        self.assertEqual(report["players"][0]["lock"], "Batocera P1")
+        self.assertEqual(names[1], "Wii U GameCube Adapter Port 1")
+        self.assertTrue(report["starter_applied"])
+
+    def test_starter_helpers(self):
+        self.assertEqual(lo.starter_type_for([{"devicepath": "/dev/input/event1", "type": "arcade", "gun": False}],
+                                             "/dev/input/event1"), "arcade")
+        self.assertEqual(lo.starter_type_for([{"devicepath": "/dev/input/event1", "type": "arcade", "gun": True}],
+                                             "/dev/input/event1"), "")
+        self.assertEqual(lo.starter_type_for([], "/dev/input/event1"), "")
+        ordered = [{"type": "arcade", "slot": 2}, {"type": "gamecube", "slot": 1}, {"type": "arcade", "slot": 3}]
+        self.assertEqual([c["slot"] for c in lo.apply_starter_type(ordered, "arcade")], [2, 3, 1])
+        self.assertEqual(lo.apply_starter_type(ordered, ""), ordered)
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "last-input-device"
+            self.assertEqual(lo.read_starter_device(str(missing)), (None, ""))
+            bad = Path(tmp) / "bad"
+            bad.write_text("not-a-number /dev/input/event1\n")
+            self.assertEqual(lo.read_starter_device(str(bad)), (None, ""))
+
     def test_disabled_or_unknown_rules_leave_argv_untouched(self):
         argv = argv_for(self.players)
         self.assertEqual(self.plan(argv, dict(self.runtime, enabled=False))[0], argv)
@@ -425,6 +519,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["best_effort_mode"], "priority")
         runtime = compile_runtime(config, es_settings_file=Path("/e"), roms_root=Path("/r"), report_file=Path("/s"))
         self.assertEqual(runtime["best_effort_mode"], "priority")
+
+    def test_starter_type_defaults_off_and_reaches_the_runtime(self):
+        self.assertFalse(normalize({})["starter_type"])
+        config = normalize({"starter_type": True, "best_effort_mode": "priority"})
+        runtime = compile_runtime(config, es_settings_file=Path("/e"), roms_root=Path("/r"), report_file=Path("/s"),
+                                  starter_file="/tmp/last-input-device")
+        self.assertTrue(runtime["starter_type"])
+        self.assertEqual(runtime["starter_file"], "/tmp/last-input-device")
 
 
 def make_settings(base: Path):
@@ -578,6 +680,13 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.set_best_effort_mode("nope")
         self.assertEqual(self.manager.get_status()["best_effort_mode"], "priority")
+        self.manager.set_starter_type(True)
+        self.assertTrue(self.manager.get_status()["starter_type"])
+        runtime = json.loads(self.paths.runtime_file.read_text())
+        self.assertTrue(runtime["starter_type"])
+        self.assertTrue(runtime["starter_file"].endswith("last-input-device"))
+        self.manager.set_starter_type(False)
+        self.assertFalse(self.manager.get_status()["starter_type"])
         self.manager.set_preset("n64", True)
         self.manager.set_system("gamecube", [{"kind": "type", "type": "gamecube"}])
         self.manager.set_game("gamecube/Mario Kart.iso", [{"kind": "type", "type": "gamecube"}], "Mario Kart")
@@ -638,6 +747,7 @@ class HandlerTests(unittest.TestCase):
         cases = [
             (["auto"], {"enabled": True}, "set_auto"),
             (["best-effort-mode"], {"mode": "priority"}, "set_best_effort_mode"),
+            (["starter-type"], {"enabled": True}, "set_starter_type"),
             (["default"], {"order": []}, "set_default"),
             (["presets", "snes"], {"enabled": True}, "set_preset"),
             (["systems"], {"system": "snes", "order": []}, "set_system"),

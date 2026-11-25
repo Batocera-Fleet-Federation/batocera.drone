@@ -10,6 +10,12 @@
   `POST /v1/api/admin/integrations/controller-assignments/best-effort-mode` (`{"mode": "closest"|"priority"}`).
   The type picker marks the controller types that are connected right now.
 
+- Controller Assignments: new **Use the type of the controller that starts the game** switch
+  (off by default). When on, every controller of the last pressed type fills the first player
+  slots in its usual order, with the rest placed by the normal rules; Batocera assignments and
+  light guns still win, and stale/unknown presses fall back to the normal rules. New
+  `POST /v1/api/admin/integrations/controller-assignments/starter-type` (`{"enabled": bool}`).
+
 - Backups: every new (non-snapshot) backup now records the source Drone's ROMs (with folder-unit
   metadata and present gamelist artwork fields), BIOS files, movies and music in a bounded,
   hash-verified `assets.json.gz` member (`backups/assets.py`), with older backups falling back to

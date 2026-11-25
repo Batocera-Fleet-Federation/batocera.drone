@@ -73,6 +73,15 @@ switch, which also applies to presets):
   those that do, whatever their place in the list. Types can be listed whether or not they are
   connected.
 
+**Starter type** (`starter_type`, the "Use the type of the controller that starts the game"
+switch, off by default) promotes every controller of the last pressed type ahead of the rest,
+keeping their usual order within the type (a left arcade stick stays P1 even when the right
+stick started the game). It applies on top of game, system, preset, best-effort and default
+ordering. Batocera pins and light guns still keep their slots. The privileged input monitor
+records each button press to `control/last-input-device` ("`<epoch> <devicepath>`"); a press
+older than `STARTER_MAX_AGE_SECONDS` (15 s), a keyboard/web launch, or an unknown device falls
+back to the normal rules. "Last launch" shows the starter type when it changed the order.
+
 ## Limits
 
 EmulationStation passes at most 8 controllers. The wrapper reorders those but cannot add a

@@ -72,6 +72,49 @@ class DeliberateInputDetectionTests(unittest.TestCase):
         finally:
             os.close(read_fd)
 
+    def test_button_press_records_the_device_but_release_does_not(self) -> None:
+        pressed: list = []
+        read_fd = self._feed(_event(iam.EV_KEY, 304, 1) + _event(iam.EV_SYN, 0, 0))
+        try:
+            iam._read_deliberate_input(read_fd, {}, {}, device_path="/dev/input/event3",
+                                       press_devices=pressed)
+        finally:
+            os.close(read_fd)
+        self.assertEqual(pressed, ["/dev/input/event3"])
+        pressed.clear()
+        read_fd = self._feed(_event(iam.EV_KEY, 304, 0) + _event(iam.EV_SYN, 0, 0))
+        try:
+            iam._read_deliberate_input(read_fd, {}, {}, device_path="/dev/input/event3",
+                                       press_devices=pressed)
+        finally:
+            os.close(read_fd)
+        self.assertEqual(pressed, [])
+
+    def test_axis_and_sync_events_record_no_device(self) -> None:
+        pressed: list = []
+        payload = b"".join(_event(iam.EV_ABS, 2, v) for v in (127, 180, 255))
+        read_fd = self._feed(payload)
+        try:
+            iam._read_deliberate_input(read_fd, {}, {}, {}, now=1_000.0,
+                                       device_path="/dev/input/event7", press_devices=pressed)
+        finally:
+            os.close(read_fd)
+        self.assertEqual(pressed, [])
+
+    def test_device_file_path_defaults_beside_the_activity_file(self) -> None:
+        self.assertEqual(iam._device_file_path("/var/control/last-input-activity"),
+                         "/var/control/last-input-device")
+        with mock.patch.dict("os.environ", {"DRONE_INPUT_DEVICE_FILE": "/tmp/custom-device"}):
+            self.assertEqual(iam._device_file_path("/var/control/last-input-activity"),
+                             "/tmp/custom-device")
+
+    def test_write_input_device_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = str(Path(tmp) / "control" / "last-input-device")
+            Path(tmp, "control").mkdir()
+            iam._write_input_device(target, 1_700_000_000.0, "/dev/input/event3")
+            self.assertEqual(Path(target).read_text(), "1700000000 /dev/input/event3\n")
+
     def test_analog_sweep_counts_as_activity(self) -> None:
         # Three poles past the deadzone is a real stick sweep, not a square wave.
         payload = b"".join(_event(iam.EV_ABS, 2, v) for v in (127, 180, 255))

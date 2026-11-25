@@ -346,7 +346,8 @@ self-contained `launch_order.py` wrapper. That wrapper is copied to `bin/`, is s
 the app, and on any error execs the original command. Batocera's own `INPUT P<n>` assignments and
 light guns keep their slots; rules (game → system → preset → global best effort → default) fill the
 open ones. Best effort is `closest` (fit score) or `priority` (native families, then the default order as
-a fallback priority). Overlay changes need one EmulationStation restart, and rule edits apply on the next launch.
+a fallback priority). The starter-type switch promotes the last pressed controller's whole type first.
+Overlay changes need one EmulationStation restart, and rule edits apply on the next launch.
 Both Drone es_systems mergers merge partial overlay nodes field by field, as EmulationStation does.
 See `docs/integrations-controller-assignments.md`.
 

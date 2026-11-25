@@ -35,9 +35,13 @@ import struct
 import sys
 import time
 from collections import deque
+from pathlib import Path
+from typing import Optional
 
 
 DEFAULT_OUTPUT = "/userdata/system/drone-app/control/last-input-activity"
+LAST_INPUT_DEVICE_FILENAME = "last-input-device"
+DEVICE_WRITE_THROTTLE_SECONDS = 0.5  # a press is rare; record it promptly
 WRITE_THROTTLE_SECONDS = 2.0  # avoid rewriting the file on every event
 RESCAN_SECONDS = 30.0  # re-open devices to pick up hot-plugged controllers
 SELECT_TIMEOUT_SECONDS = 5.0
@@ -227,18 +231,48 @@ def _write_activity(output_path: str, epoch: float) -> None:
             pass
 
 
+def _device_file_path(output_path: str) -> str:
+    override = os.environ.get("DRONE_INPUT_DEVICE_FILE")
+    if override:
+        return override
+    return str(Path(output_path).parent / LAST_INPUT_DEVICE_FILENAME)
+
+
+def _write_input_device(device_path: str, epoch: float, device: str) -> None:
+    """Record which input device was pressed last ("<epoch> <device>")."""
+    tmp_path = f"{device_path}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(f"{epoch:.0f} {device}\n")
+        os.replace(tmp_path, device_path)
+        try:
+            os.chmod(device_path, 0o664)
+        except OSError:
+            pass
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def _read_deliberate_input(
     fd: int,
     abs_state: dict,
     deadzones: dict,
     trackers=None,
     now=None,
+    *,
+    device_path: str = "",
+    press_devices: Optional[list] = None,
 ) -> bool:
     """Read pending events from fd; return True if any was a deliberate user input.
 
     ``abs_state`` maps (fd, code) -> last seen absolute value so we can ignore the
     continuous jitter that idle analog axes emit. ``trackers`` holds per-axis
-    transition history used to ignore periodic two-value square waves. Raises
+    transition history used to ignore periodic two-value square waves. When
+    ``press_devices`` is a list, the device path of every button *press*
+    (``EV_KEY`` with a nonzero value) is appended to it. Raises
     OSError (other than EAGAIN/EWOULDBLOCK) if the device disappears so the
     caller can drop it.
     """
@@ -264,6 +298,8 @@ def _read_deliberate_input(
             )
             if ev_type == EV_KEY:
                 activity = True
+                if value != 0 and press_devices is not None and device_path:
+                    press_devices.append(device_path)
             elif ev_type == EV_REL:
                 if value != 0:
                     activity = True
@@ -306,10 +342,13 @@ def main() -> int:
     last_written = now
 
     devices = _open_devices()
+    device_path = _device_file_path(output_path)
     abs_state: dict = {}
     deadzones: dict = {}
     axis_trackers: dict = {}
     last_scan = time.time()
+    last_device = ""
+    last_device_written = 0.0
 
     while True:
         if time.time() - last_scan >= RESCAN_SECONDS:
@@ -339,9 +378,11 @@ def main() -> int:
 
         now = time.time()
         activity = False
+        pressed: list = []
         for fd in readable:
             try:
-                if _read_deliberate_input(fd, abs_state, deadzones, axis_trackers, now=now):
+                if _read_deliberate_input(fd, abs_state, deadzones, axis_trackers, now=now,
+                                          device_path=devices.get(fd, ""), press_devices=pressed):
                     activity = True
             except OSError:
                 # Device unplugged; drop it and rescan on the next loop.
@@ -359,6 +400,12 @@ def main() -> int:
             if now - last_written >= WRITE_THROTTLE_SECONDS:
                 _write_activity(output_path, now)
                 last_written = now
+            if pressed:
+                latest = pressed[-1]
+                if latest != last_device or now - last_device_written >= DEVICE_WRITE_THROTTLE_SECONDS:
+                    _write_input_device(device_path, now, latest)
+                    last_device = latest
+                    last_device_written = now
 
 
 if __name__ == "__main__":

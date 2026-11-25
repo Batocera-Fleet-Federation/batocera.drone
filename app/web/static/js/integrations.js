@@ -1951,6 +1951,10 @@ function caSettingsHtml() {
         <input class="form-check-input" type="checkbox" role="switch" id="caMode" data-ca-change="best-effort-mode" ${closest ? "checked" : ""}>
         <label class="form-check-label" for="caMode">Pick the closest controller automatically</label></div>
       <p class="small text-muted mb-0">${modeHelp} Also applies to enabled presets.${s.auto || anyPreset ? "" : " Takes effect when best effort or a preset is on."}</p></div>
+    <div class="form-check form-switch mb-2">
+      <input class="form-check-input" type="checkbox" role="switch" id="caStarter" data-ca-change="starter-type" ${s.starter_type ? "checked" : ""}>
+      <label class="form-check-label" for="caStarter"><strong>Use the type of the controller that starts the game</strong></label></div>
+    <p class="small text-muted mb-2">Whatever kind of controller you start the game with is used for as many players as possible, keeping its usual order (a left stick stays P1 even if the right stick started it). The rest follow your normal rules. Batocera assignments and light guns still keep their slots. Web, phone, keyboard, and older presses fall back to your normal rules.</p>
     <h3 class="h6">Batocera player assignments <span class="text-muted small">(always win)</span></h3>
     ${pins ? `<ul class="small mb-1">${pins}</ul><p class="small text-muted mb-0">These slots keep their controller whenever it is connected; the Drone only fills the other slots. Change them in EmulationStation → Controller &amp; Bluetooth Settings.</p>`
       : `<p class="small text-muted mb-0">None set — the Drone can fill every slot.</p>`}`;
@@ -2001,7 +2005,8 @@ function caLastLaunchHtml() {
   const rows = (report.players || []).map((player) => `<tr><td><strong>P${sdEsc(player.slot)}</strong></td><td>${sdEsc(player.name)}</td><td>${sdEsc(caTypeLabel(player.type))}</td>
       <td class="small">${player.lock ? sdBadge(`Kept: ${player.lock}`, "secondary") : ""}</td></tr>`).join("");
   const warnings = (report.warnings || []).map((text) => `<div class="small text-warning"><i class="bi bi-exclamation-triangle me-1"></i>${sdEsc(text)}</div>`).join("");
-  return `<div class="small mb-2"><code>${sdEsc(report.game)}</code> · rule: <strong>${sdEsc(report.rule)}</strong>${report.matching ? ` (${report.matching === "priority" ? "fallback priority" : "closest match"})` : ""} · ${report.changed ? "order changed" : "order unchanged"} · ${sdEsc(sdTime(report.at))}</div>
+  const starter = report.starter_applied ? ` · starter: <strong>${sdEsc(caTypeLabel(report.starter_type))}</strong>` : "";
+  return `<div class="small mb-2"><code>${sdEsc(report.game)}</code> · rule: <strong>${sdEsc(report.rule)}</strong>${report.matching ? ` (${report.matching === "priority" ? "fallback priority" : "closest match"})` : ""}${starter} · ${report.changed ? "order changed" : "order unchanged"} · ${sdEsc(sdTime(report.at))}</div>
     <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-1"><tbody>${rows || '<tr><td class="text-muted small">No controllers were passed.</td></tr>'}</tbody></table></div>${warnings}`;
 }
 
@@ -2173,6 +2178,8 @@ async function caOnChange(kind, element) {
     try { await caPost("/auto", { enabled: element.checked }); await caRefresh(element.checked ? "Best-effort matching is on." : "Best-effort matching is off."); } catch (error) { sdError(error); await caRefresh(); }
   } else if (kind === "best-effort-mode") {
     try { await caPost("/best-effort-mode", { mode: element.checked ? "closest" : "priority" }); await caRefresh(element.checked ? "Best effort picks the closest controller." : "Best effort follows your fallback priority (Default order)."); } catch (error) { sdError(error); await caRefresh(); }
+  } else if (kind === "starter-type") {
+    try { await caPost("/starter-type", { enabled: element.checked }); await caRefresh(element.checked ? "Starter type is on." : "Starter type is off."); } catch (error) { sdError(error); await caRefresh(); }
   } else if (kind === "preset") {
     try { await caPost(`/presets/${encodeURIComponent(element.dataset.id)}`, { enabled: element.checked }); await caRefresh("Preset saved."); } catch (error) { sdError(error); await caRefresh(); }
   } else if (kind === "add-entry") {
