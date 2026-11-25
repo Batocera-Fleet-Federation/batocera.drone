@@ -1900,7 +1900,8 @@ function caEditorOrder(editor) {
 
 function caAddOptions() {
   const s = caState.status || {};
-  const types = (s.types || []).map((item) => `<option value="type:${sdEsc(item.id)}">Any ${sdEsc(item.label)} controller</option>`).join("");
+  const connected = new Set((s.controllers || []).map((item) => item.type));
+  const types = (s.types || []).map((item) => `<option value="type:${sdEsc(item.id)}">Any ${sdEsc(item.label)} controller${connected.has(item.id) ? " (connected)" : ""}</option>`).join("");
   const devices = (s.controllers || []).map((item, index) => `<option value="device:${index}">${sdEsc(item.name)}${item.port ? ` — ${sdEsc(caPortLabel(item.port))}` : ""}</option>`).join("");
   return `<option value="">Add to this order…</option><optgroup label="Controller types">${types}</optgroup>${devices ? `<optgroup label="Connected controllers">${devices}</optgroup>` : ""}`;
 }
@@ -1936,10 +1937,20 @@ function caStatusHtml() {
 function caSettingsHtml() {
   const s = caState.status || {};
   const pins = (s.batocera_assignments || []).map((pin) => `<li><strong>P${sdEsc(pin.slot)}</strong> ${sdEsc(pin.name)}</li>`).join("");
+  const closest = s.best_effort_mode !== "priority";
+  const anyPreset = (s.presets || []).some((preset) => preset.enabled);
+  const modeHelp = closest
+    ? "The Drone picks the closest controller for each system. For Nintendo 64 that is an N64 pad, then GameCube, Switch / Pro, Xbox, PlayStation, and it checks for an analog stick and enough buttons. Your default order breaks ties."
+    : "Native controllers go first (for Nintendo 64: N64 and GameCube pads). After them the Drone follows your <strong>Default order</strong>, which now acts as your fallback priority. Controllers without an analog stick or enough buttons for the system go last.";
   return `<div class="form-check form-switch mb-2">
       <input class="form-check-input" type="checkbox" role="switch" id="caAuto" data-ca-change="auto" ${s.auto ? "checked" : ""}>
       <label class="form-check-label" for="caAuto"><strong>Best-effort matching for every game</strong></label></div>
-    <p class="small text-muted mb-3">When a game has no game or system rule, the Drone scores each controller for the system being played (controller family, analog stick, button count) and fills the open player slots best match first. Your default order below breaks ties. Systems it does not recognise use the default order.</p>
+    <p class="small text-muted mb-2">When a game has no game or system rule, the Drone matches the connected controllers to the system being played and fills the open player slots best match first. Systems it does not recognise use the default order.</p>
+    <div class="ms-4 mb-3 ${s.auto || anyPreset ? "" : "opacity-50"}">
+      <div class="form-check form-switch mb-1">
+        <input class="form-check-input" type="checkbox" role="switch" id="caMode" data-ca-change="best-effort-mode" ${closest ? "checked" : ""}>
+        <label class="form-check-label" for="caMode">Pick the closest controller automatically</label></div>
+      <p class="small text-muted mb-0">${modeHelp} Also applies to enabled presets.${s.auto || anyPreset ? "" : " Takes effect when best effort or a preset is on."}</p></div>
     <h3 class="h6">Batocera player assignments <span class="text-muted small">(always win)</span></h3>
     ${pins ? `<ul class="small mb-1">${pins}</ul><p class="small text-muted mb-0">These slots keep their controller whenever it is connected; the Drone only fills the other slots. Change them in EmulationStation → Controller &amp; Bluetooth Settings.</p>`
       : `<p class="small text-muted mb-0">None set — the Drone can fill every slot.</p>`}`;
@@ -1953,10 +1964,13 @@ function caControllersHtml() {
 }
 
 function caPresetsHtml() {
+  const priority = (caState.status || {}).best_effort_mode === "priority";
   return ((caState.status || {}).presets || []).map((preset) => `<div class="form-check form-switch">
       <input class="form-check-input" type="checkbox" role="switch" id="caPreset-${sdEsc(preset.id)}" data-ca-change="preset" data-id="${sdEsc(preset.id)}" ${preset.enabled ? "checked" : ""}>
       <label class="form-check-label" for="caPreset-${sdEsc(preset.id)}">${sdEsc(preset.label)}
-        <div class="small text-muted">Prefers ${sdEsc(preset.types.map(caTypeLabel).join(" → "))}. Systems: ${sdEsc(preset.systems.join(", "))}</div></label></div>`).join("");
+        <div class="small text-muted">${priority
+          ? `Native: ${sdEsc((preset.native_types || []).map(caTypeLabel).join(" → "))}, then your fallback priority.`
+          : `Prefers ${sdEsc(preset.types.map(caTypeLabel).join(" → "))}.`} Systems: ${sdEsc(preset.systems.join(", "))}</div></label></div>`).join("");
 }
 
 function caSystemsHtml() {
@@ -1987,7 +2001,7 @@ function caLastLaunchHtml() {
   const rows = (report.players || []).map((player) => `<tr><td><strong>P${sdEsc(player.slot)}</strong></td><td>${sdEsc(player.name)}</td><td>${sdEsc(caTypeLabel(player.type))}</td>
       <td class="small">${player.lock ? sdBadge(`Kept: ${player.lock}`, "secondary") : ""}</td></tr>`).join("");
   const warnings = (report.warnings || []).map((text) => `<div class="small text-warning"><i class="bi bi-exclamation-triangle me-1"></i>${sdEsc(text)}</div>`).join("");
-  return `<div class="small mb-2"><code>${sdEsc(report.game)}</code> · rule: <strong>${sdEsc(report.rule)}</strong> · ${report.changed ? "order changed" : "order unchanged"} · ${sdEsc(sdTime(report.at))}</div>
+  return `<div class="small mb-2"><code>${sdEsc(report.game)}</code> · rule: <strong>${sdEsc(report.rule)}</strong>${report.matching ? ` (${report.matching === "priority" ? "fallback priority" : "closest match"})` : ""} · ${report.changed ? "order changed" : "order unchanged"} · ${sdEsc(sdTime(report.at))}</div>
     <div class="table-responsive"><table class="table table-sm align-middle themed-table mb-1"><tbody>${rows || '<tr><td class="text-muted small">No controllers were passed.</td></tr>'}</tbody></table></div>${warnings}`;
 }
 
@@ -1997,13 +2011,22 @@ function caRenderLive() {
 }
 
 function caRenderRules() {
+  const s = caState.status || {};
+  const priorityMode = s.best_effort_mode === "priority";
+  const defaultCard = document.getElementById("caDefaultCard");
+  if (defaultCard) {
+    defaultCard.querySelector("h2").textContent = priorityMode ? "Default order & fallback priority" : "Default order";
+    defaultCard.querySelector("p").textContent = priorityMode
+      ? "Used for every system without a more specific rule. In best effort, this is the priority for controllers that are not native to the system. For example: Any PlayStation → Any GameCube → Any Arcade stick. You can add types that are not connected right now."
+      : "Used for every system without a more specific rule, and to break ties in best-effort matching.";
+  }
   const map = { caSettings: caSettingsHtml, caDefault: () => caOrderEditor("default", "Empty: EmulationStation's order is kept unless a preset, best effort, or a rule applies."),
     caPresets: caPresetsHtml, caSystems: caSystemsHtml, caGames: caGamesHtml };
   Object.entries(map).forEach(([id, render]) => { const node = document.getElementById(id); if (node) node.innerHTML = render(); });
 }
 
-function caCard(title, id, help) {
-  return `<section class="card mb-3"><div class="card-body"><h2 class="h6">${title}</h2>${help ? `<p class="small text-muted">${help}</p>` : ""}<div id="${id}"></div></div></section>`;
+function caCard(title, id, help, cardId = "") {
+  return `<section class="card mb-3"${cardId ? ` id="${cardId}"` : ""}><div class="card-body"><h2 class="h6">${title}</h2>${help ? `<p class="small text-muted">${help}</p>` : ""}<div id="${id}"></div></div></section>`;
 }
 
 function caRender() {
@@ -2013,7 +2036,7 @@ function caRender() {
     <div class="alert alert-info small"><i class="bi bi-info-circle me-2"></i>EmulationStation still chooses which controllers a game gets (up to 8). The Drone reorders them just before launch: Batocera's own player assignments keep their slots, light guns are never moved, and your rules fill the remaining slots. Most specific wins: game rule → system rule → preset → best effort → default order.</div>
     <div class="row g-3"><div class="col-xl-5">${caCard("Status", "caStatus")}${caCard("Matching", "caSettings")}${caCard("Last launch", "caLastLaunch")}</div>
       <div class="col-xl-7">${caCard("Connected controllers", "caControllers")}
-        ${caCard("Default order", "caDefault", "Used for every system without a more specific rule, and to break ties in best-effort matching.")}
+        ${caCard("Default order", "caDefault", "Used for every system without a more specific rule, and to break ties in best-effort matching.", "caDefaultCard")}
         ${caCard("Presets", "caPresets", "Turn on best-effort matching for one family of systems, even when the global setting is off.")}
         ${caCard("System rules", "caSystems", "An exact order for every game of one system.")}
         ${caCard("Game rules", "caGames", "An exact order for one game. Beats every other rule.")}</div></div>
@@ -2148,6 +2171,8 @@ async function caOnAction(action, element) {
 async function caOnChange(kind, element) {
   if (kind === "auto") {
     try { await caPost("/auto", { enabled: element.checked }); await caRefresh(element.checked ? "Best-effort matching is on." : "Best-effort matching is off."); } catch (error) { sdError(error); await caRefresh(); }
+  } else if (kind === "best-effort-mode") {
+    try { await caPost("/best-effort-mode", { mode: element.checked ? "closest" : "priority" }); await caRefresh(element.checked ? "Best effort picks the closest controller." : "Best effort follows your fallback priority (Default order)."); } catch (error) { sdError(error); await caRefresh(); }
   } else if (kind === "preset") {
     try { await caPost(`/presets/${encodeURIComponent(element.dataset.id)}`, { enabled: element.checked }); await caRefresh("Preset saved."); } catch (error) { sdError(error); await caRefresh(); }
   } else if (kind === "add-entry") {

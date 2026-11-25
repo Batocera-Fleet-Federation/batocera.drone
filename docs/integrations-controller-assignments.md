@@ -62,6 +62,17 @@ families (best first), whether an analog stick is needed, and the minimum button
 switches it on for one family of systems. The global setting switches it on for every system in
 `SYSTEM_PROFILE_BY_SYSTEM`. The default order breaks ties.
 
+Best effort has two modes (`best_effort_mode`, the "Pick the closest controller automatically"
+switch, which also applies to presets):
+
+* **`closest`** (default, switch on): `fit_score` as above.
+* **`priority`** (switch off): `priority_order` puts the system's **native** controllers first
+  (the first `NATIVE_FAMILY_COUNT` = 2 families of its profile, e.g. N64 and GameCube pads for
+  N64). The rest follow the **default order**, which is the fallback priority list here. Controllers
+  that do not suit the system (no analog stick when one is needed, or too few buttons) go after
+  those that do, whatever their place in the list. Types can be listed whether or not they are
+  connected.
+
 ## Limits
 
 EmulationStation passes at most 8 controllers. The wrapper reorders those but cannot add a

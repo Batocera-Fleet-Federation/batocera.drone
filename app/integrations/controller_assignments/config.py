@@ -19,7 +19,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .launch_order import CONTROLLER_TYPES, SYSTEM_PROFILE_BY_SYSTEM, SYSTEM_PROFILES, TYPE_IDS
+from .launch_order import (BEST_EFFORT_MODES, CONTROLLER_TYPES, NATIVE_FAMILY_COUNT, SYSTEM_PROFILE_BY_SYSTEM,
+                           SYSTEM_PROFILES, TYPE_IDS)
 from .paths import ControllerAssignmentsPaths
 
 try:
@@ -71,15 +72,26 @@ def type_catalog() -> List[dict]:
     return [{"id": type_id, "label": label} for type_id, label in CONTROLLER_TYPES]
 
 
+def preset_native_types(preset_id: str) -> List[str]:
+    types: List[str] = []
+    for profile in PRESETS[preset_id]["profiles"]:
+        for family in SYSTEM_PROFILES[profile]["families"][:NATIVE_FAMILY_COUNT]:
+            if family not in types:
+                types.append(family)
+    return types
+
+
 def preset_catalog(enabled: Optional[dict] = None) -> List[dict]:
     enabled = enabled or {}
     return [{"id": preset_id, "label": item["label"], "types": preset_types(preset_id),
+             "native_types": preset_native_types(preset_id),
              "systems": preset_systems(preset_id), "enabled": bool(enabled.get(preset_id))}
             for preset_id, item in PRESETS.items()]
 
 
 def profile_catalog() -> List[dict]:
     return [{"id": profile_id, "label": item["label"], "families": list(item["families"]),
+             "native": list(item["families"][:NATIVE_FAMILY_COUNT]),
              "analog": item["analog"], "buttons": item["buttons"],
              "systems": sorted(s for s, p in SYSTEM_PROFILE_BY_SYSTEM.items() if p == profile_id)}
             for profile_id, item in SYSTEM_PROFILES.items()]
@@ -138,8 +150,14 @@ def validate_order(value: Any) -> List[dict]:
 
 
 def default_config() -> dict:
-    return {"version": CONFIG_VERSION, "enabled": False, "auto": False, "default": [], "presets": {},
-            "systems": {}, "games": {}}
+    return {"version": CONFIG_VERSION, "enabled": False, "auto": False, "best_effort_mode": "closest",
+            "default": [], "presets": {}, "systems": {}, "games": {}}
+
+
+def valid_best_effort_mode(value: Any) -> str:
+    if value not in BEST_EFFORT_MODES:
+        raise ValueError("best-effort mode must be one of: " + ", ".join(BEST_EFFORT_MODES))
+    return value
 
 
 def normalize(raw: Any) -> dict:
@@ -149,6 +167,8 @@ def normalize(raw: Any) -> dict:
         return config
     config["enabled"] = raw.get("enabled") is True
     config["auto"] = raw.get("auto") is True
+    if raw.get("best_effort_mode") in BEST_EFFORT_MODES:
+        config["best_effort_mode"] = raw["best_effort_mode"]
     try:
         config["default"] = validate_order(raw.get("default") or [])
     except ValueError:
@@ -198,6 +218,10 @@ class ConfigStore:
 
     def set_auto(self, enabled: Any) -> dict:
         return self.update(lambda config: config.__setitem__("auto", enabled is True))
+
+    def set_best_effort_mode(self, mode: Any) -> dict:
+        clean = valid_best_effort_mode(mode)
+        return self.update(lambda config: config.__setitem__("best_effort_mode", clean))
 
     def set_default(self, order: Any) -> dict:
         clean = validate_order(order)
@@ -251,6 +275,7 @@ def compile_runtime(config: dict, *, es_settings_file: Path, roms_root: Path, re
         "version": CONFIG_VERSION,
         "enabled": bool(config["enabled"]),
         "auto": bool(config["auto"]),
+        "best_effort_mode": config["best_effort_mode"],
         "es_settings_file": str(es_settings_file),
         "roms_root": str(roms_root),
         "report_file": str(report_file),

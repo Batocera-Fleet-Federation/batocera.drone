@@ -308,6 +308,43 @@ class OrderingTests(unittest.TestCase):
         new_argv, _ = self.plan(argv_for(self.players), runtime)
         self.assertEqual(order_names(new_argv)[0], "Wii U GameCube Adapter Port 3")
 
+    def _priority_runtime(self, *types, **extra):
+        runtime = dict(self.runtime, auto=True, best_effort_mode="priority",
+                       default=[{"kind": "type", "type": t} for t in types])
+        runtime.update(extra)
+        return runtime
+
+    def test_priority_mode_native_first_then_the_fallback_priority(self):
+        players = {1: self.players[1], 2: self.players[5], 3: self.players[6]}  # DragonRise, DS4, GameCube
+        runtime = self._priority_runtime("playstation", "gamecube", "arcade")
+        new_argv, report = self.plan(argv_for(players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        # GameCube is one of N64's two native families, so it beats the priority list.
+        self.assertEqual(order_names(new_argv), ["Wii U GameCube Adapter Port 1",
+                                                 "Sony Interactive Entertainment Wireless Controller",
+                                                 "DragonRise Inc.   Generic   USB  Joystick  "])
+        self.assertEqual(report["matching"], "priority")
+        self.assertEqual(report["rule"], "best-effort")
+
+    def test_priority_mode_follows_the_list_when_nothing_native_is_connected(self):
+        players = {1: self.players[5], 2: self.players[1]}  # DS4, DragonRise
+        runtime = self._priority_runtime("arcade", "playstation")
+        new_argv, _ = self.plan(argv_for(players, "snes", "/userdata/roms/snes/g.sfc"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "DragonRise Inc.   Generic   USB  Joystick  ")
+        # N64 needs an analog stick: the digital arcade stick drops below the DS4 despite the list.
+        new_argv, _ = self.plan(argv_for(players, "n64", "/userdata/roms/n64/g.z64"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "Sony Interactive Entertainment Wireless Controller")
+
+    def test_priority_mode_applies_to_presets_and_closest_stays_default(self):
+        players = {1: self.players[5], 2: self.players[1]}
+        runtime = self._priority_runtime("arcade", "playstation", auto=False)
+        runtime["systems"] = {"snes": {"mode": "best-effort", "source": "preset:snes"}}
+        new_argv, report = self.plan(argv_for(players, "snes", "/userdata/roms/snes/g.sfc"), runtime)
+        self.assertEqual(order_names(new_argv)[0], "DragonRise Inc.   Generic   USB  Joystick  ")
+        self.assertEqual(report["matching"], "priority")
+        _, report = self.plan(argv_for(players, "snes", "/userdata/roms/snes/g.sfc"),
+                              dict(runtime, best_effort_mode="bogus"))
+        self.assertEqual(report["matching"], "closest")
+
     def test_disabled_or_unknown_rules_leave_argv_untouched(self):
         argv = argv_for(self.players)
         self.assertEqual(self.plan(argv, dict(self.runtime, enabled=False))[0], argv)
@@ -380,6 +417,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(runtime["systems"]["snes"]["source"], "system")
         self.assertEqual(runtime["systems"]["sfc"], {"mode": "best-effort", "source": "preset:snes"})
         self.assertEqual(set(PRESETS), {"gamecube", "n64", "snes", "nes", "sega", "playstation", "xbox", "arcade", "switch"})
+
+    def test_best_effort_mode_defaults_to_closest_and_is_validated(self):
+        self.assertEqual(normalize({})["best_effort_mode"], "closest")
+        self.assertEqual(normalize({"best_effort_mode": "rm -rf"})["best_effort_mode"], "closest")
+        config = normalize({"best_effort_mode": "priority"})
+        self.assertEqual(config["best_effort_mode"], "priority")
+        runtime = compile_runtime(config, es_settings_file=Path("/e"), roms_root=Path("/r"), report_file=Path("/s"))
+        self.assertEqual(runtime["best_effort_mode"], "priority")
 
 
 def make_settings(base: Path):
@@ -529,11 +574,16 @@ class ManagerTests(unittest.TestCase):
         self.assertIn("gamecube", status["systems"])
 
         self.manager.set_auto(True)
+        self.manager.set_best_effort_mode("priority")
+        with self.assertRaises(ValueError):
+            self.manager.set_best_effort_mode("nope")
+        self.assertEqual(self.manager.get_status()["best_effort_mode"], "priority")
         self.manager.set_preset("n64", True)
         self.manager.set_system("gamecube", [{"kind": "type", "type": "gamecube"}])
         self.manager.set_game("gamecube/Mario Kart.iso", [{"kind": "type", "type": "gamecube"}], "Mario Kart")
         runtime = json.loads(self.paths.runtime_file.read_text())
         self.assertTrue(runtime["auto"])
+        self.assertEqual(runtime["best_effort_mode"], "priority")
         self.assertEqual(runtime["systems"]["n64"]["source"], "preset:n64")
         self.assertIn("gamecube/Mario Kart.iso", runtime["games"])
 
@@ -587,6 +637,7 @@ class HandlerTests(unittest.TestCase):
     def test_post_routes_dispatch_to_the_manager(self):
         cases = [
             (["auto"], {"enabled": True}, "set_auto"),
+            (["best-effort-mode"], {"mode": "priority"}, "set_best_effort_mode"),
             (["default"], {"order": []}, "set_default"),
             (["presets", "snes"], {"enabled": True}, "set_preset"),
             (["systems"], {"system": "snes", "order": []}, "set_system"),

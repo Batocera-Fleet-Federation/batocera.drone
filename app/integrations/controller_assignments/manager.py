@@ -148,6 +148,7 @@ class ControllerAssignmentsIntegration(Integration):
             "types": type_catalog(),
             "presets": preset_catalog(config["presets"]),
             "auto": config["auto"],
+            "best_effort_mode": config["best_effort_mode"],
             "profiles": profile_catalog(),
             "default": config["default"],
             "systems_rules": [{"system": key, **value} for key, value in sorted(config["systems"].items())],
@@ -251,6 +252,10 @@ class ControllerAssignmentsIntegration(Integration):
     def set_auto(self, enabled: Any, requested_by: str = "") -> dict:
         return self._edit(lambda: self.config.set_auto(enabled), "best-effort-updated", requested_by,
                           enabled=enabled is True)
+
+    def set_best_effort_mode(self, mode: Any, requested_by: str = "") -> dict:
+        return self._edit(lambda: self.config.set_best_effort_mode(mode), "best-effort-mode-updated", requested_by,
+                          mode=str(mode))
 
     def set_default(self, order: Any, requested_by: str = "") -> dict:
         return self._edit(lambda: self.config.set_default(order), "default-updated", requested_by)

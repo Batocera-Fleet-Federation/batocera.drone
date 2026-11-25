@@ -23,9 +23,12 @@ Behaviour, in order of authority:
 2. Light guns are never moved (they are ignored by the integration).
 3. Every other controller is ordered by the most specific matching rule
    into the slots that remain open: a game rule, then a system rule, then an
-   enabled preset, then (when the global "best effort" setting is on) a
-   per-system fit score (family, analog stick, button count) with the default
-   order breaking ties, then the default order alone. Controllers a rule does
+   enabled preset, then (when the global "best effort" setting is on) best
+   effort, then the default order alone. Best effort has two modes:
+   ``closest`` scores each controller for the system (family, analog stick,
+   button count) with the default order breaking ties; ``priority`` puts the
+   system's native controllers first, then follows the default order as a
+   fallback priority, with unsuitable controllers last. Controllers a rule does
    not mention follow in EmulationStation's original order. Nobody is dropped
    and the set of slot numbers is unchanged.
 
@@ -287,6 +290,46 @@ def best_effort_order(controllers, system, tie_break):
     return sorted(controllers, key=lambda c: (-fit_score(c, profile), tie(c), c["slot"]))
 
 
+# How many of a profile's preferred families count as the system's own
+# ("native") controllers in priority mode: N64 -> N64 and GameCube pads.
+NATIVE_FAMILY_COUNT = 2
+BEST_EFFORT_MODES = ("closest", "priority")
+
+
+def suits(controller, profile):
+    """False when a controller lacks the analog stick or buttons a system needs."""
+    if profile["analog"] and not has_analog(controller):
+        return False
+    buttons = controller.get("buttons")
+    return buttons is None or buttons >= profile["buttons"]
+
+
+def priority_order(controllers, system, priority):
+    """Native controllers first, then the administrator's fallback priority.
+
+    Order: the system's own families (best first); then controllers that
+    suit the system, then those that do not (no analog stick, too few
+    buttons); within each group, the first matching ``priority`` selector
+    wins and EmulationStation's order breaks ties. ``None`` when the system
+    is unknown.
+    """
+    profile = SYSTEM_PROFILES.get(SYSTEM_PROFILE_BY_SYSTEM.get(system, ""))
+    if profile is None:
+        return None
+    native = tuple(profile["families"][:NATIVE_FAMILY_COUNT])
+
+    def rank(controller):
+        position = len(priority or [])
+        for index, selector in enumerate(priority or []):
+            if selector_matches(selector, controller):
+                position = index
+                break
+        family = controller["type"]
+        native_rank = native.index(family) if family in native else len(native)
+        return (native_rank, not suits(controller, profile), position, controller["slot"])
+    return sorted(controllers, key=rank)
+
+
 def is_gun(name, facts=None):
     return bool((facts or {}).get("gun")) or bool(_GUN_NAME.search(str(name or "")))
 
@@ -466,15 +509,19 @@ def plan(argv, runtime, *, sys_root="/sys", udev_root="/run/udev/data"):
     game_key = rom_key(system, rom, runtime.get("roms_root") or "/userdata/roms")
     source, order, ranked = resolve_rule(runtime, system, game_key)
     controllers = [controller_view(slot, values, sys_root, udev_root) for slot, values in sorted(players.items())]
+    mode = runtime.get("best_effort_mode") if runtime.get("best_effort_mode") in BEST_EFFORT_MODES else "closest"
     report = {"system": system, "game": game_key, "rule": source, "changed": False,
               "profile": SYSTEM_PROFILE_BY_SYSTEM.get(system, "") if ranked else "",
+              "matching": mode if ranked else "",
               "before": [_public(c) for c in controllers], "players": [], "warnings": []}
     if not runtime.get("enabled") or source == "none" or not controllers:
         report["players"] = [dict(_public(c), lock="") for c in controllers]
         return argv, report
     pins = read_batocera_pins(runtime.get("es_settings_file") or "")
     ranker = None
-    if ranked:
+    if ranked and mode == "priority":
+        ranker = lambda free: priority_order(free, system, order)  # noqa: E731
+    elif ranked:
         ranker = lambda free: best_effort_order(free, system, order)  # noqa: E731
     assignment, locks = compute_assignment(controllers, order, pins, ranker)
     new_players = {slot: players[controller["slot"]] for slot, controller in assignment.items()}

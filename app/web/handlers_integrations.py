@@ -331,6 +331,8 @@ class HandlersIntegrationsMixin:
             self._send_json(200, manager.set_default(body.get("order"), requested_by=actor))
         elif sub == ["auto"]:
             self._send_json(200, manager.set_auto(body.get("enabled"), requested_by=actor))
+        elif sub == ["best-effort-mode"]:
+            self._send_json(200, manager.set_best_effort_mode(body.get("mode"), requested_by=actor))
         elif len(sub) == 2 and sub[0] == "presets":
             self._send_json(200, manager.set_preset(sub[1], body.get("enabled"), requested_by=actor))
         elif sub == ["systems"]:

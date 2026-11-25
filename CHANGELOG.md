@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Controller Assignments: under "Best-effort matching for every game", a new **Pick the closest
+  controller automatically** switch (on by default, today's behaviour). Turn it off and best effort,
+  including enabled presets, puts the system's native controllers first (for N64: N64 and GameCube
+  pads), then follows the Default order as a fallback priority (for example PlayStation → GameCube →
+  Arcade stick). Controllers without the analog stick or buttons a system needs go last. New
+  `POST /v1/api/admin/integrations/controller-assignments/best-effort-mode` (`{"mode": "closest"|"priority"}`).
+  The type picker marks the controller types that are connected right now.
+
 - Backups: every new (non-snapshot) backup now records the source Drone's ROMs (with folder-unit
   metadata and present gamelist artwork fields), BIOS files, movies and music in a bounded,
   hash-verified `assets.json.gz` member (`backups/assets.py`), with older backups falling back to
