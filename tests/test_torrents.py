@@ -3300,6 +3300,76 @@ class TorrentMoveStopsSeedingTests(unittest.TestCase):
             self.assertTrue(file1.exists())
             self.assertEqual(manager._pending_payload_cleanup, [])
 
+    def _queue_for_retry(self, manager, folder: Path, download_dir: Path) -> None:
+        with manager._lock:
+            manager._queue_pending_payload_cleanup_locked(folder, str(download_dir))
+        manager._payload_cleanup_next_attempt.clear()
+
+    def test_pending_cleanup_removes_nested_tree_without_following_inner_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            download_dir = root / "downloads"
+            folder = download_dir / "pack"
+            (folder / "Season 1" / "extras").mkdir(parents=True)
+            (folder / "Season 1" / "e01.mkv").write_bytes(b"x")
+            (folder / "Season 1" / "extras" / "nfo.txt").write_bytes(b"x")
+            (folder / ".fuse_hidden0006753700000004").write_bytes(b"x")
+            outside = root / "library"
+            outside.mkdir()
+            (outside / "keep.bin").write_bytes(b"keep")
+            (folder / "link-to-library").symlink_to(outside, target_is_directory=True)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            self._queue_for_retry(manager, folder, download_dir)
+            manager._move_tick()
+            self.assertFalse(folder.exists())
+            self.assertTrue(download_dir.is_dir())
+            self.assertTrue((outside / "keep.bin").exists())
+            self.assertEqual(manager._pending_payload_cleanup, [])
+
+    def test_pending_cleanup_refuses_download_dir_or_ancestor_turned_symlink(self) -> None:
+        for swapped in ("download_dir", "ancestor"):
+            with self.subTest(swapped=swapped), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                mount = root / "mount"
+                download_dir = mount / "downloads"
+                folder = download_dir / "saves"
+                folder.mkdir(parents=True)
+                (folder / "leftover").write_bytes(b"busy")
+                library = root / "library"
+                victim = library / "downloads" / "saves" if swapped == "ancestor" else library / "saves"
+                victim.mkdir(parents=True)
+                (victim / "precious").write_bytes(b"keep")
+                manager = TorrentManager(_build_settings(root), start_worker=False)
+                self._queue_for_retry(manager, folder, download_dir)
+                moved_aside = (mount if swapped == "ancestor" else download_dir).with_name("real")
+                (mount if swapped == "ancestor" else download_dir).rename(moved_aside)
+                (mount if swapped == "ancestor" else download_dir).symlink_to(library, target_is_directory=True)
+                manager._move_tick()
+                self.assertTrue((victim / "precious").exists())
+                # Refused entries are dropped, never retried through the link.
+                self.assertEqual(manager._pending_payload_cleanup, [])
+
+    def test_pending_cleanup_keeps_retrying_a_busy_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            download_dir = root / "downloads"
+            folder = download_dir / "pack"
+            folder.mkdir(parents=True)
+            (folder / "held.bin").write_bytes(b"x")
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            self._queue_for_retry(manager, folder, download_dir)
+            with mock.patch.object(
+                torrent_manager.os, "rmdir", side_effect=OSError(errno.ENOTEMPTY, "Directory not empty")
+            ):
+                manager._move_tick()
+            self.assertTrue(folder.exists())
+            self.assertEqual(len(manager._pending_payload_cleanup), 1)
+            self.assertGreater(manager._payload_cleanup_next_attempt[str(folder)], 0)
+            manager._payload_cleanup_next_attempt.clear()
+            manager._move_tick()
+            self.assertFalse(folder.exists())
+            self.assertEqual(manager._pending_payload_cleanup, [])
+
 
 class TorrentQueueControlTests(unittest.TestCase):
     def test_pause_sets_flag_pauses_aria2_and_blocks_scheduling(self) -> None:

@@ -623,8 +623,13 @@ drained even when `rmtree` fails. Only the folder delete is queued in
 `_pending_payload_cleanup` (persisted as `pending_payload_cleanup`, bounded by
 `PAYLOAD_CLEANUP_MAX_PENDING`). `_retry_pending_payload_cleanup` retries it at
 the start of each move tick with a `PAYLOAD_CLEANUP_RETRY_SECONDS` back-off. It
-only removes a non-symlink direct child of the recorded `download_dir`, and it
-drops (never deletes) a folder that a tracked torrent owns again. The finish
+only removes a direct child of the recorded (resolved) `download_dir`, via
+`_remove_pending_payload_dir`: every component from `/` is opened `O_NOFOLLOW`
+relative to its pinned parent and the tree is deleted through descriptors
+(`_rmtree_child_nofollow`), never `shutil.rmtree(path)`. A symlink on the
+download dir or any ancestor (the queue is persisted, so it can appear between
+retries or across a restart) makes it drop the entry rather than delete through
+the link. It also drops (never deletes) a folder that a tracked torrent owns again. The finish
 notification reports `cleanup_pending`. FUSE behaviour can't be mocked, so a
 change here needs a live check with a `fuseblk` source and a destination on a
 different device.

@@ -785,6 +785,118 @@ def _remove_downloaded_payload(entry: dict, failed_roots: Optional[List[Path]] =
     return removed_ok
 
 
+_NOFOLLOW_DIR_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+# Upper bound on directory entries one pending-cleanup retry will delete, so a
+# process refilling the folder cannot keep the move tick busy forever.
+_PAYLOAD_CLEANUP_MAX_ENTRIES = 200_000
+
+
+class _PayloadCleanupRefused(Exception):
+    """The recorded folder no longer sits at its recorded physical location
+    (a symlink or non-directory appeared on the path); never delete it."""
+
+
+def _remove_pending_payload_dir(path: Path, download_dir: Path) -> bool:
+    """Delete the recorded torrent folder ``path`` (a direct child of the
+    recorded, already-resolved ``download_dir``) without following any
+    symlink (issue #766 retry).
+
+    Every component from ``/`` down to ``download_dir`` is opened with
+    ``O_NOFOLLOW`` relative to its already-open parent, and the folder's
+    contents are removed through descriptors rather than paths, so replacing
+    the download directory or any ancestor with a symlink -- before or
+    during the retry -- cannot redirect the delete outside the recorded tree.
+
+    Returns True once the folder is gone (removed now or already missing).
+    Raises ``_PayloadCleanupRefused`` if a symlink or non-directory now sits
+    anywhere on the recorded path, and ``OSError`` for a retryable failure
+    (busy file, leftover FUSE placeholder, permissions).
+    """
+    name = path.name
+    parts = download_dir.parts
+    if (
+        not download_dir.is_absolute()
+        or not path.is_absolute()
+        or path.parent != download_dir
+        or name in ("", ".", "..")
+        or any(part in (".", "..") for part in parts[1:])
+    ):
+        raise _PayloadCleanupRefused(str(path))
+    fd = os.open(parts[0], _NOFOLLOW_DIR_FLAGS & ~getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for part in parts[1:]:
+            try:
+                next_fd = os.open(part, _NOFOLLOW_DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                return True
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise _PayloadCleanupRefused(str(path)) from error
+                raise
+            os.close(fd)
+            fd = next_fd
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        if not stat.S_ISDIR(info.st_mode):
+            raise _PayloadCleanupRefused(str(path))
+        _rmtree_child_nofollow(fd, name)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _rmtree_child_nofollow(parent_fd: int, name: str) -> None:
+    """Iteratively delete directory ``name`` inside ``parent_fd``. Each level
+    is opened ``O_NOFOLLOW`` relative to its pinned parent and entries are
+    unlinked/rmdir'd by name in that parent, so no symlink is ever followed."""
+    try:
+        first = os.open(name, _NOFOLLOW_DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _PayloadCleanupRefused(name) from error
+        raise
+    stack: List[Tuple[int, str]] = [(first, name)]
+    budget = _PAYLOAD_CLEANUP_MAX_ENTRIES
+    try:
+        while stack:
+            dir_fd = stack[-1][0]
+            descended = False
+            for child in os.listdir(dir_fd):
+                budget -= 1
+                if budget < 0:
+                    raise OSError(errno.EBUSY, "Too many entries to remove in one pass", name)
+                try:
+                    info = os.stat(child, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    stack.append((os.open(child, _NOFOLLOW_DIR_FLAGS, dir_fd=dir_fd), child))
+                    descended = True
+                    break
+                try:
+                    os.unlink(child, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    pass
+            if descended:
+                continue
+            dir_fd, own_name = stack.pop()
+            os.close(dir_fd)
+            os.rmdir(own_name, dir_fd=stack[-1][0] if stack else parent_fd)
+    finally:
+        for dir_fd, _ in stack:
+            os.close(dir_fd)
+
+
 def _magnet_display_name(magnet_uri: str) -> str:
     """Best-effort display name for a freshly-added magnet link, from its
     ``dn=`` parameter or a truncated infohash. Purely a placeholder --
@@ -974,7 +1086,7 @@ class TorrentManager:
                 download_dir = str(item.get("download_dir") or "").strip()
                 if path and download_dir:
                     self._pending_payload_cleanup.append({"path": path, "download_dir": download_dir})
-        entries =stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
+        entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
                 continue
@@ -3053,8 +3165,10 @@ class TorrentManager:
 
         Only ever removes a dedicated per-torrent folder recorded by
         _finalize_move_job_locked: it must still be a direct, non-symlink
-        child of the recorded download directory, and it is dropped (never
-        deleted) once a tracked torrent owns that folder again.
+        child of the recorded (resolved) download directory, reached from
+        ``/`` without following any symlink (_remove_pending_payload_dir), and
+        it is dropped (never deleted) once a tracked torrent owns that folder
+        again or a symlink appears anywhere on its recorded path.
         """
         now = time.monotonic()
         with self._lock:
@@ -3087,10 +3201,15 @@ class TorrentManager:
                 finished.add(item["path"])
                 continue
             try:
-                if path.is_symlink():
-                    finished.add(item["path"])
-                    continue
-                shutil.rmtree(path)
+                _remove_pending_payload_dir(path, download_dir)
+                finished.add(item["path"])
+            except _PayloadCleanupRefused:
+                print(
+                    f"Torrent payload cleanup skipped for {path}: a symlink or non-directory "
+                    "now sits on its recorded path",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 finished.add(item["path"])
             except FileNotFoundError:
                 finished.add(item["path"])
