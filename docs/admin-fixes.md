@@ -2,13 +2,13 @@
 
 The web Admin panel contains a **Fixes** page for opt-in compatibility workarounds that do not belong in Batocera's read-only system image. Each fix has a live status card, an enable/disable switch, a short summary, and a title button that opens the complete technical explanation and rollback impact.
 
-## Lindbergh input-device guard
+## Input-device guard (all systems)
 
 LinuxLoader and the SDL3 build on affected Batocera releases can crash during joystick initialization when a cabinet exposes more joystick-class devices than LinuxLoader's eight-controller model expects. The guard is installed as the supported Batocera game hook:
 
 `/userdata/system/scripts/drone-lindbergh-input-device-guard.py`
 
-It acts only on `lindbergh` launches. When `/sys/class/input/js*` exceeds eight entries, it groups entries by physical USB parent, protects devices whose names identify them as light guns, ignores every single-controller device, and temporarily unbinds a suitable multi-port adapter. `gameStop` restores the adapter. A detached watchdog handles abnormal `emulatorlauncher` exits, the next launch repairs stale state, and rebooting also restores normal USB binding.
+It acts on every system by default (`systems: ["*"]` in `/userdata/system/input-device-guard/config.json`). When `/sys/class/input/js*` exceeds `max_joysticks` (eight), it first stops the Wii U GameCube adapter daemon and unbinds the adapter, because its four virtual pads have no USB parent; this step is skipped for `adapter_exempt_systems` (`gamecube`, `wii`, `wiiu`, `switch`) and for systems the Switch 2 guard manages. If the count is still over, it groups entries by physical USB parent, protects light guns, ignores every single-controller device, and temporarily unbinds a suitable multi-port adapter. `gameStop` binds the adapters again and restarts the adapter daemon. A detached watchdog handles abnormal `emulatorlauncher` exits, the next launch repairs stale state, and rebooting also restores normal USB binding. Nothing happens at or under the limit.
 
 Configuration and the rotating activity log are stored under `/userdata/system/input-device-guard` and `/userdata/system/logs/input-device-guard.log`. Disabling the fix restores any active adapter before removing the Drone-owned hook.
 

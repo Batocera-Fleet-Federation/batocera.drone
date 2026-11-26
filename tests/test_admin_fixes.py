@@ -309,6 +309,76 @@ class InstalledFixAssetTests(unittest.TestCase):
         self.assertEqual([group["usb_id"] for group in selected], ["1-2"])
 
 
+class AllSystemsInputGuardTests(unittest.TestCase):
+    """The input-device guard runs on every system and can pause the GameCube adapter."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.host = FakeGameCubeHost(root)
+        self.input = root / "sys" / "class" / "input"
+        self.input.mkdir(parents=True)
+        for index in range(5):
+            (self.input / f"js{index}").mkdir()  # real pads
+        for index in range(5, 9):
+            (self.input / f"js{index}").mkdir()  # the daemon's virtual GameCube ports
+        guard = lindbergh_input_guard
+
+        def kill(pid: int, sig: int) -> None:
+            self.host.kill(pid, sig)
+            for index in range(5, 9):
+                (self.input / f"js{index}").rmdir()
+
+        self.host.add_process(4242, ["/usr/bin/wii-u-gc-adapter"])
+        for patcher in (
+            mock.patch.object(guard, "USB_DEVICES_ROOT", self.host.devices),
+            mock.patch.object(guard, "USB_DRIVERS_ROOT", self.host.drivers),
+            mock.patch.object(guard, "SYS_INPUT_ROOT", self.input),
+            mock.patch.object(guard, "PROC_ROOT", self.host.proc),
+            mock.patch.object(guard, "RUNTIME_ROOT", root / "run"),
+            mock.patch.object(guard, "STATE_PATH", root / "run" / "state.json"),
+            mock.patch.object(guard, "LOCK_PATH", root / "run" / "state.lock"),
+            mock.patch.object(guard, "SWITCH2_GUARD_STATE", root / "run" / "switch2.json"),
+            mock.patch.object(guard, "SWITCH2_GUARD_CONFIG", root / "missing.json"),
+            mock.patch.object(guard, "CONFIG_PATH", root / "config.json"),
+            mock.patch.object(guard, "LOG_PATH", root / "guard.log"),
+            mock.patch.object(guard, "UDEV_RESTART_GRACE_SECONDS", 0),
+            mock.patch.object(guard.time, "sleep"),
+            mock.patch.object(guard.os, "kill", side_effect=kill),
+            mock.patch.object(guard, "spawn_watchdog"),
+            mock.patch.object(guard.os, "getppid", return_value=100),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.guard = guard
+
+    def test_snes_launch_over_the_limit_pauses_the_adapter_then_restores_it(self) -> None:
+        self.guard.main(["gameStart", "snes", "libretro", "snes9x", "/userdata/roms/snes/Mario.zip"])
+        self.assertEqual(self.host.driver_action("unbind"), "5-1.4")
+        self.assertFalse((self.host.proc / "4242").exists())
+        self.assertNotEqual(self.host.driver_action("unbind"), "3-1")
+        (self.host.devices / "5-1.4" / "driver").rmdir()  # the kernel drops the driver link on unbind
+        with mock.patch.object(self.guard, "start_daemon") as start:
+            self.guard.main(["gameStop", "snes", "libretro", "snes9x", "/userdata/roms/snes/Mario.zip"])
+        self.assertEqual(self.host.driver_action("bind"), "5-1.4")
+        start.assert_called_once_with(["/usr/bin/wii-u-gc-adapter"])
+        self.assertFalse(self.guard.STATE_PATH.exists())
+
+    def test_under_the_limit_changes_nothing(self) -> None:
+        for index in range(5, 9):
+            (self.input / f"js{index}").rmdir()
+        self.guard.main(["gameStart", "snes", "libretro", "snes9x", "x.zip"])
+        self.assertTrue((self.host.proc / "4242").exists())
+        self.assertEqual(self.host.driver_action("unbind"), "")
+
+    def test_gamecube_systems_and_switch2_keep_the_adapter(self) -> None:
+        for system in ("gamecube", "switch2"):
+            self.guard.main(["gameStart", system, "e", "c", "x.rom"])
+        self.assertTrue((self.host.proc / "4242").exists())
+        self.assertEqual(self.host.driver_action("unbind"), "")
+
+
 class Switch2GameCubeGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

@@ -61,13 +61,13 @@ FIX_CATALOG = (
     },
     {
         "id": LINDBERGH_INPUT_GUARD_ID,
-        "name": "Lindbergh input-device guard",
-        "summary": "Prevents Lindbergh/LinuxLoader from crashing when too many joystick-class devices are connected.",
-        "applies_to": "Sega Lindbergh (LinuxLoader)",
+        "name": "Input-device guard (all systems)",
+        "summary": "Prevents games from crashing at startup when too many controllers are connected, by pausing spare adapters while the game runs.",
+        "applies_to": "All systems (RetroArch, LinuxLoader and other emulators)",
         "details": [
-            "LinuxLoader initializes SDL joystick, haptic, and gamepad support before a game starts. On affected Batocera builds, that initialization can crash when the connected joystick topology exceeds the eight-controller range LinuxLoader expects.",
-            "At a Lindbergh gameStart event, this guard inventories /sys/class/input/js*. If the total exceeds eight, it groups those entries by physical USB device, protects light guns, and temporarily unbinds only a multi-port controller adapter. Single controllers are never selected automatically.",
-            "At gameStop it binds the adapter again. A detached watchdog also restores it if emulatorlauncher exits without delivering gameStop, and stale state is repaired at the next launch. A reboot restores USB binding naturally as an additional safety net.",
+            "RetroArch, LinuxLoader and other emulators initialize joystick support before a game starts. On affected Batocera builds, that initialization can abort (\"stack smashing detected\") when more than eight joystick devices are connected.",
+            "At every gameStart event, this guard counts /sys/class/input/js*. If the total exceeds eight, it first stops the Wii U GameCube adapter daemon and unbinds the adapter (its four virtual pads have no USB parent), unless the game is a GameCube, Wii, Wii U or Switch title or the Switch 2 guard manages it. If still over, it temporarily unbinds multi-port USB controller adapters and protects light guns. Single controllers are never selected automatically.",
+            "At gameStop it binds the adapters again and restarts the GameCube adapter daemon. A detached watchdog also restores it if emulatorlauncher exits without delivering gameStop, and stale state is repaired at the next launch. A reboot restores USB binding naturally as an additional safety net.",
         ],
         "changes": [
             f"Installs /userdata/system/scripts/{HOOK_FILENAME}",
@@ -75,7 +75,7 @@ FIX_CATALOG = (
             "Writes activity to /userdata/system/logs/input-device-guard.log",
             "Does not modify Batocera's read-only system image or emulator files",
         ],
-        "caution": "While a Lindbergh game is running, a selected multi-port adapter is unavailable. It is restored when the game exits.",
+        "caution": "Only when more than eight joysticks are connected: a selected adapter (usually the GameCube adapter) is unavailable while the game runs and is restored when it exits.",
     },
     {
         "id": SWITCH2_GAMECUBE_GUARD_ID,
