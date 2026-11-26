@@ -30,7 +30,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app.device.network_share_manager as network_share_manager
 import app.device.smtp_manager as smtp_manager
 import app.device.tailnet_service as tailnet_service
 import app.device.vpn_manager as vpn_manager
@@ -44,7 +43,6 @@ from app.mock_data import seed_mock_userdata
 _STARTER_FLAGS = (
     "_VPN_SHARING_POLLER_STARTED",
     "_VPN_SELF_HEAL_POLLER_STARTED",
-    "_NETWORK_SHARE_WATCHDOG_STARTED",
     "_SMTP_SHARING_POLLER_STARTED",
     "_AUDIT_EMAIL_POLLER_STARTED",
     "_TAILNET_SHARING_POLLER_STARTED",
@@ -57,8 +55,6 @@ _QUIET_FLAGS = (
     "_AUTOMATION_POLLER_STARTED",
     "_LOCAL_NETWORK_WORKERS_STARTED",
     "_STREAMDECK_SUPERVISOR_STARTED",
-    "_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED",
-    "_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED",
     "_SMTP_BOOTSTRAP_ATTEMPTED",
     "_TAILNET_BOOTSTRAP_ATTEMPTED",
     "_VPN_AUTO_CONNECT_ATTEMPTED",
@@ -70,7 +66,6 @@ _PRODUCTION_POLLERS = (
     smtp_manager.run_sharing_revocation_poller,
     smtp_manager.run_audit_email_digest_poller,
     tailnet_service.run_tailnet_sharing_revocation_poller,
-    network_share_manager.run_watchdog_poller,
 )
 
 _POLLER_CASES = (
@@ -78,13 +73,11 @@ _POLLER_CASES = (
     ("vpn-self-heal", vpn_manager, "run_self_heal_poller", "check_and_self_heal"),
     ("smtp-sharing", smtp_manager, "run_sharing_revocation_poller", "check_sharing_revocation"),
     ("tailnet-sharing", tailnet_service, "run_tailnet_sharing_revocation_poller", "check_tailnet_sharing_revocation"),
-    ("network-watchdog", network_share_manager, "run_watchdog_poller", "list_shares"),
 )
 
 _THREAD_NAMES = {
     "drone-vpn-sharing-revocation",
     "drone-vpn-self-heal",
-    "drone-network-share-watchdog",
     "drone-smtp-sharing-revocation",
     "drone-outbound-mail-worker",
     "drone-tailnet-sharing-revocation",
@@ -202,9 +195,8 @@ def _patch_poller_io(test: unittest.TestCase, gate: _DualGate) -> dict[str, mock
         "smtp-sharing": mock.Mock(return_value=False),
         "smtp-ingest": mock.Mock(),
         "tailnet-sharing": mock.Mock(return_value=False),
-        "watchdog": mock.Mock(return_value=[]),
     }
-    for module in (vpn_manager, smtp_manager, tailnet_service, network_share_manager):
+    for module in (vpn_manager, smtp_manager, tailnet_service):
         real_generation = module.poller_generation
         _start_patch(
             test,
@@ -222,7 +214,6 @@ def _patch_poller_io(test: unittest.TestCase, gate: _DualGate) -> dict[str, mock
         test,
         mock.patch.object(tailnet_service, "check_tailnet_sharing_revocation", checks["tailnet-sharing"]),
     )
-    _start_patch(test, mock.patch.object(network_share_manager, "list_shares", checks["watchdog"]))
     return checks
 
 
@@ -244,7 +235,6 @@ def _assert_zero_checks(test: unittest.TestCase, checks: dict[str, mock.Mock]) -
     test.assertEqual(checks["smtp-sharing"].call_count, 0)
     test.assertEqual(checks["smtp-ingest"].call_count, 0)
     test.assertEqual(checks["tailnet-sharing"].call_count, 0)
-    test.assertEqual(checks["watchdog"].call_count, 0)
 
 
 class MainFinallyCaptureRaceUAT(unittest.TestCase):
@@ -396,7 +386,10 @@ class PreLoopCaptureUAT(unittest.TestCase):
                     release_parse.set()
                     thread.join(10)
                 self.assertFalse(thread.is_alive(), f"{label} did not exit after retirement during interval parse")
-                self.assertGreaterEqual(len(sleeps), 1, f"{label} never entered its loop")
+                if label != "vpn-sharing":
+                    # The VPN sharing poller also claims at function entry (#615), so a
+                    # retirement during its interval parse ends it before the first sleep.
+                    self.assertGreaterEqual(len(sleeps), 1, f"{label} never entered its loop")
                 self.assertEqual(check.call_count, 0, f"{label} checked after retirement during interval parse")
 
 

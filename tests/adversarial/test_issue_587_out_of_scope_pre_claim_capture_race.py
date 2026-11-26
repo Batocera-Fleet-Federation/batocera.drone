@@ -1,6 +1,8 @@
 """Out-of-scope probes next to #587: retirement can still miss the VPN poller.
 
-Not blocking #587 assertions. #587 is the per-tick Exception guard so one
+Since #615 every poller is started like create_server() does it, with the
+generation snapshotted by drone_api._poller_start_args before Thread.start();
+these probes now guard that fix. Not blocking #587 assertions. #587 is the per-tick Exception guard so one
 unexpected check cannot permanently stop revocation. These cases are a
 separate lifecycle hole already tracked as #615: a poller whose thread was
 started before retirement can still capture a *new* generation and keep
@@ -63,7 +65,7 @@ class OutOfScopePreClaimCaptureRaceUAT(unittest.TestCase):
                 mock.patch.object(vpn_manager, "check_sharing_revocation", check):
             thread = threading.Thread(
                 target=vpn_manager.run_sharing_revocation_poller,
-                args=(None,),
+                args=drone_api._poller_start_args(vpn_manager.run_sharing_revocation_poller, None),
                 name="issue-587-pre-claim-capture-race",
                 daemon=True,
             )
@@ -87,7 +89,7 @@ class OutOfScopePreClaimCaptureRaceUAT(unittest.TestCase):
         self.assertNotEqual(start, -1, "create_server must start the VPN sharing poller")
         window = source[start:start + 220]
         self.assertIn(
-            "generation=",
+            "args=_poller_start_args(_vpn_manager.run_sharing_revocation_poller",
             window,
             "create_server starts the VPN sharing poller without binding the "
             "pre-start generation, so a retirement before the thread is scheduled "
@@ -115,12 +117,14 @@ class OutOfScopePreClaimCaptureRaceUAT(unittest.TestCase):
                 mock.patch.object(smtp_manager, "check_sharing_revocation", check):
             thread = threading.Thread(
                 target=smtp_manager.run_sharing_revocation_poller,
-                args=(None,),
+                args=drone_api._poller_start_args(smtp_manager.run_sharing_revocation_poller, None),
                 name="issue-587-smtp-capture-race",
                 daemon=True,
             )
-            thread.start()
+            # Retirement lands after create_server() snapshotted the generation
+            # (the Thread args above) but before the thread runs (#615).
             runtime_state.retire_pollers()
+            thread.start()
             gate.set()
             thread.join(10)
 
@@ -153,12 +157,14 @@ class OutOfScopePreClaimCaptureRaceUAT(unittest.TestCase):
                 mock.patch.object(tailnet_service, "check_tailnet_sharing_revocation", check):
             thread = threading.Thread(
                 target=tailnet_service.run_tailnet_sharing_revocation_poller,
-                args=(None,),
+                args=drone_api._poller_start_args(tailnet_service.run_tailnet_sharing_revocation_poller, None),
                 name="issue-587-tailnet-capture-race",
                 daemon=True,
             )
-            thread.start()
+            # Retirement lands after create_server() snapshotted the generation
+            # (the Thread args above) but before the thread runs (#615).
             runtime_state.retire_pollers()
+            thread.start()
             gate.set()
             thread.join(10)
 

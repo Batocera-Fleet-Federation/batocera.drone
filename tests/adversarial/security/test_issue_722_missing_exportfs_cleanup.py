@@ -14,7 +14,9 @@ class MissingExportfsCleanupTests(unittest.TestCase):
     def test_missing_exportfs_keeps_client_address_until_revocation_can_be_verified(self):
         """'Removed handlers must not leave exports open.' Confidence: medium."""
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            # Resolved: on macOS the temp dir is under the /var -> /private/var
+            # symlink and cleanup resolves the export root it revokes.
+            root = Path(temporary).resolve()
             env = {
                 "USERDATA_ROOT": str(root),
                 "ROMS_ROOT": str(root / "roms"),

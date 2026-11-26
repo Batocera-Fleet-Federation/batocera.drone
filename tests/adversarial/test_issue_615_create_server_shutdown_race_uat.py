@@ -26,7 +26,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app.device.network_share_manager as network_share_manager
 import app.device.smtp_manager as smtp_manager
 import app.device.tailnet_service as tailnet_service
 import app.device.vpn_manager as vpn_manager
@@ -40,7 +39,6 @@ from app.mock_data import seed_mock_userdata
 _STARTER_FLAGS = (
     "_VPN_SHARING_POLLER_STARTED",
     "_VPN_SELF_HEAL_POLLER_STARTED",
-    "_NETWORK_SHARE_WATCHDOG_STARTED",
     "_SMTP_SHARING_POLLER_STARTED",
     "_AUDIT_EMAIL_POLLER_STARTED",
     "_TAILNET_SHARING_POLLER_STARTED",
@@ -53,8 +51,6 @@ _QUIET_FLAGS = (
     "_AUTOMATION_POLLER_STARTED",
     "_LOCAL_NETWORK_WORKERS_STARTED",
     "_STREAMDECK_SUPERVISOR_STARTED",
-    "_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED",
-    "_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED",
     "_SMTP_BOOTSTRAP_ATTEMPTED",
     "_TAILNET_BOOTSTRAP_ATTEMPTED",
     "_VPN_AUTO_CONNECT_ATTEMPTED",
@@ -65,13 +61,11 @@ _POLLER_CASES = (
     ("vpn-self-heal", vpn_manager, "run_self_heal_poller", "check_and_self_heal"),
     ("smtp-sharing", smtp_manager, "run_sharing_revocation_poller", "check_sharing_revocation"),
     ("tailnet-sharing", tailnet_service, "run_tailnet_sharing_revocation_poller", "check_tailnet_sharing_revocation"),
-    ("network-watchdog", network_share_manager, "run_watchdog_poller", "list_shares"),
 )
 
 _THREAD_NAMES = {
     "drone-vpn-sharing-revocation",
     "drone-vpn-self-heal",
-    "drone-network-share-watchdog",
     "drone-smtp-sharing-revocation",
     "drone-outbound-mail-worker",
     "drone-tailnet-sharing-revocation",
@@ -190,7 +184,6 @@ class PollerStartArgsContractUAT(unittest.TestCase):
             smtp_manager.run_sharing_revocation_poller,
             smtp_manager.run_audit_email_digest_poller,
             tailnet_service.run_tailnet_sharing_revocation_poller,
-            network_share_manager.run_watchdog_poller,
         ]
         for poller in pollers:
             with self.subTest(poller=poller.__name__):
@@ -331,9 +324,8 @@ class CreateServerShutdownRaceUAT(unittest.TestCase):
             "smtp-sharing": mock.Mock(return_value=False),
             "smtp-ingest": mock.Mock(),
             "tailnet-sharing": mock.Mock(return_value=False),
-            "watchdog": mock.Mock(return_value=[]),
         }
-        for module in (vpn_manager, smtp_manager, tailnet_service, network_share_manager):
+        for module in (vpn_manager, smtp_manager, tailnet_service):
             real_generation = module.poller_generation
             self._start_patch(
                 mock.patch.object(module, "poller_generation", gate.gated_generation(real_generation))
@@ -351,7 +343,6 @@ class CreateServerShutdownRaceUAT(unittest.TestCase):
         self._start_patch(
             mock.patch.object(tailnet_service, "check_tailnet_sharing_revocation", checks["tailnet-sharing"])
         )
-        self._start_patch(mock.patch.object(network_share_manager, "list_shares", checks["watchdog"]))
         return checks
 
     def _join_pollers(self) -> None:
@@ -393,7 +384,6 @@ class CreateServerShutdownRaceUAT(unittest.TestCase):
         self.assertEqual(checks["smtp-sharing"].call_count, 0)
         self.assertEqual(checks["smtp-ingest"].call_count, 0)
         self.assertEqual(checks["tailnet-sharing"].call_count, 0)
-        self.assertEqual(checks["watchdog"].call_count, 0)
 
     def test_create_server_passes_generation_before_thread_start_for_held_swarm_mail_worker(self) -> None:
         _RecordingThread.created = []

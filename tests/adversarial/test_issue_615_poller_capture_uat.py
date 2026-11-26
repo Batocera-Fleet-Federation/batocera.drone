@@ -25,7 +25,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app.device.network_share_manager as network_share_manager
 import app.device.smtp_manager as smtp_manager
 import app.device.tailnet_service as tailnet_service
 import app.device.vpn_manager as vpn_manager
@@ -39,7 +38,6 @@ from app.mock_data import seed_mock_userdata
 _STARTER_FLAGS = (
     "_VPN_SHARING_POLLER_STARTED",
     "_VPN_SELF_HEAL_POLLER_STARTED",
-    "_NETWORK_SHARE_WATCHDOG_STARTED",
     "_SMTP_SHARING_POLLER_STARTED",
     "_AUDIT_EMAIL_POLLER_STARTED",
     "_TAILNET_SHARING_POLLER_STARTED",
@@ -49,7 +47,6 @@ _STARTER_FLAGS = (
 _POLLER_TARGETS = {
     "drone-vpn-sharing-revocation": vpn_manager.run_sharing_revocation_poller,
     "drone-vpn-self-heal": vpn_manager.run_self_heal_poller,
-    "drone-network-share-watchdog": network_share_manager.run_watchdog_poller,
     "drone-smtp-sharing-revocation": smtp_manager.run_sharing_revocation_poller,
     "drone-outbound-mail-worker": smtp_manager.run_audit_email_digest_poller,
     "drone-tailnet-sharing-revocation": tailnet_service.run_tailnet_sharing_revocation_poller,
@@ -129,14 +126,14 @@ class PollerCaptureWiringUAT(unittest.TestCase):
         for name in ("_ROM_METADATA_POLLER_STARTED", "_ROM_METADATA_WATCHER_STARTED",
                      "_GAME_PROCESS_MONITOR_STARTED", "_AUTOMATION_POLLER_STARTED",
                      "_LOCAL_NETWORK_WORKERS_STARTED", "_STREAMDECK_SUPERVISOR_STARTED",
-                     "_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED", "_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED",
+                     
                      "_SMTP_BOOTSTRAP_ATTEMPTED", "_TAILNET_BOOTSTRAP_ATTEMPTED",
                      "_VPN_AUTO_CONNECT_ATTEMPTED") + _STARTER_FLAGS:
             originals[name] = getattr(drone_api, name)
             setattr(drone_api, name, False)
         for name in ("_ROM_METADATA_POLLER_STARTED", "_ROM_METADATA_WATCHER_STARTED",
                      "_GAME_PROCESS_MONITOR_STARTED", "_AUTOMATION_POLLER_STARTED",
-                     "_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED", "_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED",
+                     
                      "_SMTP_BOOTSTRAP_ATTEMPTED", "_TAILNET_BOOTSTRAP_ATTEMPTED",
                      "_VPN_AUTO_CONNECT_ATTEMPTED", "_STREAMDECK_SUPERVISOR_STARTED"):
             setattr(drone_api, name, True)

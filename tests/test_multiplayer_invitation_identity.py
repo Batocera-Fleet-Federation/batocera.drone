@@ -1,13 +1,30 @@
 """Invitation refresh and acceptance races over the simulated pinned-peer channel."""
 import tempfile
 import unittest
+from unittest import mock
 
 from app.multiplayer import models as m
+from app.multiplayer.adapters.streaming import StreamingAdapter
 from multiplayer_support import make_swarm
 
 
 class InvitationIdentityTests(unittest.TestCase):
     def setUp(self):
+        # Streaming is capped at host + one guest (#511). Inviting a third player is the only
+        # way to change a session's mechanism while an invitation is pending, so these
+        # protocol tests lift that cap in the simulated swarm; the cap itself is
+        # covered by the capacity tests.
+        real_assess = StreamingAdapter.assess_game
+
+        def assess_four(adapter, game, overrides=None):
+            result = real_assess(adapter, game, overrides)
+            if result and result.get("max_players"):
+                result["max_players"] = 4
+            return result
+
+        patcher = mock.patch.object(StreamingAdapter, "assess_game", assess_four)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.hub, self.nodes = make_swarm(temporary.name, ("host", "guest", "other"),

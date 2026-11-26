@@ -87,7 +87,9 @@ const actions = row.slice(row.indexOf("data-swarm-actions"));
 for (const button of actions.matchAll(/<button([^>]*)>(.*?)<\\/button>/gs)) {
   assert.match(button[1], /aria-label=/);
   assert.match(button[1], /title=/);
-  assert.equal(button[2].replace(/<[^>]+>/g, "").trim(), "");
+  // Forget is destructive, so it keeps a visible label (#623); the rest are icon-only.
+  const label = button[2].replace(/<[^>]+>/g, "").trim();
+  assert.equal(label, /aria-label="Forget Drone"/.test(button[1]) ? "Forget" : "");
 }
 const pending = renderSwarmDroneCard({ ...peer, online: null, pending: true });
 assert.match(pending, /Checking\\.\\.\\./);

@@ -48,11 +48,18 @@ def non_loopback_host() -> str | None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("192.0.2.1", 80))
             host = sock.getsockname()[0]
-        if host and not ipaddress.ip_address(host).is_loopback:
-            return host
+        if not host or ipaddress.ip_address(host).is_loopback:
+            return None
+        # The default-route address can belong to a VPN tunnel (e.g. a macOS utun)
+        # that does not loop back to this host; only use an address we can reach.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((host, 0))
+            listener.listen(1)
+            with socket.create_connection((host, listener.getsockname()[1]), timeout=2):
+                pass
+        return host
     except OSError:
         return None
-    return None
 
 
 def settings_for(root: Path, **extra: str) -> Settings:
