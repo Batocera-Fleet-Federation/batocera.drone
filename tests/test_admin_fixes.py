@@ -707,6 +707,7 @@ class AdminFixHandlerTests(unittest.TestCase):
                 admin_fixes.CRASH_NOTIFIER_ID,
                 admin_fixes.SWITCH_GUI_WORKAROUND_ID,
                 admin_fixes.SINDEN_RECOIL_ID,
+                admin_fixes.GAMECUBE_ADAPTER_FIX_ID,
             })
 
     def test_sinden_profiles_can_be_saved_disabled_enabled_and_removed(self) -> None:

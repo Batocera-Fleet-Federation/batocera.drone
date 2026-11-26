@@ -24,6 +24,8 @@ CRASH_NOTIFIER_ID = "game-crash-notifier"
 CRASH_NOTIFIER_HOOK_FILENAME = "drone-game-crash-notifier.py"
 SWITCH2_GAMECUBE_GUARD_ID = "switch2-gamecube-adapter-guard"
 SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME = "drone-switch2-gamecube-guard.py"
+GAMECUBE_ADAPTER_FIX_ID = "gamecube-adapter-driver-fix"
+GAMECUBE_ADAPTER_SERVICE_NAME = "DRONE_GC_ADAPTER"
 SINDEN_RECOIL_ID = "sinden-recoil"
 SINDEN_RECOIL_HOOK_FILENAME = "drone-sinden-recoil.py"
 HOOK_FILENAME = "drone-lindbergh-input-device-guard.py"
@@ -32,6 +34,7 @@ ASSET_PATH = ASSET_ROOT / "lindbergh_input_guard.py"
 CRASH_NOTIFIER_ASSET = ASSET_ROOT / "game_crash_notifier.py"
 SWITCH2_GAMECUBE_GUARD_ASSET = ASSET_ROOT / "switch2_gamecube_guard.py"
 SINDEN_RECOIL_ASSET = ASSET_ROOT / "sinden_recoil.py"
+GAMECUBE_ADAPTER_FIX_ASSET = ASSET_ROOT / "gamecube_adapter_fix.py"
 _SINDEN_CONFIG_LOCK = Lock()
 SWITCH_LAUNCHER_ASSET = ASSET_ROOT / "switch_gui_launcher.py"
 SWITCH_WRAPPER_ASSET = ASSET_ROOT / "switch_gui_autoload.sh"
@@ -93,6 +96,24 @@ FIX_CATALOG = (
         "caution": "GameCube controllers on the adapter cannot be used in Switch 2 games. They come back when the game exits.",
     },
     {
+        "id": GAMECUBE_ADAPTER_FIX_ID,
+        "name": "GameCube adapter driver fix",
+        "summary": "Restarts the Wii U GameCube adapter driver when it gets stuck at boot or plug-in, so the controllers show up.",
+        "applies_to": "Wii U / GameCube controller adapters (057e:0337), all systems",
+        "details": [
+            "Batocera starts its wii-u-gc-adapter driver from a udev rule that fires about six times for one plug-in, and each run stops the previous driver and starts another. The last one can open the adapter while another instance is still holding it, fail part-way and then sit idle: the adapter shows up in lsusb, but no \"Wii U GameCube Adapter Port\" controllers appear, and unplugging it or rebooting can hit the same race again.",
+            "This fix runs a small Batocera service that waits a few seconds after the adapter appears, until the plug-in burst is over, then checks that exactly one driver is running and that it is reading the adapter. If not, it stops every driver instance and starts exactly one. It tries up to three times per plug-in, then shows an EmulationStation message asking you to replug the adapter.",
+            "It leaves the adapter alone while the Switch 2 GameCube adapter guard has taken it offline for a game, never changes USB binding, and does nothing on a machine without an adapter.",
+        ],
+        "changes": [
+            f"Installs the Batocera service /userdata/system/services/{GAMECUBE_ADAPTER_SERVICE_NAME} and adds it to system.services in batocera.conf",
+            "Stores configuration in /userdata/system/gamecube-adapter-fix/config.json",
+            "Writes activity to /userdata/system/logs/gamecube-adapter-fix.log",
+            "Does not modify Batocera's udev rule, read-only system image or emulator files",
+        ],
+        "caution": "Controllers on the adapter disconnect for about a second when the driver is restarted. A repair only happens when the driver is not working anyway.",
+    },
+    {
         "id": CRASH_NOTIFIER_ID,
         "name": "Game crash notifier",
         "summary": "Shows an EmulationStation message when a game crashes on startup instead of silently returning to the menu.",
@@ -144,6 +165,10 @@ def _paths(settings: Settings) -> Dict[str, Path]:
         "gc_hook": system_root / "scripts" / SWITCH2_GAMECUBE_GUARD_HOOK_FILENAME,
         "gc_config": system_root / "switch2-gamecube-guard" / "config.json",
         "gc_log": system_root / "logs" / "switch2-gamecube-guard.log",
+        "gcfix_service": system_root / "services" / GAMECUBE_ADAPTER_SERVICE_NAME,
+        "gcfix_config": system_root / "gamecube-adapter-fix" / "config.json",
+        "gcfix_log": system_root / "logs" / "gamecube-adapter-fix.log",
+        "batocera_conf": system_root / "batocera.conf",
         "sinden_hook": system_root / "scripts" / SINDEN_RECOIL_HOOK_FILENAME,
         "sinden_config": system_root / "sinden-recoil" / "config.json",
         "sinden_log": system_root / "logs" / "sinden-recoil.log",
@@ -191,8 +216,13 @@ def _fix_status(settings: Settings, metadata: Dict[str, Any]) -> Dict[str, Any]:
         hook_key, asset, log_key = "gc_hook", SWITCH2_GAMECUBE_GUARD_ASSET, "gc_log"
     elif metadata["id"] == SINDEN_RECOIL_ID:
         hook_key, asset, log_key = "sinden_hook", SINDEN_RECOIL_ASSET, "sinden_log"
+    elif metadata["id"] == GAMECUBE_ADAPTER_FIX_ID:
+        hook_key, asset, log_key = "gcfix_service", GAMECUBE_ADAPTER_FIX_ASSET, "gcfix_log"
     installed = paths[hook_key].is_file()
     managed = installed and _sha256(paths[hook_key]) == _sha256(asset)
+    if metadata["id"] == GAMECUBE_ADAPTER_FIX_ID:
+        # A service that Batocera will not start at boot is not really enabled.
+        managed = managed and GAMECUBE_ADAPTER_SERVICE_NAME in _enabled_batocera_services(paths["batocera_conf"])
     payload = dict(metadata)
     payload.update(
         {
@@ -416,6 +446,70 @@ def _disable_switch2_gamecube_guard(settings: Settings) -> None:
     _restore_and_remove_hook(settings, _paths(settings)["gc_hook"])
 
 
+def _enabled_batocera_services(conf: Path) -> List[str]:
+    try:
+        lines = conf.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    services: List[str] = []
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip() == "system.services":
+            services = value.split()  # the last assignment wins, as in batocera-settings-get
+    return services
+
+
+def _on_real_batocera(settings: Settings) -> bool:
+    # Tests and desktop development roots must never touch host services.
+    return settings.userdata_root.resolve() == Path("/userdata")
+
+
+def _batocera_services(action: str) -> None:
+    try:
+        result = subprocess.run(
+            ["batocera-services", action, GAMECUBE_ADAPTER_SERVICE_NAME],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except subprocess.SubprocessError as error:
+        raise OSError(f"batocera-services {action} {GAMECUBE_ADAPTER_SERVICE_NAME} did not finish: {error}") from error
+    if result.returncode != 0:
+        raise OSError(f"batocera-services {action} {GAMECUBE_ADAPTER_SERVICE_NAME} failed: {(result.stderr or result.stdout).strip()}")
+
+
+def _enable_gamecube_adapter_fix(settings: Settings) -> None:
+    paths = _paths(settings)
+    config = {
+        "usb_ids": ["057e:0337"],
+        "daemon_path": "/usr/bin/wii-u-gc-adapter",
+        "wrapper_names": ["wii-u-gc-adapter-daemon"],
+        "interval_seconds": 2.0,
+        "settle_seconds": 5.0,
+        "max_repairs": 3,
+    }
+    _atomic_write(paths["gcfix_config"], (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o644)
+    _atomic_write(paths["gcfix_service"], GAMECUBE_ADAPTER_FIX_ASSET.read_bytes(), 0o755)
+    if _on_real_batocera(settings):
+        _batocera_services("enable")
+        # Restart so an updated watcher replaces a running older one.
+        _batocera_services("restart")
+
+
+def _disable_gamecube_adapter_fix(settings: Settings) -> None:
+    service = _paths(settings)["gcfix_service"]
+    if _on_real_batocera(settings):
+        if service.is_file():
+            try:
+                subprocess.run([str(service), "stop"], timeout=15, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _batocera_services("disable")
+    # The adapter driver itself is left running: it is Batocera's, not ours.
+    try:
+        service.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _disable_lindbergh_input_guard(settings: Settings) -> None:
     _restore_and_remove_hook(settings, _paths(settings)["hook"])
 
@@ -615,6 +709,11 @@ def set_fix_enabled(
             _enable_switch2_gamecube_guard(settings)
         else:
             _disable_switch2_gamecube_guard(settings)
+    elif fix_id == GAMECUBE_ADAPTER_FIX_ID:
+        if enabled:
+            _enable_gamecube_adapter_fix(settings)
+        else:
+            _disable_gamecube_adapter_fix(settings)
     elif fix_id == SINDEN_RECOIL_ID:
         _configure_sinden_recoil(settings, enabled, recoil_profile)
     elif fix_id == SWITCH_GUI_WORKAROUND_ID:

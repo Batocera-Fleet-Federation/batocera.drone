@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Admin → Fixes: add the **GameCube adapter driver fix**. Batocera's `wii-u-gc-adapter` udev rule
+  starts the driver about six times per plug-in or boot, each run killing the last, and the survivor
+  can end up stuck (adapter in `lsusb`, no "Wii U GameCube Adapter Port" controllers; replugging
+  does not help). The fix installs the Batocera service `DRONE_GC_ADAPTER`, which waits for the
+  burst to settle and, when there is no driver, more than one, or one without its adapter reader
+  thread, replaces them with exactly one. After three failed attempts per plug-in it shows an
+  EmulationStation message. It leaves the adapter alone while the Switch 2 guard has it offline.
+
 - Controller Assignments: under "Best-effort matching for every game", a new **Pick the closest
   controller automatically** switch (on by default, today's behaviour). Turn it off and best effort,
   including enabled presets, puts the system's native controllers first (for N64: N64 and GameCube

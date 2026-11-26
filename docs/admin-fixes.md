@@ -30,6 +30,20 @@ It acts only on `switch2` launches (the `systems` list in its config). At `gameS
 
 Configuration is `/userdata/system/switch2-gamecube-guard/config.json` (`systems`, `usb_ids`, `daemon_names`) and activity is logged to `/userdata/system/logs/switch2-gamecube-guard.log`, including the joystick count before and after. Disabling the fix restores an active adapter and daemon before removing the hook.
 
+## GameCube adapter driver fix
+
+Batocera drives a Wii U GameCube adapter (`057e:0337`) with the userspace `wii-u-gc-adapter` daemon. Its udev rule (`/etc/udev/rules.d/99-wii-u-gc-adapter.rules`) has no `ACTION` filter and matches both the USB device and its interface, so one plug-in or boot runs `/usr/bin/wii-u-gc-adapter-daemon` about six times, and each run `killall`s the previous daemon before starting another. The surviving daemon can open the adapter while an instance being killed still has its interface claimed. Its setup then fails part-way, it never retries, and it sits idle with the device open: the adapter shows in `lsusb`, but no "Wii U GameCube Adapter Port N" joystick appears, and unplugging it or rebooting can hit the same race again. A burst can also leave several daemons running at once. (The kernel's `usbfs: ... did not claim interface 0 before use` message is harmless; a healthy daemon logs it too.)
+
+The fix installs a Batocera user service, started at boot by `S99userservices`:
+
+`/userdata/system/services/DRONE_GC_ADAPTER`
+
+Every two seconds it looks for bound `057e:0337` adapters. Once the adapter and the daemon set have been unchanged for five seconds and no `wii-u-gc-adapter-daemon` wrapper is running (the udev burst is over), it checks for exactly one daemon with a reader thread per adapter (a healthy daemon has its main thread, libusb's event thread and one thread per adapter). Otherwise it stops every daemon instance (SIGTERM, then SIGKILL after three seconds) and starts exactly one. It tries up to three times per plug-in (a replug gets a new USB device number and fresh attempts), then posts an EmulationStation message asking the user to replug the adapter. That message is retried for three minutes, so a failure during boot is still shown once EmulationStation is up. If the daemon binary is missing it says so instead of retrying.
+
+It never changes USB binding or Batocera's udev rule, does nothing on a machine without an adapter, and leaves an unbound adapter alone. While the Switch 2 GameCube adapter guard has the adapter offline for a game (its state file exists), the watcher waits, and a repair holds the guard's lock so the two never restart the daemon at the same time.
+
+Configuration is `/userdata/system/gamecube-adapter-fix/config.json` (`usb_ids`, `daemon_path`, `wrapper_names`, `interval_seconds`, `settle_seconds`, `max_repairs`) and activity is logged to `/userdata/system/logs/gamecube-adapter-fix.log`. `DRONE_GC_ADAPTER check` runs one pass immediately and prints the verdict. Enabling the fix adds the service to `system.services` and (re)starts it. Disabling stops the watcher, removes it from `system.services` and deletes the service file, and leaves Batocera's adapter daemon running. The card shows **modified** when the service file differs from the shipped version or the service is not in `system.services`; repairing reinstalls and re-enables it.
+
 ## Game crash notifier
 
 Batocera returns silently to EmulationStation when an emulator dies at launch. This fix installs `/userdata/system/scripts/drone-game-crash-notifier.py`, which starts a detached watcher at every `gameStart` (any system) tied to the `emulatorlauncher` process. When the launcher exits, the watcher reads only the part of `es_launch_stderr.log` and `es_launch_stdout.log` written during that session and scores it:
