@@ -5466,6 +5466,51 @@ async function clearGameCrashHistory() {
   await renderGameCrashesPage();
 }
 
+// Admin Fixes are grouped into tabs; the selection survives re-renders after a toggle.
+const ADMIN_FIX_TABS = [
+  { id: "input", label: "Input & Controllers", icon: "bi-controller", fixes: ["sinden-recoil", "lindbergh-input-device-guard", "switch2-gamecube-adapter-guard", "gamecube-adapter-driver-fix"] },
+  { id: "switch", label: "Switch", icon: "bi-nintendo-switch", fixes: ["switch-gui-autoload"] },
+  { id: "diagnostics", label: "Diagnostics", icon: "bi-activity", fixes: ["game-crash-notifier"] },
+];
+let adminFixActiveTab = "input";
+
+function adminFixTabsFor(fixes) {
+  const known = new Set(ADMIN_FIX_TABS.flatMap((tab) => tab.fixes));
+  const tabs = ADMIN_FIX_TABS.map((tab) => ({ ...tab, items: fixes.filter((fix) => tab.fixes.includes(fix.id)) }));
+  const other = fixes.filter((fix) => !known.has(fix.id));
+  if (other.length) tabs.push({ id: "other", label: "Other", icon: "bi-three-dots", items: other });
+  return tabs.filter((tab) => tab.items.length);
+}
+
+function selectAdminFixTab(tabId) {
+  adminFixActiveTab = tabId;
+  document.querySelectorAll("[data-fix-tab]").forEach((node) => {
+    node.classList.toggle("active", node.dataset.fixTab === tabId);
+  });
+  document.querySelectorAll("[data-fix-tab-panel]").forEach((node) => {
+    node.hidden = node.dataset.fixTabPanel !== tabId;
+  });
+}
+
+function renderAdminFixTabs(fixes) {
+  const tabs = adminFixTabsFor(fixes);
+  if (!tabs.length) return "";
+  if (!tabs.some((tab) => tab.id === adminFixActiveTab)) adminFixActiveTab = tabs[0].id;
+  const nav = tabs.map((tab) => {
+    const active = tab.id === adminFixActiveTab;
+    const on = tab.items.filter((fix) => fix.enabled).length;
+    return `<li class="nav-item" role="presentation">
+      <button type="button" class="nav-link ${active ? "active" : ""}" role="tab" data-fix-tab="${tab.id}" onclick="selectAdminFixTab('${tab.id}')">
+        <i class="bi ${tab.icon} me-1"></i>${escapeHtml(tab.label)} <span class="badge text-bg-secondary ms-1">${on}/${tab.items.length}</span>
+      </button></li>`;
+  }).join("");
+  const panels = tabs.map((tab) => `
+    <div data-fix-tab-panel="${tab.id}" role="tabpanel" ${tab.id === adminFixActiveTab ? "" : "hidden"}>
+      <div class="row">${tab.items.map(renderAdminFixCard).join("")}</div>
+    </div>`).join("");
+  return `<ul class="nav nav-tabs admin-panel-tabs mb-3" role="tablist">${nav}</ul>${panels}`;
+}
+
 async function renderAdminFixesPage() {
   currentSystemContext = null;
   setLoading(true, "Loading compatibility fixes...");
@@ -5481,7 +5526,7 @@ async function renderAdminFixesPage() {
         <p class="text-muted mb-0">These fixes are reversible and intentionally disabled until you turn them on.</p>
         <button class="btn btn-sm btn-outline-secondary" type="button" onclick="setHash('#admin')"><i class="bi bi-arrow-left me-1"></i>Admin</button>
       </div>
-      <div class="row">${fixes.map(renderAdminFixCard).join("")}</div>
+      ${renderAdminFixTabs(fixes)}
     `;
   } catch (error) {
     showError(error.message || "Unable to load admin fixes.");
